@@ -11,7 +11,7 @@
 //!   `bookrack run` and the headless `bookrack-mcp` compete for it, so
 //!   the operator cannot accidentally point two writers at the same
 //!   on-disk catalog or corpus. Readers that go through the MCP HTTP
-//!   surface (`bookrack exec`) never take it.
+//!   surface (`bookrack rpc`) never take it.
 //! - [`RootLock`] at `<data_root>/.bookrack.lock` — one writer per data
 //!   root, whether that writer is a daemon serving the root or an
 //!   offline command about to destroy it. Its contents are display-only
@@ -22,8 +22,11 @@
 //! Stale *content* — a pid or MCP address from a previous run — is
 //! tolerated and overwritten by the next successful acquire.
 
+use bookrack_core::knob::{
+    Candidate, DotenvSupply, KnobOrigin, KnobReach, Layer, ReadAt, env_layers, resolve_knob,
+};
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use eyre::{Context, Result, eyre};
@@ -39,7 +42,7 @@ const ROOT_LOCK_NAME_STR: &str = ".bookrack.lock";
 
 /// File name of the session-scoped lock under the runtime directory.
 /// Exposed so siblings (the `cli` REPL, the headless `mcp` binary,
-/// `bookrack exec`) discover the active session through the same path.
+/// `bookrack rpc`) discover the active session through the same path.
 pub fn tty_lock_name() -> &'static str {
     TTY_LOCK_NAME_STR
 }
@@ -66,6 +69,71 @@ pub fn resolve_runtime_dir(override_path: Option<&Path>) -> Result<PathBuf> {
         return Ok(PathBuf::from(v));
     }
     platform_runtime_dir()
+}
+
+/// Every knob this crate reads, with where each value came from.
+///
+/// The flag layer is reported as a place the value can come from, never
+/// as one it came from on this call: `--runtime-dir` belongs to a
+/// `bookrack run` invocation, and a report of one process must not
+/// claim to speak for another.
+pub fn knob_origins(dotenv: Option<DotenvSupply<'_>>) -> Vec<KnobOrigin> {
+    knob_origins_from(|name| std::env::var(name).ok(), dotenv)
+}
+
+/// Every knob this crate reads, as it stands on a machine where nothing
+/// is configured.
+///
+/// The inventory form of [`knob_origins`]: the same row from the same
+/// resolution, fed an empty environment and no dotenv record. The
+/// platform layer still reports where the convention lands on this
+/// host, which is what a reader asking after the default wants — the
+/// row exists to say that the default is derived.
+pub fn knob_catalog() -> Vec<KnobOrigin> {
+    knob_origins_from(|_| None, None)
+}
+
+/// Pure form of [`knob_origins`], so the inventory can describe an
+/// environment that sets nothing.
+fn knob_origins_from(
+    get: impl Fn(&str) -> Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> Vec<KnobOrigin> {
+    let mut candidates = vec![Candidate::of(
+        Layer::Flag,
+        "run --runtime-dir (not this invocation)",
+        None,
+    )];
+    candidates.extend(env_layers(
+        dotenv,
+        RUNTIME_DIR_ENV,
+        get(RUNTIME_DIR_ENV)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+    ));
+    candidates.push(Candidate::of(
+        Layer::Platform,
+        platform_runtime_dir_site(),
+        platform_runtime_dir().ok().map(|p| p.display().to_string()),
+    ));
+
+    vec![resolve_knob(
+        "runtime_dir",
+        KnobReach::Process,
+        ReadAt::BeforeResolution,
+        candidates,
+    )]
+}
+
+/// Which platform convention supplies the runtime directory here.
+fn platform_runtime_dir_site() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        if dirs::runtime_dir().is_some() {
+            return "XDG_RUNTIME_DIR";
+        }
+    }
+    "platform cache directory"
 }
 
 /// Platform-conventional fallback for the runtime directory.
@@ -116,13 +184,18 @@ pub struct TtyLock {
     file: File,
     #[allow(dead_code)]
     path: PathBuf,
+    /// In-memory copy of the file's contents. Held so a recorder that
+    /// replaces a line ([`TtyLock::record_mcp_addr`]) can rewrite the
+    /// whole payload without reading back a file it already owns, and
+    /// so every reader sees one line per key.
+    payload: String,
 }
 
 impl TtyLock {
     /// Acquire the session lock at `path`, writing the running pid,
     /// the chosen MCP address (or `disabled`), and optionally the
     /// control-plane socket path into it so other tools —
-    /// `bookrack exec`, `bookrack doctor` — can find the live session
+    /// `bookrack rpc`, `bookrack doctor` — can find the live session
     /// and reach its control plane.
     ///
     /// The `control_sock` argument is `None` when the caller does not
@@ -163,17 +236,32 @@ impl TtyLock {
                 )
             }
         })?;
-        let mut owned = file;
-        owned.set_len(0).context("truncate session lock contents")?;
-        write!(owned, "pid={pid}\nmcp={mcp_addr}\n").context("write session lock contents")?;
+        let mut payload = format!("pid={pid}\nmcp={mcp_addr}\n");
         if let Some(sock) = control_sock {
-            writeln!(owned, "control_sock={}", sock.display())
-                .context("write session lock control_sock line")?;
+            payload.push_str(&format!("control_sock={}\n", sock.display()));
         }
-        Ok(TtyLock {
-            file: owned,
+        let mut lock = TtyLock {
+            file,
             path: path.to_path_buf(),
-        })
+            payload,
+        };
+        lock.flush_payload()
+            .context("write session lock contents")?;
+        Ok(lock)
+    }
+
+    /// Rewrite the lock file from [`TtyLock::payload`]. The holder owns
+    /// the file exclusively for the lock's lifetime, so truncating and
+    /// writing from offset zero races nothing.
+    fn flush_payload(&mut self) -> Result<()> {
+        self.file.set_len(0).context("truncate session lock")?;
+        self.file
+            .seek(SeekFrom::Start(0))
+            .context("rewind session lock")?;
+        self.file
+            .write_all(self.payload.as_bytes())
+            .context("write session lock")?;
+        self.file.flush().context("flush session lock")
     }
 
     /// Append a `control_sock=<path>` line to the lock file. Used by
@@ -181,30 +269,40 @@ impl TtyLock {
     /// already held, so the recorded path matches the listener that
     /// actually came up.
     pub fn record_control_sock(&mut self, control_sock: &Path) -> Result<()> {
-        writeln!(self.file, "control_sock={}", control_sock.display())
+        self.payload
+            .push_str(&format!("control_sock={}\n", control_sock.display()));
+        self.flush_payload()
             .context("append session lock control_sock line")
     }
 
-    /// Append `data_dir=` and optionally `library_name=` lines to the
-    /// lock file. Called after the daemon resolves its configuration
-    /// so other tools can identify which library this session serves
-    /// without paying for an RPC.
+    /// Replace the `mcp=` line with the address the MCP listener
+    /// actually bound.
     ///
-    /// `library_name` is `None` when the data root was selected
-    /// directly (`--data-dir` / `BOOKRACK_DATA_DIR`) and so has no
-    /// registry handle.
-    pub fn record_library_root(
-        &mut self,
-        data_dir: &Path,
-        library_name: Option<&str>,
-    ) -> Result<()> {
-        writeln!(self.file, "data_dir={}", data_dir.display())
-            .context("append session lock data_dir line")?;
-        if let Some(name) = library_name {
-            writeln!(self.file, "library_name={name}")
-                .context("append session lock library_name line")?;
-        }
-        Ok(())
+    /// [`TtyLock::acquire`] writes the *intended* address, because the
+    /// lock has to carry a complete record from the instant it exists —
+    /// a second daemon reads it to name the session already running.
+    /// Once the listener is bound the intent is superseded: with
+    /// `port 0` the kernel picked the port, and every reader of this
+    /// file (`bookrack status`, `bookrack doctor`, an operator's
+    /// `cat`) needs the address a client can actually connect to.
+    /// Replacing rather than appending keeps one `mcp=` line, so the
+    /// lock-conflict message quotes a single address.
+    pub fn record_mcp_addr(&mut self, mcp_addr: &str) -> Result<()> {
+        let replaced: Vec<String> = self
+            .payload
+            .lines()
+            .map(|line| {
+                if line.starts_with("mcp=") {
+                    format!("mcp={mcp_addr}")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect();
+        self.payload = replaced.join("\n");
+        self.payload.push('\n');
+        self.flush_payload()
+            .context("record the bound MCP address in the session lock")
     }
 }
 
@@ -335,16 +433,6 @@ pub struct LockInfo {
     pub pid: u32,
     pub mcp: String,
     pub control_sock: Option<PathBuf>,
-    /// Resolved data-root path the daemon serves. Recorded by
-    /// [`TtyLock::record_library_root`] once the daemon's
-    /// configuration resolution completes; `None` on lock files
-    /// written by daemons that crashed before that step or by an
-    /// older daemon that predates the identity fields.
-    pub data_dir: Option<PathBuf>,
-    /// Registry name of the served library, when one was selected by
-    /// name. `None` when the data root was selected directly (no
-    /// registry handle) or when the lock predates the identity fields.
-    pub library_name: Option<String>,
 }
 
 /// Read the session lock at `path` without acquiring it.
@@ -352,11 +440,12 @@ pub struct LockInfo {
 /// Returns `Ok(None)` when the file does not exist. Returns `Err`
 /// when the file cannot be read, or when its contents are missing
 /// the required `pid=` / `mcp=` lines or carry a `pid` value that
-/// is not a `u32`. The `control_sock=`, `data_dir=`, and
-/// `library_name=` lines are all optional: a lock file written by a
-/// daemon that crashed mid-startup, or one written by a binary that
-/// predates these fields, parses cleanly with the corresponding
-/// `Option` left at `None`.
+/// is not a `u32`. The `control_sock=` line is optional: a lock file
+/// written by a daemon that crashed mid-startup, or one written by a
+/// binary that predates the field, parses cleanly with the `Option`
+/// left at `None`. The `data_dir=` / `library_name=` identity lines
+/// an older daemon wrote are ignored — a daemon mounts several
+/// libraries, and which ones is answered over RPC.
 pub fn peek_lock(path: &Path) -> Result<Option<LockInfo>> {
     let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -374,8 +463,6 @@ fn parse_lock(raw: &str, source: &Path) -> Result<LockInfo> {
     let mut pid: Option<u32> = None;
     let mut mcp: Option<String> = None;
     let mut control_sock: Option<PathBuf> = None;
-    let mut data_dir: Option<PathBuf> = None;
-    let mut library_name: Option<String> = None;
     for line in raw.lines() {
         if let Some(value) = line.strip_prefix("pid=") {
             pid = Some(value.parse::<u32>().with_context(|| {
@@ -388,10 +475,6 @@ fn parse_lock(raw: &str, source: &Path) -> Result<LockInfo> {
             mcp = Some(value.to_string());
         } else if let Some(value) = line.strip_prefix("control_sock=") {
             control_sock = Some(PathBuf::from(value));
-        } else if let Some(value) = line.strip_prefix("data_dir=") {
-            data_dir = Some(PathBuf::from(value));
-        } else if let Some(value) = line.strip_prefix("library_name=") {
-            library_name = Some(value.to_string());
         }
     }
     let pid = pid.ok_or_else(|| {
@@ -410,8 +493,6 @@ fn parse_lock(raw: &str, source: &Path) -> Result<LockInfo> {
         pid,
         mcp,
         control_sock,
-        data_dir,
-        library_name,
     })
 }
 
@@ -529,6 +610,99 @@ mod tests {
         );
     }
 
+    /// The bound address replaces the intent instead of joining it:
+    /// a second `mcp=` line would leave every reader — `peek_lock`,
+    /// the lock-conflict message, an operator's `cat` — to guess which
+    /// of the two a client should connect to.
+    #[test]
+    fn record_mcp_addr_replaces_the_intended_address() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(tty_lock_name());
+        let sock = dir.path().join("ctrl.sock");
+        let mut lock = TtyLock::acquire(&path, 44, "127.0.0.1:0", None).unwrap();
+        lock.record_control_sock(&sock).unwrap();
+        lock.record_mcp_addr("127.0.0.1:54321").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            content.lines().filter(|l| l.starts_with("mcp=")).count(),
+            1,
+            "expected exactly one mcp line: {content:?}"
+        );
+        assert!(
+            content.contains("mcp=127.0.0.1:54321"),
+            "bound address missing: {content:?}"
+        );
+        assert!(
+            !content.contains("mcp=127.0.0.1:0"),
+            "intended address survived: {content:?}"
+        );
+        assert!(content.contains("pid=44"), "pid line lost: {content:?}");
+        assert!(
+            content.contains(&format!("control_sock={}", sock.display())),
+            "control_sock line lost: {content:?}"
+        );
+
+        let info = peek_lock(&path).unwrap().expect("lock readable");
+        assert_eq!(info.mcp, "127.0.0.1:54321");
+    }
+
+    /// A later record must not leave the tail of a longer previous
+    /// payload behind: the file is rewritten, not overwritten in place.
+    #[test]
+    fn record_mcp_addr_shrinking_the_payload_leaves_no_tail() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(tty_lock_name());
+        let mut lock = TtyLock::acquire(&path, 55, "127.0.0.1:65535", None).unwrap();
+        lock.record_mcp_addr("127.0.0.1:1").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            content, "pid=55\nmcp=127.0.0.1:1\n",
+            "tail left: {content:?}"
+        );
+    }
+
+    /// The catalog row falls through to the platform convention and
+    /// still names the variable and the flag as places it can be set.
+    /// A catalog that read the environment would report the variable as
+    /// the winner wherever it is set.
+    #[test]
+    fn the_catalog_falls_to_the_platform_convention() {
+        let rows = knob_catalog();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+
+        assert_eq!(row.layer, Layer::Platform, "site: {}", row.site);
+        let sites: Vec<&str> = row.chain.iter().map(|s| s.site.as_str()).collect();
+        assert!(sites.contains(&RUNTIME_DIR_ENV), "{sites:?}");
+        assert!(
+            sites.iter().any(|s| s.contains("--runtime-dir")),
+            "{sites:?}"
+        );
+    }
+
+    /// The flag layer is present as a place the value can be set, and
+    /// never claims to have supplied it: `--runtime-dir` belongs to the
+    /// `bookrack run` process, not to whoever is reading this report.
+    #[test]
+    fn the_flag_layer_is_reported_without_claiming_this_invocation_used_it() {
+        let rows = knob_origins(None);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+
+        assert_eq!(row.key, "runtime_dir");
+        assert_ne!(
+            row.layer,
+            Layer::Flag,
+            "a report of this process must not attribute a value to another process's flag"
+        );
+        assert!(
+            !row.shadowed.iter().any(|s| s.layer == Layer::Flag),
+            "the flag offered nothing, so it cannot be shadowed: {:?}",
+            row.shadowed
+        );
+    }
+
     #[test]
     fn resolve_runtime_dir_prefers_explicit_override() {
         let path = PathBuf::from("/tmp/bookrack-test-override");
@@ -585,8 +759,6 @@ mod tests {
         assert_eq!(info.pid, 4242);
         assert_eq!(info.mcp, "127.0.0.1:8765");
         assert_eq!(info.control_sock.as_deref(), Some(Path::new("/tmp/x.sock")));
-        assert!(info.data_dir.is_none());
-        assert!(info.library_name.is_none());
     }
 
     #[test]
@@ -598,12 +770,14 @@ mod tests {
         assert_eq!(info.pid, 1);
         assert_eq!(info.mcp, "disabled");
         assert!(info.control_sock.is_none());
-        assert!(info.data_dir.is_none());
-        assert!(info.library_name.is_none());
     }
 
+    /// A lock written by an older daemon carries `data_dir=` and
+    /// `library_name=` identity lines. Both fall through the unknown-key
+    /// arm rather than failing the parse, so a new binary can still
+    /// examine a session an old one left behind.
     #[test]
-    fn peek_lock_parses_library_root_fields() {
+    fn peek_lock_ignores_the_identity_lines_an_older_daemon_wrote() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("bookrack.tty.lock");
         std::fs::write(
@@ -612,38 +786,8 @@ mod tests {
         )
         .unwrap();
         let info = peek_lock(&path).unwrap().unwrap();
-        assert_eq!(info.data_dir.as_deref(), Some(Path::new("/data/main")));
-        assert_eq!(info.library_name.as_deref(), Some("main"));
-    }
-
-    #[test]
-    fn record_library_root_appends_data_dir_only_when_unnamed() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join(tty_lock_name());
-        let mut lock = TtyLock::acquire(&path, 9, "disabled", None).unwrap();
-        let data_dir = PathBuf::from("/data/unnamed");
-        lock.record_library_root(&data_dir, None).unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            content.contains("data_dir=/data/unnamed"),
-            "data_dir line missing: {content:?}"
-        );
-        assert!(
-            !content.contains("library_name="),
-            "unexpected library_name line: {content:?}"
-        );
-    }
-
-    #[test]
-    fn record_library_root_appends_both_lines_when_named() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join(tty_lock_name());
-        let mut lock = TtyLock::acquire(&path, 10, "disabled", None).unwrap();
-        let data_dir = PathBuf::from("/data/main");
-        lock.record_library_root(&data_dir, Some("main")).unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("data_dir=/data/main"));
-        assert!(content.contains("library_name=main"));
+        assert_eq!(info.pid, 7);
+        assert_eq!(info.mcp, "disabled");
     }
 
     #[test]

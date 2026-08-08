@@ -14,6 +14,8 @@
 
 use std::collections::BTreeMap;
 
+use bookrack_extract::CslType;
+
 /// How strong the evidence for a single field's value is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaperFieldGrade {
@@ -277,6 +279,15 @@ pub struct PaperReport {
     /// Cross-field flags that do not belong to a single field —
     /// e.g. [`PaperFlag::NoStableIdentifier`].
     pub cross_field_flags: Vec<PaperFlag>,
+    /// The CSL type this judgement actually selected the
+    /// required-field matrix by: the effective value when it parses,
+    /// the extracted one otherwise. `None` when the profile disabled
+    /// the audit, since nothing was judged.
+    ///
+    /// The audit projection stores this rather than the extracted
+    /// type, so the row's `csl_type` column and the matrix behind its
+    /// verdict can never name two different types.
+    pub csl_type: Option<CslType>,
 }
 
 impl PaperReport {
@@ -301,6 +312,12 @@ impl PaperReport {
     /// Keys are emitted in field-name order; arrays preserve flag
     /// order so the output is byte-stable across runs over the same
     /// input.
+    ///
+    /// [`Self::csl_type`] is deliberately absent: this JSON is the
+    /// paper-side review note, and the shape a per-field read surface
+    /// wants from it is not settled. Adding a key here is an
+    /// append-only change any reader must tolerate, so it waits for
+    /// the reader.
     pub fn to_json(&self) -> String {
         let mut out = String::new();
         out.push('{');
@@ -459,6 +476,7 @@ mod tests {
             verdict: PaperVerdict::NeedsWork,
             confidence: PaperConfidence::Low,
             cross_field_flags: vec![PaperFlag::NoStableIdentifier],
+            csl_type: Some(CslType::ArticleJournal),
         };
         let json = report.to_json();
         assert!(json.contains("\"verdict\":\"needs_work\""));

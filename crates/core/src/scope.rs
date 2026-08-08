@@ -56,6 +56,7 @@ impl fmt::Display for ScopeParseError {
 
 impl std::error::Error for ScopeParseError {}
 
+// setting: internal -- the width of a sha256 in hex, not a choice
 const HASH_LEN: usize = 64;
 
 fn is_lower_hex64(s: &str) -> bool {

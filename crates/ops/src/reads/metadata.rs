@@ -2,6 +2,8 @@
 
 //! Read ops over the metadata audit trail and the review queue.
 
+use std::path::Path;
+
 use bookrack_catalog::{Catalog, IntakeFilter, STATUS_ACKNOWLEDGED, STATUS_PENDING};
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::Corpus;
@@ -14,7 +16,7 @@ use crate::dto::audit::AuditTrailEntry;
 use crate::dto::metadata_report::{
     MetadataAuditReport, MetadataListPage, MetadataListRow, MetadataReport,
 };
-use crate::dto::{BookDetail, TocStats, clamp_limit};
+use crate::dto::{BookDetail, MetadataFilter, TocStats, clamp_limit};
 use crate::recorder::record_call_sync;
 
 /// Read the metadata-status record for one book: bibliographic detail
@@ -101,23 +103,79 @@ pub fn show_metadata_report<E: Embedder>(
     )
 }
 
-/// List every registered book with its current confidence and review
-/// status. Paginated; no audit / review filtering.
+/// The confidence grades an item on the review queue carries.
+const NEEDS_REVIEW_CONFIDENCE: &[&str] = &["low", "medium"];
+
+/// The review states an item on the review queue carries. An item
+/// never reviewed counts as `pending`.
+const NEEDS_REVIEW_STATUS: &[&str] = &[STATUS_PENDING, STATUS_ACKNOWLEDGED];
+
+/// The filter behind the review-queue preset, shared by both
+/// pipelines: the confidence and review vocabularies are one set, so a
+/// second threshold on the paper side would be a second answer to the
+/// same question.
+pub(crate) fn needs_review_filter() -> IntakeFilter<'static> {
+    IntakeFilter {
+        confidence_in: NEEDS_REVIEW_CONFIDENCE,
+        review_status_in: NEEDS_REVIEW_STATUS,
+        ..IntakeFilter::default()
+    }
+}
+
+/// List registered books with their current confidence and review
+/// status, narrowed by `filter`. Paginated.
+///
+/// The title predicate reads the base layer — what extraction and
+/// enrichment wrote — so a row reached by its extracted title is the
+/// one a review pass is looking for. Each row carries both layers:
+/// [`MetadataListRow::title_raw`] as extracted, and
+/// [`MetadataListRow::title`] as reported everywhere else. To search
+/// the reported titles, use
+/// [`reads::books::find_books`](crate::reads::books::find_books).
 pub fn list_metadata<E: Embedder>(
     ops: &Ops<E>,
+    filter: MetadataFilter,
     limit: u32,
     offset: u32,
 ) -> Result<MetadataListPage> {
     record_call_sync!(
         ops,
         "library.list_metadata",
-        serde_json::json!({ "limit": limit, "offset": offset }),
-        { list_metadata_inner(ops, IntakeFilter::default(), limit, offset) }
+        serde_json::json!({
+            "title_substring": filter.title_substring,
+            "confidence_in": filter.confidence_in,
+            "review_status_in": filter.review_status_in,
+            "limit": limit,
+            "offset": offset,
+        }),
+        {
+            let confidence_in: Vec<&str> =
+                filter.confidence_in.iter().map(String::as_str).collect();
+            let review_status_in: Vec<&str> =
+                filter.review_status_in.iter().map(String::as_str).collect();
+            let catalog_filter = IntakeFilter {
+                title_substring: filter.title_substring.as_deref(),
+                confidence_in: confidence_in.as_slice(),
+                review_status_in: review_status_in.as_slice(),
+                ..IntakeFilter::default()
+            };
+            list_metadata_inner(
+                ops.catalog_db(),
+                ItemKind::Book,
+                catalog_filter,
+                limit,
+                offset,
+            )
+        }
     )
 }
 
 /// List books still on the review queue: low / medium confidence plus
 /// pending / acknowledged review status. Paginated.
+///
+/// A preset over the same listing [`list_metadata`] serves: it is the
+/// one question asked often enough to earn its own verb, and it shares
+/// that function's filter shape rather than a second query.
 pub fn list_pending_reviews<E: Embedder>(
     ops: &Ops<E>,
     limit: u32,
@@ -128,40 +186,54 @@ pub fn list_pending_reviews<E: Embedder>(
         "library.list_pending_reviews",
         serde_json::json!({ "limit": limit, "offset": offset }),
         {
-            let needs_review_confidence: &[&str] = &["low", "medium"];
-            let needs_review_status: &[&str] = &[STATUS_PENDING, STATUS_ACKNOWLEDGED];
-            let filter = IntakeFilter {
-                confidence_in: needs_review_confidence,
-                review_status_in: needs_review_status,
-                ..IntakeFilter::default()
-            };
-            list_metadata_inner(ops, filter, limit, offset)
+            list_metadata_inner(
+                ops.catalog_db(),
+                ItemKind::Book,
+                needs_review_filter(),
+                limit,
+                offset,
+            )
         }
     )
 }
 
-/// Shared body of the two paginated metadata listings. Pulled out so
-/// the public entry points stay thin and the filter shape is the only
-/// thing that differs between them.
-fn list_metadata_inner<E: Embedder>(
-    ops: &Ops<E>,
+/// Shared body of the paginated metadata listings, over whichever
+/// catalog and item kind the caller names. Pulled out so the public
+/// entry points stay thin and the filter shape and the pipeline are
+/// the only things that differ between them.
+///
+/// The row shape carries nothing pipeline-specific, so one body serves
+/// both sides; what a caller must get right is pairing the catalog
+/// with the kind stored in it.
+pub(crate) fn list_metadata_inner(
+    catalog_db: &Path,
+    kind: ItemKind,
     filter: IntakeFilter<'_>,
     limit: u32,
     offset: u32,
 ) -> Result<MetadataListPage> {
     let (effective_limit, _) = clamp_limit(limit);
-    let catalog = Catalog::open_read_only(ops.catalog_db())?;
+    // The kind reaches the query twice: `IntakeFilter::kind` decides
+    // which scope every `node_*` JOIN picks up, and the projection
+    // reads below take it directly. Setting it here rather than
+    // trusting the caller's filter keeps those two from disagreeing —
+    // a filter left on the default scope returns the other pipeline's
+    // rows against this pipeline's catalog, which is an empty page
+    // rather than an error.
+    let filter = IntakeFilter { kind, ..filter };
+    let catalog = Catalog::open_read_only(catalog_db)?;
     let (intakes, total) = catalog.find_intakes_page(&filter, effective_limit, offset)?;
     let intake_ids: Vec<i64> = intakes.iter().map(|i| i.intake_id).collect();
-    let effective = catalog.effective_publication_attrs_for_intakes(&intake_ids, ItemKind::Book)?;
-    let attrs = catalog.publication_attrs_for_intakes(&intake_ids, ItemKind::Book)?;
-    let reviews = catalog.reviews_for_addresses(&intake_ids, ItemKind::Book)?;
+    let effective = catalog.effective_publication_attrs_for_intakes(&intake_ids, kind)?;
+    let attrs = catalog.publication_attrs_for_intakes(&intake_ids, kind)?;
+    let reviews = catalog.reviews_for_addresses(&intake_ids, kind)?;
     let rows: Vec<MetadataListRow> = intakes
         .iter()
         .map(|intake| {
             let title = effective
                 .get(&intake.intake_id)
                 .and_then(|e| e.get("title").map(str::to_string));
+            let title_raw = attrs.get(&intake.intake_id).and_then(|a| a.title.clone());
             let confidence = attrs
                 .get(&intake.intake_id)
                 .and_then(|a| a.confidence.clone());
@@ -169,6 +241,7 @@ fn list_metadata_inner<E: Embedder>(
             MetadataListRow {
                 intake_id: intake.intake_id,
                 title,
+                title_raw,
                 confidence,
                 review_status,
             }
@@ -196,14 +269,25 @@ pub fn show_audit_trail<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<Vec
         ops,
         "library.show_audit_trail",
         serde_json::json!({ "intake_id": intake_id }),
-        {
-            let catalog = Catalog::open_read_only(ops.catalog_db())?;
-            let node_id = PartitionIdx::new(intake_id).root().get();
-            let rows = catalog.metadata_audit_for_node(node_id)?;
-            if rows.is_empty() && catalog.intake_by_id(intake_id)?.is_none() {
-                return Err(OpsError::IntakeNotFound { intake_id });
-            }
-            Ok(rows.into_iter().map(AuditTrailEntry::from_row).collect())
-        }
+        { show_audit_trail_inner(ops.catalog_db(), intake_id) }
     )
+}
+
+/// Shared body of the audit-trail read, over whichever catalog the
+/// caller names.
+///
+/// `metadata_audit` has no scope column — each pipeline's rows live in
+/// its own catalog — so the catalog path is the whole of what differs
+/// between the two sides.
+pub(crate) fn show_audit_trail_inner(
+    catalog_db: &Path,
+    intake_id: i64,
+) -> Result<Vec<AuditTrailEntry>> {
+    let catalog = Catalog::open_read_only(catalog_db)?;
+    let node_id = PartitionIdx::new(intake_id).root().get();
+    let rows = catalog.metadata_audit_for_node(node_id)?;
+    if rows.is_empty() && catalog.intake_by_id(intake_id)?.is_none() {
+        return Err(OpsError::IntakeNotFound { intake_id });
+    }
+    Ok(rows.into_iter().map(AuditTrailEntry::from_row).collect())
 }

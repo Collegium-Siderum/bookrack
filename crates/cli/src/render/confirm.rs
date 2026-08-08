@@ -26,6 +26,9 @@
 //! keyboard — able to answer, while an idle pipe stops the command
 //! instead of parking it forever.
 
+use bookrack_core::knob::{
+    Candidate, DotenvSupply, KnobOrigin, KnobReach, Layer, ReadAt, env_over, resolve_knob,
+};
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -47,6 +50,7 @@ pub const CONFIRM_TIMEOUT_ENV: &str = "BOOKRACK_CONFIRM_TIMEOUT_SECS";
 /// short throws away an answer a human was halfway through typing.
 /// The ceiling is the daemon's 15-minute pinned-plan TTL, past which
 /// an answer buys a plan-expired error instead of the work.
+// setting: internal -- the Default rung of `confirm.timeout_secs`, reported by `config knobs`
 pub const DEFAULT_CONFIRM_TIMEOUT_SECS: u64 = 120;
 
 /// Resolve the answer-window bound from the environment. `None` means
@@ -58,6 +62,43 @@ pub fn confirm_bound_from(get: impl Fn(&str) -> Option<String>) -> Option<Durati
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_CONFIRM_TIMEOUT_SECS);
     (secs > 0).then(|| Duration::from_secs(secs))
+}
+
+/// Every knob this module reads, with where the value came from.
+pub fn knob_origins(dotenv: Option<DotenvSupply<'_>>) -> Vec<KnobOrigin> {
+    knob_origins_from(|name| std::env::var(name).ok(), dotenv)
+}
+
+/// The same row on a machine where nothing is configured: the inventory
+/// form, reporting [`DEFAULT_CONFIRM_TIMEOUT_SECS`] as the value and the
+/// variable as the place it can be moved from.
+pub fn knob_catalog() -> Vec<KnobOrigin> {
+    knob_origins_from(|_| None, None)
+}
+
+/// Pure form of [`knob_origins`], sharing the parse rule with
+/// [`confirm_bound_from`] rather than restating it.
+fn knob_origins_from(
+    get: impl Fn(&str) -> Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> Vec<KnobOrigin> {
+    vec![resolve_knob(
+        "confirm.timeout_secs",
+        KnobReach::Process,
+        ReadAt::PerCall,
+        env_over(
+            dotenv,
+            CONFIRM_TIMEOUT_ENV,
+            get(CONFIRM_TIMEOUT_ENV)
+                .and_then(|raw| raw.trim().parse::<u64>().ok())
+                .map(|v| v.to_string()),
+            vec![Candidate::of(
+                Layer::Default,
+                "built-in",
+                Some(DEFAULT_CONFIRM_TIMEOUT_SECS.to_string()),
+            )],
+        ),
+    )]
 }
 
 /// How long an answer may take to arrive.
@@ -722,6 +763,25 @@ mod tests {
         );
         let (verdict, _) = via(Answer::Abandoned, AnswerWindow::Within(window), false);
         assert_eq!(verdict, Confirmation::Unanswerable(NoAnswer::Abandoned));
+    }
+
+    /// The catalog row reports the compiled-in window and names the
+    /// variable that moves it, which is what an inventory of this
+    /// build's knobs has to say about a knob nobody has set.
+    #[test]
+    fn the_catalog_reports_the_compiled_in_window() {
+        let rows = knob_catalog();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+
+        assert_eq!(row.key, "confirm.timeout_secs");
+        assert_eq!(row.layer, Layer::Default, "site: {}", row.site);
+        assert_eq!(
+            row.value.as_deref(),
+            Some(DEFAULT_CONFIRM_TIMEOUT_SECS.to_string().as_str())
+        );
+        let sites: Vec<&str> = row.chain.iter().map(|s| s.site.as_str()).collect();
+        assert!(sites.contains(&CONFIRM_TIMEOUT_ENV), "{sites:?}");
     }
 
     /// The reason has to tell the operator which knob widens the

@@ -40,7 +40,11 @@ const READ_TOOLS: &[&str] = &[
     "library.show_book",
     "library.show_metadata_audit",
     "library.show_metadata_report",
+    "library.list_paper_metadata",
+    "library.list_paper_pending_reviews",
     "library.show_paper",
+    "library.show_paper_audit_trail",
+    "library.show_paper_metadata_report",
     "library.show_paper_toc",
     "library.show_pipeline_trail",
     "library.show_toc",
@@ -135,6 +139,30 @@ fn every_published_tool_carries_a_description() {
         .map(|tool| tool.name)
         .collect();
     assert!(missing.is_empty(), "tools with no description: {missing:?}");
+}
+
+#[test]
+fn the_logs_tail_description_states_the_bounds_the_server_applies() {
+    // A description that quotes a number restates a constant, and a
+    // restatement drifts. An agent client reads this text instead of
+    // the inventory `bookrack config fixed` prints, so it is held to
+    // the values the handler actually applies.
+    let tool = bookrack_mcp::list_tools()
+        .into_iter()
+        .find(|tool| tool.name == "session.logs_tail")
+        .expect("session.logs_tail is a published tool");
+
+    for bound in [
+        bookrack_obs::stream::TAIL_REQUEST_DEFAULT,
+        bookrack_obs::stream::TAIL_REQUEST_MAX,
+    ] {
+        assert!(
+            tool.description.contains(&bound.to_string()),
+            "the description does not state {bound}, so an agent reads a bound the \
+             server does not apply: {}",
+            tool.description
+        );
+    }
 }
 
 #[test]

@@ -26,8 +26,8 @@ pub use migrate::TARGET_VERSION;
 pub use types::{IndexKind, IndexSpec, LookupResult, NewBook, NewEntry, NewOverlay, ResolvedEntry};
 
 /// Quality flag stamped on the hits of a self-cancelling redirect
-/// chain. Mirrors the catalog flag of the same name in mother doc
-/// §5.11.
+/// chain. Mirrors the flag of the same name in the distill quality-flag
+/// catalog (`crates/distill/data/quality_flags.toml`).
 pub const REDIRECT_LOOP_FLAG: &str = "redirect_loop";
 
 /// Errors from opening, migrating, or querying `reference.db`.
@@ -50,6 +50,16 @@ pub enum RefsError {
         "reference.db schema is newer than this build supports: found user_version {found}, supports {supported}"
     )]
     SchemaTooNew { found: i64, supported: i64 },
+
+    /// A read-only open found a `user_version` short of
+    /// [`TARGET_VERSION`]: the file exists but the migrations that
+    /// build the tables the read path queries have not run. The
+    /// writable [`Refs::open`] would migrate it forward; the read path
+    /// refuses rather than write to a database a read command opened.
+    #[error(
+        "reference.db schema is behind this build: found user_version {found}, expects {supported}"
+    )]
+    SchemaTooOld { found: i64, supported: i64 },
 
     /// A slug or field path failed identifier validation before being
     /// interpolated into a DDL statement.
@@ -86,15 +96,24 @@ impl Refs {
     ///
     /// Mirrors the corpus read-only door in intent: the strict read-only
     /// flags block writes and refuse a missing file rather than
-    /// materialize an empty schema, no migration runs, and a
-    /// `user_version` past [`TARGET_VERSION`] is refused with
-    /// [`RefsError::SchemaTooNew`]. A file at or below the target reads as
-    /// is — the writable [`Refs::open`] is the only path that migrates.
+    /// materialize an empty schema, and no migration runs. Both
+    /// directions of a `user_version` that is not [`TARGET_VERSION`] are
+    /// refused — [`RefsError::SchemaTooNew`] for a file this build
+    /// cannot read, [`RefsError::SchemaTooOld`] for one whose tables
+    /// have not been built yet — because the alternative is a query
+    /// against a schema the caller was not promised. The writable
+    /// [`Refs::open`] is the only path that migrates.
     pub fn open_read_only(path: &Path) -> RefsResult<Self> {
         let conn = bookrack_dbkit::open_production_strict_read_only(path)?;
         let found: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if found > TARGET_VERSION {
             return Err(RefsError::SchemaTooNew {
+                found,
+                supported: TARGET_VERSION,
+            });
+        }
+        if found < TARGET_VERSION {
+            return Err(RefsError::SchemaTooOld {
                 found,
                 supported: TARGET_VERSION,
             });
@@ -118,8 +137,9 @@ impl Refs {
 
     /// Register a reference book or update its existing registration in
     /// place. `entry_count` and `parse_warnings` are left at their
-    /// current values (or default 0 on first insert); distill updates
-    /// them through dedicated CRUD as entries are upserted.
+    /// current values, which is 0 on first insert and 0 thereafter:
+    /// nothing writes those two columns. See [`crate::types::NewBook`]
+    /// for what reads the count instead.
     pub fn upsert_book(&self, book: &NewBook) -> RefsResult<()> {
         self.conn.execute(
             "INSERT INTO reference_books (\
@@ -274,7 +294,7 @@ impl Refs {
     /// with one redirect hop, the `primary_by_authority` index, and a
     /// latin-key fallback retry.
     ///
-    /// Redirect rules (mother doc §5.5):
+    /// Redirect rules:
     /// - If the query yields exactly one hit and that hit's payload
     ///   carries `redirect_to`, the target is looked up under the same
     ///   `book_slug` scope; on success the result reports the target's
@@ -544,6 +564,50 @@ mod refs_tests {
             )
             .expect("query sqlite_master");
         count > 0
+    }
+
+    /// `entry_count` and `parse_warnings` stay at 0 no matter what is
+    /// written through this crate's public surface.
+    ///
+    /// Both column docs describe them as counters `Refs` maintains as
+    /// entries are upserted, which no code path does. The test holds
+    /// the docs to what the code actually guarantees, so a future
+    /// writer either updates them or fails here.
+    #[test]
+    fn the_entry_counters_on_reference_books_are_never_written() {
+        let refs = fresh_refs();
+        refs.upsert_book(&sample_book("fake_book", 10, "2026-06-25T00:00:00Z"))
+            .expect("upsert book");
+        for key in ["a", "b", "c"] {
+            refs.upsert_entry(&sample_entry("fake_book", key, key, json!({})))
+                .expect("upsert entry");
+        }
+        // A second registration of the same book, the other write that
+        // touches this row.
+        refs.upsert_book(&sample_book("fake_book", 20, "2026-06-26T00:00:00Z"))
+            .expect("re-upsert book");
+
+        let (entry_count, parse_warnings): (i64, i64) = refs
+            .connection()
+            .query_row(
+                "SELECT entry_count, parse_warnings FROM reference_books \
+                 WHERE book_slug = 'fake_book'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read the counter columns");
+        assert_eq!(entry_count, 0, "three entries did not move entry_count");
+        assert_eq!(parse_warnings, 0);
+
+        let live: i64 = refs
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM reference_entries WHERE book_slug = 'fake_book'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count entries");
+        assert_eq!(live, 3, "the rows a reader has to count instead are there");
     }
 
     #[test]
@@ -1206,6 +1270,31 @@ mod read_only_tests {
         assert!(
             format!("{err}").to_lowercase().contains("readonly"),
             "expected a readonly rejection, got {err}"
+        );
+    }
+
+    /// A `user_version` short of the target is refused: the file
+    /// exists but holds none of the tables the read path queries, and
+    /// migrating it is the writable door's job.
+    #[test]
+    fn open_read_only_refuses_older_schema() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("reference.db");
+        // A half-created database: present, empty, `user_version` 0.
+        std::fs::File::create(&path).expect("create an unmigrated reference.db");
+
+        let Err(err) = Refs::open_read_only(&path) else {
+            panic!("a schema behind the target must be refused");
+        };
+        assert!(
+            matches!(
+                err,
+                RefsError::SchemaTooOld {
+                    found,
+                    supported,
+                } if found == 0 && supported == TARGET_VERSION
+            ),
+            "expected SchemaTooOld, got {err}"
         );
     }
 

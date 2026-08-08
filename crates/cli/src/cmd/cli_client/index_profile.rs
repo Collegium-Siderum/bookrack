@@ -76,24 +76,15 @@ pub async fn run(
         return Ok(());
     }
 
-    // Executing routes through the daemon that owns the library; refuse
-    // up front when a running daemon serves a different one than the
-    // plan targets, instead of resetting the wrong store. The comparison
-    // is against the *resolved* root rather than the selection, so a plan
-    // derived from a registry default — which the top-level pre-flight
-    // stays silent about, there being no explicit selection to compare —
-    // is checked too. Both axes are asserted: a lock that records only
-    // one of the two is silent about the other.
-    crate::preflight::enforce_selection_mismatch(&LibrarySelection {
-        data_dir: Some(plan.target.data_dir().to_path_buf()),
-        library: None,
-    })?;
-    if let Some(entry) = &plan.target.entry {
-        crate::preflight::enforce_selection_mismatch(&LibrarySelection {
-            data_dir: None,
-            library: Some(entry.name.clone()),
-        })?;
-    }
+    // Executing routes through the daemon that owns the library, and
+    // every action names the plan's own target. A target with no
+    // registry entry has no name to deliver: the selection that
+    // produced it was refused before the plan was built, so the only
+    // way here is a root the registry claims.
+    debug_assert!(
+        plan.target.entry.is_some(),
+        "an apply reached execution with an unnamed target"
+    );
 
     let client = helpers::connect(runtime_dir).await?;
     let status = helpers::dispatch(&client, "status", Value::Null).await?;
@@ -395,6 +386,36 @@ fn method_for(pipeline: Pipeline, action: PlannedAction) -> &'static str {
     }
 }
 
+/// The library name every call in this apply carries: the plan's own
+/// target, taken from [`ApplyPlan`] at each call site.
+fn plan_library(plan: &ApplyPlan) -> Option<&str> {
+    plan.target.entry.as_ref().map(|entry| entry.name.as_str())
+}
+
+/// Name `library` on an outgoing call, overriding whatever selection
+/// the client would otherwise inject.
+///
+/// The invocation's `--library` is not the right answer here: the plan
+/// was derived against the target this apply resolved, which may come
+/// from the registry default with no flag in sight. Naming it
+/// explicitly is what puts the actions on the library the plan was
+/// computed for.
+///
+/// `None` is a target with no registry entry — a root selected by path,
+/// which has no name to send. Those are refused before any action runs.
+fn with_library(library: Option<&str>, mut params: Value) -> Value {
+    let Some(name) = library else {
+        return params;
+    };
+    if params.is_null() {
+        params = Value::Object(serde_json::Map::new());
+    }
+    if let Some(object) = params.as_object_mut() {
+        object.insert("library".to_string(), json!(name));
+    }
+    params
+}
+
 /// Drive one action through its method. The orchestrator satisfies
 /// every handler-side `yes` requirement itself — the operator already
 /// confirmed the whole plan, so no step asks again.
@@ -410,7 +431,7 @@ async fn execute_action(
             helpers::call_with_progress(
                 Arc::clone(client),
                 method,
-                json!({ "resume": false, "yes": true }),
+                with_library(plan_library(plan), json!({ "resume": false, "yes": true })),
             )
             .await
         }
@@ -419,22 +440,35 @@ async fn execute_action(
             helpers::call_with_progress(
                 Arc::clone(client),
                 method,
-                json!({
-                    "kind": ann.kind.as_str(),
-                    "num_partitions": ann.num_partitions,
-                    "num_sub_vectors": ann.num_sub_vectors,
-                    "num_bits": ann.num_bits,
-                    "nprobes": ann.nprobes,
-                    "refine_factor": ann.refine_factor,
-                }),
+                with_library(
+                    plan_library(plan),
+                    json!({
+                        "kind": ann.kind.as_str(),
+                        "num_partitions": ann.num_partitions,
+                        "num_sub_vectors": ann.num_sub_vectors,
+                        "num_bits": ann.num_bits,
+                        "nprobes": ann.nprobes,
+                        "refine_factor": ann.refine_factor,
+                    }),
+                ),
             )
             .await
         }
         PlannedAction::DropIndex => {
-            helpers::call_with_progress(Arc::clone(client), method, json!({ "yes": true })).await
+            helpers::call_with_progress(
+                Arc::clone(client),
+                method,
+                with_library(plan_library(plan), json!({ "yes": true })),
+            )
+            .await
         }
         PlannedAction::ReconcileStamps => {
-            helpers::call_with_progress(Arc::clone(client), method, Value::Null).await
+            helpers::call_with_progress(
+                Arc::clone(client),
+                method,
+                with_library(plan_library(plan), Value::Null),
+            )
+            .await
         }
         PlannedAction::Reembed => {
             // The pinned two-leg protocol: a fresh dry-run leg computes
@@ -445,7 +479,10 @@ async fn execute_action(
             let reembed_plan = helpers::call_with_progress_value(
                 Arc::clone(client),
                 method,
-                json!({ "stale_only": false, "dry_run": true }),
+                with_library(
+                    plan_library(plan),
+                    json!({ "stale_only": false, "dry_run": true }),
+                ),
             )
             .await?;
             helpers::print_value(&reembed_plan);
@@ -459,7 +496,10 @@ async fn execute_action(
             let outcome = helpers::call_with_progress_value(
                 Arc::clone(client),
                 method,
-                json!({ "plan_id": plan_id, "yes": true }),
+                with_library(
+                    plan_library(plan),
+                    json!({ "plan_id": plan_id, "yes": true }),
+                ),
             )
             .await?;
             helpers::print_value(&outcome);
@@ -471,6 +511,55 @@ async fn execute_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every action an apply drives names the plan's own target, and
+    /// that name outranks the one the client would inject from the
+    /// invocation's `--library`.
+    ///
+    /// Both halves matter and neither alone is enough: without the
+    /// first, the actions inherit whatever the invocation selected —
+    /// including nothing, which lands on the daemon's registry default
+    /// while the plan was computed against another library. Without the
+    /// second, the injection overwrites the plan's target on its way
+    /// out. The two production functions are composed here in the order
+    /// the real call takes.
+    #[test]
+    fn the_plans_target_outranks_the_invocations_selection() {
+        let params = with_library(Some("beta"), json!({ "yes": true }));
+        assert_eq!(params["library"], "beta");
+
+        let sent = bookrack_cli::library_param::apply_selection(
+            Some("alpha"),
+            "vectors.reset",
+            params.clone(),
+        )
+        .expect("a routed method accepts a selection");
+        assert_eq!(
+            sent["library"], "beta",
+            "the plan's target must survive the client's injection: {sent}"
+        );
+        assert_eq!(
+            sent["yes"], true,
+            "the action's own params must survive too"
+        );
+    }
+
+    /// A null-params action still ends up carrying the library: an
+    /// action with nothing else to say is the easiest one to deliver to
+    /// the wrong store.
+    #[test]
+    fn an_action_with_no_params_still_names_its_library() {
+        let params = with_library(Some("beta"), Value::Null);
+        assert_eq!(params, json!({ "library": "beta" }));
+    }
+
+    /// A target selected by path has no name to send, and inventing one
+    /// would be a guess. Those plans are refused before any action runs.
+    #[test]
+    fn a_path_rooted_target_sends_no_library() {
+        let params = with_library(None, json!({ "yes": true }));
+        assert_eq!(params, json!({ "yes": true }));
+    }
 
     /// A plan with nothing destructive and nothing soft runs
     /// unprompted.

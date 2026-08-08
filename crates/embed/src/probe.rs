@@ -50,6 +50,7 @@ pub enum ProbeError {
 /// Default probe timeout. Short by design: the probe runs before the
 /// user's first interaction and a hung daemon should fall through to
 /// "unreachable" within a couple of seconds.
+// setting: embed.probe_timeout
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// GET `<base_url>/api/tags` and report whether the daemon is up and
@@ -69,8 +70,11 @@ pub async fn probe_ollama_with_timeout(
     base_url: &str,
     timeout: Duration,
 ) -> Result<ProbeReport, ProbeError> {
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
+    let mut builder = reqwest::Client::builder().timeout(timeout);
+    if bookrack_core::net::bypasses_proxy(base_url) {
+        builder = builder.no_proxy();
+    }
+    let client = builder
         .build()
         .map_err(|e| ProbeError::ClientInit(e.to_string()))?;
     let url = format!("{}/api/tags", base_url.trim_end_matches('/'));

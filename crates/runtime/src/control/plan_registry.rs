@@ -81,6 +81,7 @@ struct RegisteredPlan {
 /// Default time-to-live for a registered plan: long enough for an
 /// operator to read the dry-run output and confirm without a clock
 /// race, short enough that meaningful state drift forces a re-plan.
+// setting: control.plan_ttl
 pub const DEFAULT_PLAN_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// Time-limited map of pinned plans, shared across the daemon's

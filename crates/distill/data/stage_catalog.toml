@@ -1,11 +1,9 @@
 # Stage catalog: the public surface of every distill builtin.
 #
 # Each table declares one stage that a book.toml's `parser.stages`
-# may reference. Mother doc §5.2 enumerates the canonical set; the
-# three `(c)`-tier inline stages from the spike were promoted to
-# declarative builtins (§1.4 of the execution manual). `partition_body_around_match`,
-# `walk_anchors_per_lang`, and `unpack_paired_body` are the §1.4
-# additions.
+# may reference. `partition_body_around_match`,
+# `walk_anchors_per_lang`, and `unpack_paired_body` were promoted from
+# inline spike code into declarative builtins.
 #
 # `input` and `output` name a `StageData` variant (source / pages /
 # blocks / raws / splits / drafts). `writes_properties` declares the
@@ -58,7 +56,7 @@ params = [
 [pair_bilingual_entries]
 input = "raws"
 output = "raws"
-description = "Pair adjacent bilingual raw entries by language and merge them into one packed body."
+description = "Pair each sheet's Nth primary-language entry with its Nth secondary-language entry and merge them into one packed body. A sheet whose two sides differ in entry count is emitted unpaired."
 emits_flags = ["pair_mismatch"]
 params = [
   { name = "primary_lang", type = "string", required = true },
@@ -129,7 +127,7 @@ params = [
 [partition_body_around_match]
 input = "splits"
 output = "splits"
-description = "Partition the body around a pattern match; head goes to one payload key, tail to another, optionally splitting the head further by a regex."
+description = "Partition the body around a pattern match; head goes to one payload key, tail to another, optionally splitting the head further by a regex. `skip_inner` names captured values that do not count as a match, for a book whose tag shape carries more than one kind of tag."
 writes_properties = ["country", "chinese_name", "variants", "bio_annotation"]
 params = [
   { name = "pattern", type = "pattern_ref", required = true },
@@ -138,6 +136,7 @@ params = [
   { name = "first_to", type = "property_name", required = false },
   { name = "rest_to", type = "property_name", required = false },
   { name = "tail_to", type = "property_name", required = false },
+  { name = "skip_inner", type = "string[]", required = false, default = [] },
 ]
 
 [unpack_paired_body]

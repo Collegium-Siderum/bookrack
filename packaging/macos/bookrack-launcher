@@ -6,6 +6,10 @@
 # is staged in Resources so `current_exe().parent()` returns the
 # Resources directory -- the PDFium loader and the portable
 # data-directory probe both look next to the running binary.
+#
+# That staging serves the loaders only. The wizard refuses a data root
+# anywhere inside the bundle: an upgrade replaces the bundle whole, so
+# a library kept there goes with it.
 set -eu
 res="$(cd "$(dirname "$0")/../Resources" && pwd)"
 open -a Terminal "$res/bookrack-run.command"

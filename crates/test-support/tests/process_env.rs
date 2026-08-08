@@ -40,6 +40,20 @@ fn the_process_sandbox_moves_the_platform_paths() {
     );
 }
 
+/// A daemon this binary brings up in process binds its MCP address
+/// during bring-up, so the sandbox pins a kernel-assigned port: the
+/// built-in default would hand one fixed host port a veto over
+/// whether the test starts at all.
+#[test]
+fn the_process_sandbox_asks_for_a_kernel_assigned_mcp_port() {
+    process_env(ProcessEnv::daemon());
+    assert_eq!(
+        bookrack_config::McpConfig::from_env().addr,
+        "127.0.0.1:0",
+        "an in-process daemon must not contend for the default port",
+    );
+}
+
 /// The `.env` channel is closed, not merely unlikely.
 ///
 /// Cargo runs this binary from its package root, so dotenv's upward

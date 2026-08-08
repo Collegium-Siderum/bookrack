@@ -88,7 +88,7 @@ pub fn ocr_intake(report: &OcrIngestReport) {
         let confidence = report.audit_confidence.as_deref().unwrap_or("unknown");
         println!(
             "  \u{26a0} metadata audit: needs_work (confidence {confidence}). \
-             Run `bookrack exec library.show_metadata_audit '{{\"intake_id\":{}}}'` to inspect.",
+             Run `bookrack rpc call library.show_metadata_audit '{{\"intake_id\":{}}}'` to inspect.",
             report.ocr_intake_id,
         );
     }
@@ -103,7 +103,7 @@ fn print_audit_warning(report: &IngestReport) {
         let confidence = report.audit_confidence.as_deref().unwrap_or("unknown");
         println!(
             "  \u{26a0} metadata audit: needs_work (confidence {confidence}). \
-             Run `bookrack exec library.show_metadata_audit '{{\"intake_id\":{}}}'` to inspect.",
+             Run `bookrack rpc call library.show_metadata_audit '{{\"intake_id\":{}}}'` to inspect.",
             report.intake_id,
         );
     }
@@ -229,6 +229,10 @@ pub struct VerifyReport {
     pub missing_intake_files: Option<Vec<i64>>,
     pub vectors_built_at_chunk_count: Option<u64>,
     pub vectors_churn: Option<u64>,
+    /// Why `vectors_meta.json` could not be read, flattened to its full
+    /// source chain. Distinct from all three counts being absent, which
+    /// is a library that never built an ANN index.
+    pub vectors_meta_error: Option<String>,
 }
 
 /// Print the `bookrack verify` report. Quiet on success, loud on
@@ -279,9 +283,18 @@ pub fn verify(report: &VerifyReport) {
         }
     }
 
-    if report.vectors_built_at_chunk_count.is_some() || report.vectors_churn.is_some() {
+    if report.vectors_built_at_chunk_count.is_some()
+        || report.vectors_churn.is_some()
+        || report.vectors_meta_error.is_some()
+    {
         println!();
         println!("vectors:");
+        if let Some(err) = &report.vectors_meta_error {
+            println!("  meta:            FAILED");
+            for line in err.lines() {
+                println!("    {line}");
+            }
+        }
         if let Some(n) = report.vectors_built_at_chunk_count {
             println!("  chunks_at_build: {n}");
         }
@@ -294,7 +307,12 @@ pub fn verify(report: &VerifyReport) {
 /// Print the library registry as a human-readable listing. A `None`
 /// argument means the registry is not configured at all — surfaced as
 /// a single explanatory line rather than an empty body.
-pub fn libraries_list(entries: Option<&[LibraryEntry]>) {
+///
+/// `served` names the libraries a running daemon holds. `None` means
+/// nobody was asked or nobody answered, and the column is left out
+/// entirely: printing it empty would state that no library is served,
+/// which is a different claim from having no answer.
+pub fn libraries_list(entries: Option<&[LibraryEntry]>, served: Option<&[String]>) {
     let Some(entries) = entries else {
         println!("No registry found (run `bookrack init`, or set BOOKRACK_REGISTRY).");
         return;
@@ -303,21 +321,52 @@ pub fn libraries_list(entries: Option<&[LibraryEntry]>) {
         println!("Registry has no library entries.");
         return;
     }
-    println!("{:<20}  {:<10}  {:<8}  data_dir", "name", "default", "kind");
-    for entry in entries {
-        let default_mark = if entry.is_default { "yes" } else { "" };
-        println!(
-            "{:<20}  {:<10}  {:<8}  {}",
-            entry.name,
-            default_mark,
-            entry.kind.as_str(),
-            entry.data_dir.display(),
-        );
+    match served {
+        Some(served) => {
+            println!(
+                "{:<20}  {:<10}  {:<8}  {:<8}  data_dir",
+                "name", "default", "kind", "served"
+            );
+            for entry in entries {
+                println!(
+                    "{:<20}  {:<10}  {:<8}  {:<8}  {}",
+                    entry.name,
+                    default_mark(entry),
+                    entry.kind.as_str(),
+                    if served.contains(&entry.name) {
+                        "yes"
+                    } else {
+                        ""
+                    },
+                    entry.data_dir.display(),
+                );
+            }
+        }
+        None => {
+            println!("{:<20}  {:<10}  {:<8}  data_dir", "name", "default", "kind");
+            for entry in entries {
+                println!(
+                    "{:<20}  {:<10}  {:<8}  {}",
+                    entry.name,
+                    default_mark(entry),
+                    entry.kind.as_str(),
+                    entry.data_dir.display(),
+                );
+            }
+        }
     }
 }
 
+fn default_mark(entry: &LibraryEntry) -> &'static str {
+    if entry.is_default { "yes" } else { "" }
+}
+
 /// Same registry as a JSON array — `null` when no registry is set.
-pub fn libraries_list_json(entries: Option<&[LibraryEntry]>) {
+///
+/// `served` follows the human listing: each object carries a `served`
+/// boolean when a daemon answered, and the key is absent from every
+/// object when none did.
+pub fn libraries_list_json(entries: Option<&[LibraryEntry]>, served: Option<&[String]>) {
     let Some(entries) = entries else {
         println!("null");
         return;
@@ -335,6 +384,10 @@ pub fn libraries_list_json(entries: Option<&[LibraryEntry]>) {
         write_string_field(&mut out, "kind", entry.kind.as_str());
         out.push(',');
         out.push_str(&format!("\"is_default\":{}", entry.is_default));
+        if let Some(served) = served {
+            out.push(',');
+            out.push_str(&format!("\"served\":{}", served.contains(&entry.name)));
+        }
         out.push('}');
     }
     out.push(']');

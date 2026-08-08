@@ -17,6 +17,7 @@ use serde::Deserialize;
 pub const DATA_OVERLAY_FILE: &str = "paper_audit_data.local.toml";
 
 /// Schema version the loader accepts.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// In-repo default data source, embedded at build time.
@@ -219,11 +220,11 @@ mod tests {
         std::fs::write(
             &overlay,
             "schema_version = 1\n\
-             venue_whitelist = [\"Nature\", \"Science\"]\n",
+             venue_whitelist = [\"Journal A\", \"Journal B\"]\n",
         )
         .unwrap();
         let d = PaperAuditData::load_from(dir.path()).unwrap();
-        assert_eq!(d.venue_whitelist, vec!["Nature", "Science"]);
+        assert_eq!(d.venue_whitelist, vec!["Journal A", "Journal B"]);
         // Lists not declared in the overlay keep their default value.
         assert!(d.placeholder_titles.contains(&"untitled".to_string()));
     }

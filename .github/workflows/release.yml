@@ -7,11 +7,10 @@ on:
 # x86_64) and creates a GitHub Release whose body is the section of
 # CHANGELOG.md matching the tag's semver. The tag must be `vX.Y.Z` (or
 # `vX.Y.Z-foo` for a prerelease — the workflow detects the hyphen and
-# flags the release accordingly). Intel macOS users run the arm64
-# binary under Rosetta 2; a dedicated x86_64-apple-darwin target is not
-# shipped because `lance-linalg`'s build script hard-codes
-# `-march=native` for AVX-512 codegen, which is incompatible with
-# cross-compiling on the Apple Silicon runner.
+# flags the release accordingly). No x86_64-apple-darwin target is
+# built: `lance-linalg`'s build script hard-codes `-march=native` for
+# AVX-512 codegen, which is incompatible with cross-compiling on the
+# Apple Silicon runner. Intel macOS users build from source.
 
 env:
   CARGO_TERM_COLOR: always
@@ -182,8 +181,9 @@ jobs:
                 "${payload_dir}/bookrack" \
                 "${payload_dir}/bookrack-mcp"
               # Ad-hoc sign so Gatekeeper sees a signature on the
-              # bundle. No paid Developer ID; first launch still
-              # requires right-click -> Open on a quarantined copy.
+              # bundle. No paid Developer ID and no notarization; a
+              # quarantined copy still needs one-time approval in
+              # System Settings -> Privacy & Security. See the README.
               codesign --force --deep --sign - "dist/${stage}/Bookrack.app"
               ;;
             Windows)

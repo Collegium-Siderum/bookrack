@@ -5,6 +5,10 @@
 //! Reads stdin for prompts, writes progress to stdout, errors to
 //! stderr. Owns every operator-facing string of the wizard; the
 //! runner hands over structured reports only.
+//!
+//! Every one of those strings goes through [`Console`], so what the
+//! operator reads is what a test reads. Writing to the process streams
+//! directly from a step would put that claim back out of reach.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -18,51 +22,146 @@ use super::{
     SmokeOutcome, WizardDriver,
 };
 
+/// Terminal I/O the driver needs, injected so the operator-facing
+/// strings can be asserted without a TTY.
+pub(super) trait Console: Send + Sync {
+    /// Progress the operator reads as the run proceeds.
+    fn line(&self, text: &str);
+    /// A warning or a failure: the same text, on the error stream.
+    fn warn(&self, text: &str);
+    /// Render a prompt and read one trimmed answer.
+    fn prompt(&self, prompt: &str) -> Result<String>;
+}
+
+/// The real terminal: stdout for progress, stderr for warnings, stdin
+/// for answers.
+struct TerminalConsole;
+
+impl Console for TerminalConsole {
+    fn line(&self, text: &str) {
+        println!("{text}");
+    }
+
+    fn warn(&self, text: &str) {
+        eprintln!("{text}");
+    }
+
+    fn prompt(&self, prompt: &str) -> Result<String> {
+        print!("{prompt}");
+        std::io::stdout().flush().context("flush stdout")?;
+        let stdin = std::io::stdin();
+        let mut buf = String::new();
+        stdin.lock().read_line(&mut buf).context("read line")?;
+        Ok(buf.trim().to_string())
+    }
+}
+
 pub struct CliWizardDriver {
     /// Mirrors `WizardOpts::non_interactive`: suppresses every prompt
     /// this driver would otherwise issue after step 1.
-    pub non_interactive: bool,
+    non_interactive: bool,
+    console: Box<dyn Console>,
+}
+
+/// How many times step 1 asks before it gives up. A refused path is
+/// usually a typo, and retyping it beats rerunning the whole wizard;
+/// an unbounded loop would spin against a stdin already at end of file.
+// setting: internal -- how many tries one prompt allows, not a value to tune
+const MAX_DATA_ROOT_ATTEMPTS: usize = 3;
+
+impl CliWizardDriver {
+    /// Drive the wizard against the process's own terminal.
+    pub fn terminal(non_interactive: bool) -> Self {
+        Self {
+            non_interactive,
+            console: Box::new(TerminalConsole),
+        }
+    }
+
+    /// Ask the data-root question once and judge the answer. An empty
+    /// answer takes `offered`; anything else is resolved against the
+    /// working directory. Renders nothing on success — the caller
+    /// echoes the choice, so a refused root never gets a `Using` line.
+    fn answer_data_root(
+        &self,
+        question: &str,
+        offered: Option<&PathBuf>,
+        force: bool,
+    ) -> Result<PathBuf> {
+        let typed = self.console.prompt(question)?;
+        let chosen = if typed.is_empty() {
+            offered.cloned().context(
+                "a data root path is required (this host has no portable layout \
+                 and no platform data directory to default to)",
+            )?
+        } else {
+            PathBuf::from(typed)
+        };
+        let abs = absolutise(&chosen)?;
+        validate_unused_or_force(&abs, force)?;
+        Ok(abs)
+    }
 }
 
 #[async_trait::async_trait]
 impl WizardDriver for CliWizardDriver {
     /// Step 1: pick the data root.
     ///
-    /// In interactive mode this is the only prompt the wizard issues. A
-    /// `bookrack-data` directory beside the running binary is offered
-    /// as the Press-Enter default (the portable layout); otherwise the
-    /// prompt has no default and the operator types a path. Validation
-    /// runs before the choice is echoed, so a refused root never
-    /// renders a `Using` line.
+    /// In interactive mode this is the only prompt the wizard issues.
+    /// It carries a Press-Enter default: an existing portable layout
+    /// beside the running binary when there is one, otherwise the
+    /// platform's suggested root. Only a host whose data directory
+    /// cannot be located leaves the prompt without one, and there an
+    /// empty answer is the one remaining way to fail. Validation runs
+    /// before the choice is echoed, so a refused root never renders a
+    /// `Using` line.
     async fn step_data_root(&self, hint: DataRootHint) -> Result<PathBuf> {
-        print_intro();
-        println!("[1/5] Data root");
+        let console = &*self.console;
+        print_intro(console);
+        console.line("[1/5] Data root");
         if let Some(path) = &hint.data_dir {
             let abs = absolutise(path)?;
             validate_unused_or_force(&abs, hint.force)?;
-            println!("      Using {}", abs.display());
+            console.line(&format!("      Using {}", abs.display()));
             return Ok(abs);
         }
         if hint.non_interactive {
             eyre::bail!("--data-dir is required in --non-interactive mode");
         }
-        let typed = match &hint.portable {
-            Some(p) => {
-                println!("      Portable layout detected at {}.", p.display(),);
-                prompt_line("      Press Enter to use it, or type another path: ")?
+        // A discovered layout outranks a suggested one: something is
+        // already there, and defaulting past it would strand it.
+        let offered = hint.portable.as_ref().or(hint.default_root.as_ref());
+        let question = match (&hint.portable, &hint.default_root) {
+            (Some(portable), _) => {
+                console.line(&format!(
+                    "      Portable layout detected at {}.",
+                    portable.display()
+                ));
+                "      Press Enter to use it, or type another path: ".to_string()
             }
-            None => prompt_line("      Where should books, indexes, and logs live? Path: ")?,
+            (None, Some(default_root)) => format!(
+                "      Press Enter to use {}, or type another path: ",
+                default_root.display()
+            ),
+            (None, None) => "      Where should books, indexes, and logs live? Path: ".to_string(),
         };
-        let chosen = if typed.is_empty() {
-            hint.portable
-                .context("a data root path is required (no portable layout to default to)")?
-        } else {
-            PathBuf::from(typed)
-        };
-        let abs = absolutise(&chosen)?;
-        validate_unused_or_force(&abs, hint.force)?;
-        println!("      Using {}", abs.display());
-        Ok(abs)
+        let mut attempt = 1;
+        loop {
+            match self.answer_data_root(&question, offered, hint.force) {
+                Ok(abs) => {
+                    console.line(&format!("      Using {}", abs.display()));
+                    return Ok(abs);
+                }
+                // The last reason stands as the failure: re-asking is a
+                // convenience, and running out of tries must not reword
+                // what was wrong with the final answer.
+                Err(e) if attempt >= MAX_DATA_ROOT_ATTEMPTS => return Err(e),
+                Err(e) => {
+                    console.warn(&format!("      {e}"));
+                    attempt += 1;
+                }
+            }
+        }
     }
 
     /// Step 2: report the PDFium search. Warn-only: ingest of EPUB and
@@ -71,27 +170,28 @@ impl WizardDriver for CliWizardDriver {
     /// binary exists for this platform, an interactive run offers to
     /// download it on the spot.
     async fn step_pdfium(&self, report: &PdfiumReport) -> Result<PdfiumChoice> {
-        println!("[2/5] PDFium native library");
+        let console = &*self.console;
+        console.line("[2/5] PDFium native library");
         if let Some(path) = &report.found {
-            println!("      Found {}", path.display());
+            console.line(&format!("      Found {}", path.display()));
             return Ok(PdfiumChoice::Continue);
         }
         let filename = report.filename;
-        println!("      WARN: {filename} not found. Searched:");
+        console.line(&format!("      WARN: {filename} not found. Searched:"));
         for dir in &report.probed {
-            println!("            {}", dir.display());
+            console.line(&format!("            {}", dir.display()));
         }
         if report.installable && !self.non_interactive {
-            let answer = prompt_line("      Download the pinned PDFium build now? [Y/n]: ")?;
+            let answer = console.prompt("      Download the pinned PDFium build now? [Y/n]: ")?;
             if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
-                println!("      Downloading ...");
+                console.line("      Downloading ...");
                 return Ok(PdfiumChoice::Install);
             }
         }
-        println!(
+        console.line(
             "            Run `bookrack doctor --install-pdfium` later, or set \
              BOOKRACK_PDFIUM_LIB. PDF ingest will fail until the library is \
-             present; EPUB and TXT still work."
+             present; EPUB and TXT still work.",
         );
         Ok(PdfiumChoice::Continue)
     }
@@ -99,16 +199,17 @@ impl WizardDriver for CliWizardDriver {
     /// Step 2b: report the download outcome. Warn-only either way; a
     /// failed install degrades PDF ingest, nothing else.
     async fn step_pdfium_install(&self, outcome: &PdfiumInstallOutcome) -> Result<()> {
+        let console = &*self.console;
         match outcome {
             PdfiumInstallOutcome::Installed(path) => {
-                println!("      Installed {}", path.display());
+                console.line(&format!("      Installed {}", path.display()));
             }
             PdfiumInstallOutcome::Failed(reason) => {
-                eprintln!("      WARN: PDFium install failed: {reason}");
-                eprintln!(
+                console.warn(&format!("      WARN: PDFium install failed: {reason}"));
+                console.warn(
                     "            Run `bookrack doctor --install-pdfium` to retry. \
                      PDF ingest will fail until the library is present; EPUB \
-                     and TXT still work."
+                     and TXT still work.",
                 );
             }
         }
@@ -118,52 +219,59 @@ impl WizardDriver for CliWizardDriver {
     /// Step 3: report the Ollama probe. Unreachable daemon or a
     /// missing embed model aborts the wizard with a remediation hint.
     async fn step_ollama(&self, step: &OllamaStep<'_>) -> Result<()> {
+        let console = &*self.console;
         let url = step.url;
         let embed_model = step.embed_model;
-        println!("[3/5] Ollama daemon");
-        println!("      Probing {url} ...");
+        console.line("[3/5] Ollama daemon");
+        console.line(&format!("      Probing {url} ..."));
         if !step.report.reachable {
-            eprintln!("      FAIL: Ollama is not reachable at {url}.");
-            eprintln!("            Install it from https://ollama.com, run `ollama serve`,");
-            eprintln!("            pull the model:");
-            eprintln!("              ollama pull {embed_model}");
-            eprintln!("            then rerun `bookrack init`.");
+            console.warn(&format!("      FAIL: Ollama is not reachable at {url}."));
+            console.warn("            Install it from https://ollama.com, run `ollama serve`,");
+            console.warn("            pull the model:");
+            console.warn(&format!("              ollama pull {embed_model}"));
+            console.warn("            then rerun `bookrack init`.");
             eyre::bail!("Ollama unreachable");
         }
         if !report_has_model(step.report, embed_model) {
-            eprintln!("      FAIL: Ollama is up but {embed_model} is not pulled.");
-            eprintln!("            Run:  ollama pull {embed_model}");
-            eprintln!("            then rerun `bookrack init`.");
+            console.warn(&format!(
+                "      FAIL: Ollama is up but {embed_model} is not pulled."
+            ));
+            console.warn(&format!("            Run:  ollama pull {embed_model}"));
+            console.warn("            then rerun `bookrack init`.");
             eyre::bail!("embed model not pulled");
         }
-        println!(
+        console.line(&format!(
             "      OK ({} model(s) pulled, {embed_model} present)",
             step.report.models.len(),
-        );
+        ));
         Ok(())
     }
 
     /// Step 4: report the smoke outcome. A zero-hit search aborts —
     /// the embed or search pipeline is broken end-to-end.
     async fn step_smoke(&self, outcome: &SmokeOutcome) -> Result<()> {
-        println!("[4/5] End-to-end probe");
+        let console = &*self.console;
+        console.line("[4/5] End-to-end probe");
         match outcome {
             SmokeOutcome::Skipped => {
-                println!("      Skipped (--no-smoke).");
+                console.line("      Skipped (--no-smoke).");
             }
             SmokeOutcome::Ran(report) => {
-                println!("      Ingesting a synthetic fixture through Ollama -> LanceDB ...");
-                println!(
+                console.line("      Ingesting a synthetic fixture through Ollama -> LanceDB ...");
+                console.line(&format!(
                     "      Ingested {} chunk(s); querying for marker ...",
                     report.chunks_written,
-                );
+                ));
                 if report.hits == 0 {
                     let marker = report.marker_query;
                     eyre::bail!(
                         "smoke search returned no hits for `{marker}` -- the embed or search pipeline is broken"
                     );
                 }
-                println!("      OK ({} hit(s) on the marker token)", report.hits);
+                console.line(&format!(
+                    "      OK ({} hit(s) on the marker token)",
+                    report.hits
+                ));
             }
         }
         Ok(())
@@ -171,53 +279,63 @@ impl WizardDriver for CliWizardDriver {
 
     /// Step 5: report what finalize wrote, then the closing hints.
     async fn step_finalize(&self, summary: &FinalizeSummary) -> Result<()> {
-        println!("[5/5] Finalizing");
-        println!(
+        let console = &*self.console;
+        console.line("[5/5] Finalizing");
+        console.line(&format!(
             "      Created {} (sources, books, logs, audit-rules)",
             summary.data_root.display()
-        );
+        ));
         if summary.config_kept {
-            println!("      Kept existing {}", summary.config_path.display());
+            console.line(&format!(
+                "      Kept existing {}",
+                summary.config_path.display()
+            ));
         } else {
-            println!("      Wrote {}", summary.config_path.display());
+            console.line(&format!("      Wrote {}", summary.config_path.display()));
         }
         if summary.manifest_kept {
-            println!("      Kept existing {}", summary.manifest_path.display());
+            console.line(&format!(
+                "      Kept existing {}",
+                summary.manifest_path.display()
+            ));
         } else {
-            println!("      Wrote {}", summary.manifest_path.display());
+            console.line(&format!("      Wrote {}", summary.manifest_path.display()));
         }
         match &summary.registry {
             Some(path) => {
-                println!("      Wrote {} (default = \"default\")", path.display());
+                console.line(&format!(
+                    "      Wrote {} (default = \"default\")",
+                    path.display()
+                ));
             }
             None => {
-                eprintln!(
+                console.warn(&format!(
                     "      WARN: could not locate the platform config directory. \
                      Set BOOKRACK_DATA_DIR=\"{}\" so other shells find this library.",
                     summary.data_root.display(),
-                );
+                ));
             }
         }
-        print_success(&summary.data_root);
+        print_success(console, &summary.data_root);
         Ok(())
     }
 }
 
-fn print_intro() {
-    println!("bookrack init: a five-step setup wizard.");
-    println!();
+fn print_intro(console: &dyn Console) {
+    console.line("bookrack init: a five-step setup wizard.");
+    console.line("");
 }
 
-fn print_success(data_root: &Path) {
-    println!();
-    println!("bookrack is ready.");
-    println!();
-    println!("Data root: {}", data_root.display());
-    println!();
-    println!("Try:");
-    println!("  bookrack ingest /path/to/book.epub");
-    println!("  bookrack query \"your question\"");
-    println!("  bookrack-mcp          # start the MCP server on 127.0.0.1:8765");
+fn print_success(console: &dyn Console, data_root: &Path) {
+    console.line("");
+    console.line("bookrack is ready.");
+    console.line("");
+    console.line(&format!("Data root: {}", data_root.display()));
+    console.line("");
+    console.line("Try:");
+    console.line("  bookrack ingest /path/to/book.epub");
+    console.line("  bookrack query \"your question\"");
+    console.line("  bookrack-mcp          # start the MCP server on 127.0.0.1:8765");
 }
 
 fn report_has_model(probe: &EmbedProbeReport, name: &str) -> bool {
@@ -236,12 +354,269 @@ fn absolutise(p: &Path) -> Result<PathBuf> {
     Ok(cwd.join(p))
 }
 
-/// Print a prompt to stdout and read a single trimmed line from stdin.
-fn prompt_line(prompt: &str) -> Result<String> {
-    print!("{prompt}");
-    std::io::stdout().flush().context("flush stdout")?;
-    let stdin = std::io::stdin();
-    let mut buf = String::new();
-    stdin.lock().read_line(&mut buf).context("read line")?;
-    Ok(buf.trim().to_string())
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    /// Answers the scripted console hands back, and everything the
+    /// driver rendered, in order.
+    #[derive(Default)]
+    struct Script {
+        answers: Mutex<VecDeque<String>>,
+        captured: Mutex<Vec<String>>,
+    }
+
+    impl Script {
+        fn with_answers<const N: usize>(answers: [&str; N]) -> Arc<Self> {
+            Arc::new(Self {
+                answers: Mutex::new(answers.iter().map(|a| a.to_string()).collect()),
+                captured: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn captured(&self) -> Vec<String> {
+            self.captured.lock().expect("captured").clone()
+        }
+
+        fn answers_left(&self) -> usize {
+            self.answers.lock().expect("answers").len()
+        }
+
+        /// How many rendered lines contain `needle`. Counting rather
+        /// than testing presence is what tells a re-ask from a single
+        /// question.
+        fn times_rendered(&self, needle: &str) -> usize {
+            self.captured()
+                .iter()
+                .filter(|line| line.contains(needle))
+                .count()
+        }
+    }
+
+    /// A console driven by a [`Script`]. Running out of answers is an
+    /// error rather than a block: a driver that re-asks without a bound
+    /// then fails the test instead of hanging it.
+    struct ScriptedConsole(Arc<Script>);
+
+    impl Console for ScriptedConsole {
+        fn line(&self, text: &str) {
+            self.0.captured.lock().expect("captured").push(text.into());
+        }
+
+        fn warn(&self, text: &str) {
+            self.0.captured.lock().expect("captured").push(text.into());
+        }
+
+        fn prompt(&self, prompt: &str) -> Result<String> {
+            self.0
+                .captured
+                .lock()
+                .expect("captured")
+                .push(prompt.into());
+            self.0
+                .answers
+                .lock()
+                .expect("answers")
+                .pop_front()
+                .ok_or_else(|| eyre::eyre!("the script ran out of answers"))
+        }
+    }
+
+    fn scripted_driver(script: &Arc<Script>) -> CliWizardDriver {
+        CliWizardDriver {
+            non_interactive: false,
+            console: Box::new(ScriptedConsole(Arc::clone(script))),
+        }
+    }
+
+    /// A hint with neither `--data-dir` nor a portable layout: the
+    /// shape of a first run on a host that has no bookrack yet.
+    fn interactive_hint(default_root: Option<&str>) -> DataRootHint {
+        DataRootHint {
+            portable: None,
+            default_root: default_root.map(PathBuf::from),
+            data_dir: None,
+            non_interactive: false,
+            force: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn first_question_offers_the_platform_default_on_enter() {
+        let script = Script::with_answers([""]);
+        let driver = scripted_driver(&script);
+        let expected = PathBuf::from("/opt/state/bookrack/library");
+
+        let chosen = driver
+            .step_data_root(interactive_hint(Some("/opt/state/bookrack/library")))
+            .await
+            .expect("pressing Enter takes the offered default");
+
+        assert_eq!(chosen, expected);
+        assert_eq!(
+            script.times_rendered("/opt/state/bookrack/library"),
+            2,
+            "the prompt must name the default, and the choice must be \
+             echoed: {:?}",
+            script.captured()
+        );
+        // The guard is the oracle for the offer: whatever the driver
+        // hands back on Enter has to be a root the wizard would accept.
+        validate_unused_or_force(&chosen, false)
+            .expect("the offered default must pass the data-root guard");
+    }
+
+    /// A portable layout already holds data; the suggested root holds
+    /// nothing. Defaulting past the former would strand it.
+    #[tokio::test]
+    async fn a_portable_layout_outranks_the_platform_default() {
+        let script = Script::with_answers([""]);
+        let driver = scripted_driver(&script);
+        let portable = PathBuf::from("/media/stick/bookrack/bookrack-data");
+        let hint = DataRootHint {
+            portable: Some(portable.clone()),
+            ..interactive_hint(Some("/opt/state/bookrack/library"))
+        };
+
+        let chosen = driver.step_data_root(hint).await.expect("Enter");
+
+        assert_eq!(chosen, portable);
+        assert_eq!(
+            script.times_rendered("/opt/state/bookrack/library"),
+            0,
+            "the suggested root must not be mentioned: {:?}",
+            script.captured()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_typed_path_wins_over_the_offered_default() {
+        let script = Script::with_answers(["/srv/books"]);
+        let driver = scripted_driver(&script);
+
+        let chosen = driver
+            .step_data_root(interactive_hint(Some("/opt/state/bookrack/library")))
+            .await
+            .expect("a typed path");
+
+        assert_eq!(chosen, PathBuf::from("/srv/books"));
+    }
+
+    /// The only remaining way for an empty answer to fail: a host whose
+    /// platform data directory could not be located at all.
+    #[tokio::test]
+    async fn an_empty_answer_fails_only_when_there_is_nothing_to_default_to() {
+        // One answer per attempt: an empty answer is refused the same
+        // way each round, and the bound is what ends the question.
+        let script = Script::with_answers(["", "", ""]);
+        let driver = scripted_driver(&script);
+
+        let err = driver
+            .step_data_root(interactive_hint(None))
+            .await
+            .expect_err("nothing to default to");
+
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains("a data root path is required"),
+            "unexpected reason: {rendered}"
+        );
+        assert_eq!(
+            script.times_rendered("Press Enter"),
+            0,
+            "a prompt without a default must not offer one: {:?}",
+            script.captured()
+        );
+    }
+
+    /// A refused path is usually a typo. Retyping it beats rerunning
+    /// all five steps, which is what a bail from step 1 costs.
+    #[tokio::test]
+    async fn first_question_re_asks_after_a_refused_path() {
+        let script = Script::with_answers([
+            "/Applications/Bookrack.app/Contents/Resources/bookrack-data",
+            "/srv/books",
+        ]);
+        let driver = scripted_driver(&script);
+
+        let chosen = driver
+            .step_data_root(interactive_hint(Some("/opt/state/bookrack/library")))
+            .await
+            .expect("the second answer is accepted");
+
+        assert_eq!(chosen, PathBuf::from("/srv/books"));
+        assert_eq!(
+            script.times_rendered("Press Enter to use"),
+            2,
+            "the question must be asked again: {:?}",
+            script.captured()
+        );
+        assert_eq!(
+            script.times_rendered("/Applications/Bookrack.app"),
+            1,
+            "the refusal must say why before re-asking: {:?}",
+            script.captured()
+        );
+    }
+
+    /// Bounded, so a driver reading a stdin already at end-of-file
+    /// stops rather than spins, and the reason the operator is left
+    /// with is the one from their last attempt.
+    #[tokio::test]
+    async fn the_first_question_gives_up_after_a_bounded_number_of_refusals() {
+        let script = Script::with_answers([
+            "/Applications/First.app/data",
+            "/Applications/Second.app/data",
+            "/Applications/Third.app/data",
+            "/srv/books",
+        ]);
+        let driver = scripted_driver(&script);
+
+        let err = driver
+            .step_data_root(interactive_hint(Some("/opt/state/bookrack/library")))
+            .await
+            .expect_err("the bound is reached");
+
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains("/Applications/Third.app"),
+            "the last reason must be the one that stands: {rendered}"
+        );
+        assert_eq!(
+            script.answers_left(),
+            1,
+            "a fourth answer must never be asked for"
+        );
+    }
+
+    /// The guard judges the offered default too. Were the suggested
+    /// root ever moved beside the running binary, on macOS that lands
+    /// inside `Bookrack.app`, and the wizard must refuse it rather than
+    /// quietly write a library that the next upgrade deletes.
+    #[tokio::test]
+    async fn an_offered_default_inside_a_bundle_is_refused_not_used() {
+        let script = Script::with_answers(["", "", ""]);
+        let driver = scripted_driver(&script);
+        let inside = "/Applications/Bookrack.app/Contents/Resources/bookrack-data";
+
+        let err = driver
+            .step_data_root(interactive_hint(Some(inside)))
+            .await
+            .expect_err("a bundled default must be refused");
+
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains("/Applications/Bookrack.app"),
+            "unexpected reason: {rendered}"
+        );
+        assert_eq!(
+            script.times_rendered("      Using "),
+            0,
+            "a refused root must not be echoed as chosen: {:?}",
+            script.captured()
+        );
+    }
 }

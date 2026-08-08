@@ -39,7 +39,7 @@ use bookrack_ingest::IngestParams;
 use bookrack_obs::WorkerGuard;
 use bookrack_obs::stream::LogStreamHandle;
 use bookrack_ops::reads::info::LibraryInfoContext;
-use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
+use bookrack_ops::registry::{JobTemplates, LibraryHandle, LibraryRegistry, MountGuard};
 use bookrack_ops::{Caller, Ops, PapersPaths};
 use bookrack_query::Library;
 use bookrack_session::{
@@ -153,7 +153,6 @@ pub struct DaemonRuntime {
     pub log_stream: LogStreamHandle,
     pub queue_state: Arc<Mutex<QueueState>>,
     pub queue_state_path: PathBuf,
-    pub queue_params_template: IngestParams,
     pub shutdown_tx: broadcast::Sender<()>,
     pub runtime_dir: PathBuf,
     pub lock_path: PathBuf,
@@ -162,7 +161,14 @@ pub struct DaemonRuntime {
     /// control-plane clients through `daemon.version` so they can
     /// derive an uptime.
     pub started_at_wall: DateTime<Utc>,
+    /// Address the MCP listener bound, or `disabled` when the session
+    /// runs without one. Set from the socket's own `local_addr`, so a
+    /// `port 0` configuration reports the port the kernel assigned.
     pub mcp_label: String,
+    /// The bound MCP socket, taken by the host that spawns the
+    /// listener task ([`bookrack_mcp::spawn_listener`]). `None` once
+    /// taken, and from the start when the session runs without MCP.
+    pub mcp_listener: Option<tokio::net::TcpListener>,
     /// Broadcast handle for control-plane events.
     pub event_stream: EventStreamHandle,
     /// Process-wide write mutex held by every control-plane write
@@ -172,7 +178,7 @@ pub struct DaemonRuntime {
     /// `TtyLock` keeps a second daemon from coming up at all.
     pub write_guard: Arc<tokio::sync::Mutex<()>>,
     /// Discovered path of the control-plane listener, used by callers
-    /// (e.g. `bookrack exec`) that read the session lock and want to
+    /// (e.g. `bookrack rpc`) that read the session lock and want to
     /// reach the control plane.
     pub control_sock: ControlSocketPath,
     /// Set by the platform signal aggregator before forwarding the
@@ -203,12 +209,13 @@ pub struct DaemonRuntime {
     /// underscore prefix marks it as "kept alive for its destructor";
     /// no caller reads it.
     pub _tty_lock: TtyLock,
-    /// Drop-only field: holds the exclusive flock on every served
-    /// data root for the daemon's whole life, so no second daemon and
-    /// no offline destructive command touches a served root behind
-    /// its back. A root that cannot host a lock file (read-only
-    /// volume) is served without an entry here.
-    pub _root_locks: Vec<RootLock>,
+    /// Drop-only field: takes every library out of the registry, which
+    /// releases each served root's lock as soon as the last caller
+    /// still using that library is done. Each lock lives on its
+    /// library's handle, so this is the one owner whose drop stands for
+    /// "this daemon is done serving" — a spawned task holding a
+    /// `MethodContext` clone keeps the registry alive on its own.
+    _mounted_set: crate::mount::MountedSet,
     /// Drop-only field: holds the tracing non-blocking writer's
     /// background-thread guard. Dropping flushes buffered log lines
     /// and joins the writer thread, so this lives until the runtime
@@ -251,8 +258,10 @@ impl DaemonRuntime {
             )
         })?;
 
-        // 2. resolve MCP listener address label up front so the lock
-        //    file records it before the listener actually binds.
+        // 2. resolve the MCP listener address up front so the lock
+        //    file records a complete session record from the instant
+        //    it exists. This is the *intended* address; step 3c
+        //    replaces it with the one the listener actually bound.
         let mcp_addr = if opts.no_mcp {
             None
         } else {
@@ -263,18 +272,18 @@ impl DaemonRuntime {
             )
         };
         let lock_path = runtime_dir.join(tty_lock_name());
-        let mcp_label = mcp_addr.clone().unwrap_or_else(|| "disabled".to_string());
+        let mcp_intent = mcp_addr.clone().unwrap_or_else(|| "disabled".to_string());
 
         // 3. TtyLock acquire (control_sock added in step 3b once the
         //    socket is bound; recording the path before the listener
-        //    actually came up would let `bookrack exec` reach for a
+        //    actually came up would let `bookrack rpc` reach for a
         //    socket that never existed).
-        let mut tty_lock = TtyLock::acquire(&lock_path, std::process::id(), &mcp_label, None)?;
+        let mut tty_lock = TtyLock::acquire(&lock_path, std::process::id(), &mcp_intent, None)?;
         let started_at = Instant::now();
         let started_at_wall = Utc::now();
         tracing::info!(
             path = %lock_path.display(),
-            mcp = %mcp_label,
+            mcp = %mcp_intent,
             "bookrack session lock acquired",
         );
 
@@ -305,15 +314,39 @@ impl DaemonRuntime {
             "control plane socket bound",
         );
 
+        // 3c. Bind the MCP listener, and refuse the bring-up if the
+        //     endpoint cannot be taken. Deliberately after the session
+        //     lock: a second daemon on the same runtime directory must
+        //     hear "already running", not "port in use". The bound
+        //     socket travels to the listener task through
+        //     `Self::mcp_listener`, so the address reported from here
+        //     on is one this process owns — with `port 0` it is the
+        //     port the kernel assigned, which no earlier step knows.
+        let mcp_listener = match &mcp_addr {
+            Some(addr) => Some(crate::mcp_endpoint::bind_listener(addr).await?),
+            None => None,
+        };
+        let mcp_label = match &mcp_listener {
+            Some(listener) => listener
+                .local_addr()
+                .context("read the bound MCP listener address")?
+                .to_string(),
+            None => "disabled".to_string(),
+        };
+        if mcp_listener.is_some() {
+            tty_lock.record_mcp_addr(&mcp_label)?;
+            tracing::info!(mcp = %mcp_label, "MCP listener bound");
+        }
+
         // 4. Config::resolve + obs init
+        //
+        // The authoritative resolve, and the only one whose result is
+        // used. `bookrack run` probes the same call before taking the
+        // lock, to offer the wizard on an unconfigured install, and
+        // throws that result away; resolution happens here, after the
+        // lock, so the configuration the daemon serves is the one that
+        // was in place when it took ownership.
         let cfg = Arc::new(Config::resolve(&opts.selection).context("resolve configuration")?);
-        // Now that the data root and (optional) registry name are
-        // known, append them to the session lock so other tools can
-        // identify which library this session serves without paying
-        // for an RPC. Mirrors the `record_control_sock` append above.
-        tty_lock
-            .record_library_root(cfg.data_dir(), cfg.library())
-            .context("record library root in session lock")?;
         // 4b. Decide the mount set and take every served root's lock
         //     before anything expensive comes up, so a contended root
         //     fails with no reranker spawned and no half-open handles.
@@ -351,7 +384,10 @@ impl DaemonRuntime {
         // volume, which `libraries add` already supports — is served
         // unlocked: read-only media have no writers to exclude.
         let mut roots_seen: HashMap<PathBuf, String> = HashMap::new();
-        let mut root_locks: Vec<RootLock> = Vec::with_capacity(mounts.len());
+        // Each lock is keyed by the library it guards, so step 6 can
+        // hand it to that library's handle: from there on the lock is
+        // released when the handle is, not when this scope ends.
+        let mut root_locks: HashMap<String, MountGuard> = HashMap::new();
         for (name, lib_cfg) in &mounts {
             claim_unique_root(&mut roots_seen, lib_cfg.data_dir(), name)?;
             match RootLock::acquire(lib_cfg.data_dir(), std::process::id(), "daemon") {
@@ -361,7 +397,7 @@ impl DaemonRuntime {
                         path = %root_lock_path(lib_cfg.data_dir()).display(),
                         "bookrack data root lock acquired",
                     );
-                    root_locks.push(lock);
+                    root_locks.insert(name.clone(), Arc::new(lock) as MountGuard);
                 }
                 Err(err) if is_root_lock_conflict(&err) => {
                     return Err(err.wrap_err(format!("lock the data root of library '{name}'")));
@@ -449,9 +485,17 @@ impl DaemonRuntime {
         //     llama-server is spawned and held to readiness. Either
         //     way a profile that promises a reranker gets a verified
         //     backend or the daemon refuses to start.
+        //
+        //     The stage is taken from the mounted set, not from the
+        //     primary: one backend serves every mounted library, so a
+        //     set that disagrees on the section is refused here rather
+        //     than served under whichever library bring-up happened to
+        //     select.
+        let rerank_cfg =
+            crate::rerank_supervisor::agreed_reranker_config(&mounts)?.unwrap_or(cfg.as_ref());
         let events_for_rerank = event_stream.clone();
         let reranker = crate::rerank_supervisor::bring_up_reranker(
-            &cfg,
+            rerank_cfg,
             &runtime_dir,
             Some(Arc::new(move |state: &SupervisorState| {
                 if let Some(active) = rerank_degraded_transition(state) {
@@ -470,10 +514,11 @@ impl DaemonRuntime {
         let mut handles = Vec::with_capacity(mounts.len());
         for (name, lib_cfg) in &mounts {
             let handle = build_library_handle(
-                lib_cfg,
+                Arc::clone(lib_cfg),
                 name,
                 reranker.as_ref().map(|r| &r.stage),
                 opts.caller.clone(),
+                root_locks.remove(name),
             )
             .await
             .with_context(|| format!("bring up library '{name}'"))?;
@@ -492,25 +537,7 @@ impl DaemonRuntime {
         );
 
         // 9. LibraryInfoContext
-        let info_context = LibraryInfoContext {
-            data_dir: cfg.data_dir().display().to_string(),
-            library_name: cfg.library().map(str::to_string),
-            resolution_source: resolution_source_label(cfg.source()).to_string(),
-            shadowed_default: cfg.shadowed_default().map(|shadowed| {
-                format!(
-                    "registry default '{}' is shadowed by {}",
-                    shadowed.name,
-                    resolution_source_label(cfg.source())
-                )
-            }),
-            library_identification: cfg
-                .library_identification()
-                .and_then(library_identification_label)
-                .map(str::to_string),
-            ollama_url: cfg.ollama_url().to_string(),
-            embed_model_configured: embed_cfg.model.clone(),
-            mcp_addr: mcp_label.clone(),
-        };
+        let info_context = library_info_context(&cfg, &embed_cfg.model, &mcp_label);
 
         // 10. broadcast::channel; signal_task::spawn
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(8);
@@ -518,6 +545,7 @@ impl DaemonRuntime {
         let signal_handle = tokio::spawn(signal_task(
             shutdown_tx.clone(),
             Arc::clone(&signal_triggered),
+            event_stream.clone(),
         ));
 
         // 11. queue state load + (opt) worker spawn. The snapshot lives
@@ -532,13 +560,11 @@ impl DaemonRuntime {
             &queue_state_path,
         )
         .context("migrate the queue snapshot into the daemon state directory")?;
-        let initial_queue_state =
-            queue::load(&queue_state_path).context("load persistent queue state")?;
+        // No eyre context: `QueueLoadError` is self-sufficient in the
+        // log and carries its own three-part wording to the front end.
+        let initial_queue_state = queue::load(&queue_state_path)?;
         let queue_paused = Arc::new(AtomicBool::new(initial_queue_state.paused));
         let queue_state = Arc::new(Mutex::new(initial_queue_state));
-        let queue_params_template = build_queue_params_template(&cfg, &embed_cfg);
-        let glean_params_template = build_glean_params_template(&cfg, &embed_cfg);
-
         let write_guard = Arc::new(tokio::sync::Mutex::new(()));
         let selection_for_doctor = LibrarySelection {
             data_dir: opts.selection.data_dir.clone(),
@@ -549,9 +575,6 @@ impl DaemonRuntime {
             let registry = Arc::clone(&registry);
             let state = Arc::clone(&queue_state);
             let state_path = queue_state_path.clone();
-            let params_template = queue_params_template.clone();
-            let glean_template = glean_params_template.clone();
-            let cfg_for_worker = Arc::clone(&cfg);
             let shutdown_rx = shutdown_tx.subscribe();
             let library_default = library_name.clone();
             let events_for_loop = event_stream.clone();
@@ -563,9 +586,6 @@ impl DaemonRuntime {
                 shutdown_rx,
                 move |job| {
                     let registry = Arc::clone(&registry);
-                    let params_template = params_template.clone();
-                    let glean_template = glean_template.clone();
-                    let cfg_for_job = Arc::clone(&cfg_for_worker);
                     let library_default = library_default.clone();
                     let sink = EventProgressSink::new(job.id.clone(), events_for_runner.clone());
                     async move {
@@ -589,8 +609,8 @@ impl DaemonRuntime {
                                     .map_err(|e| queue::JobError::Book(format!("registry: {e}")))?;
                                 if let Some(ocr) = intake_ocr {
                                     let params = prepare_book_params(
-                                        &params_template,
-                                        &cfg_for_job,
+                                        &handle.templates().ingest,
+                                        handle.cfg(),
                                         force,
                                         hold_for_metadata,
                                         audit_profile.as_deref(),
@@ -614,8 +634,8 @@ impl DaemonRuntime {
                                 match job_kind {
                                     bookrack_core::ItemKind::Book => {
                                         let params = prepare_book_params(
-                                            &params_template,
-                                            &cfg_for_job,
+                                            &handle.templates().ingest,
+                                            handle.cfg(),
                                             force,
                                             hold_for_metadata,
                                             audit_profile.as_deref(),
@@ -659,7 +679,7 @@ impl DaemonRuntime {
                                         // per-job override is enqueued as
                                         // `None` for paper kinds and is
                                         // intentionally not consulted here.
-                                        let mut params = glean_template;
+                                        let mut params = handle.templates().glean.clone();
                                         params.force = force;
                                         let report = handle
                                             .glean_paper(&path, &params)
@@ -715,7 +735,6 @@ impl DaemonRuntime {
         let tray_focus_signal = Arc::new(tokio::sync::Notify::new());
         let plan_registry = Arc::new(crate::control::plan_registry::PlanRegistry::new());
         let method_ctx = MethodContext {
-            cfg: Arc::clone(&cfg),
             registry: Arc::clone(&registry),
             info_context: info_context.clone(),
             queue_state: Arc::clone(&queue_state),
@@ -730,9 +749,15 @@ impl DaemonRuntime {
             queue_worker_enabled: opts.spawn_queue_worker,
             tray_focus_signal: Arc::clone(&tray_focus_signal),
             rerank_supervisor: rerank_supervisor.clone(),
+            control_socket: Some(control_sock_guard.path().to_path_buf()),
             queue_paused: Arc::clone(&queue_paused),
             log_stream: log_stream.clone(),
             plan_registry,
+            mounter: Some(Arc::new(crate::mount::Mounter::new(
+                Arc::clone(&registry),
+                reranker.as_ref().map(|r| r.stage.clone()),
+                opts.caller.clone(),
+            ))),
         };
 
         // Bridge the obs log stream into the control-plane event
@@ -762,6 +787,8 @@ impl DaemonRuntime {
         // belongs to `run_until_shutdown`.
         let control_sock = control_sock_guard.disarm();
 
+        let mounted_set = crate::mount::MountedSet::new(Arc::clone(&registry));
+
         Ok(Self {
             cfg,
             registry,
@@ -769,13 +796,13 @@ impl DaemonRuntime {
             log_stream,
             queue_state,
             queue_state_path,
-            queue_params_template,
             shutdown_tx,
             runtime_dir,
             lock_path,
             started_at,
             started_at_wall,
             mcp_label,
+            mcp_listener,
             event_stream,
             write_guard,
             control_sock,
@@ -785,7 +812,7 @@ impl DaemonRuntime {
             method_context: method_ctx,
             rerank_supervisor,
             _tty_lock: tty_lock,
-            _root_locks: root_locks,
+            _mounted_set: mounted_set,
             _obs_guard: obs_guard,
             shutdown_rx,
             queue_worker,
@@ -818,7 +845,7 @@ impl DaemonRuntime {
             // Bound (not folded into `..`) so the flocks live across
             // the drain timeouts below; `..` would drop them here.
             _tty_lock,
-            _root_locks,
+            _mounted_set,
             ..
         } = self;
 
@@ -826,9 +853,13 @@ impl DaemonRuntime {
         let _ = foreground_rx.recv().await;
         tracing::info!("shutdown signalled, joining session tasks");
 
-        // Flip the daemon-state flag before draining clients so the
-        // `daemon.state=stopping` notification reaches every attached
-        // subscriber before its connection task exits.
+        // Backstop for a caller that fired the broadcast without going
+        // through `initiate_shutdown` — an embedder holding its own
+        // `shutdown_tx` clone. It cannot rescue that caller's attached
+        // subscribers: connection tasks wake on the same broadcast and
+        // flush only what is already queued, so a transition published
+        // here has already lost the race. Both in-tree entry points
+        // publish ahead of the broadcast instead; the repeat is a no-op.
         event_stream.set_stopping();
 
         match tokio::time::timeout(Duration::from_secs(3), control_accept_handle).await {
@@ -943,12 +974,14 @@ fn claim_unique_root(seen: &mut HashMap<PathBuf, String>, root: &Path, name: &st
 /// (`Ops::with_library`) — read, ingest, and glean paths all work,
 /// unlike an `Ops::catalog_only` handle, whose pipeline entry points
 /// report an error.
-async fn build_library_handle(
-    cfg: &Config,
+pub(crate) async fn build_library_handle(
+    cfg_arc: Arc<Config>,
     name: &str,
     reranker_stage: Option<&bookrack_ops::RerankStage>,
     caller: Caller,
+    mount_guard: Option<MountGuard>,
 ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>> {
+    let cfg = cfg_arc.as_ref();
     // The embed model resolves per library by the full chain
     // (env > config.toml > index profile > default); a conflict or an
     // undefined profile refuses the handle with the repair spelled
@@ -1038,7 +1071,20 @@ async fn build_library_handle(
         Some(stage) => ops.with_reranker(stage.clone()),
         None => ops,
     };
-    Ok(LibraryHandle::new(name, ops))
+    // Job templates resolve from this library's own configuration:
+    // its `audit-rules/` overlays, its heading patterns, and the
+    // embedding model its index profile declares.
+    let templates = JobTemplates {
+        ingest: build_queue_params_template(cfg, &embed_cfg),
+        glean: build_glean_params_template(cfg, &embed_cfg),
+    };
+    Ok(LibraryHandle::with_templates(
+        name,
+        Arc::clone(&cfg_arc),
+        ops,
+        templates,
+        mount_guard,
+    ))
 }
 
 /// Move a queue snapshot left under a library's data root by an older
@@ -1077,7 +1123,8 @@ fn migrate_queue_snapshot(legacy: &std::path::Path, target: &std::path::Path) ->
 /// restart is routine self-healing; at it, the exponential backoff
 /// has already failed twice and the outage deserves operator
 /// attention.
-const RERANK_CRASHLOOP_ATTEMPTS: u32 = 3;
+// setting: reranker.crashloop_attempts
+pub(crate) const RERANK_CRASHLOOP_ATTEMPTS: u32 = 3;
 
 /// Map a supervisor state transition onto the reranker degraded
 /// cause: `Some(true)` enters, `Some(false)` exits, `None` leaves the
@@ -1143,6 +1190,36 @@ fn build_glean_params_template(cfg: &Config, embed_cfg: &EmbedConfig) -> GleanPa
     }
 }
 
+/// The static half of a library's status card: where it lives, what it
+/// is called, how it was resolved, and what it embeds with.
+///
+/// Derived from one library's [`Config`], so a caller holding a handle
+/// builds the card's identity from that library rather than from a
+/// bring-up snapshot of the selected one. `mcp_addr` is the exception
+/// and is passed in: the listener is a property of the process, not of
+/// any library it serves.
+pub fn library_info_context(cfg: &Config, embed_model: &str, mcp_addr: &str) -> LibraryInfoContext {
+    LibraryInfoContext {
+        data_dir: cfg.data_dir().display().to_string(),
+        library_name: cfg.library().map(str::to_string),
+        resolution_source: resolution_source_label(cfg.source()).to_string(),
+        shadowed_default: cfg.shadowed_default().map(|shadowed| {
+            format!(
+                "registry default '{}' is shadowed by {}",
+                shadowed.name,
+                resolution_source_label(cfg.source())
+            )
+        }),
+        library_identification: cfg
+            .library_identification()
+            .and_then(library_identification_label)
+            .map(str::to_string),
+        ollama_url: cfg.ollama_url().to_string(),
+        embed_model_configured: embed_model.to_string(),
+        mcp_addr: mcp_addr.to_string(),
+    }
+}
+
 /// Map [`ResolutionSource`] onto the operator-visible label woven into
 /// `session.info` and the daemon's startup banner.
 pub fn resolution_source_label(source: ResolutionSource) -> &'static str {
@@ -1171,7 +1248,11 @@ pub fn library_identification_label(id: LibraryIdentification) -> Option<&'stati
 }
 
 /// Aggregate the platform's shutdown signals onto the shared broadcast.
-async fn signal_task(shutdown_tx: broadcast::Sender<()>, triggered: Arc<AtomicBool>) -> Result<()> {
+async fn signal_task(
+    shutdown_tx: broadcast::Sender<()>,
+    triggered: Arc<AtomicBool>,
+    event_stream: EventStreamHandle,
+) -> Result<()> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -1197,7 +1278,7 @@ async fn signal_task(shutdown_tx: broadcast::Sender<()>, triggered: Arc<AtomicBo
         }
     }
     triggered.store(true, Ordering::SeqCst);
-    let _ = shutdown_tx.send(());
+    crate::control::events::initiate_shutdown(&event_stream, &shutdown_tx);
     Ok(())
 }
 

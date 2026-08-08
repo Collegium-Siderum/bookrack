@@ -30,6 +30,7 @@ use crate::{Result, VectorsError};
 /// Current schema version of [`VectorsMeta`]. Bumped any time a field
 /// is removed or its semantics change; new optional fields can be added
 /// without a bump.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Filename under `<lancedb_dir>` that carries [`VectorsMeta`].

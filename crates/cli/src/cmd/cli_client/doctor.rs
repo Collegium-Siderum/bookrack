@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use bookrack_cli::library_param;
 use bookrack_config::LibrarySelection;
 use bookrack_control_client::ControlError;
 use eyre::Result;
@@ -36,6 +37,7 @@ pub async fn run(
     install_reranker: bool,
     rename_envelopes: bool,
     backfill_ocr_derivation: bool,
+    close_abandoned_runs: bool,
     dry_run: bool,
     runtime_dir: Option<PathBuf>,
 ) -> Result<bool> {
@@ -86,25 +88,53 @@ pub async fn run(
         bookrack_runtime::doctor::render_backfill_report(&report, json);
         return Ok(!report.has_failures());
     }
+    // Closing abandoned runs writes the registry, so it carries the
+    // same offline rule as the backfill: a daemon serving the library
+    // holds the write handle, and one of its own runs may be in flight.
+    // The dry run is refused for the same reason the backfill's is — a
+    // plan computed against a live library describes a moment that has
+    // already passed.
+    if close_abandoned_runs {
+        if daemon_is_running(runtime_dir.as_deref()).await {
+            eyre::bail!(
+                "a daemon is serving this library; --close-abandoned-runs is an \
+                 offline repair. Stop the daemon with `bookrack quit` and re-run."
+            );
+        }
+        let cfg = bookrack_config::Config::resolve(selection)?;
+        let report = bookrack_runtime::open_runs::close_abandoned_runs(&cfg, dry_run);
+        bookrack_runtime::open_runs::render_close_report(&report, json);
+        return Ok(!report.has_failures());
+    }
     match bookrack_control_client::discover(runtime_dir.as_deref()) {
         Ok(socket) => match bookrack_control_client::connect(&socket).await {
             Ok(client) => {
+                // Not routed through `helpers::dispatch`: this call
+                // sits between two fallbacks that run without a
+                // daemon. It still passes the selection gate, which
+                // refuses a `--library` naming a library this report
+                // cannot be about.
+                let params = library_param::apply("doctor.gather", Value::Null)?;
                 let value = client
-                    .call_raw("doctor.gather", Value::Null)
+                    .call_raw("doctor.gather", params)
                     .await
                     .map_err(eyre::Report::from)?;
                 bookrack_runtime::doctor::render_value(&value, json)
             }
-            Err(ControlError::NotRunning) => bookrack_runtime::doctor::run(selection, json).await,
+            Err(ControlError::NotRunning) => {
+                bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await
+            }
             Err(err) => {
                 eprintln!("bookrack: connect to {}: {err}", socket.path().display());
-                bookrack_runtime::doctor::run(selection, json).await
+                bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await
             }
         },
-        Err(ControlError::NotRunning) => bookrack_runtime::doctor::run(selection, json).await,
+        Err(ControlError::NotRunning) => {
+            bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await
+        }
         Err(err) => {
             eprintln!("bookrack: resolve daemon address: {err}");
-            bookrack_runtime::doctor::run(selection, json).await
+            bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await
         }
     }
 }

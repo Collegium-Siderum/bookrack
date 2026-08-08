@@ -14,6 +14,7 @@ use eyre::{Context, Result};
 
 use crate::audit_helpers::{load_audit_data, load_audit_profile, load_heading_patterns};
 use crate::embed_helpers::embedder;
+use crate::pipeline_run_helpers::{close_run, open_run};
 use crate::render;
 
 pub async fn run(
@@ -41,9 +42,12 @@ pub async fn run(
         heading_patterns,
         ..Default::default()
     };
-    let pipeline_run_id = catalog
-        .open_pipeline_run("ingest", None, cfg.data_dir().to_str())
-        .ok();
+    let run = open_run(
+        &catalog,
+        &cfg.catalog_db(),
+        "ingest",
+        cfg.data_dir().to_str(),
+    );
     let result = run_inner(
         &mut corpus,
         &mut catalog,
@@ -55,12 +59,7 @@ pub async fn run(
         &params,
     )
     .await;
-    if let Some(id) = pipeline_run_id.as_deref() {
-        let status = if result.is_ok() { "ok" } else { "error" };
-        if let Err(e) = catalog.close_pipeline_run(id, status) {
-            tracing::warn!(error = %e, pipeline_run_id = id, "ingest: close_pipeline_run failed");
-        }
-    }
+    close_run(&catalog, run, result.is_ok());
     result
 }
 

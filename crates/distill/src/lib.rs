@@ -60,3 +60,10 @@ pub use segment::{
     walk_anchors_per_lang,
 };
 pub use splitter::{split_at_first_cjk, split_headline_only};
+
+bookrack_core::fixed_settings! {
+    owner = "distill";
+    "distill.sample_scan_max" = pipeline::MAX_SAMPLE_SCAN,
+        "items above which a stage records its retention count but skips the dropped-line sample",
+        acts on "the dropped-line sample in a distill trace";
+}

@@ -27,6 +27,7 @@ use text_splitter::{ChunkConfig, TextSplitter};
 /// defaults, [`GROUP_SEPARATOR`], the `text-splitter` version, or the
 /// trim setting. The chunk text feeds `norm_chunk_sha256`, so a change is
 /// a re-embedding commitment.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const CHUNK_VERSION: u32 = 1;
 
 /// String joining adjacent leaves within one group before splitting. Part

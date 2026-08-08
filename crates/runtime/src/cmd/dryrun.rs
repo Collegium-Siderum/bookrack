@@ -20,10 +20,14 @@ use bookrack_ingest::{
 use eyre::{Context, Result};
 use sha2::{Digest, Sha256};
 
+use crate::cmd::input_error::CmdInputError;
+use crate::pipeline_run_helpers::{RunHandle, close_run, open_run};
+
 /// How many dryrun JSONL artifacts to keep under `<data_root>/dryruns/`
 /// before pruning the oldest. Matches the catalog backup retention so
 /// the two operational artifact directories age out at the same cadence.
-const DRYRUN_KEEP: usize = 5;
+// setting: dryrun.reports_kept
+pub(crate) const DRYRUN_KEEP: usize = 5;
 
 /// What the dryrun produced. Returned from [`run`] so the caller can
 /// render its own summary line and decide what to stream where; the
@@ -46,23 +50,23 @@ pub fn run(
     no_chunk: bool,
     profile_name: Option<&str>,
 ) -> Result<DryrunRunOutcome> {
-    let pipeline_run_id = open_dryrun_pipeline_run(cfg, "dryrun");
+    let run = open_dryrun_pipeline_run(cfg, "dryrun");
     let result = run_inner(cfg, path, out, no_chunk, profile_name);
-    close_dryrun_pipeline_run(cfg, pipeline_run_id.as_deref(), result.is_ok());
+    close_dryrun_pipeline_run(cfg, run, result.is_ok());
     result
 }
 
 /// Open a `pipeline_runs` row labeled `command` for tracking. A
-/// missing catalog skips tracking entirely — a preview must not
-/// materialise and migrate a database for one lifecycle row — and a
-/// catalog-open failure logs and demotes to a NULL run id; the dryrun
-/// itself proceeds unchanged either way.
-fn open_dryrun_pipeline_run(cfg: &Config, command: &str) -> Option<String> {
-    if !cfg.catalog_db().exists() {
-        return None;
-    }
-    let catalog = match bookrack_catalog::Catalog::open(&cfg.catalog_db()) {
-        Ok(c) => c,
+/// catalog this preview may not write — one that is missing, or one
+/// behind a revision an open would migrate — skips tracking entirely:
+/// a preview must not materialise a database, nor advance one through
+/// a forward-only migration, for a single lifecycle row. An open
+/// failure logs and demotes to a NULL run id; the dryrun itself
+/// proceeds unchanged either way.
+fn open_dryrun_pipeline_run(cfg: &Config, command: &str) -> Option<RunHandle> {
+    let catalog = match bookrack_catalog::Catalog::open_if_current(&cfg.catalog_db()) {
+        Ok(Some(c)) => c,
+        Ok(None) => return None,
         Err(err) => {
             tracing::warn!(
                 error = %err,
@@ -72,29 +76,41 @@ fn open_dryrun_pipeline_run(cfg: &Config, command: &str) -> Option<String> {
             return None;
         }
     };
-    catalog
-        .open_pipeline_run(command, None, cfg.data_dir().to_str())
-        .ok()
+    open_run(
+        &catalog,
+        &cfg.catalog_db(),
+        command,
+        cfg.data_dir().to_str(),
+    )
 }
 
 /// Close the dryrun's `pipeline_runs` row. No summary is computed:
 /// dryrun does not write `book_distill_audit` / `node_paper_audit`, so
 /// the rollup would be empty.
-fn close_dryrun_pipeline_run(cfg: &Config, pipeline_run_id: Option<&str>, ok: bool) {
-    let Some(id) = pipeline_run_id else {
+///
+/// The close leg opens the catalog a second time, which is a failure
+/// point the open leg already survived. When it fails the run is
+/// abandoned rather than silently forgotten, so the row it leaves at
+/// `running` is one a repair can still find. The same holds for a
+/// catalog that stopped being writable between the two opens: the
+/// close does not migrate its way back in.
+fn close_dryrun_pipeline_run(cfg: &Config, run: Option<RunHandle>, ok: bool) {
+    let Some(run) = run else {
         return;
     };
-    let catalog = match bookrack_catalog::Catalog::open(&cfg.catalog_db()) {
-        Ok(c) => c,
+    let catalog = match bookrack_catalog::Catalog::open_if_current(&cfg.catalog_db()) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            run.abandon();
+            return;
+        }
         Err(err) => {
-            tracing::warn!(error = %err, pipeline_run_id = id, "dryrun: close path catalog open failed");
+            tracing::warn!(error = %err, pipeline_run_id = run.id(), "dryrun: close path catalog open failed");
+            run.abandon();
             return;
         }
     };
-    let status = if ok { "ok" } else { "error" };
-    if let Err(err) = catalog.close_pipeline_run(id, status) {
-        tracing::warn!(error = %err, pipeline_run_id = id, "dryrun: close_pipeline_run failed");
-    }
+    close_run(&catalog, Some(run), ok);
 }
 
 fn run_inner(
@@ -107,7 +123,14 @@ fn run_inner(
     let audit_data = crate::audit_helpers::load_audit_data(cfg);
     let files = collect_files(path, &audit_data.book_extensions);
     if files.is_empty() {
-        eyre::bail!("no supported files found under {}", path.display());
+        return Err(CmdInputError::NothingToDo {
+            summary: format!("no supported files found under {}", path.display()),
+            hint: format!(
+                "Point the command at a directory holding one of: {}.",
+                audit_data.book_extensions.join(", ")
+            ),
+        }
+        .into());
     }
     eprintln!(
         "bookrack dryrun: {} files under {}",
@@ -355,9 +378,19 @@ fn input_hash(path: &Path) -> String {
     digest[..8].to_string()
 }
 
-/// Keep the [`DRYRUN_KEEP`] newest `dryrun-*.jsonl` files (plus their
+/// Names a book-side artifact. The paper side writes into the same
+/// directory and its names extend this one's prefix with `paper-`, so
+/// that extension is excluded here: each side's sweep sees only what
+/// it wrote, and neither counts nor deletes the other's runs.
+fn is_book_artifact(name: &str) -> bool {
+    name.starts_with("dryrun-") && !name.starts_with("dryrun-paper-") && name.ends_with(".jsonl")
+}
+
+/// Keep the [`DRYRUN_KEEP`] newest book-side artifacts (plus their
 /// summary sidecars); delete the rest. Filenames lead with a sortable
-/// timestamp, so lexical order is chronological.
+/// timestamp, so lexical order is chronological. Membership is
+/// [`is_book_artifact`], not the bare `dryrun-` prefix — the shared
+/// directory holds the paper side's runs too.
 fn prune_old_dryruns(dir: &Path) -> Result<()> {
     let entries = fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?;
     let mut jsonls: Vec<PathBuf> = entries
@@ -365,7 +398,7 @@ fn prune_old_dryruns(dir: &Path) -> Result<()> {
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("dryrun-") && n.ends_with(".jsonl"))
+                .is_some_and(is_book_artifact)
         })
         .collect();
     jsonls.sort();
@@ -381,6 +414,36 @@ fn prune_old_dryruns(dir: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// A `catalog.db` the preview would have to migrate before it could
+    /// record anything is left without a schema. The fixture is an
+    /// empty file, which reads as schema revision 0 and so takes the
+    /// same verdict an outdated database takes — without pinning a
+    /// historical schema into the test. The witness is that a read-only
+    /// open still finds no tables: a migrated file opens cleanly here.
+    #[test]
+    fn a_catalog_that_would_need_migrating_is_left_untouched() {
+        let dir = tempdir().expect("tempdir");
+        let cfg = Config::new(
+            dir.path().to_path_buf(),
+            "http://localhost:11434".to_string(),
+        );
+        fs::write(cfg.catalog_db(), b"").expect("seed an uninitialised catalog.db");
+        let input = dir.path().join("no-books");
+        fs::create_dir_all(&input).expect("create input dir");
+
+        // No supported files under the input path, so `run_inner`
+        // fails — but the lifecycle legs around it have already run.
+        let _ = run(&cfg, &input, None, false, None);
+
+        let err = bookrack_catalog::Catalog::open_read_only(&cfg.catalog_db())
+            .err()
+            .expect("preview migrated catalog.db");
+        assert!(
+            matches!(err, bookrack_catalog::CatalogError::Verify(_)),
+            "{err:?}"
+        );
+    }
 
     #[test]
     fn unix_epoch_renders_as_1970_01_01() {
@@ -400,6 +463,86 @@ mod tests {
             sidecar_summary_path(p),
             PathBuf::from("/tmp/dryrun-2026-06-02-deadbeef.summary.json")
         );
+    }
+
+    /// Lays a full keep window of paper-side artifacts beside three
+    /// book-side ones. Both sides write into the same directory, and
+    /// `dryrun-` leads a timestamp on the book side but `paper-` on the
+    /// paper side — a digit sorts before a letter, so every book-side
+    /// name sorts ahead of every paper-side one and an unfiltered
+    /// prune evicts exactly the artifacts it was meant to keep.
+    #[test]
+    fn book_pruning_does_not_count_paper_artifacts() {
+        let dir = tempdir().expect("tempdir");
+        for i in 0..DRYRUN_KEEP {
+            let jsonl = dir.path().join(format!(
+                "dryrun-paper-2026-06-02T00-00-{i:02}Z-abcdef01.jsonl"
+            ));
+            fs::write(&jsonl, b"{}\n").expect("write paper jsonl");
+            fs::write(sidecar_summary_path(&jsonl), b"{}").expect("write paper summary");
+        }
+        let books: Vec<PathBuf> = (0..3)
+            .map(|i| {
+                let jsonl = dir
+                    .path()
+                    .join(format!("dryrun-2026-06-03T00-00-{i:02}Z-abcdef01.jsonl"));
+                fs::write(&jsonl, b"{}\n").expect("write book jsonl");
+                fs::write(sidecar_summary_path(&jsonl), b"{}").expect("write book summary");
+                jsonl
+            })
+            .collect();
+
+        prune_old_dryruns(dir.path()).expect("prune");
+
+        for book in &books {
+            assert!(
+                book.exists(),
+                "book dry-run {} was pruned; surviving artifacts: {:?}",
+                book.display(),
+                surviving_names(dir.path())
+            );
+        }
+    }
+
+    /// The other half of the same filter: a directory holding nothing
+    /// but paper-side artifacts gives a book-side prune nothing of its
+    /// own to age out, so it must delete nothing at all.
+    #[test]
+    fn book_pruning_never_deletes_a_paper_artifact() {
+        let dir = tempdir().expect("tempdir");
+        let papers: Vec<PathBuf> = (0..(DRYRUN_KEEP + 3))
+            .map(|i| {
+                let jsonl = dir.path().join(format!(
+                    "dryrun-paper-2026-06-02T00-00-{i:02}Z-abcdef01.jsonl"
+                ));
+                fs::write(&jsonl, b"{}\n").expect("write paper jsonl");
+                fs::write(sidecar_summary_path(&jsonl), b"{}").expect("write paper summary");
+                jsonl
+            })
+            .collect();
+
+        prune_old_dryruns(dir.path()).expect("prune");
+
+        for paper in &papers {
+            assert!(
+                paper.exists(),
+                "paper dry-run {} was pruned by the book-side sweep; \
+                 surviving artifacts: {:?}",
+                paper.display(),
+                surviving_names(dir.path())
+            );
+        }
+    }
+
+    fn surviving_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".jsonl"))
+            .collect();
+        names.sort();
+        names
     }
 
     #[test]

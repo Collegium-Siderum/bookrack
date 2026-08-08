@@ -8,15 +8,21 @@
 //! value-type helpers needed to express its public surface (`serde`,
 //! `chrono`).
 
+mod bytes;
 mod error_chain;
+pub mod fixed;
 mod item_kind;
 mod kinded_node_id;
+pub mod knob;
+pub mod net;
 mod node_type;
 mod partition;
 mod problem;
 pub mod queue;
 mod scope;
+mod typed_id;
 
+pub use bytes::bytes_human;
 pub use error_chain::error_chain;
 pub use item_kind::ItemKind;
 pub use kinded_node_id::KindedNodeId;
@@ -24,3 +30,4 @@ pub use node_type::NodeType;
 pub use partition::{NODE_CAPACITY, NODE_PARTITION_FACTOR, NodeId, PartitionIdx};
 pub use problem::{Explain, Problem, ProblemData};
 pub use scope::{Scope, ScopeParseError};
+pub use typed_id::{TypedIdParseError, TypedItemId};

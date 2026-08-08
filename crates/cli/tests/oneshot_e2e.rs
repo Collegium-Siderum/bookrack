@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Phase 4 end-to-end coverage for the one-shot CLI subcommands.
+//! End-to-end coverage for the one-shot CLI subcommands.
 //!
 //! Asserts the daemon-not-running invariant: a one-shot subcommand
 //! that routes through the control plane exits with the documented
 //! "not running" code (2) and names `bookrack run` on stderr, whether
 //! it reads or writes. The exceptions are the clients that can answer
 //! without a daemon — `bookrack doctor` falls back to the local probe,
-//! `bookrack status` and `bookrack exec info` report the absence and
-//! exit 0 — plus `bookrack quit`, which has nothing to stop.
+//! `bookrack status` reports the absence and exits 0 — plus
+//! `bookrack quit`, which has nothing to stop.
 //!
-//! The daemon-running path needs an Ollama-backed library bootstrap
-//! and lives behind `#[ignore]` in `control_writes`; Phase 4 adds
-//! nothing new there, so this test stays focused on the cheap-to-verify
-//! exit-code contract.
+//! The daemon-running path is covered by the control-plane integration
+//! tests in `bookrack-runtime`, which answer the daemon's embedder
+//! probe with `bookrack_test_support::EmbedStub` and so need no Ollama
+//! daemon. This test stays on the exit-code contract.
 
 #![cfg(unix)]
 
@@ -32,7 +32,7 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
             CaseExpect::NotRunning,
         ),
         (
-            &["metadata", "set", "1", "title", "x"],
+            &["metadata", "set", "1", "--field", "title", "--value", "x"],
             CaseExpect::NotRunning,
         ),
         (&["vectors", "drop"], CaseExpect::NotRunning),
@@ -52,18 +52,20 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
         (&["logs"], CaseExpect::NotRunning),
         (&["papers", "list"], CaseExpect::NotRunning),
         (&["intake", "list-ocr-pending"], CaseExpect::NotRunning),
-        (&["exec", "library.info", "{}"], CaseExpect::NotRunning),
-        (&["exec", "tools"], CaseExpect::NotRunning),
+        (&["rpc", "list"], CaseExpect::NotRunning),
+        (
+            &["rpc", "call", "library.info", "{}"],
+            CaseExpect::NotRunning,
+        ),
         // `index-profile apply` is deliberately absent: against a data
         // root with nothing built its plan is empty, and an empty plan
         // is declared offline without the daemon being reached at all.
         // `index_profile_resolution.rs` pins that path.
         //
-        // The exceptions. `bookrack status` has the same shape as
-        // `exec info` and is pinned separately by
+        // The exception. `bookrack status` answers offline instead of
+        // failing, and is pinned separately by
         // `status_without_daemon_prints_a_short_card_and_exits_zero`.
         (&["quit"], CaseExpect::Quit),
-        (&["exec", "info"], CaseExpect::LocalFallback),
     ];
     for (argv, expect) in cases {
         let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
@@ -105,22 +107,6 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
                     "{:?} stderr missing nothing-to-stop tip: {}",
                     argv,
                     stderr,
-                );
-            }
-            CaseExpect::LocalFallback => {
-                assert_eq!(
-                    output.status.code(),
-                    Some(0),
-                    "{:?} expected exit 0 from a client that answers offline, stderr={:?}",
-                    argv,
-                    String::from_utf8_lossy(&output.stderr),
-                );
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                assert!(
-                    stdout.contains("no running daemon"),
-                    "{:?} stdout missing the absence it reports: {}",
-                    argv,
-                    stdout,
                 );
             }
         }
@@ -713,6 +699,185 @@ async fn libraries_default_rejects_an_unknown_name_with_exit_2() -> Result<()> {
         stderr.contains("no library named"),
         "stderr should name the unknown library: {stderr}",
     );
+    Ok(())
+}
+
+/// How far into the binary an id got.
+enum Reached {
+    /// Past the grammar and into the control-plane client, which is as
+    /// far as anything gets without a daemon.
+    Dispatch,
+    /// Refused while parsing arguments, before dispatch exists.
+    Grammar,
+}
+
+/// A prefixed paper id survives the whole way to the control-plane
+/// client, and a book id does not get past the grammar.
+///
+/// The exit code cannot tell those apart: a subcommand that routes to
+/// an absent daemon exits 2, and so does a `clap` parse failure. What
+/// discriminates is the wording each leaves on stderr, so the negative
+/// assertions below matter as much as the positive ones — either
+/// message alone would pass a test that only asked "did it fail".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_typed_paper_id_reaches_the_control_plane_client() -> Result<()> {
+    let sandbox = Sandbox::new();
+    let cases: &[(&str, Reached)] = &[
+        // The prefixed form of an id this namespace addresses.
+        ("paper:101", Reached::Dispatch),
+        // The bare form the namespace has always taken.
+        ("101", Reached::Dispatch),
+        // Well formed, and names the catalog next door.
+        ("book:12", Reached::Grammar),
+    ];
+    for (id, reached) in cases {
+        let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+            .args(["papers", "show", id])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{id:?} should exit 2 either way; stderr={stderr}",
+        );
+        match reached {
+            Reached::Dispatch => {
+                assert!(
+                    stderr.contains("bookrack daemon not running"),
+                    "{id:?} should have reached the daemon client: {stderr}",
+                );
+                assert!(
+                    !stderr.contains("invalid value"),
+                    "{id:?} should not have been refused by the grammar: {stderr}",
+                );
+            }
+            Reached::Grammar => {
+                assert!(
+                    stderr.contains("invalid value"),
+                    "{id:?} should have been refused by the grammar: {stderr}",
+                );
+                assert!(
+                    stderr.contains("names the book catalog")
+                        && stderr.contains("reads the paper catalog"),
+                    "{id:?} should be refused for naming another catalog: {stderr}",
+                );
+                assert!(
+                    !stderr.contains("bookrack daemon not running"),
+                    "{id:?} should not have reached the daemon client: {stderr}",
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The top-level `show` reads its id in the verb body rather than in
+/// the grammar, so a malformed id earns the three-part report instead
+/// of clap's one-line `invalid value`.
+///
+/// The exit code cannot tell the two apart — both are 2 — so what
+/// discriminates is the wording, and the summary alone does not
+/// discriminate either: an implementation that dropped the hint would
+/// still print a summary. The hint is the part that tells an operator
+/// holding a bare number what to type next.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bare_id_at_the_top_level_is_refused_with_a_hint() -> Result<()> {
+    let sandbox = Sandbox::new();
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+        .args(["show", "12"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "stderr={stderr}");
+    assert!(
+        stderr.contains("cannot resolve a bare id at the top level"),
+        "the summary should name what failed: {stderr}",
+    );
+    assert!(
+        stderr.contains("hint:") && stderr.contains("book:12"),
+        "the hint should show the prefixed form to type instead: {stderr}",
+    );
+    assert!(
+        !stderr.contains("invalid value"),
+        "the id is read in the verb body, not by the grammar: {stderr}",
+    );
+    Ok(())
+}
+
+/// A `reference:` id parses and is refused at the verb, before any
+/// connection is opened: the kind is one the syntax accepts and the
+/// command line has no read path for.
+///
+/// The negative assertion carries the discrimination. An
+/// implementation that dispatched the id like any other would fail
+/// too — with "daemon not running", which says nothing about the
+/// capability being absent and would send the operator off to start a
+/// daemon that could not answer either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reference_id_is_refused_before_a_daemon_is_looked_for() -> Result<()> {
+    let sandbox = Sandbox::new();
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+        .args(["show", "reference:name_alpha/smith"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "stderr={stderr}");
+    assert!(
+        stderr.contains("reference ids are not readable from the command line yet"),
+        "the summary should state the capability boundary: {stderr}",
+    );
+    assert!(
+        stderr.contains("control plane") && stderr.contains("hint:"),
+        "the refusal should carry its detail and hint: {stderr}",
+    );
+    assert!(
+        !stderr.contains("bookrack daemon not running"),
+        "the refusal should not depend on a daemon: {stderr}",
+    );
+    Ok(())
+}
+
+/// Both readable kinds get past the grammar and into the
+/// control-plane client, which is as far as anything gets without a
+/// daemon.
+///
+/// The negative assertion is what would catch a `value_parser` hung
+/// on the top-level argument: clap would refuse `book:12` with
+/// `invalid value` and exit 2 as well, and the `Explain`
+/// implementation written for this surface would never have a
+/// consumer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn both_readable_kinds_reach_the_control_plane_client() -> Result<()> {
+    let sandbox = Sandbox::new();
+    for id in ["book:12", "paper:101"] {
+        let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+            .args(["show", id])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{id:?} stderr={stderr}");
+        assert!(
+            stderr.contains("bookrack daemon not running"),
+            "{id:?} should have reached the daemon client: {stderr}",
+        );
+        assert!(
+            !stderr.contains("invalid value") && !stderr.contains("item kind"),
+            "{id:?} should not have been refused while reading the id: {stderr}",
+        );
+    }
     Ok(())
 }
 
@@ -1516,9 +1681,18 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
         String::from_utf8_lossy(&output.stderr),
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // The edit lands in a file a running daemon read when it opened
+    // the library, so the note has to say the change is not live yet
+    // and name a way to make it so. Both routes are named because
+    // they differ in blast radius: a restart re-opens every library,
+    // re-mounting re-opens the one that was edited.
     assert!(
-        stderr.contains("restart the daemon"),
-        "a write should note the daemon restart: {stderr}",
+        stderr.contains("on the next open"),
+        "a write should say the change is not live until the library is re-opened: {stderr}",
+    );
+    assert!(
+        stderr.contains("restart") && stderr.contains("libraries mount"),
+        "the note should name both ways to re-open the library: {stderr}",
     );
     let written = std::fs::read_to_string(root.path().join("config.toml"))?;
     assert!(
@@ -1845,6 +2019,86 @@ async fn a_root_config_with_a_process_level_key_is_refused_and_annotated() -> Re
     Ok(())
 }
 
+/// A filter only one catalog carries is refused before a connection is
+/// opened, and the report says which side carries it.
+///
+/// Exit code cannot tell this apart from anything else the verb does
+/// wrong — every failure path here exits 2. What discriminates is the
+/// wording, and specifically the *negative* half: `daemon not running`
+/// is the only trace an invocation leaves when it went out on the wire,
+/// so its absence is what proves the refusal happened first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_paper_filter_is_refused_before_the_call_goes_out() -> Result<()> {
+    let sandbox = Sandbox::new();
+    for scope in ["all", "book"] {
+        let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+            .args(["find", "--year", "2020", "--scope", scope])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "--scope {scope} should be refused; stderr={stderr}",
+        );
+        assert!(
+            stderr.contains("--year filters the paper side only"),
+            "--scope {scope} should be refused by side, not by value: {stderr}",
+        );
+        assert!(
+            stderr.contains("--scope paper"),
+            "the hint should name the scope that works: {stderr}",
+        );
+        assert!(
+            !stderr.contains("bookrack daemon not running"),
+            "--scope {scope} reached the daemon client before being refused: {stderr}",
+        );
+    }
+    Ok(())
+}
+
+/// The same filter without any `--scope` is refused by the grammar,
+/// which is the half `clap` can express: a side-specific flag requires
+/// the flag that says which side.
+///
+/// The two halves are asserted apart because they fail differently —
+/// this one has no chance to phrase anything, and the one above has to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_side_specific_filter_requires_a_scope() -> Result<()> {
+    let sandbox = Sandbox::new();
+    for flag in ["--year", "--format"] {
+        let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+            .args(["find", flag, "x"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{flag} without --scope should be refused; stderr={stderr}",
+        );
+        assert!(
+            stderr.contains("required arguments were not provided") && stderr.contains("--scope"),
+            "{flag} should be refused by the grammar for the missing scope: {stderr}",
+        );
+        assert!(
+            !stderr.contains("filters the"),
+            "{flag} was refused in the verb body, so the grammar let it through: {stderr}",
+        );
+        assert!(
+            !stderr.contains("bookrack daemon not running"),
+            "{flag} reached the daemon client: {stderr}",
+        );
+    }
+    Ok(())
+}
+
 /// Render a path as a TOML basic string for a registry `data_dir` value.
 /// Test paths from `tempfile` carry no quotes or backslashes on unix, so
 /// wrapping in quotes is sufficient here.
@@ -1858,7 +2112,4 @@ enum CaseExpect {
     NotRunning,
     /// `bookrack quit` has nothing to stop: exit 0, said on stderr.
     Quit,
-    /// A client with an offline answer — it reports the absence and
-    /// exits 0, on stdout, because the absence *is* the answer.
-    LocalFallback,
 }

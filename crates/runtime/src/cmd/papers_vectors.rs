@@ -4,7 +4,7 @@
 //! rebuild, brute-force drop, re-embed under the active embedder, and
 //! reset+rechunk. Peer of [`crate::cmd::vectors`] for the paper
 //! pipeline; status reads live at
-//! `bookrack exec library.vectors_status`.
+//! `bookrack rpc call library.vectors_status`.
 
 use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_config::Config;
@@ -12,7 +12,10 @@ use bookrack_corpus::{Corpus, EMBED_MODEL_KEY, VECTOR_DIM_KEY};
 use bookrack_vectors::ChunkStore;
 use eyre::{Context, Result};
 
+use crate::cmd::input_error::CmdInputError;
+use crate::cmd::vectors::parse_ann_kind;
 use crate::embed_helpers::embedder;
+use crate::pipeline_run_helpers::{close_run, open_run};
 
 /// Render `bookrack papers vectors rebuild` — build or rebuild the ANN
 /// index over `lancedb_papers` from CLI flags, falling back to the
@@ -33,8 +36,9 @@ pub async fn rebuild(
     let dim = corpus
         .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
         .context("read vector_dim stamp")?
-        .ok_or_else(|| {
-            eyre::eyre!("papers library has no ingested chunks yet; glean a paper before rebuild")
+        .ok_or(CmdInputError::NotIngested {
+            what: "ingested paper chunks",
+            hint: "Glean a paper before rebuilding the index.",
         })?
         .parse::<usize>()
         .context("parse vector_dim stamp")?;
@@ -42,9 +46,7 @@ pub async fn rebuild(
         .await
         .context("open papers vector store")?;
     let mut base = if let Some(s) = kind_str {
-        let kind: bookrack_vectors::AnnKind =
-            s.parse().with_context(|| format!("parse --kind {s:?}"))?;
-        bookrack_vectors::AnnConfig::default_for(kind)
+        bookrack_vectors::AnnConfig::default_for(parse_ann_kind(s)?)
     } else if let Some(c) = store
         .current_ann_cfg(&lancedb_dir)
         .context("read ann config")?
@@ -89,7 +91,10 @@ pub async fn drop(cfg: &Config) -> Result<()> {
     let dim = corpus
         .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
         .context("read vector_dim stamp")?
-        .ok_or_else(|| eyre::eyre!("papers library has no ingested chunks yet; nothing to drop"))?
+        .ok_or(CmdInputError::NotIngested {
+            what: "ingested paper chunks",
+            hint: "There is no index to drop until a paper has been gleaned.",
+        })?
         .parse::<usize>()
         .context("parse vector_dim stamp")?;
     let store = ChunkStore::open(&lancedb_dir, dim)
@@ -185,7 +190,15 @@ where
         }
     }
 
-    let report = match bookrack_glean::reset::reset_and_rechunk(
+    // Registered past the confirmation prompt: a declined reset is not
+    // a pass and leaves no row behind.
+    let run = open_run(
+        &catalog,
+        &cfg.papers_catalog_db(),
+        "papers_reset",
+        cfg.data_dir().to_str(),
+    );
+    let outcome = bookrack_glean::reset::reset_and_rechunk(
         &catalog,
         &mut corpus,
         &lancedb_dir,
@@ -193,8 +206,10 @@ where
         &embed_cfg,
         resume,
     )
-    .await
-    {
+    .await;
+    close_run(&catalog, run, outcome.is_ok());
+
+    let report = match outcome {
         Ok(report) => report,
         Err(e) => {
             // A mid-build failure leaves finished intakes at Embedded
@@ -249,7 +264,13 @@ pub async fn execute_reembed_from_plan(
     let mut corpus = Corpus::open(&cfg.papers_corpus_db()).context("open papers corpus")?;
     let embed_cfg = crate::profile::effective_embed_config(cfg)?;
     let embedder_client = embedder(cfg, &embed_cfg)?;
-    bookrack_glean::reembed::reembed_all(
+    let run = open_run(
+        &catalog,
+        &cfg.papers_catalog_db(),
+        "papers_reembed",
+        cfg.data_dir().to_str(),
+    );
+    let result = bookrack_glean::reembed::reembed_all(
         &catalog,
         &mut corpus,
         &lancedb_dir,
@@ -260,5 +281,97 @@ pub async fn execute_reembed_from_plan(
         false,
     )
     .await
-    .context("papers reembed_all")
+    .context("papers reembed_all");
+    close_run(&catalog, run, result.is_ok());
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_cfg() -> (tempfile::TempDir, Config) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(
+            dir.path().to_path_buf(),
+            "http://localhost:11434".to_string(),
+        );
+        // `drop` names this module's command function, so the seed
+        // handles are released by falling out of the statement.
+        Catalog::open(&cfg.papers_catalog_db()).expect("seed paper catalog");
+        Corpus::open(&cfg.papers_corpus_db()).expect("seed paper corpus");
+        (dir, cfg)
+    }
+
+    fn runs(cfg: &Config) -> Vec<(String, Option<String>)> {
+        let catalog = Catalog::open_read_only(&cfg.papers_catalog_db()).expect("open read-only");
+        catalog
+            .list_pipeline_runs(None, None)
+            .expect("list pipeline_runs")
+            .into_iter()
+            .map(|run| (run.command, run.status))
+            .collect()
+    }
+
+    /// The paper-side pass registers on the paper catalog, under its
+    /// own command name: a merged `runs list` has to tell a paper
+    /// reset from a book one.
+    #[tokio::test]
+    async fn reset_registers_and_closes_one_run_on_the_paper_catalog() {
+        let (_tmp, cfg) = temp_cfg();
+
+        reset(&cfg, true, false, |_| Ok(true))
+            .await
+            .expect("reset succeeds on an empty library");
+
+        assert_eq!(
+            runs(&cfg),
+            vec![("papers_reset".to_string(), Some("ok".to_string()))]
+        );
+        let books = Catalog::open_read_only(&cfg.catalog_db());
+        assert!(
+            books.is_err()
+                || books
+                    .expect("open")
+                    .list_pipeline_runs(None, None)
+                    .expect("list")
+                    .is_empty(),
+            "the book catalog carries no paper-side run row",
+        );
+    }
+
+    /// Declining the confirmation prompt is not a pass.
+    #[tokio::test]
+    async fn a_declined_reset_registers_nothing() {
+        let (_tmp, cfg) = temp_cfg();
+
+        reset(&cfg, false, false, |_| Ok(false))
+            .await
+            .expect("declining is not an error");
+
+        assert!(
+            runs(&cfg).is_empty(),
+            "no run row for a pass that never ran"
+        );
+    }
+
+    /// The reembed pass registers on its execute leg; the plan leg is
+    /// a dry run and stays out of the registry.
+    #[tokio::test]
+    async fn reembed_registers_on_the_execute_leg_only() {
+        let (_tmp, cfg) = temp_cfg();
+
+        let plan = plan_reembed(&cfg, None, false).await.expect("plan");
+        assert!(plan.is_empty(), "an empty library plans no work");
+        assert!(runs(&cfg).is_empty(), "the plan leg registers nothing");
+
+        execute_reembed_from_plan(&cfg, Vec::new())
+            .await
+            .expect("execute");
+
+        assert_eq!(
+            runs(&cfg),
+            vec![("papers_reembed".to_string(), Some("ok".to_string()))]
+        );
+    }
 }

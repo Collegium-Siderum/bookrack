@@ -27,6 +27,7 @@ bookrack-obs = { path = "../obs" }
 bookrack-ops = { path = "../ops" }
 bookrack-query = { path = "../query" }
 bookrack-cli-grammar = { path = "../cli-grammar" }
+bookrack-refs = { workspace = true }
 bookrack-session = { path = "../session" }
 bookrack-vectors = { path = "../vectors" }
 eyre.workspace = true
@@ -42,6 +43,9 @@ clap.workspace = true
 # `pdfium_install` downloads the pinned PDFium archive over HTTPS and
 # unpacks it (gzip + tar) into the managed directory.
 flate2.workspace = true
+# `doctor`'s free-space row: `available_space` on the data root, which
+# has no std equivalent and would otherwise be a per-platform syscall.
+fs2.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -64,6 +68,14 @@ uuid.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+# Read the paper catalog back after a rejected write, to assert no row
+# landed. Both are already dependencies of this crate; an integration
+# test links only against `[dev-dependencies]`, so they repeat here.
+bookrack-catalog = { path = "../catalog" }
+bookrack-core = { path = "../core" }
+# Stamp `vector_dim` on a fixture corpus, so a vector write gets past
+# the "this library has no chunks" leg and reaches the one under test.
+bookrack-corpus = { path = "../corpus" }
 bookrack-test-support.workspace = true
 tempfile.workspace = true
 ts-rs.workspace = true

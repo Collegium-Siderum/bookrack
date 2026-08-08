@@ -1,6 +1,6 @@
 # Property catalog for the distill payload keyspace.
 #
-# Mother doc §5.7 + the four-book v1 superset. Every key referenced
+# The v1 superset of payload keys. Every key referenced
 # by any book.toml's `parser.writes_properties` or by any
 # stage_catalog stage's `writes_properties` must appear here. Adding
 # a new property is a deliberate PR change, not an automatic side
@@ -59,7 +59,7 @@ description = "Alternate spellings or readings; synonym of variants kept for old
 
 [redirect_to]
 type = "string"
-description = "Target entry_key for a cross-reference entry (mother doc §5.5)."
+description = "Target entry_key for a cross-reference entry."
 
 [bio_annotation]
 type = "string"

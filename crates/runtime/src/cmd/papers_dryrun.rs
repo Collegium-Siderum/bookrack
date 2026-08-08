@@ -11,18 +11,22 @@ use std::path::{Path, PathBuf};
 
 use bookrack_config::Config;
 use bookrack_glean::dryrun::{
-    DryrunPaperParams, DryrunPaperReport, DryrunPaperSummary, collect_files, dryrun_paper,
-    summarize,
+    DryrunPaperParams, DryrunPaperReport, DryrunPaperSummary, PAPER_EXTENSIONS, collect_files,
+    dryrun_paper, summarize,
 };
 use eyre::{Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::cmd::input_error::CmdInputError;
+use crate::pipeline_run_helpers::{RunHandle, close_run, open_run};
+
 /// How many paper dryrun JSONL artifacts to keep under
 /// `<data_root>/dryruns/` before pruning the oldest. Independent of
 /// the book-side retention so a heavy book sweep does not displace a
 /// recent paper dryrun.
-const PAPERS_DRYRUN_KEEP: usize = 5;
+// setting: dryrun.paper_reports_kept
+pub(crate) const PAPERS_DRYRUN_KEEP: usize = 5;
 
 /// What [`run`] produced. Mirrors [`crate::cmd::dryrun::DryrunRunOutcome`]
 /// for the paper pipeline so the caller can render its own summary
@@ -42,50 +46,61 @@ pub fn run(
     out: Option<&Path>,
     skip_chunks: bool,
 ) -> Result<PapersDryrunRunOutcome> {
-    let pipeline_run_id = open_papers_dryrun_pipeline_run(cfg);
+    let run = open_papers_dryrun_pipeline_run(cfg);
     let result = run_inner(cfg, path, out, skip_chunks);
-    close_papers_dryrun_pipeline_run(cfg, pipeline_run_id.as_deref(), result.is_ok());
+    close_papers_dryrun_pipeline_run(cfg, run, result.is_ok());
     result
 }
 
-/// Open the papers dryrun's `pipeline_runs` row. A missing catalog
-/// skips tracking — a preview must not materialise a database for one
-/// lifecycle row — and an open failure demotes to a NULL run id.
-fn open_papers_dryrun_pipeline_run(cfg: &Config) -> Option<String> {
-    if !cfg.catalog_db().exists() {
-        return None;
-    }
-    let catalog = match bookrack_catalog::Catalog::open(&cfg.catalog_db()) {
-        Ok(c) => c,
+/// Open the papers dryrun's `pipeline_runs` row on the paper catalog,
+/// where the paper-side audit rows a rollup would aggregate live: the
+/// `pipeline_run_summary` foreign key does not cross databases. A
+/// catalog this preview may not write — missing, or behind a revision
+/// an open would migrate — skips tracking, since neither materialising
+/// a database nor migrating one is a price a preview may pay for a
+/// single lifecycle row. An open failure demotes to a NULL run id.
+fn open_papers_dryrun_pipeline_run(cfg: &Config) -> Option<RunHandle> {
+    let catalog = match bookrack_catalog::Catalog::open_if_current(&cfg.papers_catalog_db()) {
+        Ok(Some(c)) => c,
+        Ok(None) => return None,
         Err(err) => {
             tracing::warn!(
                 error = %err,
-                path = %cfg.catalog_db().display(),
-                "papers_dryrun: failed to open catalog.db for pipeline_run lifecycle",
+                path = %cfg.papers_catalog_db().display(),
+                "papers_dryrun: failed to open papers_catalog.db for pipeline_run lifecycle",
             );
             return None;
         }
     };
-    catalog
-        .open_pipeline_run("papers_dryrun", None, cfg.data_dir().to_str())
-        .ok()
+    open_run(
+        &catalog,
+        &cfg.papers_catalog_db(),
+        "papers_dryrun",
+        cfg.data_dir().to_str(),
+    )
 }
 
-fn close_papers_dryrun_pipeline_run(cfg: &Config, pipeline_run_id: Option<&str>, ok: bool) {
-    let Some(id) = pipeline_run_id else {
+/// Close the row through a second open of the paper catalog. A failure
+/// there, or a catalog that stopped being writable between the two
+/// opens, abandons the run — the row stays `running` and keeps the
+/// liveness record a repair reads — rather than dropping it silently.
+fn close_papers_dryrun_pipeline_run(cfg: &Config, run: Option<RunHandle>, ok: bool) {
+    let Some(run) = run else {
         return;
     };
-    let catalog = match bookrack_catalog::Catalog::open(&cfg.catalog_db()) {
-        Ok(c) => c,
+    let catalog = match bookrack_catalog::Catalog::open_if_current(&cfg.papers_catalog_db()) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            run.abandon();
+            return;
+        }
         Err(err) => {
-            tracing::warn!(error = %err, pipeline_run_id = id, "papers_dryrun: close path catalog open failed");
+            tracing::warn!(error = %err, pipeline_run_id = run.id(), "papers_dryrun: close path catalog open failed");
+            run.abandon();
             return;
         }
     };
-    let status = if ok { "ok" } else { "error" };
-    if let Err(err) = catalog.close_pipeline_run(id, status) {
-        tracing::warn!(error = %err, pipeline_run_id = id, "papers_dryrun: close_pipeline_run failed");
-    }
+    close_run(&catalog, Some(run), ok);
 }
 
 fn run_inner(
@@ -96,7 +111,14 @@ fn run_inner(
 ) -> Result<PapersDryrunRunOutcome> {
     let files = collect_files(path);
     if files.is_empty() {
-        eyre::bail!("no supported paper files found under {}", path.display());
+        return Err(CmdInputError::NothingToDo {
+            summary: format!("no supported paper files found under {}", path.display()),
+            hint: format!(
+                "Point the command at a directory holding one of: {}.",
+                PAPER_EXTENSIONS.join(", ")
+            ),
+        }
+        .into());
     }
     eprintln!(
         "bookrack papers dryrun: {} files under {}",
@@ -293,6 +315,11 @@ fn input_hash(path: &Path) -> String {
     hex
 }
 
+/// Keep the [`PAPERS_DRYRUN_KEEP`] newest paper-side artifacts (plus
+/// their summary sidecars); delete the rest. The `dryrun-paper-`
+/// prefix is what confines the sweep to this side — the directory is
+/// shared with [`crate::cmd::dryrun`], whose own names lead with
+/// `dryrun-` and a timestamp.
 fn prune_old_papers_dryruns(dir: &Path) -> Result<()> {
     let entries = fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?;
     let mut jsonls: Vec<PathBuf> = entries
@@ -310,4 +337,127 @@ fn prune_old_papers_dryruns(dir: &Path) -> Result<()> {
         let _ = fs::remove_file(sidecar_summary_path(jsonl));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookrack_catalog::Catalog;
+
+    fn temp_cfg() -> (tempfile::TempDir, Config) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(
+            dir.path().to_path_buf(),
+            "http://localhost:11434".to_string(),
+        );
+        (dir, cfg)
+    }
+
+    fn run_commands(db: &Path) -> Vec<String> {
+        let catalog = Catalog::open_read_only(db).expect("open catalog read-only");
+        catalog
+            .list_pipeline_runs(None, None)
+            .expect("list pipeline_runs")
+            .into_iter()
+            .map(|run| run.command)
+            .collect()
+    }
+
+    /// The counterpart of the book side's own pair: a sweep here must
+    /// leave the book side's artifacts alone however many of them the
+    /// shared directory holds. Widening the prefix to the bare
+    /// `dryrun-` the two sides have in common is what this rules out.
+    #[test]
+    fn paper_pruning_never_touches_a_book_artifact() {
+        let (tmp, _cfg) = temp_cfg();
+        let books: Vec<PathBuf> = (0..(PAPERS_DRYRUN_KEEP + 3))
+            .map(|i| {
+                let jsonl = tmp
+                    .path()
+                    .join(format!("dryrun-2026-06-03T00-00-{i:02}Z-abcdef01.jsonl"));
+                fs::write(&jsonl, b"{}\n").expect("write book jsonl");
+                fs::write(sidecar_summary_path(&jsonl), b"{}").expect("write book summary");
+                jsonl
+            })
+            .collect();
+
+        prune_old_papers_dryruns(tmp.path()).expect("prune");
+
+        for book in &books {
+            assert!(
+                book.exists(),
+                "book dry-run {} was pruned by the paper-side sweep",
+                book.display(),
+            );
+        }
+    }
+
+    /// The run row belongs to the catalog that holds the paper-side
+    /// audit rows: registering it on the book catalog would leave a
+    /// future rollup on the far side of the cross-database foreign
+    /// key. Both catalogs exist here, so the assertion discriminates
+    /// between the two rather than between "registered" and "not".
+    #[test]
+    fn run_registers_its_pipeline_run_on_the_paper_catalog() {
+        let (tmp, cfg) = temp_cfg();
+        drop(Catalog::open(&cfg.catalog_db()).expect("seed book catalog"));
+        drop(Catalog::open(&cfg.papers_catalog_db()).expect("seed paper catalog"));
+
+        let empty = tmp.path().join("no-papers");
+        fs::create_dir_all(&empty).expect("create input dir");
+        // No supported files under the input path: `run_inner` fails,
+        // and the run row still closes with a terminal status.
+        let _ = run(&cfg, &empty, None, false);
+
+        assert_eq!(
+            run_commands(&cfg.papers_catalog_db()),
+            vec!["papers_dryrun".to_string()],
+            "the paper catalog carries the run row",
+        );
+        assert!(
+            run_commands(&cfg.catalog_db()).is_empty(),
+            "the book catalog carries no paper-side run row",
+        );
+    }
+
+    /// A data root whose paper catalog does not exist yet keeps the
+    /// preview side-effect-free: no database is materialised for one
+    /// lifecycle row.
+    #[test]
+    fn a_missing_paper_catalog_skips_tracking_without_creating_one() {
+        let (tmp, cfg) = temp_cfg();
+        let empty = tmp.path().join("no-papers");
+        fs::create_dir_all(&empty).expect("create input dir");
+
+        let _ = run(&cfg, &empty, None, false);
+
+        assert!(
+            !cfg.papers_catalog_db().exists(),
+            "preview must not materialise papers_catalog.db",
+        );
+    }
+
+    /// The companion to the case above: a paper catalog that is there
+    /// but would have to be migrated before the row could be written is
+    /// left without a schema. An empty file stands in for an outdated
+    /// one — both read as schema revision 0 — so the test does not
+    /// carry a historical schema of its own. A migrated file would open
+    /// read-only cleanly, which is what the refusal below rules out.
+    #[test]
+    fn a_paper_catalog_that_would_need_migrating_is_left_untouched() {
+        let (tmp, cfg) = temp_cfg();
+        fs::write(cfg.papers_catalog_db(), b"").expect("seed an uninitialised catalog");
+        let empty = tmp.path().join("no-papers");
+        fs::create_dir_all(&empty).expect("create input dir");
+
+        let _ = run(&cfg, &empty, None, false);
+
+        let err = Catalog::open_read_only(&cfg.papers_catalog_db())
+            .err()
+            .expect("preview migrated papers_catalog.db");
+        assert!(
+            matches!(err, bookrack_catalog::CatalogError::Verify(_)),
+            "{err:?}"
+        );
+    }
 }

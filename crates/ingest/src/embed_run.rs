@@ -188,7 +188,8 @@ fn bump_churn(lancedb_dir: &Path, delta: u64) -> Result<()> {
 /// has reached either twice the size of the corpus at the last build or
 /// the absolute floor of 20,000 chunks, whichever is larger. The floor
 /// prevents trigger-happy retraining on small libraries.
-const L2_ABSOLUTE_FLOOR: u64 = 20_000;
+// setting: ingest.ann_rebuild_floor
+pub(crate) const L2_ABSOLUTE_FLOOR: u64 = 20_000;
 
 /// Build the ANN index if it should be: either the cold-start case
 /// (no meta yet) or the L2 churn-threshold case.

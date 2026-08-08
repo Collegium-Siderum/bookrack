@@ -36,6 +36,7 @@ use bookrack_embed::Embedder;
 use bookrack_query::{Library, QueryError};
 use bookrack_rerank::RerankClient;
 
+pub use bookrack_glean::audit::{PaperAuditData, PaperAuditProfile};
 pub use bookrack_ingest::{AuditData, AuditProfile};
 pub use bookrack_query::{Citation, SearchOptions};
 pub use dto::audit::Caller;
@@ -76,15 +77,21 @@ pub enum OpsError {
     },
 
     /// The named field is not a curator-editable bibliographic
-    /// attribute. The message carries the full editable set so the
-    /// caller can self-correct without a second lookup.
+    /// attribute of the addressed pipeline. The message carries that
+    /// pipeline's editable set so the caller can self-correct without
+    /// a second lookup — the book and paper sides accept different
+    /// sets, and naming the wrong one points at a field the write
+    /// would refuse.
     #[error(
         "unknown metadata field {field:?}; editable fields are: {}",
-        bookrack_catalog::EDITABLE_FIELDS.join(", ")
+        editable.join(", ")
     )]
     UnknownMetadataField {
         /// The field name the caller asked to edit.
         field: String,
+        /// The fields the addressed pipeline accepts, in the order the
+        /// surface advertises them.
+        editable: Vec<String>,
     },
 
     /// The named contribution role is not in the closed role set. The
@@ -364,7 +371,11 @@ impl<E: Embedder> Ops<E> {
         &self.corpus_db
     }
 
-    pub(crate) fn catalog_db(&self) -> &Path {
+    /// The catalog database this `Ops` opens. Identifies which library
+    /// the stores belong to, so a caller pairing it with a
+    /// [`bookrack_config::Config`] can check the two are the same
+    /// library's.
+    pub fn catalog_db(&self) -> &Path {
         &self.catalog_db
     }
 

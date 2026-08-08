@@ -22,6 +22,7 @@
 /// It is not yet wired into any stamp chain, so bumping it does not
 /// itself trigger a re-derivation — an existing corpus keeps its old
 /// counts until it is rebuilt.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const SENTENCE_VERSION: u32 = 1;
 
 /// Count the sentences in `text`.

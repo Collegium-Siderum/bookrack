@@ -2,8 +2,8 @@
 
 //! Persistent ingest queue value types.
 //!
-//! The queue document is owned by `bookrack-cli`'s REPL worker and
-//! its readers — the file format, atomic write, walker, and worker
+//! The queue document is owned by the daemon runtime and its readers —
+//! the file format, version gate, atomic write, walker, and worker
 //! loop all live there. This module carries only the pure serde
 //! types that cross crate boundaries: the MCP `session.queue_status`
 //! tool reads the same `QueueState` snapshot the CLI mutates, and
@@ -19,7 +19,36 @@ use crate::ItemKind;
 
 /// Schema version embedded in the persisted document. Bumped whenever
 /// any field shape, enum variant, or invariant changes.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const QUEUE_SCHEMA_VERSION: u32 = 6;
+
+/// What a reader does with a persisted document, given the
+/// `schema_version` it carries.
+///
+/// The two directions are not symmetric. A document an earlier binary
+/// wrote is loaded: every field added since carries `#[serde(default)]`,
+/// so it reads as the shape that binary behaved as. A document a later
+/// binary wrote is refused, because loading it would drop the fields
+/// this binary has no field for and the next write would persist the
+/// truncated document over the original.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueOpenDecision {
+    /// The document is at or below [`QUEUE_SCHEMA_VERSION`]; read it.
+    Match,
+    /// The document is above [`QUEUE_SCHEMA_VERSION`]; leave it on disk
+    /// untouched and report the two versions.
+    Refuse,
+}
+
+/// Reduce a persisted document's `schema_version` to an open-time
+/// verdict. `found > `[`QUEUE_SCHEMA_VERSION`] is the only refusal.
+pub fn queue_open_decision(found: u32) -> QueueOpenDecision {
+    if found > QUEUE_SCHEMA_VERSION {
+        QueueOpenDecision::Refuse
+    } else {
+        QueueOpenDecision::Match
+    }
+}
 
 /// Pull order hint for the worker. The first pending job at the
 /// highest priority is picked next.
@@ -411,6 +440,105 @@ mod tests {
         let back: QueueJob = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back.kind, ItemKind::Paper);
         assert_eq!(back, job);
+    }
+
+    #[test]
+    fn a_document_at_or_below_this_version_loads_and_a_later_one_is_refused() {
+        assert_eq!(
+            queue_open_decision(QUEUE_SCHEMA_VERSION),
+            QueueOpenDecision::Match
+        );
+        assert_eq!(queue_open_decision(0), QueueOpenDecision::Match);
+        assert_eq!(
+            queue_open_decision(QUEUE_SCHEMA_VERSION - 1),
+            QueueOpenDecision::Match
+        );
+        assert_eq!(
+            queue_open_decision(QUEUE_SCHEMA_VERSION + 1),
+            QueueOpenDecision::Refuse
+        );
+        assert_eq!(queue_open_decision(u32::MAX), QueueOpenDecision::Refuse);
+    }
+
+    /// Every persisted key, pinned against the version stamp that
+    /// describes the document holding it. A field added to any of the
+    /// three types changes what an older binary sees on disk, which is
+    /// exactly what [`QUEUE_SCHEMA_VERSION`] exists to announce — so the
+    /// expected sets below and the constant move in the same change,
+    /// and a field that arrives without one fails here.
+    #[test]
+    fn the_persisted_key_set_is_pinned_to_the_schema_version() {
+        fn keys_of(value: &serde_json::Value) -> Vec<&str> {
+            let mut keys: Vec<&str> = value
+                .as_object()
+                .expect("a struct serializes as an object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            keys
+        }
+
+        assert_eq!(
+            QUEUE_SCHEMA_VERSION, 6,
+            "the key sets below describe version 6 of the document"
+        );
+
+        let job = QueueJob {
+            id: "0".to_string(),
+            library: "default".to_string(),
+            path: "/tmp/example.md".into(),
+            kind: ItemKind::Book,
+            priority: Priority::Normal,
+            force: false,
+            hold_for_metadata: false,
+            intake_ocr: Some(IntakeOcrInfo {
+                from_pdf: "/tmp/scan.pdf".into(),
+                expected_pages: Some(42),
+                allow_partial: true,
+            }),
+            audit_profile: Some("strict".to_string()),
+            state: JobState::Pending,
+            queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            started_at: None,
+            finished_at: None,
+            error: None,
+            merged_into: None,
+        };
+        let state = serde_json::to_value(QueueState {
+            schema_version: QUEUE_SCHEMA_VERSION,
+            paused: false,
+            jobs: vec![job],
+        })
+        .expect("serialize");
+
+        assert_eq!(keys_of(&state), ["jobs", "paused", "schema_version"]);
+        assert_eq!(
+            keys_of(&state["jobs"][0]),
+            [
+                "audit_profile",
+                "error",
+                "finished_at",
+                "force",
+                "hold_for_metadata",
+                "id",
+                "intake_ocr",
+                "kind",
+                "library",
+                "merged_into",
+                "path",
+                "priority",
+                "queued_at",
+                "started_at",
+                "state",
+            ]
+        );
+        assert_eq!(
+            keys_of(&state["jobs"][0]["intake_ocr"]),
+            ["allow_partial", "expected_pages", "from_pdf"]
+        );
     }
 
     #[test]

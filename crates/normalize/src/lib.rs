@@ -43,6 +43,7 @@ use unicode_normalization::UnicodeNormalization;
 /// recorded in the index so a daemon can refuse to serve an index that
 /// was built with a different algorithm version. Bumping it is a
 /// commitment to rebuild the whole corpus.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const NORMALIZE_VERSION: u32 = 1;
 
 /// Normalize prose text to its frozen canonical form.

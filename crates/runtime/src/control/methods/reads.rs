@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use ts_rs::TS;
 
 use super::MethodContext;
+use crate::control::error_map::registry_err;
 use crate::control::events::{Event, JobOutcomeSummary, QueueTick};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::doctor;
@@ -77,14 +78,7 @@ pub fn daemon_version_rpc(_params: &Option<Value>, ctx: &MethodContext) -> Resul
 }
 
 pub fn daemon_shutdown(ctx: &MethodContext) -> Value {
-    // Publish the `daemon.state = stopping` transition before firing
-    // the shutdown broadcast: connection tasks exit on the broadcast,
-    // and flush events queued ahead of it on their way out, so this
-    // order is what guarantees attached subscribers see the stopping
-    // notification. (`run_until_shutdown` calls `set_stopping` again
-    // for the non-RPC shutdown paths; the repeat is a no-op.)
-    ctx.event_stream.set_stopping();
-    let _ = ctx.shutdown_tx.send(());
+    crate::control::events::initiate_shutdown(&ctx.event_stream, &ctx.shutdown_tx);
     Value::Null
 }
 
@@ -119,19 +113,65 @@ pub fn status(ctx: &MethodContext) -> Value {
         // clients that would enqueue work (e.g. `index-profile apply`)
         // check this up front instead of failing on their first call.
         "queue_worker_enabled": ctx.queue_worker_enabled,
-        // Identity of the served library. `library` is the registry
-        // name and `null` when the data root was selected directly by
-        // path — a normal state, matching the lock file's omitted
-        // `library_name=` line, not the fabricated fallback in
-        // `ctx.library_name`. Single-library snapshot fields: a daemon
-        // serves exactly one library today.
+        // Identity of the primary (bring-up-selected) library.
+        // `library` is its registry name and `null` when the data root
+        // was selected directly by path — a normal state, not the
+        // fabricated fallback in `ctx.library_name`. Both fields stay a
+        // single-library snapshot of the primary; the set this daemon
+        // serves is `served` below. `data_dir` is also what a client
+        // with a path-shaped selection compares against when no
+        // registry entry claims that root.
         "library": ctx.info_context.library_name,
         "data_dir": ctx.info_context.data_dir,
+        "served": served_libraries(ctx),
     })
 }
 
+/// Every library this daemon has mounted, one row each, sorted by name;
+/// `null` when the registry could not be read.
+///
+/// `default` marks the library an unnamed call resolves to, `primary`
+/// the one the daemon came up under. They are two bits rather than one
+/// because they are two facts: a daemon started under a library that is
+/// not the registry's default carries them on different rows, and a
+/// client that folded them together could not answer which library an
+/// unnamed call reaches. `data_dir` is each library's own root, so a
+/// registry pointing two names at one root is visible as such.
+fn served_libraries(ctx: &MethodContext) -> Value {
+    // A poisoned default-pointer lock is the only way this read fails.
+    // The rest of the card is still worth printing, and `null` says the
+    // set could not be read rather than implying an empty one.
+    let Ok(summaries) = ctx.registry.list() else {
+        return Value::Null;
+    };
+    let primary = ctx.info_context.library_name.as_deref();
+    let rows: Vec<Value> = summaries
+        .into_iter()
+        .map(|s| {
+            let is_primary = Some(s.name.as_str()) == primary;
+            json!({
+                "name": s.name,
+                "data_dir": s.data_dir.display().to_string(),
+                "default": s.is_default,
+                "primary": is_primary,
+            })
+        })
+        .collect();
+    Value::Array(rows)
+}
+
 pub async fn doctor_gather(ctx: &MethodContext) -> Value {
-    let report = doctor::gather_with(&ctx.selection, ctx.rerank_supervisor.as_deref()).await;
+    // The address this daemon bound, not the one the environment
+    // names: the report is about the surface this session is serving.
+    let report = doctor::gather_with(
+        &ctx.selection,
+        doctor::Reporter::Daemon {
+            rerank_supervisor: ctx.rerank_supervisor.as_deref(),
+            mcp_addr: ctx.info_context.mcp_addr.as_str(),
+            control_socket: ctx.control_socket.as_deref(),
+        },
+    )
+    .await;
     serde_json::to_value(report).unwrap_or(Value::Null)
 }
 
@@ -170,8 +210,15 @@ pub fn queue_list(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
     if let Some(limit) = parsed.limit {
         jobs.truncate(limit as usize);
     }
+    // Two versions, because one cannot be read: `schema_version` is
+    // what the document on disk records, `binary_schema_version` what
+    // the serving binary reads. They differ whenever a document written
+    // by an earlier binary has not been rewritten yet, and a client
+    // comparing the first against its own constant would be measuring
+    // the wrong pair.
     Ok(json!({
         "schema_version": state.schema_version,
+        "binary_schema_version": bookrack_core::queue::QUEUE_SCHEMA_VERSION,
         "paused": state.paused,
         "summary": summary,
         "jobs": jobs,
@@ -247,6 +294,19 @@ pub struct LibraryInfoParams {
     name: Option<String>,
 }
 
+/// `library.info` selects its library under `name` rather than the
+/// `library` every other routed method takes: this parameter predates
+/// the shared spelling and is part of a published surface. The key
+/// travels with the type so a client injecting a selection reads it
+/// off the registry instead of special-casing the method.
+impl super::RoutedParams for LibraryInfoParams {
+    const LIBRARY_KEY: &'static str = "name";
+
+    fn library(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+}
+
 pub async fn library_info(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: LibraryInfoParams = match params {
         Some(v) if !v.is_null() => serde_json::from_value(v.clone()).map_err(|e| {
@@ -257,8 +317,24 @@ pub async fn library_info(params: &Option<Value>, ctx: &MethodContext) -> Result
     let handle = ctx
         .registry
         .get(parsed.name.as_deref())
-        .map_err(|e| RpcError::new(INVALID_PARAMS, format!("registry: {e}")))?;
-    let info = show_library_info(handle.ops(), ctx.info_context.clone())
+        .map_err(registry_err)?;
+    // The card's identity is built from the library the handle names,
+    // not from the bring-up snapshot in `ctx`: the counts below already
+    // come from this handle, and a card pairing one library's counts
+    // with another's root is the one an operator cannot read. The MCP
+    // address is the exception — a property of the process — and is
+    // carried over from the snapshot.
+    let embed_model = crate::profile::effective_embed_config(handle.cfg())
+        .map_err(|e| {
+            RpcError::new(
+                INTERNAL_ERROR,
+                format!("resolve the library's embed configuration: {e}"),
+            )
+        })?
+        .model;
+    let info_context =
+        crate::daemon::library_info_context(handle.cfg(), &embed_model, &ctx.info_context.mcp_addr);
+    let info = show_library_info(handle.ops(), info_context)
         .await
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("library info failed: {e}")))?;
     serde_json::to_value(info)
@@ -336,72 +412,10 @@ fn derive_tick_snapshot(state: &bookrack_core::queue::QueueState) -> QueueTick {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::{Arc, Mutex};
-
-    use bookrack_config::{Config, LibrarySelection};
-    use bookrack_core::queue::QueueState;
-    use bookrack_embed::OllamaEmbedClient;
-    use bookrack_obs::stream::LogStreamHandle;
-    use bookrack_ops::reads::info::LibraryInfoContext;
-    use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
-    use bookrack_ops::{Caller, Ops};
-    use tokio::sync::{Mutex as TokioMutex, Notify, broadcast};
-
     use super::*;
-    use crate::control::events::{DaemonState, DaemonStateFlag, EventStreamHandle};
-    use crate::control::plan_registry::PlanRegistry;
-
-    /// Build a [`MethodContext`] over a catalog-only ops handle rooted
-    /// at `dir`, so no embedder probe runs. `library_name` is the
-    /// registry name of the served library, `None` for a path-selected
-    /// root.
-    fn method_context(dir: &Path, library_name: Option<&str>) -> MethodContext {
-        let ops = Ops::<OllamaEmbedClient>::catalog_only(
-            dir.join("corpus.db"),
-            dir.join("catalog.db"),
-            &dir.join("lancedb"),
-            dir.join("books"),
-            dir.join("backup"),
-            Caller::cli(),
-        );
-        let handle = LibraryHandle::new(library_name.unwrap_or("default"), ops);
-        let state = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
-        let (shutdown_tx, _) = broadcast::channel(8);
-        MethodContext {
-            cfg: Arc::new(Config::new(
-                dir.to_path_buf(),
-                "http://127.0.0.1:11434".to_string(),
-            )),
-            registry: LibraryRegistry::single(handle),
-            info_context: LibraryInfoContext {
-                data_dir: dir.display().to_string(),
-                library_name: library_name.map(str::to_string),
-                resolution_source: "explicit".to_string(),
-                shadowed_default: None,
-                library_identification: None,
-                ollama_url: "http://127.0.0.1:11434".to_string(),
-                embed_model_configured: "test-model".to_string(),
-                mcp_addr: String::new(),
-            },
-            queue_state: Arc::new(Mutex::new(QueueState::default())),
-            queue_state_path: dir.join("queue.json"),
-            event_stream: EventStreamHandle::new(8, state),
-            write_guard: Arc::new(TokioMutex::new(())),
-            shutdown_tx,
-            started_at_rfc3339: "2026-01-01T00:00:00Z".to_string(),
-            selection: LibrarySelection::default(),
-            library_name: library_name.unwrap_or("default").to_string(),
-            mcp_tools: Arc::new(Vec::new()),
-            queue_worker_enabled: false,
-            tray_focus_signal: Arc::new(Notify::new()),
-            rerank_supervisor: None,
-            queue_paused: Arc::new(AtomicBool::new(false)),
-            log_stream: LogStreamHandle::new(8, 8),
-            plan_registry: Arc::new(PlanRegistry::new()),
-        }
-    }
+    use crate::control::jsonrpc::Request;
+    use crate::control::methods::DispatchOutcome;
+    use crate::control::methods::test_method_context as method_context;
 
     #[test]
     fn mcp_availability_snapshot_tracks_the_rpc_write_source() {
@@ -459,6 +473,31 @@ mod tests {
             "a path-selected root has no registry name: {value}"
         );
         assert_eq!(value["data_dir"], dir.path().display().to_string());
+    }
+
+    /// Route one parameterless method through the real router and
+    /// return its result value.
+    async fn dispatch_result(method: &str, ctx: &MethodContext) -> Value {
+        let req = Request {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: method.to_string(),
+            params: None,
+        };
+        match crate::control::methods::dispatch(&req, ctx).await.unwrap() {
+            DispatchOutcome::Result(value) => value,
+            DispatchOutcome::Shutdown(value) => value,
+        }
+    }
+
+    #[tokio::test]
+    async fn daemon_status_answers_the_same_body_as_the_status_rpc() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = method_context(dir.path(), Some("main"));
+        assert_eq!(
+            dispatch_result("daemon.status", &ctx).await,
+            dispatch_result("status", &ctx).await,
+        );
     }
 
     #[test]

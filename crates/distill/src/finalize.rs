@@ -36,8 +36,8 @@ impl std::fmt::Debug for FtsComposer {
     }
 }
 
-/// Normalization strategy for the lookup key. The mother doc § 5.5
-/// note ties the lookup key form to the script of the headword.
+/// Normalization strategy for the lookup key. The key form follows
+/// the script of the headword.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyNormalizer {
     /// Lower-case and strip non-alphanumeric characters; suited for

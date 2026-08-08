@@ -16,7 +16,8 @@ use crate::error::ParseError;
 /// per-stage retention number still gets recorded; only the
 /// best-effort sample is suppressed, because [`snapshot_items`] would
 /// otherwise format every input twice on the largest inputs.
-const MAX_SAMPLE_SCAN: usize = 10_000;
+// setting: distill.sample_scan_max
+pub(crate) const MAX_SAMPLE_SCAN: usize = 10_000;
 
 /// One processing stage in the distill pipeline. Object-safe: no
 /// generics, no `Self` in signatures past the receiver, `Send + Sync`
@@ -168,6 +169,7 @@ fn snapshot_items(data: &StageData) -> Vec<String> {
 }
 
 fn truncate_debug<T: std::fmt::Debug>(item: &T) -> String {
+    // setting: internal -- how far one trace line is truncated for logging
     const MAX_CHARS: usize = 120;
     let s = format!("{item:?}");
     let mut out = String::with_capacity(s.len().min(MAX_CHARS * 4) + 3);

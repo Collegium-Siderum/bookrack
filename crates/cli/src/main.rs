@@ -12,17 +12,17 @@
 //! truth for every default.
 
 mod cmd;
-mod exec;
 mod init;
-mod preflight;
 mod run;
+mod selection_routing;
 mod util;
 
 use std::path::{Path, PathBuf};
 
 use bookrack_cli_grammar::{
-    CorpusAction, DistillAction, DryrunArgs, IngestArgs, IntakeAction, LogsArgs, PapersAction,
-    QueueAction, RemoveArgs, StampsAction, WriteMetadataAction, WriteVectorsAction,
+    CorpusAction, DistillAction, DryrunArgs, FindArgs, IngestArgs, IntakeAction, ListArgs,
+    LogsArgs, PapersAction, QueueAction, RemoveArgs, RpcAction, SearchArgs, StampsAction,
+    WriteMetadataAction, WriteVectorsAction,
 };
 use bookrack_config::{Config, ConfigError, LibrarySelection};
 use bookrack_runtime::cmd::audit_profile::AuditProfileAction;
@@ -32,8 +32,13 @@ use eyre::{Context, Result};
 
 /// Trailing block shown by `bookrack --help`. Names the environment
 /// variables that select the library and the embed backend, points at
-/// the session as the way to reach library reads, and hands the
-/// runtime prerequisite check to `doctor` rather than restating it.
+/// the session as the way to reach library reads, names the one read
+/// that has a verb of its own, and hands the runtime prerequisite check
+/// to `doctor` rather than restating it.
+///
+/// The read verbs are not enumerated here: `natural_name_hint` already
+/// holds that table, and a second copy is one that goes stale on its
+/// own schedule.
 const TOP_AFTER_HELP: &str = "\
 Environment:
   BOOKRACK_DATA_DIR     library data root (overridden by --data-dir)
@@ -43,7 +48,9 @@ Environment:
 
 Library reads (search, browse, metadata, status) are served by a running
 session: start one with `bookrack run`, then list the live control-plane
-surface with `bookrack exec tools`.
+surface with `bookrack rpc list`. The reads used most have verbs of their
+own; a name this binary does not carry is answered with the verb that
+does the same thing.
 
 Prerequisites:
   Run `bookrack doctor` to check Ollama and the embed model.";
@@ -59,12 +66,13 @@ struct Cli {
     /// Select the library at this data root, overriding the
     /// environment.
     ///
-    /// On local commands (`run`, `init`, `doctor`, `audit-profile`,
-    /// `index-profile`, `distill`, `runs`) this switches the data root
-    /// for the invocation. On commands that route through a running
-    /// daemon, the daemon must already be serving this root; a mismatch
-    /// aborts the command without acting. Mutually exclusive with
-    /// `--library`.
+    /// On local commands (`run`, `init`, `audit-profile`,
+    /// `index-profile`, `distill`, `runs`, `retrieval`) this switches
+    /// the data root for the invocation. On commands that route
+    /// through a running daemon, the registry names the library that
+    /// owns this root and the call goes there; a root no entry claims
+    /// is refused unless the daemon is the one serving it. Mutually
+    /// exclusive with `--library`.
     #[arg(
         long,
         global = true,
@@ -75,9 +83,10 @@ struct Cli {
     /// Select the named library from the registry.
     ///
     /// The registry is the BOOKRACK_REGISTRY file when set, else the
-    /// platform-default registry. Behaves like `--data-dir`: a switch on
-    /// local commands, an assertion against the running daemon on routed
-    /// commands. Mutually exclusive with `--data-dir`.
+    /// platform-default registry. A switch on local commands; on
+    /// commands that route through a running daemon the name travels
+    /// with the call, so any library the daemon serves is reachable.
+    /// Mutually exclusive with `--data-dir`.
     #[arg(long, global = true, help_heading = "Common Options")]
     library: Option<String>,
     /// Select an audit profile by name: the built-ins are `default`,
@@ -129,6 +138,11 @@ impl Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
+    /// Report the configuration that actually resolves, and from where.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
     /// Inspect and compare the built-in audit profiles.
     ///
     /// Pure reflection over the profiles compiled into the binary — no
@@ -215,30 +229,20 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         runtime_dir: Option<PathBuf>,
     },
-    /// Call control-plane RPCs against the running session.
+    /// Call control-plane methods on the running session directly.
     ///
-    /// Subcommands:
-    ///   `info` (default)          — print the session pid, MCP
-    ///                               address, and control socket path.
-    ///                               Pure file read of the session
-    ///                               lock; never opens the control
-    ///                               socket.
-    ///   `tools`                   — list the control-plane methods
-    ///                               the daemon answers, alongside the
-    ///                               daemon's MCP endpoint tools for
-    ///                               visibility. Only the control-plane
-    ///                               methods are reachable from `exec`.
-    ///   `<method> [<json>]`       — call the named control-plane
-    ///                               method (e.g. `library.show_book`),
-    ///                               with the second positional token
-    ///                               forwarded verbatim as JSON params.
+    /// The escape hatch under the typed commands: `rpc list` prints
+    /// the method table the running daemon answers, `rpc call` sends
+    /// one method by name with a JSON params object. Ordinary use does
+    /// not need it — every routine operation has a typed command —
+    /// and `docs/control-plane.md` documents each method's params and
+    /// response shape.
     ///
     /// Reads `${BOOKRACK_RUNTIME_DIR}/bookrack.tty.lock` to discover
     /// the session; never opens a catalog, corpus, or vector store.
-    Exec {
-        /// Subcommand and its positional arguments.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+    Rpc {
+        #[command(subcommand)]
+        action: RpcAction,
     },
     /// Run a one-screen health check.
     ///
@@ -282,8 +286,18 @@ enum Command {
         /// library — stop it with `bookrack quit` first.
         #[arg(long)]
         backfill_ocr_derivation: bool,
-        /// With `--rename-envelopes` or `--backfill-ocr-derivation`,
-        /// compute the plan without touching the disk or database.
+        /// Close `pipeline_runs` rows still marked running whose owning
+        /// process is gone, stamping each `abandoned`. Only rows proven
+        /// ownerless are touched: a run still in flight, and one that
+        /// kept no liveness record, are both left alone. An offline
+        /// repair: it writes the catalog directly, so it is refused
+        /// while a daemon is serving the library — stop it with
+        /// `bookrack quit` first.
+        #[arg(long)]
+        close_abandoned_runs: bool,
+        /// With `--rename-envelopes`, `--backfill-ocr-derivation`, or
+        /// `--close-abandoned-runs`, compute the plan without touching
+        /// the disk or database.
         #[arg(long)]
         dry_run: bool,
     },
@@ -296,6 +310,17 @@ enum Command {
         "ingest /path/to/book.epub --hold-for-metadata",
     ])]
     Ingest(IngestArgs),
+    /// Submit one or more papers for ingest.
+    ///
+    /// The paper-side pipeline verb, equivalent to `papers ingest` and
+    /// symmetric with the book-side `ingest`. Requires a running
+    /// bookrack daemon; the command exits with code 2 if no daemon is
+    /// found.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "glean /path/to/paper.pdf",
+        "glean /path/to/papers-dir/ --recursive",
+    ])]
+    Glean(bookrack_cli_grammar::PapersIngestArgs),
     /// Drive an intake from a derived source manifestation (OCR-only).
     ///
     /// The job is enqueued onto the persistent ingest queue and
@@ -354,6 +379,61 @@ enum Command {
     Papers {
         #[command(subcommand)]
         action: PapersAction,
+    },
+    /// Filter both catalogs from one verb.
+    ///
+    /// The same page `list` prints, narrowed by the columns both
+    /// catalogs carry. `--format` filters the book side and `--year` /
+    /// `--venue` / `--doi` the paper side, so each of those requires
+    /// `--scope` naming the side that has it.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "find --title \"Sample Title\"",
+        "find --year 2020 --scope paper",
+    ])]
+    Find(FindArgs),
+    /// Browse both catalogs from one verb.
+    ///
+    /// Reads the book catalog and the paper catalog and prints a
+    /// section for each, so a page covers the library rather than one
+    /// pipeline. `--scope` narrows it to one side; the namespaced form
+    /// — `bookrack papers list` — stays and means the same thing.
+    ///
+    /// Under `--json` the payload is assembled by this command: the
+    /// rows of both sides in one `items` array, with a `pages` block
+    /// carrying each side's own total. It is not the response of any
+    /// one control-plane method.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "list",
+        "list --scope paper --limit 20",
+    ])]
+    List(ListArgs),
+    /// Search both pipelines from one verb.
+    ///
+    /// Ranks passages from the book corpus and the paper corpus
+    /// against the same query and prints them interleaved, each cited
+    /// by the item it came from. `--scope` narrows it to one corpus.
+    ///
+    /// A merged search is not recorded in the retrieval sidecar: its
+    /// results span two corpora and no single corpus fingerprint
+    /// describes them. A single-sided one is recorded as usual.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "search \"a sample phrase\"",
+        "search \"a sample phrase\" --scope book --top-k 5",
+    ])]
+    Search(SearchArgs),
+    /// Show one item by its typed id.
+    ///
+    /// The id names its own pipeline (`book:12`, `paper:101`), so the
+    /// verb needs no namespace to fix which catalog is read. The
+    /// namespaced forms — `bookrack papers show 101` — stay, and mean
+    /// the same thing.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "show book:12",
+        "show paper:101",
+    ])]
+    Show {
+        /// Item to show, as `<kind>:<id>`.
+        id: String,
     },
     /// Simulate an ingest without writing the live stores.
     #[command(after_long_help = bookrack_cli_grammar::examples![
@@ -454,6 +534,52 @@ enum Command {
     Status,
 }
 
+#[derive(clap::Subcommand)]
+pub(crate) enum ConfigAction {
+    /// Print every knob's effective value with the layer that supplied it.
+    ///
+    /// `libraries config` edits one library's `config.toml`; this
+    /// reports the value every layer together produces — flags, the
+    /// environment, `.env`, that file, the manifest, the registry,
+    /// platform conventions, and the built-in defaults. Needs no
+    /// running daemon: it is the surface for the case where the daemon
+    /// will not start, so a data root that does not resolve still
+    /// yields a report, with the failure stated at its head.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "config effective",
+        "config effective --library demo --json",
+    ])]
+    Effective,
+
+    /// List every knob this build has, with where each can be set.
+    ///
+    /// The inventory beside `config effective`'s report: the same knobs
+    /// from the same resolvers, asked what they would be with nothing
+    /// set anywhere. It reads no data root, no daemon, and no `.env`,
+    /// so the answer is a property of the binary rather than of this
+    /// machine — which is what makes it the list to check a `.env`
+    /// against, or to hand someone asking what can be configured.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "config knobs",
+        "config knobs --json",
+    ])]
+    Knobs,
+
+    /// List the values compiled into this build that no layer moves.
+    ///
+    /// The surface for a value an operator cannot set but still has to
+    /// quote: the cap a response stopped at, the timeout a call died
+    /// on, the retry count a log implies. Each row names what the
+    /// value bounds and which surface changes with it. Like `config
+    /// knobs` it reads no data root, no daemon and no `.env`, so the
+    /// answer describes the binary rather than this machine.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "config fixed",
+        "config fixed --json",
+    ])]
+    Fixed,
+}
+
 #[derive(clap::Subcommand, Debug)]
 pub(crate) enum LibrariesAction {
     /// List every entry in the registry.
@@ -494,6 +620,34 @@ pub(crate) enum LibrariesAction {
     ])]
     Default {
         /// Library short name to record as the registry default.
+        name: String,
+    },
+    /// Mount a registered library into the running daemon.
+    ///
+    /// The daemon opens the library's stores, takes its data root's
+    /// lock, and serves it from then on — no restart. The name has to
+    /// be in the registry already; register a new root with
+    /// `libraries add` first.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries mount demo",
+        "libraries mount demo --json",
+    ])]
+    Mount {
+        /// Registry name of the library to start serving.
+        name: String,
+    },
+    /// Unmount a library, releasing its data root.
+    ///
+    /// The daemon stops serving the library and lets go of its root
+    /// lock, so an offline command can touch that root. Refused for the
+    /// registry default, for the library the daemon came up under, and
+    /// for a library with queued work.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries unmount demo",
+        "libraries unmount demo --json",
+    ])]
+    Unmount {
+        /// Registry name of the library to stop serving.
         name: String,
     },
     /// Clone the current library into a sibling at a new data root.
@@ -712,8 +866,8 @@ impl From<KindArg> for bookrack_config::LibraryKind {
 }
 
 /// clap's default "did you mean" tip only sees top-level subcommand
-/// names, so a user typing `bookrack list` lands on a suggestion of
-/// `bookrack ingest`. This wrapper parses normally, then on a
+/// names, so a user typing `bookrack ls` lands on a suggestion of
+/// `bookrack logs`. This wrapper parses normally, then on a
 /// `InvalidSubcommand` error checks the offending token against a
 /// hand-maintained map of natural-name aliases and prints a friendlier
 /// tip before exiting through clap's own renderer.
@@ -751,16 +905,24 @@ fn invalid_subcommand_token(err: &clap::Error) -> Option<String> {
 /// (multiple options joined with ` or `), or `None` for tokens not in
 /// the table — those fall through to clap's own similarity tip.
 ///
-/// Library reads moved off the external CLI surface: the hints below
-/// point at the `bookrack exec library.<tool>` proxy that talks to
-/// the running daemon session.
+/// A read with a top-level verb of its own is pointed at that verb.
+/// The rest point at the `bookrack rpc call library.<tool>` proxy that
+/// talks to the running daemon session, which is the whole surface
+/// those reads have.
 fn natural_name_hint(typed: &str) -> Option<String> {
     let suggestions: &[&str] = match typed {
-        "list" | "ls" => &["`bookrack exec library.list_books`"],
-        "find" => &["`bookrack exec library.find_books`"],
-        "show" => &["`bookrack exec library.show_book`"],
-        "stats" => &["`bookrack exec library.stats`"],
-        "search" => &["`bookrack exec library.search`"],
+        "list" | "ls" => &["`bookrack list`"],
+        "find" => &["`bookrack find`"],
+        "show" => &["`bookrack show book:<id>`"],
+        "stats" => &["`bookrack rpc call library.stats`"],
+        "search" => &["`bookrack search`"],
+        // The paper side has a namespace, the book side does not: a
+        // book is the unprefixed subject, and the verbs that narrow to
+        // it take `--scope book`.
+        "books" => &[
+            "`bookrack list --scope book`",
+            "`bookrack search --scope book`",
+        ],
         _ => return None,
     };
     Some(suggestions.join(" or "))
@@ -808,7 +970,7 @@ async fn main() -> std::process::ExitCode {
     // First, before anything reads a variable: every later read then
     // sees one environment, whether it goes through `Config::resolve`
     // or straight to `std::env`.
-    bookrack_config::load_dotenv();
+    let _ = bookrack_config::load_dotenv();
     // Install the color-eyre report and panic hooks. The hooks render
     // `eyre::Report` cause chains and panics with rustc-style colored
     // prefixes when stderr is a TTY, and as plain text when it is not.
@@ -924,52 +1086,17 @@ async fn run() -> Result<()> {
         }
         bookrack_cli::render::init(RenderCtx::new(output, color));
     }
-    let json_global = cli.json;
-
-    // Refuse a daemon-routed command when the invoking shell's
-    // explicit library selection (`--data-dir` / `--library` /
-    // `BOOKRACK_DATA_DIR`) disagrees with the library a running
-    // daemon is serving. Skipped for commands that resolve a data
-    // root locally through `Config::resolve` (`run`, `init`,
-    // `audit-profile`, the `index-profile` verbs other than an executing
-    // `apply`, `distill`, `runs`, `retrieval`, and the offline
-    // `libraries` verbs): the flag is a real switch there, not an
-    // assertion. `doctor` is not exempt — it
-    // resolves on its own below, but only after this check keeps a
-    // running daemon from being diagnosed under the wrong library.
-    // Silent when no daemon is running, when no
-    // selection was given, or when the lock predates the identity
-    // fields that make the comparison possible.
-    let index_profile_is_local = match &cli.command {
-        // `apply` executes through the daemon, so only its offline
-        // `--dry-run` form keeps the local-resolve exemption.
-        Command::IndexProfile { action } => {
-            !matches!(action, IndexProfileAction::Apply { dry_run: false, .. })
-        }
-        _ => false,
-    };
-    if !(index_profile_is_local
-        || matches!(
-            cli.command,
-            Command::Init { .. }
-                | Command::Run { .. }
-                | Command::AuditProfile { .. }
-                | Command::Distill { .. }
-                | Command::Runs { .. }
-                | Command::Retrieval { .. }
-                | Command::Libraries {
-                    action: LibrariesAction::Default { .. }
-                        | LibrariesAction::Detect { .. }
-                        | LibrariesAction::Scan { .. }
-                        | LibrariesAction::Add { .. }
-                        | LibrariesAction::Register { .. }
-                        | LibrariesAction::Remove { .. }
-                        | LibrariesAction::Config { .. }
-                }
-        ))
-    {
-        preflight::enforce_selection_mismatch(&cli.selection())?;
+    // A locally resolving command keeps its selection to itself: a path
+    // is a switch into that root, a name is resolved through the
+    // config crate, and nothing goes on a wire. A daemon-routed one
+    // hands its selection to the control-plane client, which puts it
+    // on every call — translating a path into a registry name once it
+    // has a connection, since the last question that translation asks
+    // is the daemon's to answer.
+    if !selection_routing::resolves_root_locally(&cli.command) {
+        bookrack_cli::library_param::init_pending(cli.selection());
     }
+    let json_global = cli.json;
 
     // `doctor` resolves on its own — it has a daemon-running path
     // (control plane) and a daemon-not-running fallback that probes
@@ -982,6 +1109,7 @@ async fn run() -> Result<()> {
         install_reranker,
         rename_envelopes,
         backfill_ocr_derivation,
+        close_abandoned_runs,
         dry_run,
     } = &cli.command
     {
@@ -992,6 +1120,7 @@ async fn run() -> Result<()> {
             *install_reranker,
             *rename_envelopes,
             *backfill_ocr_derivation,
+            *close_abandoned_runs,
             *dry_run,
             None,
         )
@@ -1039,6 +1168,14 @@ async fn run() -> Result<()> {
         // instead of an opaque "no library configured" bail -- the
         // platform launchers count on `bookrack run` to be a
         // self-contained first-run flow.
+        //
+        // The probe **discards its result**: the daemon resolves again
+        // once it owns the lock, and that one is the configuration it
+        // serves. Only the failure is read here, and only to decide
+        // whether to offer the wizard. Handing this result down instead
+        // would move the resolve ahead of the lock it is supposed to
+        // follow, and would put a `Config` in the runtime's options for
+        // no behaviour that differs.
         if let Err(err) = Config::resolve(&selection) {
             match err {
                 ConfigError::MissingDataDir | ConfigError::DataDirNotFound(_) => {
@@ -1056,13 +1193,12 @@ async fn run() -> Result<()> {
         .await;
     }
 
-    // `exec` is the discovery surface for an already-running daemon.
-    // It must NOT open a database — the "no DB handle outside the
-    // scheduler" invariant is what gives the daemon-REPL session its
-    // single-writer guarantee — so it dispatches before Config::resolve
-    // as well.
-    if let Command::Exec { args } = &cli.command {
-        return exec::run(args, None).await;
+    // `rpc` is the escape hatch onto an already-running daemon. It must
+    // NOT open a database — the "no DB handle outside the scheduler"
+    // invariant is what gives the daemon-REPL session its single-writer
+    // guarantee — so it dispatches before Config::resolve as well.
+    if let Command::Rpc { action } = &cli.command {
+        return cmd::cli_client::rpc::run(action, None).await;
     }
 
     // Every remaining write/read subcommand reaches the daemon
@@ -1080,6 +1216,11 @@ async fn run() -> Result<()> {
     }
     let selection = cli.selection();
     match cli.command {
+        Command::Config { action } => match action {
+            ConfigAction::Effective => bookrack_cli::config_effective::run(&selection),
+            ConfigAction::Knobs => bookrack_cli::config_knobs::run(),
+            ConfigAction::Fixed => bookrack_cli::config_fixed::run(),
+        },
         Command::AuditProfile { action } => bookrack_runtime::cmd::audit_profile::run(action),
         Command::IndexProfile { mut action } => {
             match &mut action {
@@ -1115,7 +1256,10 @@ async fn run() -> Result<()> {
             match action {
                 // `list` renders the on-disk registry directly, so it
                 // works with no daemon and shows every registered
-                // library, not just the one a daemon has warm.
+                // library, not just the ones a daemon has warm. Which
+                // of them a daemon does hold is a separate question,
+                // asked here and answered best-effort: no daemon means
+                // no column, not a column of noes.
                 LibrariesAction::List { json } => {
                     if bookrack_cli::render::ctx().is_quiet() {
                         // Quiet suppresses the listing but still reads
@@ -1124,14 +1268,61 @@ async fn run() -> Result<()> {
                         bookrack_config::list_libraries()?;
                         Ok(())
                     } else {
-                        bookrack_runtime::cmd::libraries::list(json)
+                        let served = cmd::cli_client::helpers::served_library_names(None).await;
+                        bookrack_runtime::cmd::libraries::list(json, served.as_deref())
                     }
                 }
                 LibrariesAction::Default { name } => {
-                    // `libraries default` writes the registry directly,
-                    // so it works with no daemon and the pointer persists
-                    // across restarts. Resolve the registry file the same
-                    // way the daemon's fork helper does.
+                    // A running daemon caches this pointer, and a
+                    // registry write it never hears about leaves the two
+                    // disagreeing: `libraries list` would read the new
+                    // default off disk while unnamed calls kept going to
+                    // the old one. So hand the change to the daemon when
+                    // one is there — it writes the same registry file and
+                    // refreshes its own cache — and write the registry
+                    // here only when nothing is listening.
+                    match cmd::cli_client::helpers::connect(None).await {
+                        Ok(client) => {
+                            let params = serde_json::json!({ "name": name });
+                            let response = cmd::cli_client::helpers::dispatch(
+                                &client,
+                                "library.set_default",
+                                params,
+                            )
+                            .await?;
+                            if bookrack_cli::render::ctx().is_json() {
+                                cmd::cli_client::helpers::print_value(&response);
+                            } else if !bookrack_cli::render::ctx().is_quiet() {
+                                println!(
+                                    "default library set to '{name}'; \
+                                     the running daemon follows it now"
+                                );
+                            }
+                            return Ok(());
+                        }
+                        // Only "nothing is listening" falls through to the
+                        // offline write. A daemon that is there but cannot
+                        // be reached is a failure to report, not a reason
+                        // to write behind its back and leave the two
+                        // answers disagreeing.
+                        Err(err) => {
+                            let absent = err
+                                .downcast_ref::<bookrack_cli::error::BookrackCliError>()
+                                .is_some_and(|e| {
+                                    matches!(
+                                        e,
+                                        bookrack_cli::error::BookrackCliError::DaemonNotRunning
+                                    )
+                                });
+                            if !absent {
+                                return Err(err);
+                            }
+                        }
+                    }
+                    // No daemon: write the registry directly, so the
+                    // pointer still persists across restarts. Resolve the
+                    // registry file the same way the daemon's fork helper
+                    // does.
                     let registry_path =
                         bookrack_config::registry_target_path().ok_or_else(|| {
                             eyre::eyre!(
@@ -1258,6 +1449,13 @@ async fn run() -> Result<()> {
         Command::Papers { action } => {
             cmd::cli_client::papers::run(action, None, audit_profile).await
         }
+        Command::Find(args) => cmd::cli_client::listing::find(args, None).await,
+        Command::List(args) => cmd::cli_client::listing::list(args, None).await,
+        Command::Search(args) => cmd::cli_client::listing::search(args, None).await,
+        Command::Show { id } => cmd::cli_client::show::run(id, None).await,
+        Command::Glean(args) => {
+            cmd::cli_client::papers::run(PapersAction::Ingest(args), None, audit_profile).await
+        }
         Command::Dryrun(args) => cmd::cli_client::dryrun::run(args, None, audit_profile).await,
         Command::Distill { action } => bookrack_cli::distill_cmd::run(&selection, action).await,
         Command::Runs { action } => bookrack_cli::runs_cmd::run(&selection, action),
@@ -1268,7 +1466,7 @@ async fn run() -> Result<()> {
         Command::Doctor { .. } => unreachable!("Doctor is dispatched above"),
         Command::Init { .. } => unreachable!("Init is dispatched above"),
         Command::Run { .. } => unreachable!("Run is dispatched above"),
-        Command::Exec { .. } => unreachable!("Exec is dispatched above"),
+        Command::Rpc { .. } => unreachable!("Rpc is dispatched above"),
     }
 }
 
@@ -1286,6 +1484,7 @@ fn accepts_audit_profile(command: &Command) -> bool {
     };
     match command {
         Command::Ingest(_) => true,
+        Command::Glean(_) => true,
         Command::Intake { action } => matches!(action, IntakeAction::Ocr { .. }),
         Command::Dryrun(_) => true,
         Command::Metadata { action } => matches!(
@@ -1298,7 +1497,8 @@ fn accepts_audit_profile(command: &Command) -> bool {
                 action: PapersMetadataAction::Reaudit { .. }
             }
         ),
-        Command::AuditProfile { .. }
+        Command::Config { .. }
+        | Command::AuditProfile { .. }
         | Command::IndexProfile { .. }
         | Command::Verify
         | Command::Libraries { .. }
@@ -1312,12 +1512,16 @@ fn accepts_audit_profile(command: &Command) -> bool {
         | Command::Runs { .. }
         | Command::Retrieval { .. }
         | Command::Logs(_)
+        | Command::Find(_)
+        | Command::List(_)
+        | Command::Search(_)
+        | Command::Show { .. }
         | Command::Status
         | Command::Quit
         | Command::Doctor { .. }
         | Command::Init { .. }
         | Command::Run { .. }
-        | Command::Exec { .. } => false,
+        | Command::Rpc { .. } => false,
     }
 }
 
@@ -1834,7 +2038,9 @@ mod tests {
         // global flag is set, so the value cannot silently drop.
         let outsiders = [
             vec!["bookrack", "verify"],
-            vec!["bookrack", "metadata", "set", "1", "title", "x"],
+            vec![
+                "bookrack", "metadata", "set", "1", "--field", "title", "--value", "x",
+            ],
             vec!["bookrack", "metadata", "approve", "1"],
             vec!["bookrack", "queue", "list"],
             vec!["bookrack", "vectors", "rebuild"],
@@ -1853,10 +2059,37 @@ mod tests {
     #[test]
     fn metadata_write_subcommands_parse_through_cli() {
         for argv in [
-            vec!["bookrack", "metadata", "set", "1", "title", "A New Title"],
-            vec!["bookrack", "metadata", "set", "1", "pub_place", "New York"],
-            vec!["bookrack", "metadata", "set", "1", "original_year", "1949"],
-            vec!["bookrack", "metadata", "clear", "1", "title"],
+            vec![
+                "bookrack",
+                "metadata",
+                "set",
+                "1",
+                "--field",
+                "title",
+                "--value",
+                "A New Title",
+            ],
+            vec![
+                "bookrack",
+                "metadata",
+                "set",
+                "1",
+                "--field",
+                "pub_place",
+                "--value",
+                "New York",
+            ],
+            vec![
+                "bookrack",
+                "metadata",
+                "set",
+                "1",
+                "--field",
+                "original_year",
+                "--value",
+                "1949",
+            ],
+            vec!["bookrack", "metadata", "clear", "1", "--field", "title"],
             vec!["bookrack", "metadata", "ack", "1", "--reason", "test"],
             vec!["bookrack", "metadata", "approve", "1"],
             vec![
@@ -1927,12 +2160,19 @@ mod tests {
     #[test]
     fn natural_name_hints_cover_the_common_typos_from_the_test_report() {
         for (typed, expected) in [
-            ("list", "`bookrack exec library.list_books`"),
-            ("ls", "`bookrack exec library.list_books`"),
-            ("find", "`bookrack exec library.find_books`"),
-            ("show", "`bookrack exec library.show_book`"),
-            ("stats", "`bookrack exec library.stats`"),
-            ("search", "`bookrack exec library.search`"),
+            ("list", "`bookrack list`"),
+            ("ls", "`bookrack list`"),
+            ("find", "`bookrack find`"),
+            ("show", "`bookrack show book:<id>`"),
+            // The one read with no verb of its own, so the one line
+            // that still points at the proxy.
+            ("stats", "`bookrack rpc call library.stats`"),
+            ("search", "`bookrack search`"),
+            // The namespace the book side deliberately does not have.
+            (
+                "books",
+                "`bookrack list --scope book` or `bookrack search --scope book`",
+            ),
         ] {
             assert_eq!(natural_name_hint(typed).as_deref(), Some(expected));
         }
@@ -1941,6 +2181,82 @@ mod tests {
         // returning None is how we signal that.
         assert_eq!(natural_name_hint("nope"), None);
         assert_eq!(natural_name_hint(""), None);
+    }
+
+    #[test]
+    fn rpc_call_takes_the_method_and_an_optional_params_token() {
+        let Command::Rpc { action } =
+            Cli::try_parse_from(["bookrack", "rpc", "call", "library.info", "{}"])
+                .expect("method plus params parses")
+                .command
+        else {
+            panic!("`rpc call` must parse into Command::Rpc");
+        };
+        assert_eq!(
+            action,
+            RpcAction::Call {
+                method: "library.info".to_string(),
+                params: Some("{}".to_string()),
+            }
+        );
+
+        let Command::Rpc { action } =
+            Cli::try_parse_from(["bookrack", "rpc", "call", "daemon.version"])
+                .expect("a bare method parses")
+                .command
+        else {
+            panic!("`rpc call` must parse into Command::Rpc");
+        };
+        assert_eq!(
+            action,
+            RpcAction::Call {
+                method: "daemon.version".to_string(),
+                params: None,
+            }
+        );
+    }
+
+    /// `rpc list` and `rpc call` are named subcommands rather than a
+    /// var-arg method token, so clap's own similarity tip covers a
+    /// mistyped action and the binary carries no did-you-mean table for
+    /// this surface.
+    #[test]
+    fn a_mistyped_rpc_action_is_answered_by_claps_similarity_tip() {
+        let rendered = match Cli::try_parse_from(["bookrack", "rpc", "lsit"]) {
+            Ok(_) => panic!("`lsit` is not an action"),
+            Err(err) => err.to_string(),
+        };
+        assert!(rendered.contains("list"), "{rendered}");
+    }
+
+    /// The top-level alias is the same grammar as the namespaced verb,
+    /// so the two parse into equal argument bundles. Comparing the
+    /// parse products — rather than asserting both dispatch to the same
+    /// function — is what keeps the flags from drifting apart.
+    #[test]
+    fn glean_parses_into_the_same_args_as_papers_ingest() {
+        let Command::Glean(direct) =
+            Cli::try_parse_from(["bookrack", "glean", "/x/paper.pdf", "--recursive"])
+                .expect("the alias parses")
+                .command
+        else {
+            panic!("`glean` must parse into Command::Glean");
+        };
+        let Command::Papers {
+            action: PapersAction::Ingest(namespaced),
+        } = Cli::try_parse_from([
+            "bookrack",
+            "papers",
+            "ingest",
+            "/x/paper.pdf",
+            "--recursive",
+        ])
+        .expect("the namespaced verb parses")
+        .command
+        else {
+            panic!("`papers ingest` must parse into PapersAction::Ingest");
+        };
+        assert_eq!(direct, namespaced);
     }
 
     #[test]
@@ -2032,13 +2348,19 @@ mod tests {
         }
     }
 
+    /// The token an unknown subcommand carries is what the hint table
+    /// is keyed on, so it has to survive extraction verbatim.
+    ///
+    /// `ls` is the sample because it is a name an operator types and
+    /// this surface does not carry — the hint table answers it, and
+    /// unlike `list` it is not a spelling a verb could take over.
     #[test]
     fn invalid_subcommand_token_extracts_the_offending_string() {
-        let Err(err) = Cli::try_parse_from(["bookrack", "list"]) else {
-            panic!("`list` is not a valid subcommand and must error");
+        let Err(err) = Cli::try_parse_from(["bookrack", "ls"]) else {
+            panic!("`ls` is not a valid subcommand and must error");
         };
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
-        assert_eq!(invalid_subcommand_token(&err).as_deref(), Some("list"));
+        assert_eq!(invalid_subcommand_token(&err).as_deref(), Some("ls"));
     }
 
     #[test]
@@ -2117,24 +2439,30 @@ mod tests {
     /// or an observation command.
     const TOP_LEVEL_BY_DESIGN: &[&str] = &[
         "audit-profile",
+        "config",
         "corpus",
         "diagnose",
         "distill",
         "doctor",
         "dryrun",
-        "exec",
+        "find",
+        "glean",
         "ingest",
         "init",
         "intake",
         "libraries",
+        "list",
         "logs",
         "metadata",
         "papers",
         "queue",
         "quit",
         "remove",
+        "rpc",
         "run",
+        "search",
         "runs",
+        "show",
         "stamps",
         "status",
         "vectors",
@@ -2152,13 +2480,14 @@ mod tests {
     /// is a new help page, and a help page is a surface commitment, so the
     /// tree's shape is pinned here rather than left to grow silently.
     const SUBCOMMAND_COUNTS: &[(&str, usize)] = &[
-        ("bookrack", 25),
+        ("bookrack", 31),
         ("bookrack audit-profile", 3),
+        ("bookrack config", 3),
         ("bookrack corpus", 1),
         ("bookrack distill", 4),
         ("bookrack index-profile", 6),
         ("bookrack intake", 2),
-        ("bookrack libraries", 10),
+        ("bookrack libraries", 12),
         ("bookrack metadata", 10),
         ("bookrack papers", 13),
         ("bookrack papers corpus", 1),
@@ -2167,6 +2496,7 @@ mod tests {
         ("bookrack papers vectors", 4),
         ("bookrack queue", 5),
         ("bookrack retrieval", 2),
+        ("bookrack rpc", 2),
         ("bookrack runs", 2),
         ("bookrack stamps", 1),
         ("bookrack vectors", 4),
@@ -2235,6 +2565,117 @@ mod tests {
              into TOP_LEVEL_BY_ACCRETION when it does not, and record the change \
              in CHANGELOG.md. Added: {added:?}; no longer present: {removed:?}"
         );
+    }
+
+    /// How an explicit library selection reaches a command: as a switch
+    /// into a data root the command resolves itself, or as an assertion
+    /// about the library a running daemon serves.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Reach {
+        Local,
+        Routed,
+    }
+
+    /// One representative invocation per side of
+    /// [`selection_routing::resolves_root_locally`], keyed by the argv a
+    /// caller would type. Namespaces that span both sides carry a row
+    /// each: `libraries` splits by verb, `index-profile apply` by
+    /// `--dry-run`.
+    ///
+    /// The table mirrors the classification rather than deriving from
+    /// it, which is what lets the two be compared; the comparison runs
+    /// each row through the real parser and the real classifier.
+    const ROUTING_CASES: &[(&[&str], Reach)] = &[
+        (&["audit-profile", "list"], Reach::Local),
+        (&["config", "effective"], Reach::Routed),
+        (&["corpus", "rebuild"], Reach::Routed),
+        (&["diagnose"], Reach::Routed),
+        (&["distill", "list"], Reach::Local),
+        (&["doctor"], Reach::Routed),
+        (&["dryrun", "/tmp/book.epub"], Reach::Routed),
+        (&["find"], Reach::Routed),
+        (&["glean", "/tmp/paper.pdf"], Reach::Routed),
+        (&["index-profile", "list"], Reach::Local),
+        (
+            &["index-profile", "apply", "demo", "--dry-run"],
+            Reach::Local,
+        ),
+        (&["index-profile", "apply", "demo"], Reach::Routed),
+        (&["ingest", "/tmp/book.epub"], Reach::Routed),
+        (&["init"], Reach::Local),
+        (&["intake", "list-ocr-pending"], Reach::Routed),
+        (&["libraries", "detect", "/tmp/library"], Reach::Local),
+        (&["libraries", "list"], Reach::Routed),
+        (&["libraries", "mount", "demo"], Reach::Routed),
+        (&["libraries", "unmount", "demo"], Reach::Routed),
+        (&["list"], Reach::Routed),
+        (&["logs"], Reach::Routed),
+        (&["metadata", "reaudit", "1"], Reach::Routed),
+        (&["papers", "list"], Reach::Routed),
+        (&["queue", "list"], Reach::Routed),
+        (&["quit"], Reach::Routed),
+        (&["remove", "1"], Reach::Routed),
+        (&["retrieval", "list"], Reach::Local),
+        (&["rpc", "list"], Reach::Routed),
+        (&["search", "a sample phrase"], Reach::Routed),
+        (&["run"], Reach::Local),
+        (&["runs", "list"], Reach::Local),
+        (&["show", "book:12"], Reach::Routed),
+        (&["stamps", "reconcile"], Reach::Routed),
+        (&["status"], Reach::Routed),
+        (&["vectors", "reset"], Reach::Routed),
+        (&["verify"], Reach::Routed),
+    ];
+
+    /// The routing classification and the top-level whitelist are two
+    /// tables at two granularities — the whitelist names commands, the
+    /// classification splits some of them by verb — so neither can be
+    /// generated from the other. What has to hold is that they cover the
+    /// same set of commands: a name the classification never mentions is
+    /// a command whose selection semantics nobody decided, and a name
+    /// only the classification knows is a stale row.
+    #[test]
+    fn the_routing_table_and_the_top_level_whitelist_name_the_same_commands() {
+        let routed: BTreeSet<&str> = ROUTING_CASES.iter().map(|(argv, _)| argv[0]).collect();
+        let whitelisted: BTreeSet<&str> = TOP_LEVEL_BY_DESIGN
+            .iter()
+            .chain(TOP_LEVEL_BY_ACCRETION)
+            .copied()
+            .collect();
+
+        let unclassified: Vec<&&str> = whitelisted.difference(&routed).collect();
+        let stale: Vec<&&str> = routed.difference(&whitelisted).collect();
+        assert!(
+            unclassified.is_empty() && stale.is_empty(),
+            "the routing classification and the top-level command surface \
+             disagree. Every top-level command has to be filed on one side \
+             of `selection_routing::resolves_root_locally` and carry a row \
+             here. Not classified: {unclassified:?}; classified but no \
+             longer a command: {stale:?}"
+        );
+    }
+
+    /// The table above is only worth having if it is checked against the
+    /// classifier it mirrors, through the parser an operator's argv goes
+    /// through.
+    #[test]
+    fn every_recorded_invocation_reaches_the_side_the_table_records() {
+        for (argv, expected) in ROUTING_CASES {
+            let full: Vec<&str> = std::iter::once("bookrack")
+                .chain(argv.iter().copied())
+                .collect();
+            let cli = Cli::try_parse_from(&full)
+                .unwrap_or_else(|err| panic!("{argv:?} does not parse: {err}"));
+            let reach = if selection_routing::resolves_root_locally(&cli.command) {
+                Reach::Local
+            } else {
+                Reach::Routed
+            };
+            assert_eq!(
+                reach, *expected,
+                "{argv:?} is classified {reach:?} but the table records {expected:?}"
+            );
+        }
     }
 
     /// A new subcommand is a new help page, and every help page carries the

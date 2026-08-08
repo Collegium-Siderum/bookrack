@@ -11,6 +11,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// setting: internal -- every code below is a wire contract callers match on, listed in
+// docs/control-plane.md; none of them is a value to tune
+
 /// JSON-RPC 2.0 protocol marker. Every frame carries this verbatim.
 pub const JSONRPC_VERSION: &str = "2.0";
 
@@ -55,6 +58,16 @@ pub const PLAN_KIND_MISMATCH: i32 = -32014;
 /// different library than the one the execute leg is scoped to.
 #[allow(dead_code)]
 pub const PLAN_LIBRARY_MISMATCH: i32 = -32015;
+/// bookrack-specific: a `plan_id` resolved, but the target it was
+/// minted against moved before the execute leg presented it. Distinct
+/// from [`PLAN_NOT_FOUND`]: the id was valid and has now been
+/// consumed, so what changed is the target, not the plan registry.
+pub const PLAN_TARGET_DRIFTED: i32 = -32016;
+/// bookrack-specific: an external backend the call depends on is
+/// unusable — the Ollama daemon did not answer, or answered that it is
+/// overloaded. The same condition refuses bring-up with exit 2; on a
+/// live call it is retryable, so it maps to exit 4 instead.
+pub const BACKEND_UNAVAILABLE: i32 = -32017;
 
 /// One inbound JSON-RPC request.
 #[derive(Debug, Clone, Deserialize)]

@@ -16,6 +16,7 @@
 
 use bookrack_core::{Explain, Problem};
 use bookrack_ops::OpsError;
+use bookrack_ops::dto::UnknownFilterValue;
 use rmcp::ErrorData;
 use rmcp::model::{CallToolResult, Content, ErrorCode};
 use serde::Serialize;
@@ -55,6 +56,27 @@ pub(crate) fn mcp_from_problem(code: ErrorCode, problem: Problem) -> ErrorData {
 /// unguarded exit.
 pub(crate) fn invalid_params_err<E: std::error::Error + 'static>(e: &E) -> ErrorData {
     mcp_from_problem(ErrorCode::INVALID_PARAMS, Problem::from_error_chain(e))
+}
+
+/// Map a refused filter value to an MCP `invalid_params`.
+///
+/// The accepted set travels with the refusal rather than being spelled
+/// out here, so a vocabulary that gains a value cannot leave a stale
+/// list behind on this surface.
+pub(crate) fn unknown_filter_value_to_mcp(unknown: &UnknownFilterValue) -> ErrorData {
+    mcp_from_problem(
+        ErrorCode::INVALID_PARAMS,
+        Problem::new(format!(
+            "cannot filter on {} value {:?}",
+            unknown.parameter, unknown.value
+        ))
+        .detail(format!(
+            "The {} filter names a value no row carries, so it was refused rather \
+             than applied without it.",
+            unknown.parameter
+        ))
+        .hint(format!("Use one of: {}.", unknown.accepted.join(", "))),
+    )
 }
 
 /// Map a generic [`OpsError`] to an MCP internal error.
@@ -123,6 +145,7 @@ mod tests {
     fn user_input_error_message_is_unchanged_by_flattening() {
         let e = OpsError::UnknownMetadataField {
             field: "no_such_field".into(),
+            editable: vec![String::from("title"), String::from("year")],
         };
         let expected = e.to_string(); // error-boundary-check: allow
         let data = ops_error_to_edit_error(e);

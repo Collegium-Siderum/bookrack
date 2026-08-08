@@ -60,9 +60,17 @@ pub fn build_verify_report(cfg: &Config) -> render::VerifyReport {
             }
         }
     }
-    let vectors_meta = bookrack_vectors::meta::load(&cfg.lancedb_dir())
-        .ok()
-        .flatten();
+    // `load` already separates an absent sidecar (`Ok(None)`, a library
+    // that never built an index) from an unreadable one. Keep the two
+    // apart in the report: the error variants are wrappers, so the
+    // chain is flattened before it crosses the RPC boundary.
+    let vectors_meta = match bookrack_vectors::meta::load(&cfg.lancedb_dir()) {
+        Ok(meta) => meta,
+        Err(e) => {
+            report.vectors_meta_error = Some(bookrack_core::error_chain(&e));
+            None
+        }
+    };
     if let Some(meta) = &vectors_meta {
         report.vectors_built_at_chunk_count = Some(meta.built_at_chunk_count);
         report.vectors_churn = Some(meta.churn_since_rebuild);
@@ -132,6 +140,65 @@ mod tests {
                 .next()
                 .is_none(),
             "verify must not create files"
+        );
+    }
+
+    /// A catalog-only data root under `dir`, so the report gets past
+    /// the `not_initialised` short circuit and reaches the vectors
+    /// sidecar.
+    fn catalog_only_root(dir: &Path) -> Config {
+        let cfg = config_for(dir);
+        drop(Catalog::open(&cfg.catalog_db()).expect("create catalog"));
+        cfg
+    }
+
+    #[test]
+    fn a_corrupt_vectors_meta_does_not_read_as_a_library_without_an_index() {
+        let absent_dir = tempfile::tempdir().expect("tempdir");
+        let absent = build_verify_report(&catalog_only_root(absent_dir.path()));
+
+        let corrupt_dir = tempfile::tempdir().expect("tempdir");
+        let corrupt_cfg = catalog_only_root(corrupt_dir.path());
+        std::fs::create_dir_all(corrupt_cfg.lancedb_dir()).expect("create lancedb dir");
+        std::fs::write(
+            corrupt_cfg
+                .lancedb_dir()
+                .join(bookrack_vectors::meta::META_FILENAME),
+            b"{ this is not a vectors meta",
+        )
+        .expect("write a corrupt sidecar");
+        let corrupt = build_verify_report(&corrupt_cfg);
+
+        assert_ne!(
+            serde_json::to_value(&absent).expect("encode absent"),
+            serde_json::to_value(&corrupt).expect("encode corrupt"),
+            "a corrupt vectors_meta.json reports exactly what a library that \
+             never built an index reports"
+        );
+        // An absent sidecar is not a failure, so the negative half has
+        // to hold too: only the unreadable one carries a reason.
+        assert!(
+            absent.vectors_meta_error.is_none(),
+            "a library that never built an index reported a meta error: {:?}",
+            absent.vectors_meta_error
+        );
+        let reason = corrupt
+            .vectors_meta_error
+            .as_deref()
+            .expect("a corrupt sidecar carries its reason");
+        // The variant's own Display is the wrapper `vectors_meta parse
+        // error`; the parser's message is what names the defect, and it
+        // only survives if the chain was flattened.
+        assert!(
+            reason.starts_with("vectors_meta parse error: "),
+            "the reason did not carry the parse error's own cause: {reason}"
+        );
+        // The sidecar failing says nothing about the stores, which were
+        // read through their own doors.
+        assert!(
+            corrupt.catalog_schema_ok,
+            "{:?}",
+            corrupt.catalog_schema_error
         );
     }
 

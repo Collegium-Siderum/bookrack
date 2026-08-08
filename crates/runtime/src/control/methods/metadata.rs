@@ -12,9 +12,10 @@ use serde_json::{Value, json};
 #[cfg(test)]
 use ts_rs::TS;
 
-use super::{MethodContext, run_write};
+use super::{MethodContext, input_err, run_write};
+use crate::audit_helpers::require_known_profile;
 use crate::cmd::metadata::{WriteMetadataAction, run_write as run_metadata};
-use crate::control::error_map::write_err;
+use crate::control::error_map::{registry_err, write_err};
 use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Deserialize)]
@@ -28,6 +29,12 @@ pub struct MetadataSetParams {
     reason: Option<String>,
     #[serde(default)]
     confirmed: bool,
+    /// The library this call acts on. Absent means the registry's
+    /// current default — the library the daemon was brought up under,
+    /// unless `library.set_default` has moved it since.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +45,12 @@ pub struct MetadataClearParams {
     field: String,
     #[serde(default)]
     reason: Option<String>,
+    /// The library this call acts on. Absent means the registry's
+    /// current default — the library the daemon was brought up under,
+    /// unless `library.set_default` has moved it since.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +61,12 @@ pub struct MetadataVoidParams {
     field: String,
     #[serde(default)]
     reason: Option<String>,
+    /// The library this call acts on. Absent means the registry's
+    /// current default — the library the daemon was brought up under,
+    /// unless `library.set_default` has moved it since.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,11 +75,18 @@ pub struct MetadataVoidParams {
 pub struct MetadataReauditParams {
     book: i64,
     /// Optional book-side audit profile name. Resolves through the
-    /// shared built-in set; absent means the daemon's overlay-resolved
-    /// default profile.
+    /// shared built-in set, and is refused as invalid params on a name
+    /// outside it; absent means the daemon's overlay-resolved default
+    /// profile.
     #[serde(default)]
     #[cfg_attr(test, ts(type = "string | null"))]
     audit_profile: Option<String>,
+    /// The library this call acts on. Absent means the registry's
+    /// current default — the library the daemon was brought up under,
+    /// unless `library.set_default` has moved it since.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +100,12 @@ pub struct MetadataContributorAddParams {
     nationality: Option<String>,
     #[serde(default)]
     reason: Option<String>,
+    /// The library this call acts on. Absent means the registry's
+    /// current default — the library the daemon was brought up under,
+    /// unless `library.set_default` has moved it since.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +116,12 @@ pub struct MetadataContributorRemoveParams {
     contributor_id: i64,
     #[serde(default)]
     reason: Option<String>,
+    /// The library this call acts on. Absent means the registry's
+    /// current default — the library the daemon was brought up under,
+    /// unless `library.set_default` has moved it since.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +130,12 @@ pub struct MetadataContributorRemoveParams {
 pub struct MetadataAckParams {
     book: i64,
     reason: String,
+    /// The library this call acts on. Absent means the registry's
+    /// current default — the library the daemon was brought up under,
+    /// unless `library.set_default` has moved it since.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +145,12 @@ pub struct MetadataApproveParams {
     book: i64,
     #[serde(default)]
     reason: Option<String>,
+    /// The library this call acts on. Absent means the registry's
+    /// current default — the library the daemon was brought up under,
+    /// unless `library.set_default` has moved it since.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +159,12 @@ pub struct MetadataApproveParams {
 pub struct MetadataRejectParams {
     book: i64,
     reason: String,
+    /// The library this call acts on. Absent means the registry's
+    /// current default — the library the daemon was brought up under,
+    /// unless `library.set_default` has moved it since.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,11 +174,18 @@ pub struct MetadataAdvanceParams {
     book: i64,
     /// Optional book-side audit profile name. Used when `advance`
     /// triggers a re-audit on the way out of the metadata gate;
-    /// resolves through the shared built-in set, absent means the
-    /// daemon's overlay-resolved default profile.
+    /// resolves through the shared built-in set and is refused as
+    /// invalid params on a name outside it, absent means the daemon's
+    /// overlay-resolved default profile.
     #[serde(default)]
     #[cfg_attr(test, ts(type = "string | null"))]
     audit_profile: Option<String>,
+    /// The library this call acts on. Absent means the registry's
+    /// current default — the library the daemon was brought up under,
+    /// unless `library.set_default` has moved it since.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 pub async fn set(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -134,7 +197,7 @@ pub async fn set(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
         reason: parsed.reason,
         confirmed: parsed.confirmed,
     };
-    run_metadata_action(ctx, action, None).await
+    run_metadata_action(ctx, parsed.library.as_deref(), action, None).await
 }
 
 pub async fn clear(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -144,7 +207,7 @@ pub async fn clear(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
         field: parsed.field,
         reason: parsed.reason,
     };
-    run_metadata_action(ctx, action, None).await
+    run_metadata_action(ctx, parsed.library.as_deref(), action, None).await
 }
 
 pub async fn void(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -154,14 +217,19 @@ pub async fn void(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
         field: parsed.field,
         reason: parsed.reason,
     };
-    run_metadata_action(ctx, action, None).await
+    run_metadata_action(ctx, parsed.library.as_deref(), action, None).await
 }
 
 pub async fn reaudit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: MetadataReauditParams = parse(params, "metadata.reaudit")?;
+    require_known_profile(
+        parsed.audit_profile.as_deref(),
+        bookrack_audit_profile::ALL_BUILT_IN_NAMES,
+    )
+    .map_err(input_err)?;
     let profile = parsed.audit_profile;
     let action = WriteMetadataAction::Reaudit { book: parsed.book };
-    run_metadata_action(ctx, action, profile).await
+    run_metadata_action(ctx, parsed.library.as_deref(), action, profile).await
 }
 
 pub async fn contributor_add(
@@ -176,7 +244,7 @@ pub async fn contributor_add(
         nationality: parsed.nationality,
         reason: parsed.reason,
     };
-    run_metadata_action(ctx, action, None).await
+    run_metadata_action(ctx, parsed.library.as_deref(), action, None).await
 }
 
 pub async fn contributor_remove(
@@ -189,7 +257,7 @@ pub async fn contributor_remove(
         contributor_id: parsed.contributor_id,
         reason: parsed.reason,
     };
-    run_metadata_action(ctx, action, None).await
+    run_metadata_action(ctx, parsed.library.as_deref(), action, None).await
 }
 
 pub async fn ack(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -198,7 +266,7 @@ pub async fn ack(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
         book: parsed.book,
         reason: parsed.reason,
     };
-    run_metadata_action(ctx, action, None).await
+    run_metadata_action(ctx, parsed.library.as_deref(), action, None).await
 }
 
 pub async fn approve(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -207,7 +275,7 @@ pub async fn approve(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         book: parsed.book,
         reason: parsed.reason,
     };
-    run_metadata_action(ctx, action, None).await
+    run_metadata_action(ctx, parsed.library.as_deref(), action, None).await
 }
 
 pub async fn reject(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -216,14 +284,19 @@ pub async fn reject(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         book: parsed.book,
         reason: parsed.reason,
     };
-    run_metadata_action(ctx, action, None).await
+    run_metadata_action(ctx, parsed.library.as_deref(), action, None).await
 }
 
 pub async fn advance(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: MetadataAdvanceParams = parse(params, "metadata.advance")?;
+    require_known_profile(
+        parsed.audit_profile.as_deref(),
+        bookrack_audit_profile::ALL_BUILT_IN_NAMES,
+    )
+    .map_err(input_err)?;
     let profile = parsed.audit_profile;
     let action = WriteMetadataAction::Advance { book: parsed.book };
-    run_metadata_action(ctx, action, profile).await
+    run_metadata_action(ctx, parsed.library.as_deref(), action, profile).await
 }
 
 fn parse<T: serde::de::DeserializeOwned>(
@@ -248,11 +321,13 @@ fn parse<T: serde::de::DeserializeOwned>(
 /// `reject` / contributor edits where it would silently drop.
 async fn run_metadata_action(
     ctx: &MethodContext,
+    library: Option<&str>,
     action: WriteMetadataAction,
     profile_name: Option<String>,
 ) -> Result<Value, RpcError> {
-    let cfg = ctx.cfg.clone();
-    run_write(ctx, move || async move {
+    let handle = ctx.registry.get(library).map_err(registry_err)?;
+    let cfg = handle.cfg_arc();
+    run_write(ctx, handle.name(), move || async move {
         run_metadata(&cfg, action, profile_name.as_deref())
             .await
             .map_err(|e| write_err("metadata.write", e))?;
@@ -260,3 +335,16 @@ async fn run_metadata_action(
     })
     .await
 }
+
+routed_params!(
+    MetadataSetParams,
+    MetadataClearParams,
+    MetadataVoidParams,
+    MetadataReauditParams,
+    MetadataContributorAddParams,
+    MetadataContributorRemoveParams,
+    MetadataAckParams,
+    MetadataApproveParams,
+    MetadataRejectParams,
+    MetadataAdvanceParams,
+);

@@ -43,6 +43,7 @@ mod pipeline_runs;
 mod retrieval_call_hits;
 mod retrieval_calls;
 mod retrieval_issues;
+mod run_lock;
 mod toc_edits;
 mod works;
 
@@ -59,7 +60,9 @@ pub use csl::{
 pub use db::{Catalog, SCHEMA_VERSION};
 pub use effective::{EDITABLE_FIELDS, EffectiveAttrs};
 pub use expressions::{Expression, NewExpression};
-pub use intake::{Intake, IntakeFilter, IntakeStatus, NewIntake, OcrPending, Registration};
+pub use intake::{
+    Intake, IntakeFilter, IntakeStatus, MatchLayer, NewIntake, OcrPending, Registration,
+};
 pub use item_pipeline_audit::{ItemPipelineAudit, NewItemPipelineAudit};
 pub use item_state::{ItemState, NewItemState};
 pub use mcp_tool_calls::{McpToolCall, NewMcpToolCall};
@@ -68,17 +71,31 @@ pub use node_categories::{NewCategory, NodeCategory};
 pub use node_contributors::{CONTRIBUTOR_ROLES, NewContributor, NodeContributor};
 pub use node_overrides::{NewOverride, NodeOverride};
 pub use node_paper_audit::{FLAG_COLUMNS, GRADE_COLUMNS, NewNodePaperAudit, NodePaperAudit};
-pub use node_publication_attrs::{NewPublicationAttrs, PublicationAttrs};
+pub use node_publication_attrs::{CONFIDENCE_LEVELS, NewPublicationAttrs, PublicationAttrs};
 pub use node_reviews::{
-    NewReview, NodeReview, STATUS_ACKNOWLEDGED, STATUS_APPROVED, STATUS_PENDING, STATUS_REJECTED,
+    NewReview, NodeReview, REVIEW_STATUSES, STATUS_ACKNOWLEDGED, STATUS_APPROVED, STATUS_PENDING,
+    STATUS_REJECTED,
 };
 pub use node_role_takeovers::{NewRoleTakeover, NodeRoleTakeover};
 pub use pipeline_run_summary::{NewPipelineRunSummary, PipelineRunSummary, RunProfileBucket};
-pub use pipeline_runs::{NewPipelineRun, PipelineRun};
+pub use pipeline_runs::{
+    NewPipelineRun, PipelineRun, RUN_STATUS_ABANDONED, RUN_STATUS_ERROR, RUN_STATUS_OK,
+    RUN_STATUS_RUNNING,
+};
 pub use retrieval_call_hits::RetrievalCallHit;
 pub use retrieval_calls::{NewRetrievalCall, RetrievalCall, RetrievalCallListing};
 pub use retrieval_issues::{NewRetrievalIssue, RetrievalIssue};
+pub use run_lock::{
+    RunHandle, RunLiveness, RunLock, discard_run_lock, run_liveness, run_lock_path, run_locks_dir,
+};
 pub use works::{NewWork, Work};
+
+bookrack_core::fixed_settings! {
+    owner = "catalog";
+    "catalog.backups_kept" = db::BACKUP_KEEP,
+        "database backups kept under the backup directory before the oldest is pruned",
+        acts on "how far back a restore can reach";
+}
 
 /// Convert a SQLite `COUNT(*)` (which the driver hands back as `i64`)
 /// into the unsigned width every catalog `count_*` API returns.

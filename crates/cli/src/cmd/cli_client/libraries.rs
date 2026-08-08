@@ -1,4 +1,5 @@
-//! `bookrack libraries {info,fork}` — control-plane wrapper.
+//! `bookrack libraries {info,mount,unmount,fork}` — control-plane
+//! wrapper.
 
 use std::path::{Path, PathBuf};
 
@@ -79,6 +80,35 @@ pub async fn run(action: LibrariesAction, runtime_dir: Option<PathBuf>) -> Resul
             // before reaching this daemon path.
             unreachable!("libraries add/register/remove/config are handled offline in main")
         }
+        LibrariesAction::Mount { name } => {
+            let response =
+                helpers::dispatch(&client, "library.mount", json!({ "name": name })).await?;
+            if ctx().is_json() {
+                helpers::print_value(&response);
+                return Ok(());
+            }
+            if ctx().is_quiet() {
+                return Ok(());
+            }
+            println!("Mounted library '{name}'; the daemon serves it from now on.");
+            Ok(())
+        }
+        LibrariesAction::Unmount { name } => {
+            let response =
+                helpers::dispatch(&client, "library.unmount", json!({ "name": name })).await?;
+            if ctx().is_json() {
+                helpers::print_value(&response);
+                return Ok(());
+            }
+            if ctx().is_quiet() {
+                return Ok(());
+            }
+            println!(
+                "Unmounted library '{name}'; its data root is released once any call still \
+                 using it finishes."
+            );
+            Ok(())
+        }
         LibrariesAction::Fork {
             new_name,
             data_dir,
@@ -110,10 +140,26 @@ pub async fn run(action: LibrariesAction, runtime_dir: Option<PathBuf>) -> Resul
             if ctx().is_quiet() {
                 return Ok(());
             }
+            // Printed here rather than in the handler: the handler runs
+            // inside the daemon, whose stdout the operator who typed
+            // this is not watching.
             println!(
                 "Forked library to '{new_name}' at {} ({mode}).",
                 data_dir.display()
             );
+            if response["mounted"] == Value::Bool(true) {
+                println!("The daemon serves it now; no restart needed.");
+            } else {
+                println!("Built and registered, but the daemon is not serving it.");
+                if let Some(reason) = response["mount_error"].as_str() {
+                    println!("  {reason}");
+                }
+                println!("  bookrack libraries mount {new_name}");
+            }
+            println!();
+            println!("next steps:");
+            println!("  bookrack libraries config {new_name} index_profile=<profile>");
+            println!("  bookrack --library {new_name} vectors reset");
             Ok(())
         }
     }

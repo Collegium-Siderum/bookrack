@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# The knob-origin vocabulary every resolver in this crate reports
+# through. The only workspace edge `config` carries: it stays below
+# everything that reads configuration.
+bookrack-core = { path = "../core" }
 chrono.workspace = true
 dirs.workspace = true
 dotenvy.workspace = true

@@ -72,12 +72,18 @@ async fn registry_glean_records_a_pipeline_run_on_the_paper_catalog() {
     .expect("open papers library")
     .with_kind(ItemKind::Paper);
 
+    // The handle's configuration and its stores are the same
+    // library's: paths come off one `Config` over this root.
+    let cfg = std::sync::Arc::new(bookrack_config::Config::new(
+        dir.path().to_path_buf(),
+        "http://127.0.0.1:11434".to_string(),
+    ));
     let ops = Ops::catalog_only(
-        dir.path().join("corpus.db"),
-        dir.path().join("catalog.db"),
-        &dir.path().join("lancedb"),
-        dir.path().join("books"),
-        dir.path().join("backup"),
+        cfg.corpus_db(),
+        cfg.catalog_db(),
+        &cfg.lancedb_dir(),
+        cfg.books_dir(),
+        cfg.backup_dir(),
         Caller::cli(),
     )
     .with_papers(
@@ -89,7 +95,7 @@ async fn registry_glean_records_a_pipeline_run_on_the_paper_catalog() {
             papers_dir,
         },
     );
-    let handle = LibraryHandle::new("t", ops);
+    let handle = LibraryHandle::new("t", cfg, ops);
 
     // The embed model tag must match the warm library's, or the
     // post-glean store refresh fails its stamp verification. The

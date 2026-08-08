@@ -3,9 +3,12 @@
 //! Persistent state file for the `bookrack run` REPL's ingest queue,
 //! plus the single-puller worker that drains it.
 //!
-//! The queue lives in a single JSON document under the data root,
-//! serialised through serde and rewritten atomically through a sibling
-//! temp file + `rename`. The worker is one async task that polls the
+//! The queue lives in a single JSON document in the daemon state
+//! directory — it spans libraries, so it belongs to the daemon process
+//! rather than to any one data root. The document is serialised through
+//! serde and rewritten atomically through a sibling temp file +
+//! `rename`, and is read through a version gate that refuses a document
+//! a later binary wrote. The worker is one async task that polls the
 //! file under a shared `Mutex`, pulls the next pending job, runs an
 //! injected per-job `runner` future, and writes the outcome back. The
 //! REPL command dispatcher reuses the same primitives to add / cancel
@@ -19,28 +22,156 @@ use std::time::Duration;
 
 use chrono::Utc;
 use eyre::{Context, Result, eyre};
+use serde::Deserialize;
 use tempfile::NamedTempFile;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use bookrack_core::ItemKind;
 pub use bookrack_core::queue::{
     IntakeOcrInfo, JobState, Priority, QUEUE_SCHEMA_VERSION, QueueJob, QueueState,
 };
+use bookrack_core::queue::{QueueOpenDecision, queue_open_decision};
+use bookrack_core::{Explain, ItemKind, Problem};
 
 use crate::control::events::{
     DegradedCause, Event, EventStreamHandle, JobOutcomeSummary, QueueTick,
 };
 
-/// Read the queue state at `path`. A missing file deserialises to the
-/// default state so a freshly initialised data root just works.
-pub fn load(path: &Path) -> Result<QueueState> {
-    match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .with_context(|| format!("parse queue state at {}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(QueueState::default()),
-        Err(e) => Err(e).with_context(|| format!("read queue state at {}", path.display())),
+/// Why a persisted queue document could not be turned into a
+/// [`QueueState`].
+///
+/// Every variant names the document, because the daemon reads it before
+/// anything else it does is visible and the path is not one an operator
+/// passed in. `Display` stays a self-sufficient single line for the log;
+/// the three-part wording is assembled in the [`Explain`] impl.
+#[derive(Debug, thiserror::Error)]
+pub enum QueueLoadError {
+    /// The document exists but could not be read.
+    #[error("cannot read the queue document at {path}: {source}")]
+    Read {
+        /// The document that could not be read.
+        path: PathBuf,
+        /// The failing read.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The document is not the JSON this binary's schema describes.
+    #[error("cannot parse the queue document at {path}: {source}")]
+    Parse {
+        /// The document that could not be parsed.
+        path: PathBuf,
+        /// The failing deserialization.
+        #[source]
+        source: serde_json::Error,
+    },
+
+    /// The document records a schema version above this binary's, so it
+    /// carries fields this binary has no field for.
+    #[error("queue document at {path} records schema version {found}, newer than {expected}")]
+    SchemaTooNew {
+        /// The document that was left untouched.
+        path: PathBuf,
+        /// The version the document records.
+        found: u32,
+        /// The version this binary reads, [`QUEUE_SCHEMA_VERSION`].
+        expected: u32,
+    },
+}
+
+impl Explain for QueueLoadError {
+    fn explain(&self) -> Problem {
+        match self {
+            // Past tense: a directory made readable again clears this
+            // without the document changing.
+            QueueLoadError::Read { path, source } => {
+                Problem::new("could not read the queue document")
+                    .detail(format!("Reading {} failed: {source}.", path.display()))
+                    .hint("Check that the daemon state directory is readable by this user.")
+            }
+
+            QueueLoadError::Parse { path, source } => {
+                Problem::new("cannot parse the queue document")
+                    .detail(format!(
+                        "{} is not readable as JSON: {source}.",
+                        path.display()
+                    ))
+                    .hint(
+                        "Move the file aside to start with an empty queue. Jobs it held \
+                         are not lost work — queue their sources again.",
+                    )
+            }
+
+            QueueLoadError::SchemaTooNew {
+                path,
+                found,
+                expected,
+            } => {
+                Problem::new("cannot read a queue document written by a newer version of bookrack")
+                    .detail(format!(
+                        "{} records schema version {found}; this binary reads version {expected}.",
+                        path.display()
+                    ))
+                    .hint(
+                        "Run the newer version of bookrack, or move the file aside to start \
+                     with an empty queue. The document is left unchanged either way, so \
+                     the newer version still finds its jobs.",
+                    )
+            }
+        }
     }
+}
+
+/// The one field the version gate reads, deserialized on its own so a
+/// document whose *shape* this binary cannot parse is still judged by
+/// its version first.
+#[derive(Deserialize)]
+struct VersionProbe {
+    schema_version: u32,
+}
+
+/// Read the queue state at `path`. A missing file deserialises to the
+/// default state so a freshly initialised daemon state directory just
+/// works.
+///
+/// The version is read before the document is parsed in full. A schema
+/// bump covers new enum variants as well as new fields, and a variant
+/// this binary has no match for fails the full parse — reported as a
+/// malformed document, which is the wrong thing to tell an operator
+/// holding a document from a newer version.
+///
+/// A document above [`QUEUE_SCHEMA_VERSION`] is refused rather than
+/// loaded, and a refused load writes nothing: loading it would drop the
+/// keys this binary has no field for, and the next
+/// [`save_atomic`] would persist the truncated document over the
+/// original.
+pub fn load(path: &Path) -> std::result::Result<QueueState, QueueLoadError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(QueueState::default()),
+        Err(source) => {
+            return Err(QueueLoadError::Read {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let probe: VersionProbe =
+        serde_json::from_slice(&bytes).map_err(|source| QueueLoadError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if queue_open_decision(probe.schema_version) == QueueOpenDecision::Refuse {
+        return Err(QueueLoadError::SchemaTooNew {
+            path: path.to_path_buf(),
+            found: probe.schema_version,
+            expected: QUEUE_SCHEMA_VERSION,
+        });
+    }
+    serde_json::from_slice(&bytes).map_err(|source| QueueLoadError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// Write `state` to `path` atomically: a sibling temp file is written
@@ -842,6 +973,112 @@ mod tests {
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.schema_version, QUEUE_SCHEMA_VERSION);
         assert!(loaded.paused);
+    }
+
+    /// A document a later binary wrote carries fields this one has no
+    /// field for. Loading it and writing it back drops them, so the
+    /// promise is that such a document is refused and left alone: the
+    /// bytes on disk after a refused load are the bytes that were there
+    /// before it.
+    #[test]
+    fn a_document_from_a_newer_binary_is_refused_and_left_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.json");
+        let doc = format!(
+            "{{\"schema_version\": {}, \"paused\": false, \"jobs\": [], \
+             \"future_field\": \"keep me\"}}",
+            QUEUE_SCHEMA_VERSION + 1
+        );
+        std::fs::write(&path, doc.as_bytes()).unwrap();
+
+        let err = load(&path).expect_err("a newer document must not load");
+        let QueueLoadError::SchemaTooNew {
+            found, expected, ..
+        } = &err
+        else {
+            panic!("a newer document is refused by version, not by shape: {err}");
+        };
+        assert_eq!(*found, QUEUE_SCHEMA_VERSION + 1);
+        assert_eq!(*expected, QUEUE_SCHEMA_VERSION);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            doc,
+            "a refused load must not rewrite the document"
+        );
+
+        // The operator-facing wording carries both versions, so the
+        // report says which binary to reach for.
+        let problem = err.explain();
+        let detail = problem.data.detail.expect("detail names the two versions");
+        assert!(
+            detail.contains(&(QUEUE_SCHEMA_VERSION + 1).to_string())
+                && detail.contains(&QUEUE_SCHEMA_VERSION.to_string()),
+            "{detail}"
+        );
+        assert!(
+            !problem.data.retryable,
+            "resending the same read cannot make the document older"
+        );
+    }
+
+    /// A schema bump covers new enum variants too, so the version check
+    /// has to happen before the full parse: otherwise a document whose
+    /// jobs carry a state this binary has no variant for fails as a
+    /// parse error, and the operator reads "unknown variant" instead of
+    /// "this document is from a newer version".
+    #[test]
+    fn a_newer_document_is_refused_by_version_before_its_unknown_variants_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.json");
+        let doc = format!(
+            "{{\"schema_version\": {}, \"paused\": false, \"jobs\": [{{\
+             \"id\": \"0\", \"library\": \"default\", \"path\": \"/tmp/example.epub\", \
+             \"priority\": \"normal\", \"force\": false, \"state\": \"quarantined\", \
+             \"queued_at\": \"2026-01-02T03:04:05Z\", \"started_at\": null, \
+             \"finished_at\": null, \"error\": null}}]}}",
+            QUEUE_SCHEMA_VERSION + 1
+        );
+        std::fs::write(&path, doc.as_bytes()).unwrap();
+
+        let err = load(&path).expect_err("a newer document must not load");
+        assert!(
+            matches!(
+                err,
+                QueueLoadError::SchemaTooNew { found, .. } if found == QUEUE_SCHEMA_VERSION + 1
+            ),
+            "the version check must run before the full parse: {err}"
+        );
+    }
+
+    /// The other half of the same promise: a document an earlier binary
+    /// wrote still loads, with every field added since defaulting to
+    /// what that binary behaved as.
+    #[test]
+    fn a_document_from_an_earlier_binary_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.json");
+        let v5 = r#"{"schema_version": 5, "paused": false, "jobs": [{
+            "id": "0",
+            "library": "default",
+            "path": "/tmp/example.epub",
+            "kind": "book",
+            "priority": "normal",
+            "force": false,
+            "hold_for_metadata": false,
+            "intake_ocr": null,
+            "audit_profile": null,
+            "state": "done",
+            "queued_at": "2026-01-02T03:04:05Z",
+            "started_at": null,
+            "finished_at": null,
+            "error": null
+        }]}"#;
+        std::fs::write(&path, v5).unwrap();
+
+        let state = load(&path).expect("an earlier document must still load");
+        assert_eq!(state.schema_version, 5);
+        assert_eq!(state.jobs.len(), 1);
+        assert!(state.jobs[0].merged_into.is_none());
     }
 
     fn job(id: &str, priority: Priority, state: JobState) -> QueueJob {

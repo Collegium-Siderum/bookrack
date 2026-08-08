@@ -4,27 +4,22 @@
 //! read tools. Each method accepts the same JSON shape as its MCP
 //! counterpart, runs the same `bookrack_ops::reads::*` call, and
 //! returns the same body. Together they form the operator-side read
-//! pathway: `bookrack exec <method> '<json>'` over the control socket
+//! pathway: `bookrack rpc call <method> '<json>'` over the control socket
 //! reaches the same code path agents exercise over MCP HTTP.
 
 use std::sync::Arc;
 
 use bookrack_core::{Explain, ItemKind, KindedNodeId, NodeId, Problem};
 use bookrack_embed::OllamaEmbedClient;
-use bookrack_ops::dto::{BookFilter, PaperFilter, ShowTocArgs};
+use bookrack_ops::dto::{BookFilter, MetadataFilter, PaperFilter, ShowTocArgs, parse_statuses};
 use bookrack_ops::registry::LibraryHandle;
 use bookrack_ops::{OpsError, SearchOptions, reads};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::MethodContext;
-use crate::control::error_map::rpc_from_problem;
+use crate::control::error_map::{registry_err, rpc_from_problem, unknown_filter_value};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
-
-/// Mirror of the MCP-side `READ_CONTEXT_DEFAULT_RADIUS`. The
-/// `library.read_context` tool returns this many leaves on each side
-/// of the anchor when the caller omits `before` / `after`.
-const READ_CONTEXT_DEFAULT_RADIUS: u32 = 3;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct LibraryOnlyParams {
@@ -81,6 +76,22 @@ pub struct PageParams {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ListMetadataParams {
+    #[serde(default)]
+    pub title_substring: Option<String>,
+    #[serde(default)]
+    pub confidence_in: Option<Vec<String>>,
+    #[serde(default)]
+    pub review_status_in: Option<Vec<String>>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub offset: Option<u32>,
+    #[serde(default)]
+    pub library: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct FindBooksParams {
     #[serde(default)]
     pub title_substring: Option<String>,
@@ -91,7 +102,11 @@ pub struct FindBooksParams {
     #[serde(default)]
     pub format: Option<String>,
     #[serde(default)]
+    pub statuses: Option<Vec<String>>,
+    #[serde(default)]
     pub categories: Option<Vec<String>>,
+    #[serde(default)]
+    pub language: Option<Vec<String>>,
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
@@ -179,6 +194,12 @@ pub struct FindPapersParams {
     pub title_substring: Option<String>,
     #[serde(default)]
     pub contributor_name: Option<String>,
+    #[serde(default)]
+    pub contributor_role: Option<String>,
+    #[serde(default)]
+    pub statuses: Option<Vec<String>>,
+    #[serde(default)]
+    pub language: Option<Vec<String>>,
     #[serde(default)]
     pub year: Option<String>,
     #[serde(default)]
@@ -280,12 +301,7 @@ fn resolve(
     ctx: &MethodContext,
     library: Option<&str>,
 ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>, RpcError> {
-    ctx.registry.get(library).map_err(|e| {
-        RpcError::new(
-            INVALID_PARAMS,
-            format!("registry: {}", bookrack_core::error_chain(&e)),
-        )
-    })
+    ctx.registry.get(library).map_err(registry_err)
 }
 
 fn ops_internal(e: OpsError) -> RpcError {
@@ -328,13 +344,16 @@ pub fn list_ocr_pending(params: &Option<Value>, ctx: &MethodContext) -> Result<V
 pub fn find_books(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: FindBooksParams = parse(params, "library.find_books")?;
     let handle = resolve(ctx, p.library.as_deref())?;
+    let statuses = parse_statuses(ItemKind::Book, &p.statuses.unwrap_or_default())
+        .map_err(|unknown| unknown_filter_value(&unknown))?;
     let filter = BookFilter {
         title_substring: p.title_substring,
         contributor_name: p.contributor_name,
         contributor_role: p.contributor_role,
         format: p.format,
+        statuses,
         categories: p.categories.unwrap_or_default(),
-        ..BookFilter::default()
+        language: p.language.unwrap_or_default(),
     };
     let page = reads::books::find_books(
         handle.ops(),
@@ -369,8 +388,12 @@ pub fn show_toc(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, Rp
 pub fn read_context(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: ReadContextParams = parse(params, "library.read_context")?;
     let handle = resolve(ctx, p.library.as_deref())?;
-    let before = p.before.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
-    let after = p.after.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
+    let before = p
+        .before
+        .unwrap_or(bookrack_query::dto::DEFAULT_CONTEXT_RADIUS);
+    let after = p
+        .after
+        .unwrap_or(bookrack_query::dto::DEFAULT_CONTEXT_RADIUS);
     let target = KindedNodeId {
         kind: p.kind,
         node_id: NodeId::new(p.node_id),
@@ -428,12 +451,79 @@ pub fn show_metadata_report(
     }
 }
 
-pub fn list_metadata(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let p: PageParams = parse(params, "library.list_metadata")?;
+/// Addressing parameters for a paper read that runs the audit: the
+/// paper, and optionally the profile to judge it under.
+#[derive(Debug, Deserialize)]
+pub struct PaperAuditReadParams {
+    pub intake_id: i64,
+    /// Optional paper-side audit profile name. Absent means the
+    /// overlay-resolved default; a name outside the paper built-in set
+    /// is refused as invalid params.
+    #[serde(default)]
+    pub audit_profile: Option<String>,
+    #[serde(default)]
+    pub library: Option<String>,
+}
+
+pub fn show_paper_metadata_report(
+    params: &Option<Value>,
+    ctx: &MethodContext,
+) -> Result<Value, RpcError> {
+    let p: PaperAuditReadParams = parse(params, "library.show_paper_metadata_report")?;
     let handle = resolve(ctx, p.library.as_deref())?;
-    let page =
-        reads::metadata::list_metadata(handle.ops(), p.limit.unwrap_or(0), p.offset.unwrap_or(0))
-            .map_err(ops_internal)?;
+    crate::audit_helpers::require_known_profile(
+        p.audit_profile.as_deref(),
+        bookrack_glean::audit::profile::ALL_BUILT_IN_NAMES,
+    )
+    .map_err(super::input_err)?;
+    // The overlay lives under the target library's data root, so the
+    // report is judged under the same rules `papers.metadata.reaudit`
+    // would write with — a read that graded differently from the write
+    // it recommends would be worse than no read.
+    let audit_profile =
+        crate::audit_helpers::load_paper_audit_profile(handle.cfg(), p.audit_profile.as_deref());
+    let audit_data = crate::audit_helpers::load_paper_audit_data(handle.cfg());
+    match reads::papers_metadata::show_paper_metadata_report(
+        handle.ops(),
+        p.intake_id,
+        &audit_data,
+        &audit_profile,
+    ) {
+        Ok(report) => to_value(&Some(report)),
+        Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
+        Err(e) => Err(ops_internal(e)),
+    }
+}
+
+pub fn show_paper_audit_trail(
+    params: &Option<Value>,
+    ctx: &MethodContext,
+) -> Result<Value, RpcError> {
+    let p: BookIdParams = parse(params, "library.show_paper_audit_trail")?;
+    let handle = resolve(ctx, p.library.as_deref())?;
+    match reads::papers_metadata::show_paper_audit_trail(handle.ops(), p.intake_id) {
+        Ok(entries) => to_value(&Some(entries)),
+        Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
+        Err(e) => Err(ops_internal(e)),
+    }
+}
+
+pub fn list_metadata(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let p: ListMetadataParams = parse(params, "library.list_metadata")?;
+    let handle = resolve(ctx, p.library.as_deref())?;
+    let filter = MetadataFilter::checked(
+        p.title_substring,
+        p.confidence_in.unwrap_or_default(),
+        p.review_status_in.unwrap_or_default(),
+    )
+    .map_err(|unknown| unknown_filter_value(&unknown))?;
+    let page = reads::metadata::list_metadata(
+        handle.ops(),
+        filter,
+        p.limit.unwrap_or(0),
+        p.offset.unwrap_or(0),
+    )
+    .map_err(ops_internal)?;
     to_value(&page)
 }
 
@@ -444,6 +534,40 @@ pub fn list_pending_reviews(
     let p: PageParams = parse(params, "library.list_pending_reviews")?;
     let handle = resolve(ctx, p.library.as_deref())?;
     let page = reads::metadata::list_pending_reviews(
+        handle.ops(),
+        p.limit.unwrap_or(0),
+        p.offset.unwrap_or(0),
+    )
+    .map_err(ops_internal)?;
+    to_value(&page)
+}
+
+pub fn list_paper_metadata(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let p: ListMetadataParams = parse(params, "library.list_paper_metadata")?;
+    let handle = resolve(ctx, p.library.as_deref())?;
+    let filter = MetadataFilter::checked(
+        p.title_substring,
+        p.confidence_in.unwrap_or_default(),
+        p.review_status_in.unwrap_or_default(),
+    )
+    .map_err(|unknown| unknown_filter_value(&unknown))?;
+    let page = reads::papers_metadata::list_paper_metadata(
+        handle.ops(),
+        filter,
+        p.limit.unwrap_or(0),
+        p.offset.unwrap_or(0),
+    )
+    .map_err(ops_internal)?;
+    to_value(&page)
+}
+
+pub fn list_paper_pending_reviews(
+    params: &Option<Value>,
+    ctx: &MethodContext,
+) -> Result<Value, RpcError> {
+    let p: PageParams = parse(params, "library.list_paper_pending_reviews")?;
+    let handle = resolve(ctx, p.library.as_deref())?;
+    let page = reads::papers_metadata::list_paper_pending_reviews(
         handle.ops(),
         p.limit.unwrap_or(0),
         p.offset.unwrap_or(0),
@@ -539,12 +663,17 @@ pub fn list_papers(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
 pub fn find_papers(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: FindPapersParams = parse(params, "library.find_papers")?;
     let handle = resolve(ctx, p.library.as_deref())?;
+    let statuses = parse_statuses(ItemKind::Paper, &p.statuses.unwrap_or_default())
+        .map_err(|unknown| unknown_filter_value(&unknown))?;
     let filter = PaperFilter {
         title_substring: p.title_substring,
         contributor_name: p.contributor_name,
+        contributor_role: p.contributor_role,
+        statuses,
         year: p.year,
         venue_substring: p.venue_substring,
         doi: p.doi,
+        language: p.language.unwrap_or_default(),
     };
     let page = reads::papers::find_papers(
         handle.ops(),
@@ -630,6 +759,22 @@ pub async fn vectors_status(
         .map_err(ops_internal)?;
     to_value(&status)
 }
+
+routed_params!(
+    LibraryOnlyParams,
+    BookIdParams,
+    ShowTocParams,
+    PageParams,
+    ListMetadataParams,
+    FindBooksParams,
+    FindPapersParams,
+    SearchParams,
+    SearchInBookParams,
+    SearchInPaperParams,
+    ReadContextParams,
+    ReadSpanParams,
+    PaperAuditReadParams,
+);
 
 #[cfg(test)]
 mod tests {

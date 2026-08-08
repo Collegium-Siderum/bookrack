@@ -13,10 +13,13 @@ use serde_json::Value as JsonValue;
 
 /// Registration record for a single reference book.
 ///
-/// `entry_count` and `parse_warnings` are not exposed: they are
-/// maintenance counters owned by `Refs` and updated as entries are
-/// upserted. `built_at` is the caller's responsibility (the distill
-/// run's ISO-8601 timestamp).
+/// `entry_count` and `parse_warnings` are not exposed. The columns
+/// exist on `reference_books` and no code path writes them, so both
+/// stay 0; a reader that wants the entry count counts the rows
+/// (`distill list` does). They are kept rather than dropped because
+/// the shape a rebuild verb gives this table is still open, and that
+/// is where a maintained counter would be decided. `built_at` is the
+/// caller's responsibility (the distill run's ISO-8601 timestamp).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewBook {
     pub book_slug: String,

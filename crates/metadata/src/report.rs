@@ -380,3 +380,33 @@ pub struct AuditInput<'a> {
     /// extracted.
     pub origins: FieldOrigins,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookrack_catalog::CONFIDENCE_LEVELS;
+
+    #[test]
+    fn every_confidence_level_the_audit_writes_is_one_a_filter_accepts() {
+        // The audit writes `node_publication_attrs.confidence`; the
+        // catalog publishes the vocabulary a filter validates caller
+        // input against. A level added on one side and not the other
+        // is either a value no filter can name or a filter value no
+        // row can carry.
+        let written: Vec<&str> = [Confidence::Low, Confidence::Medium, Confidence::High]
+            .into_iter()
+            .map(Confidence::as_str)
+            .collect();
+        for level in &written {
+            assert!(
+                CONFIDENCE_LEVELS.contains(level),
+                "the audit writes {level:?}, which no filter accepts"
+            );
+        }
+        assert_eq!(
+            written.len(),
+            CONFIDENCE_LEVELS.len(),
+            "a filter accepts a level the audit never writes: {CONFIDENCE_LEVELS:?}"
+        );
+    }
+}

@@ -18,9 +18,9 @@ use std::path::PathBuf;
 use bookrack_control_client::ControlError;
 use bookrack_core::{Problem, ProblemData};
 use bookrack_runtime::control::jsonrpc::{
-    BUSY, CONFIRMATION_REQUIRED, INTERNAL_ERROR, INVALID_LIBRARY, INVALID_PARAMS, INVALID_REQUEST,
-    JOB_NOT_FOUND, METHOD_NOT_FOUND, NOT_READY, PARSE_ERROR, PLAN_KIND_MISMATCH,
-    PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND,
+    BACKEND_UNAVAILABLE, BUSY, CONFIRMATION_REQUIRED, INTERNAL_ERROR, INVALID_LIBRARY,
+    INVALID_PARAMS, INVALID_REQUEST, JOB_NOT_FOUND, METHOD_NOT_FOUND, NOT_READY, PARSE_ERROR,
+    PLAN_KIND_MISMATCH, PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND, PLAN_TARGET_DRIFTED,
 };
 use serde_json::Value;
 
@@ -41,11 +41,25 @@ pub enum BookrackCliError {
 
     /// `bookrack run` found a lock pointing at a daemon that did not
     /// answer the health probe within the grace window.
+    ///
+    /// A daemon that stopped answering has not necessarily stopped
+    /// existing: a suspended process holds its `flock` and answers
+    /// nothing, which is exactly what this state looks like. The remedy
+    /// therefore starts by asking whether the process is there, and
+    /// reaches removing the lock only after that has been answered —
+    /// deleting it under a live daemon leaves two processes believing
+    /// they own the same session. The recorded pid is what makes the
+    /// first step something the operator can run.
     #[error(
-        "bookrack session lock at {path} is stale (no live daemon answered within 2s).\nRemove the lock file manually and re-run bookrack: rm {path}",
+        "bookrack session lock at {path} is stale (no live daemon answered within 2s).\n\
+         The daemon recorded there may still exist; check before removing the lock:\n\
+         \x20 1. is it alive?      kill -0 {pid}\n\
+         \x20 2. if it is, it may be suspended: kill -CONT {pid} to resume it, \
+         or 'bookrack quit' / kill {pid} to end it\n\
+         \x20 3. only once it is gone:  rm {path}",
         path = .path.display()
     )]
-    StaleSessionLock { path: PathBuf },
+    StaleSessionLock { path: PathBuf, pid: u32 },
 
     /// `bookrack run` could not read or interpret the session lock
     /// file. Carries the formatted upstream error verbatim so the
@@ -58,16 +72,6 @@ pub enum BookrackCliError {
     /// the reporter only needs to set a non-zero exit code.
     #[error("doctor: at least one check failed; see the table above")]
     DoctorUnhealthy,
-
-    /// The invoking shell's explicit library selection
-    /// (`--data-dir` / `--library` / `BOOKRACK_DATA_DIR`) disagrees
-    /// with the library a running daemon is serving, and the
-    /// requested subcommand routes through that daemon. Bail
-    /// instead of silently acting on the daemon's library.
-    #[error(
-        "running daemon serves {running}; refusing to act on {intent}.\nRun `bookrack quit` and start a new session with the desired --library/--data-dir to switch."
-    )]
-    LibraryMismatch { intent: String, running: String },
 
     /// Daemon rejected the call as a user-input failure: bad params,
     /// unknown library, unknown job/plan id, missing confirmation
@@ -87,6 +91,19 @@ pub enum BookrackCliError {
     /// caller can retry after a backoff.
     #[error("rpc error {code}: {message}")]
     RpcBusy { code: i32, message: String },
+
+    /// An external backend the daemon depends on is unusable — Ollama
+    /// did not answer, or reported itself overloaded. Retryable, so it
+    /// shares exit 4 with [`BookrackCliError::RpcBusy`], but stays its
+    /// own variant: `RpcBusy` says the *daemon* is busy, carries no
+    /// `data`, and would drop the hint that names the repair.
+    #[error("rpc error {code}: {message}")]
+    RpcBackendUnavailable {
+        code: i32,
+        message: String,
+        /// See [`BookrackCliError::RpcUserError`].
+        data: Option<Value>,
+    },
 
     /// Daemon raised an internal error, or returned a JSON-RPC
     /// protocol-layer code (`PARSE_ERROR`, `INVALID_REQUEST`) that
@@ -112,16 +129,23 @@ pub enum BookrackCliError {
         total: u32,
     },
 
-    /// `bookrack exec <method> <params>` was handed a params argument
-    /// that is not valid JSON. A usage mistake on the exec surface, so
-    /// it shares the exit-2 bucket with the daemon's own
+    /// `bookrack rpc call <method> <params>` was handed a params
+    /// argument that is not valid JSON. A usage mistake on the
+    /// escape-hatch surface, so it shares the exit-2 bucket with the
+    /// daemon's own
     /// `-32602 invalid params` rather than falling through to the
     /// exit-1 internal-error path.
-    #[error(
-        "`{method}`: params must be a valid JSON object, e.g. `{{}}` — or omit the \
-         argument entirely for tools that take no arguments. invalid JSON: {detail}"
-    )]
-    ExecParamsInvalid { method: String, detail: String },
+    #[error("`{method}`: params are not valid JSON")]
+    RpcParamsInvalid { method: String, detail: String },
+
+    /// `bookrack rpc call` was handed a name that cannot be a
+    /// control-plane method: every method is namespaced
+    /// (`<namespace>.<verb>`). Judged locally, before the call is
+    /// sent — the daemon would answer `-32601`, but only after a
+    /// round trip and without being able to say what shape was
+    /// expected. Shares the exit-2 user-error bucket.
+    #[error("`{method}` is not a control-plane method name")]
+    RpcMethodNotNamespaced { method: String },
 
     /// A locally-resolved command (one that acts on the registry or a
     /// data root without a daemon, e.g. `libraries default <name>`
@@ -144,12 +168,51 @@ pub enum BookrackCliError {
         hint: String,
     },
 
-    /// The daemon refused to start because an external backend it
-    /// needs is unusable — the check runs before any library is
-    /// opened, so nothing was half-started. Operator input, not a
-    /// bug: exit 2, and the reporter draws the three parts.
+    /// The invocation selects a data root by path — `--data-dir` or
+    /// `BOOKRACK_DATA_DIR` — on a command that routes through the
+    /// daemon, and the root cannot be turned into a name the daemon can
+    /// be asked for: no registry entry claims it, or its manifest
+    /// identity belongs to an entry pointing somewhere else. Operator
+    /// input, not a bug: exit 2, and the reporter draws the three
+    /// parts.
+    #[error("{}", .problem.summary)]
+    RootNotRoutable { problem: Problem },
+
+    /// The invocation names a library with `--library`, but the
+    /// command it names it on reports on the daemon itself — or on
+    /// every library at once — so the selection cannot be honoured.
+    /// Refusing is what keeps it from evaporating between the flag and
+    /// the wire. Operator input, not a bug: exit 2, and the reporter
+    /// draws the three parts.
+    #[error("{}", .problem.summary)]
+    LibraryNotRoutable { problem: Problem },
+
+    /// The daemon refused to start: an external backend it needs is
+    /// unusable, an endpoint it must serve on is taken, or its queue
+    /// document was written by a newer version. Each is decided before
+    /// the daemon announces itself, so nothing was half-started.
+    /// Operator input, not a bug: exit 2, and the reporter draws the
+    /// three parts.
     #[error("{}", .problem.summary)]
     PreflightRefused { problem: Problem },
+
+    /// A top-level verb was handed an item id it cannot act on: the
+    /// string does not parse as `<kind>:<id>`, or it parses into a
+    /// pipeline the verb has no read path for. Both are the operator's
+    /// input rather than a bug: exit 2, and the reporter draws the
+    /// three parts.
+    #[error("{}", .problem.summary)]
+    ItemIdUnusable { problem: Problem },
+
+    /// A top-level read verb was handed a filter only one catalog
+    /// carries, under a scope that reaches the other. Refused before
+    /// the call goes out, because the side that does not carry the
+    /// column would answer with a params error naming a field the
+    /// operator did not think they were addressing. Operator input
+    /// rather than a bug: exit 2, and the reporter draws the three
+    /// parts.
+    #[error("{}", .problem.summary)]
+    FilterOffItsSide { problem: Problem },
 
     /// `libraries detect <path>` determined the path is not a confirmed
     /// or probable bookrack data root — a plain not-a-library verdict or
@@ -168,15 +231,18 @@ impl BookrackCliError {
             Self::StaleSessionLock { .. } => 3,
             Self::SessionLockUnreadable { .. } => 1,
             Self::DoctorUnhealthy => 1,
-            Self::LibraryMismatch { .. } => 2,
             Self::RpcUserError { .. } => 2,
-            Self::RpcBusy { .. } => 4,
+            Self::RpcBusy { .. } | Self::RpcBackendUnavailable { .. } => 4,
             Self::RpcInternal { .. } => 1,
             Self::IngestPartialFailure { .. } => 5,
-            Self::ExecParamsInvalid { .. } => 2,
+            Self::RpcParamsInvalid { .. } | Self::RpcMethodNotNamespaced { .. } => 2,
             Self::LocalUserError { .. } => 2,
             Self::ConfirmationUnanswerable { .. } => 2,
-            Self::PreflightRefused { .. } => 2,
+            Self::LibraryNotRoutable { .. }
+            | Self::RootNotRoutable { .. }
+            | Self::PreflightRefused { .. }
+            | Self::ItemIdUnusable { .. }
+            | Self::FilterOffItsSide { .. } => 2,
             Self::DetectNegative(_) => 1,
         }
     }
@@ -204,12 +270,20 @@ impl BookrackCliError {
             | CONFIRMATION_REQUIRED
             | PLAN_NOT_FOUND
             | PLAN_KIND_MISMATCH
-            | PLAN_LIBRARY_MISMATCH => Self::RpcUserError {
+            | PLAN_LIBRARY_MISMATCH
+            | PLAN_TARGET_DRIFTED => Self::RpcUserError {
                 code,
                 message,
                 data,
             },
             BUSY | NOT_READY => Self::RpcBusy { code, message },
+            // Kept out of the `BUSY` arm: that one has no `data` slot,
+            // and the hint naming the repair is the whole point here.
+            BACKEND_UNAVAILABLE => Self::RpcBackendUnavailable {
+                code,
+                message,
+                data,
+            },
             PARSE_ERROR | INVALID_REQUEST | INTERNAL_ERROR => Self::RpcInternal {
                 code,
                 message,
@@ -232,8 +306,42 @@ impl BookrackCliError {
     /// unrenderable extra is not worth failing the report over.
     pub fn problem_data(&self) -> Option<ProblemData> {
         let data = match self {
-            Self::RpcUserError { data, .. } | Self::RpcInternal { data, .. } => data.as_ref()?,
-            Self::PreflightRefused { problem } => return Some(problem.data.clone()),
+            Self::RpcUserError { data, .. }
+            | Self::RpcInternal { data, .. }
+            | Self::RpcBackendUnavailable { data, .. } => data.as_ref()?,
+            Self::LibraryNotRoutable { problem }
+            | Self::RootNotRoutable { problem }
+            | Self::PreflightRefused { problem }
+            | Self::ItemIdUnusable { problem }
+            | Self::FilterOffItsSide { problem } => {
+                return Some(problem.data.clone());
+            }
+            Self::RpcParamsInvalid { detail, .. } => {
+                return Some(ProblemData {
+                    detail: Some(detail.clone()),
+                    hint: Some(
+                        "Pass a JSON object, e.g. `{}`, or omit the argument entirely to \
+                         send `null`."
+                            .to_string(),
+                    ),
+                    retryable: false,
+                });
+            }
+            Self::RpcMethodNotNamespaced { .. } => {
+                return Some(ProblemData {
+                    detail: Some(
+                        "A control-plane method name carries a namespace: \
+                         `<namespace>.<verb>`, for example `library.show_book`."
+                            .to_string(),
+                    ),
+                    hint: Some(
+                        "Run `bookrack rpc list` to see the method names the running \
+                         daemon answers."
+                            .to_string(),
+                    ),
+                    retryable: false,
+                });
+            }
             _ => return None,
         };
         serde_json::from_value(data.clone()).ok()
@@ -291,21 +399,54 @@ pub fn classify_eyre(err: &eyre::Report) -> Option<CliReportCause<'_>> {
 mod tests {
     use super::*;
 
+    /// The stale-lock remedy asks whether the process exists before it
+    /// says to delete anything. A suspended daemon holds its `flock`
+    /// and answers no probe, which is indistinguishable from a dead one
+    /// from here — so a message whose first instruction is `rm` tells
+    /// the operator to strand a live daemon's session.
+    #[test]
+    fn the_stale_lock_remedy_checks_for_the_process_before_removing_the_lock() {
+        let rendered = BookrackCliError::StaleSessionLock {
+            path: PathBuf::from("/run/bookrack.tty.lock"),
+            pid: 4242,
+        }
+        .to_string();
+        let removal = rendered
+            .find("rm /run/bookrack.tty.lock")
+            .expect("the message still says how to remove the lock");
+        for probe in ["kill -0 4242", "kill -CONT 4242", "bookrack quit"] {
+            let at = rendered
+                .find(probe)
+                .unwrap_or_else(|| panic!("no `{probe}` step in: {rendered}"));
+            assert!(
+                at < removal,
+                "`{probe}` must come before the removal step: {rendered}"
+            );
+        }
+    }
+
     #[test]
     fn exit_codes_match_documented_values() {
         assert_eq!(BookrackCliError::DaemonNotRunning.exit_code(), 2);
         assert_eq!(
             BookrackCliError::StaleSessionLock {
-                path: PathBuf::from("/x")
+                path: PathBuf::from("/x"),
+                pid: 4242,
             }
             .exit_code(),
             3
         );
         assert_eq!(BookrackCliError::DoctorUnhealthy.exit_code(), 1);
         assert_eq!(
-            BookrackCliError::LibraryMismatch {
-                intent: "library x".into(),
-                running: "library y".into(),
+            BookrackCliError::RootNotRoutable {
+                problem: bookrack_core::Problem {
+                    summary: "no registered library at \"/x\"".into(),
+                    data: ProblemData {
+                        detail: None,
+                        hint: None,
+                        retryable: false,
+                    },
+                },
             }
             .exit_code(),
             2
@@ -350,16 +491,33 @@ mod tests {
         );
     }
 
+    /// A three-part refusal renders its summary alone on the one-line
+    /// surface; the detail and hint are the reporter's to draw. A
+    /// `Display` that reached into `data` would print the same
+    /// sentence twice.
     #[test]
-    fn library_mismatch_message_points_at_quit_and_names_both_sides() {
-        let s = BookrackCliError::LibraryMismatch {
-            intent: "/asked".into(),
-            running: "/served (library a)".into(),
-        }
-        .to_string();
-        assert!(s.contains("/asked"));
-        assert!(s.contains("/served (library a)"));
-        assert!(s.contains("bookrack quit"));
+    fn a_root_refusal_renders_its_summary_and_carries_the_rest() {
+        let err = BookrackCliError::RootNotRoutable {
+            problem: bookrack_core::Problem {
+                summary: "no registered library at \"/asked\"".into(),
+                data: ProblemData {
+                    detail: Some("A running daemon serves libraries by name.".into()),
+                    hint: Some("Register it with `bookrack libraries register`.".into()),
+                    retryable: false,
+                },
+            },
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("/asked"), "{rendered}");
+        assert!(
+            !rendered.contains("libraries register"),
+            "the hint belongs to the reporter, not to the one-line form: {rendered}"
+        );
+        let data = err.problem_data().expect("the three parts survive");
+        assert_eq!(
+            data.hint.as_deref(),
+            Some("Register it with `bookrack libraries register`.")
+        );
     }
 
     #[test]
@@ -390,18 +548,56 @@ mod tests {
     }
 
     #[test]
-    fn exec_params_invalid_uses_exit_two_and_teaches_the_operator() {
-        let err = BookrackCliError::ExecParamsInvalid {
+    fn rpc_params_invalid_uses_exit_two_and_teaches_the_operator() {
+        let err = BookrackCliError::RpcParamsInvalid {
             method: "library.stats".into(),
             detail: "invalid number at line 1 column 2".into(),
         };
         assert_eq!(err.exit_code(), 2);
         assert!(!err.is_self_reported());
+        // The summary states the fact and nothing else; the evidence
+        // and the next step live in their own fields, so a terse
+        // renderer that drops them still prints a true line.
         let s = err.to_string();
         assert!(s.contains("library.stats"), "{s}");
-        assert!(s.contains("{}"), "{s}");
-        assert!(s.contains("omit"), "{s}");
-        assert!(s.contains("invalid number at line 1 column 2"), "{s}");
+        assert!(!s.contains("omit"), "the summary gives no advice: {s}");
+        assert!(
+            !s.contains("invalid number at line 1 column 2"),
+            "the summary carries no serde evidence: {s}"
+        );
+
+        let data = err.problem_data().expect("a usage failure is explained");
+        assert_eq!(
+            data.detail.as_deref(),
+            Some("invalid number at line 1 column 2"),
+        );
+        let hint = data.hint.expect("a usage failure says what to do next");
+        assert!(hint.contains("{}"), "{hint}");
+        assert!(hint.contains("omit"), "{hint}");
+        assert!(!data.retryable, "the same bad JSON fails again");
+    }
+
+    #[test]
+    fn rpc_method_not_namespaced_uses_exit_two_and_points_at_the_method_list() {
+        let err = BookrackCliError::RpcMethodNotNamespaced {
+            method: "info".into(),
+        };
+        assert_eq!(err.exit_code(), 2);
+        assert!(!err.is_self_reported());
+        let s = err.to_string();
+        assert!(s.contains("info"), "{s}");
+        assert!(!s.contains("rpc list"), "the summary gives no advice: {s}");
+
+        let data = err.problem_data().expect("a usage failure is explained");
+        assert!(
+            data.detail
+                .as_deref()
+                .is_some_and(|d| d.contains("namespace")),
+            "{data:?}"
+        );
+        let hint = data.hint.expect("a usage failure says what to do next");
+        assert!(hint.contains("rpc list"), "{hint}");
+        assert!(!data.retryable, "the same name fails again");
     }
 
     #[test]
@@ -415,6 +611,7 @@ mod tests {
             PLAN_NOT_FOUND,
             PLAN_KIND_MISMATCH,
             PLAN_LIBRARY_MISMATCH,
+            PLAN_TARGET_DRIFTED,
         ] {
             let err = BookrackCliError::from_rpc(code, "boom".into(), None);
             assert!(
@@ -425,6 +622,24 @@ mod tests {
         }
     }
 
+    /// `docs/control-plane.md` promises the plan block `-32013..-32016`
+    /// exits 2. `from_rpc` ends in a `_` arm, so a code added inside
+    /// that block and never registered would exit 1 in silence. Walk
+    /// the range rather than the constants: the range is what the
+    /// document commits to, and a constant list would be updated by the
+    /// same edit that forgets the arm.
+    #[test]
+    fn every_code_in_the_documented_plan_block_exits_two() {
+        for code in -32016..=-32013 {
+            let err = BookrackCliError::from_rpc(code, "boom".into(), None);
+            assert_eq!(
+                err.exit_code(),
+                2,
+                "code {code} is inside the documented plan block"
+            );
+        }
+    }
+
     #[test]
     fn from_rpc_classifies_busy_codes_as_exit_four() {
         for &code in &[BUSY, NOT_READY] {
@@ -432,6 +647,36 @@ mod tests {
             assert!(matches!(err, BookrackCliError::RpcBusy { .. }));
             assert_eq!(err.exit_code(), 4, "code {code}");
         }
+    }
+
+    /// An unusable external backend exits 4 like a busy daemon, but
+    /// through its own variant, because the `data` slot has to survive:
+    /// the hint that names the repair is what separates this from an
+    /// unexplained "try later".
+    #[test]
+    fn from_rpc_classifies_an_unavailable_backend_as_exit_four_and_keeps_its_data() {
+        let err = BookrackCliError::from_rpc(
+            BACKEND_UNAVAILABLE,
+            "could not reach Ollama".into(),
+            Some(serde_json::json!({
+                "detail": "The request failed before a response arrived.",
+                "hint": "Start Ollama, or point BOOKRACK_OLLAMA_URL at the host that runs it.",
+                "retryable": true,
+            })),
+        );
+        assert!(matches!(
+            err,
+            BookrackCliError::RpcBackendUnavailable { .. }
+        ));
+        assert_eq!(err.exit_code(), 4);
+        let data = err
+            .problem_data()
+            .expect("the hint must survive classification");
+        assert!(
+            data.hint.expect("hint").contains("BOOKRACK_OLLAMA_URL"),
+            "the repair must reach the operator",
+        );
+        assert!(data.retryable);
     }
 
     #[test]

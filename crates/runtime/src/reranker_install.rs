@@ -164,7 +164,8 @@ struct StagedDownload {
 }
 
 /// Emit a progress line at most once per this many downloaded bytes.
-const PROGRESS_STEP: u64 = 64 * 1024 * 1024;
+// setting: reranker.install_progress_step
+pub(crate) const PROGRESS_STEP: u64 = 64 * 1024 * 1024;
 
 impl StagedDownload {
     fn new_in(dir: &Path) -> Result<Self> {

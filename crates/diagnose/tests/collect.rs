@@ -109,6 +109,13 @@ fn collect_writes_a_bundle_with_every_collector_present() {
     };
     let report = collect(&fx.cfg, &opts).expect("collect");
     assert!(report.scrubbed, "scrub on by default");
+    // The sandbox exports a home directory, so every redaction has its
+    // input and the coverage list stays empty.
+    assert!(
+        report.scrub_gaps.is_empty(),
+        "unexpected scrub gaps: {:?}",
+        report.scrub_gaps
+    );
     assert!(report.files > 0);
     assert!(report.out_path.exists());
 
@@ -132,6 +139,22 @@ fn collect_writes_a_bundle_with_every_collector_present() {
         let bytes = read_archive_file(&report.out_path, needle);
         assert!(!bytes.is_empty(), "{needle} decodes to empty bytes");
     }
+    // The manifest states its own schema and the redaction coverage a
+    // reader of the bundle is entitled to trust.
+    let manifest_bytes = read_archive_file(&report.out_path, "manifest.json");
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    assert_eq!(
+        manifest["schema_version"],
+        bookrack_diagnose::manifest::MANIFEST_SCHEMA_VERSION
+    );
+    assert_eq!(manifest["scrubbed"], true);
+    assert_eq!(manifest["scrub_gaps"], serde_json::json!([]));
+    let env_txt = String::from_utf8(read_archive_file(&report.out_path, "env.txt")).unwrap();
+    assert!(
+        env_txt.contains("home redaction   : applied,"),
+        "env.txt must record the home-redaction source; got: {env_txt}"
+    );
+
     // The fixture seeds no vectors sidecar — the normal fresh/legacy
     // state — so the vectors collector must contribute nothing rather
     // than an empty or error file.
@@ -306,6 +329,15 @@ fn collect_honours_no_scrub_and_writes_to_an_explicit_out_path() {
     let manifest_bytes = read_archive_file(&out, "manifest.json");
     let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
     assert_eq!(manifest["scrubbed"], false);
+    // An unredacted bundle reports no partial coverage: `scrubbed:
+    // false` already says everything a reader needs.
+    assert_eq!(manifest["scrub_gaps"], serde_json::json!([]));
+    assert!(report.scrub_gaps.is_empty());
+    let env_txt = String::from_utf8(read_archive_file(&out, "env.txt")).unwrap();
+    assert!(
+        env_txt.contains("home redaction   : not applicable"),
+        "env.txt must not claim a redaction the run skipped; got: {env_txt}"
+    );
 }
 
 #[test]

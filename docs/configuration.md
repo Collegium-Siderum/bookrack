@@ -44,6 +44,32 @@ absent. A selection that does need the registry (`--library`, or
 falling through to a `default`) still fails, and it fails naming the
 registry rather than reporting that no library is configured.
 
+## Selecting a library on a running daemon
+
+The order above chooses a data root for a command that resolves one
+itself. A command that routes through a running daemon does not: the
+daemon already serves its libraries, and what travels with the call is
+a library *name*.
+
+- `--library <name>` travels as itself. A daemon mounts every
+  registered library, so any of them is reachable; a name the registry
+  does not hold is refused by the daemon as caller input.
+- `--data-dir <path>` and `BOOKRACK_DATA_DIR` name a place on disk,
+  which is not a name a daemon can be asked for, so the registry
+  translates: the entry whose manifest identity matches the root wins,
+  then the entry whose path matches.
+- A root **no entry claims** has no name to send. The daemon is asked
+  whether that is the root it serves; if it is, the call goes out
+  unnamed and lands there. If the daemon serves something else, the
+  command is refused and names both roots.
+- A root whose manifest identity belongs to an entry pointing
+  **somewhere else** is refused without asking any daemon: two
+  directories claim one library, and acting on either answers for the
+  other.
+
+An unreadable registry therefore does veto a routed command that
+selected by path, where it does not veto the same path on a local one.
+
 ## The library registry
 
 The registry maps short names to data roots and records the machine's
@@ -85,6 +111,12 @@ reinstall.
 
 ## Per-library settings: `config.toml`
 
+`libraries config` edits this file for one library. To see what all
+the layers together produce — this file, the environment, `.env`, the
+manifest, the registry, and the built-in defaults — use
+`bookrack config effective`, which reports the value each knob
+resolves to and the layer it came from.
+
 Operational knobs resolve `environment variable > <data_root>/config.toml
 > hardcoded default`. That chain covers this machine's operational
 preferences only; a library's embed model is not one of them — it is the
@@ -103,7 +135,8 @@ weak_threshold = 0.5    # cosine distance at or above which a hit is
 [reranker]
 url     = "http://localhost:8080"  # probe an operator-run server instead
                                    # of supervising one
-ctx     = 8192          # -c for the supervised server
+ctx     = 8192          # -c for the supervised server; 8192 is also the
+                        # default, sized to the rerank working set
 threads = 4             # --threads; unset leaves the server's own choice
 ```
 
@@ -141,14 +174,32 @@ and [Retiring the process-level keys from
 
 ## Environment knobs
 
+`bookrack config effective` reports what every knob below actually
+resolves to on this machine, which layer supplied it, and — for the
+knobs nothing is set for — every layer each one *can* be set at. It
+needs no daemon and works when the data root does not resolve, so it
+is also the surface for diagnosing a root that will not open.
+
+`bookrack config knobs` lists every knob this build has, without
+consulting the machine at all: each one's compiled-in default, the
+variable that moves it, every other layer it can be set at, its reach,
+and when it is read. Use it to find out what can be configured;
+`config effective` to find out what is.
+
 Every environment variable bookrack reads is documented, with its
 default, in [`.env.example`](../.env.example): the data-root and
 registry selectors, the Ollama endpoint, the embed-batch and search
 knobs, the PDFium library directory, the log filters, and the
 per-query ANN overrides. Copy that file to `.env` and fill in what you
-need.
+need. That file and `config knobs` cannot drift apart: a test compares
+the two in both directions, so a knob with no stanza and a stanza with
+no knob are both build failures.
 
 ### Process-level knobs with no `config.toml` key
+
+These are the rows `config effective` marks `per_call`: read afresh on
+every operation rather than snapshotted, so two calls in one process
+can legitimately differ.
 
 `BOOKRACK_VECTORS_BYPASS_ANN`, `BOOKRACK_VECTORS_NPROBES`, and
 `BOOKRACK_VECTORS_REFINE_FACTOR` are read from the environment and have
@@ -160,9 +211,36 @@ permanent home, and `libraries config set` would then warn that a
 library-level value is "overridden by the environment" for a value the
 library never had.
 
+Leaving the latter two unset is not the same as switching them off.
+`nprobes` and `refine_factor` fall through to the ANN settings the
+build stamped beside the vector store (`vectors_meta.json`), which is
+why `config knobs` reports no default for them and names that file as
+the rung under the variable. The values in it come from the index
+profile the library ran under when the index was built, so a profile
+edited afterwards does not move them until `index-profile apply`
+rebuilds; `index-profile current` shows both sides. With no ANN index
+present nothing decides them, and the search is exhaustive anyway.
+
 The same reasoning retired `mcp_addr` and `log_directive` from
 `config.toml`: a knob read before any data root is known does not
 belong to a data root.
+
+### The MCP address is taken before the daemon reports success
+
+`BOOKRACK_MCP_ADDR` (or `bookrack run --mcp-addr`) is bound during
+bring-up, alongside the session lock and the control socket. An address
+another process holds refuses the start in one sentence at exit 2,
+before any success line is printed — the daemon never comes up serving
+nothing, and no health surface reports an address it does not own.
+`--no-mcp` starts a session with no MCP surface at all; the control
+plane still works.
+
+Port `0` asks the operating system for any free port. The daemon then
+reports what it was given: `bookrack run` prints it, `bookrack status`
+shows it under `daemon.mcp`, and the session lock records it. The port
+differs on every start, so an agent client configured with a fixed
+`http://…/mcp` URL wants a fixed port; `:0` is for hosts where a
+collision matters more than a stable URL.
 
 ### When `.env` is read
 
@@ -178,6 +256,79 @@ does not. And embedding a bookrack crate as a *library* gets no `.env`
 at all — loading a file out of the caller's working directory is a
 binary's decision, not a library's, so an embedder configures itself
 through the real environment.
+
+Which of the two set a variable is not something a reader of the
+environment can tell, so the loader records it and `config effective`
+reports it: a value the file supplied is shown at the `dotenv` layer,
+sited at the file, and a line the real environment got to first is
+shown as a layer that offered a value and lost. It lost at load time,
+so it stays lost — a variable that is set but blank, or set to text the
+knob cannot parse, offers nothing itself and still does not hand the
+file's line its chance back. The value in that case comes from
+`config.toml` or the built-in default, and the table shows the file's
+line beneath it. This holds for the data root as well, on both halves:
+a `BOOKRACK_DATA_DIR` written into `.env` wins rung 3 of the ladder
+above and is credited to the file, and one the real environment already
+carried leaves the file's line reported as a layer that lost. The
+second holds whichever rung the root came from — including a
+`--data-dir` flag that stopped the walk above rung 3, which decides
+where the root comes from and not what the file says. What the file
+*supplied* is the one thing a losing rung cannot report: the loader
+records which keys it filled in, not the values, so a root the file
+supplied and a higher rung outranked is absent from the row.
+
+### How far `.env` reaches
+
+The file is applied to the real process environment, so a line in it is
+not confined to a private table of bookrack's own settings. Which
+names it may set is a fixed list:
+
+| Admitted | Why |
+|---|---|
+| `BOOKRACK_*` | this project's own surface, every name in the tables above |
+| `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, and each in lower case | the outbound HTTP stack reads them, in both spellings |
+| `SSL_CERT_FILE`, `SSL_CERT_DIR` | the certificate bundle, on Linux |
+| `NO_COLOR` | the CLI's own renderer reads it |
+| `RUST_BACKTRACE` | the panic hook prints its name as the remedy |
+
+Everything else is read out of the file and dropped without reaching
+the environment. The reason is where the file comes from: dotenv
+searches *upward from the working directory*, so an unrestricted file
+lets any directory a command is run from rewrite `HOME`, `TMPDIR`,
+`XDG_CONFIG_HOME`, or `CI` for that process — a `HOME` that changes
+which paths `bookrack diagnose` redacts, an `XDG_*` that moves the
+managed directories the registry and the downloaded reranker live in, a
+`CI` that turns a skipped dependency check into a hard failure. None of
+those is something a project's configuration file is written to do.
+
+The admitted foreign names are admitted because there is a surface with
+no other way to set them: a desktop shell started from a file manager
+inherits no `export`, and `.env` is then the only place a proxy or a
+certificate bundle can be named at all. The list is matched exactly, so
+`Http_Proxy` is not `HTTP_PROXY`.
+
+Proxies are the one place bookrack overrides the environment rather
+than reading it: a client aimed at `localhost` or a loopback address is
+built with proxies off, whichever variable names one and whichever case
+it is spelled in. A proxy is a hop on the way somewhere else, and a
+request for this machine handed to one arrives at the proxy host's own
+loopback — so a locally served model would otherwise report itself
+unreachable on any machine with a proxy exported. `NO_PROXY` stays the
+way to exempt anything further.
+
+None of these names is a knob, so no row in the table can report one.
+The report says so separately: `config effective` ends with the
+variables the file named outside the `BOOKRACK_` prefix, each marked
+`set` in this process, `eclipsed` because the environment already
+carried one, or `rejected` because the name is not admitted. A refused
+line is silent otherwise — the load happens before there is anywhere
+to log to — so this section is where a `.env` line that did nothing
+becomes visible instead of being mistaken for one that worked.
+
+Names only, never values: a foreign variable is as likely to carry a
+credential as it is to be `NO_COLOR`, and a report that prints one is a
+report an operator cannot paste into an issue. `--json` carries the
+same list as `dotenv_foreign`, alongside `dotenv_path`.
 
 `BOOKRACK_NO_DOTENV` turns the load off. It has to come from the real
 environment, since a value written inside `.env` is only read if the
@@ -205,6 +356,55 @@ silent skip, which is the outcome the script exists to prevent.
 Both are worth running. A difference between them is a test reading the
 machine rather than its fixtures. CI runs the scrubbed form as its own
 job.
+
+## Values compiled in: `config fixed`
+
+Not every number that shapes bookrack's behaviour is a knob. A page
+cap, a retry count, a timeout on an internal call: an operator cannot
+change one without a rebuild, and until now could not read one without
+opening the source either. `bookrack config fixed` prints them.
+
+```sh
+bookrack config fixed                  # the whole table
+bookrack config fixed | grep timeout   # or the part that explains a failure
+bookrack config fixed --json
+```
+
+Each row names the value, what it bounds, and the surface whose
+behaviour changes with it — so a response that stopped short or a call
+that died on a deadline can be checked against the number that decided
+it. Like `config knobs`, the command reads no data root, no daemon and
+no `.env`: the table describes the binary, and the same build prints
+the same table everywhere.
+
+The three configuration surfaces divide as:
+
+| Question | Command |
+|---|---|
+| What resolves on this machine, and from where? | `config effective` |
+| What can be set, and at which layer? | `config knobs` |
+| What is decided at build time? | `config fixed` |
+
+Being listed is not being settable, and the split is deliberate. Many
+of these values are ones an operator should not move even given the
+choice: raising the read-character cap overruns the context of the
+agent the passage is for. Discoverable and adjustable are separate
+properties, and only the first is claimed here.
+
+The inventory is checked by a gate rather than kept in step by hand,
+and the gate covers the whole workspace: every numeric constant in
+every crate carries a marker naming either the key it is registered
+under or the reason it is not a setting — a version stamp, a data-format
+invariant, a heuristic that would need recalibrating — and the markers
+and the registrations are compared in both directions. A registered
+value is rendered from the constant itself, so a row cannot report a
+number the code no longer holds, and one key can be claimed by only one
+crate, which turns the same value given two homes into a build failure
+instead of two rows that happen to agree.
+
+A value that is already a knob's compiled-in default is not listed
+twice: it stays in `config knobs`, where the rest of its chain is, and
+its constant carries a marker saying so.
 
 ## Retrieval profiles: `index-profile`
 
@@ -237,6 +437,12 @@ bookrack index-profile validate <name>      # static checks; non-zero on error
 bookrack index-profile current              # what a library runs under, vs its stamps
 bookrack index-profile diff <a> <b>         # two profiles, field by field
 ```
+
+A profile's `[ann]` and `[reranker]` fields are not knobs and have no
+priority chain of their own: they are settings a build bakes into an
+index, and `current` is where they are read back. The only ones a
+running system can still move are `nprobes` and `refine_factor`, through
+the two per-query variables above.
 
 `validate` enforces the product-quantization constraints, checks the
 cross-encoder reranker contract, and consults an offline model registry
@@ -314,3 +520,10 @@ shipped-default-plus-overlay merge:
 
 All overlays are user-supplied; bookrack falls through to the shipped
 defaults when an overlay is absent or omits a field.
+
+The directory is per data root, and so per library: a daemon serving
+several libraries reads each one's overlays from that library's own
+root, for both the queue jobs it runs and the `metadata.*` /
+`papers.metadata.*` re-audits it serves. A library with no
+`audit-rules/` of its own gets the shipped defaults — never another
+library's overlay.

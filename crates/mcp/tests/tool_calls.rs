@@ -23,7 +23,8 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use bookrack_catalog::{Catalog, NewIntake};
+use bookrack_catalog::{Catalog, IntakeStatus, NewIntake};
+use bookrack_config::Config;
 use bookrack_core::ItemKind;
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
@@ -70,19 +71,21 @@ impl Fixture {
         // Deliberately a CLI-surface Ops: the `source = "mcp"`
         // assertion can then only pass through the `call_tool`
         // caller override.
+        // The configuration names the same root the catalog above was
+        // opened under, so the handle's two halves are one library's.
+        let cfg = Arc::new(Config::new(root.clone(), "http://127.0.0.1:1".to_string()));
         let ops = Ops::<OllamaEmbedClient>::catalog_only(
-            root.join("corpus.db"),
-            catalog_db.clone(),
-            &root.join("lancedb"),
-            root.join("books"),
-            root.join("backup"),
+            cfg.corpus_db(),
+            cfg.catalog_db(),
+            &cfg.lancedb_dir(),
+            cfg.books_dir(),
+            cfg.backup_dir(),
             Caller::cli(),
         );
-        let registry = LibraryRegistry::single(LibraryHandle::new("fixture", ops));
+        let registry = LibraryRegistry::single(LibraryHandle::new("fixture", cfg, ops));
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
-        drop(listener);
 
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(4);
         let info_context = LibraryInfoContext {
@@ -104,7 +107,7 @@ impl Fixture {
                 LogStreamHandle::default(),
                 Arc::new(Mutex::new(QueueState::default())),
                 serve_tx,
-                &addr.to_string(),
+                listener,
                 shutdown_rx,
             )
             .await
@@ -129,6 +132,21 @@ impl Fixture {
             shutdown_tx,
             server,
         }
+    }
+
+    /// Register one book and drive it to `status`, returning its
+    /// intake id.
+    fn seed_book(&self, sha: &str, status: IntakeStatus) -> i64 {
+        let mut catalog = Catalog::open(&self.catalog_db).expect("open catalog");
+        let intake_id = catalog
+            .register_intake(ItemKind::Book, &NewIntake::new(sha).format("epub"))
+            .expect("register intake")
+            .into_intake()
+            .intake_id;
+        catalog
+            .set_intake_status(ItemKind::Book, intake_id, status)
+            .expect("set status");
+        intake_id
     }
 
     async fn connect(&self) -> RunningService<RoleClient, ()> {
@@ -309,6 +327,136 @@ async fn search_distinguishes_caller_input_from_environmental_faults() {
         .await
         .expect_err("search without a backend must fail");
     assert_eq!(rpc_error(err).code, ErrorCode::INTERNAL_ERROR);
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+#[tokio::test]
+async fn find_books_filters_on_the_requested_lifecycle_statuses() {
+    // Only an embedded book can be recalled by search. Without this
+    // filter a client cannot tell a book with nothing to find from one
+    // that has not reached the vector store yet.
+    let fx = Fixture::start().await;
+    let embedded = fx.seed_book("sha-embedded", IntakeStatus::Embedded);
+    let _pending = fx.seed_book("sha-pending", IntakeStatus::Pending);
+    let client = fx.connect().await;
+
+    let result = client
+        .call_tool(call(
+            "library.find_books",
+            serde_json::json!({ "statuses": ["embedded"] }),
+        ))
+        .await
+        .expect("find_books with a status filter");
+    let body = body_json(&result);
+    let ids: Vec<i64> = body["books"]
+        .as_array()
+        .expect("books array")
+        .iter()
+        .map(|b| b["intake_id"].as_i64().expect("intake_id"))
+        .collect();
+    assert_eq!(
+        ids,
+        vec![embedded],
+        "the status filter did not reach the catalog: {body}"
+    );
+    assert_eq!(
+        body["total"].as_u64(),
+        Some(1),
+        "`total` counts the unfiltered shelf: {body}"
+    );
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+#[tokio::test]
+async fn find_books_refuses_a_status_no_book_can_be_in() {
+    // Dropping an unrecognised status would answer with the whole
+    // shelf, which reads as a successful filter that matched
+    // everything.
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+
+    let err = client
+        .call_tool(call(
+            "library.find_books",
+            serde_json::json!({ "statuses": ["embeded"] }),
+        ))
+        .await
+        .expect_err("a misspelled status must be rejected");
+    let data = rpc_error(err);
+    assert_eq!(data.code, ErrorCode::INVALID_PARAMS, "{}", data.message);
+    assert!(
+        data.message.contains("embeded"),
+        "the message must name the rejected status: {}",
+        data.message
+    );
+    // The accepted set is the remedy, so it belongs in the hint rather
+    // than in the summary line.
+    let problem: bookrack_core::ProblemData =
+        serde_json::from_value(data.data.expect("data slot filled")).expect("ProblemData");
+    let hint = problem.hint.expect("a rejected status has a next step");
+    for status in IntakeStatus::ALL {
+        assert!(
+            hint.contains(status.as_str()),
+            "the hint must state the accepted set, missing {}: {hint}",
+            status.as_str(),
+        );
+    }
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+#[tokio::test]
+async fn list_metadata_refuses_a_confidence_grade_no_audit_writes() {
+    // The two vocabularies this listing filters on are closed sets. A
+    // value outside one is refused with what would have been accepted,
+    // rather than dropped into an unfiltered listing.
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+
+    let err = client
+        .call_tool(call(
+            "library.list_metadata",
+            serde_json::json!({ "confidence_in": ["quite-sure"] }),
+        ))
+        .await
+        .expect_err("a confidence grade outside the audit's set must be rejected");
+    let data = rpc_error(err);
+    assert_eq!(data.code, ErrorCode::INVALID_PARAMS, "{}", data.message);
+    assert!(
+        data.message.contains("quite-sure") && data.message.contains("confidence_in"),
+        "the refusal must name the parameter and the value: {}",
+        data.message
+    );
+    let problem: bookrack_core::ProblemData =
+        serde_json::from_value(data.data.expect("data slot filled")).expect("ProblemData");
+    let hint = problem.hint.expect("a refused value has a next step");
+    for level in bookrack_catalog::CONFIDENCE_LEVELS {
+        assert!(
+            hint.contains(level),
+            "the hint must state the accepted set, missing {level}: {hint}"
+        );
+    }
+
+    // The same shape holds for the review-status vocabulary.
+    let err = client
+        .call_tool(call(
+            "library.list_metadata",
+            serde_json::json!({ "review_status_in": ["maybe"] }),
+        ))
+        .await
+        .expect_err("a review status outside the set must be rejected");
+    let data = rpc_error(err);
+    assert_eq!(data.code, ErrorCode::INVALID_PARAMS, "{}", data.message);
+    assert!(
+        data.message.contains("review_status_in"),
+        "the refusal must name the parameter: {}",
+        data.message
+    );
 
     let _ = client.cancel().await;
     fx.stop().await;

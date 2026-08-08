@@ -9,12 +9,12 @@
 
 use std::path::PathBuf;
 
-use bookrack_catalog::{Catalog, NewIntake, NewPublicationAttrs};
+use bookrack_catalog::{Catalog, NewCategory, NewIntake, NewOverride, NewPublicationAttrs};
 use bookrack_core::ItemKind;
 use bookrack_embed::OllamaEmbedClient;
-use bookrack_ops::dto::{BookFilter, MAX_LIST_LIMIT};
+use bookrack_ops::dto::{BookFilter, MAX_LIST_LIMIT, MetadataFilter};
 use bookrack_ops::reads::books::find_books;
-use bookrack_ops::reads::metadata::list_metadata;
+use bookrack_ops::reads::metadata::{list_metadata, list_pending_reviews};
 use bookrack_ops::{Caller, Ops};
 use tempfile::TempDir;
 
@@ -66,6 +66,134 @@ impl Fixture {
             .expect("seed attrs");
         intake_id
     }
+
+    /// Register one book carrying a stored language alongside its
+    /// title, so a language filter has two rows to tell apart.
+    fn seed_book_in_language(&self, sha: &str, title: &str, language: &str) -> i64 {
+        let mut catalog = self.catalog();
+        let intake_id = catalog
+            .register_intake(ItemKind::Book, &NewIntake::new(sha))
+            .expect("register intake")
+            .into_intake()
+            .intake_id;
+        let mut attrs = NewPublicationAttrs::new(intake_id, ItemKind::Book);
+        attrs.title = Some(title.into());
+        attrs.language = Some(language.into());
+        catalog
+            .upsert_publication_attrs(&attrs)
+            .expect("seed attrs");
+        intake_id
+    }
+
+    fn tag(&self, intake_id: i64, category: &str) {
+        self.catalog()
+            .add_category(&NewCategory::new(
+                intake_id,
+                ItemKind::Book,
+                category,
+                "user",
+                "human",
+            ))
+            .expect("tag category");
+    }
+
+    /// Write the audit's row-level confidence for one book.
+    fn set_confidence(&self, intake_id: i64, confidence: &str) {
+        let catalog = self.catalog();
+        let mut attrs = NewPublicationAttrs::new(intake_id, ItemKind::Book);
+        attrs.title = catalog
+            .publication_attrs(intake_id, ItemKind::Book)
+            .expect("read attrs")
+            .and_then(|a| a.title);
+        attrs.confidence = Some(confidence.to_string());
+        catalog
+            .upsert_publication_attrs(&attrs)
+            .expect("write confidence");
+    }
+
+    /// Record the user's title override: `Some` replaces the stored
+    /// title, `None` is the explicit NULL that removes the field.
+    fn override_title(&self, intake_id: i64, title: Option<&str>) {
+        self.catalog()
+            .set_override(&NewOverride::new(
+                intake_id,
+                ItemKind::Book,
+                "title",
+                title.map(str::to_string),
+                "human",
+            ))
+            .expect("write title override");
+    }
+}
+
+/// Ids `find_books` returns for a title substring, with the page and
+/// the total held to the same set.
+fn books_titled(fx: &Fixture, needle: &str) -> Vec<i64> {
+    let filter = BookFilter {
+        title_substring: Some(needle.to_string()),
+        ..BookFilter::default()
+    };
+    let page = find_books(&fx.ops, filter, 100, 0).expect("find");
+    let ids: Vec<i64> = page.books.iter().map(|b| b.intake_id).collect();
+    assert_eq!(
+        page.total as usize,
+        ids.len(),
+        "`total` and the page disagree about how many books match"
+    );
+    ids
+}
+
+#[test]
+fn find_books_matches_the_title_it_reports() {
+    // The row carries the curated title, so filtering on the stored one
+    // answers with a book whose reported title does not contain the
+    // needle — and the operator who fixed the title cannot find the
+    // book by what they typed.
+    let fx = Fixture::build();
+    let book = fx.seed_book("sha-typo", "Handbook of Widgts");
+    fx.override_title(book, Some("Handbook of Widgets"));
+
+    assert_eq!(
+        books_titled(&fx, "Widgets"),
+        vec![book],
+        "the corrected title does not answer the filter"
+    );
+    assert_eq!(
+        books_titled(&fx, "Widgts"),
+        Vec::<i64>::new(),
+        "the replaced title still answers the filter"
+    );
+
+    let row = find_books(
+        &fx.ops,
+        BookFilter {
+            title_substring: Some("Widgets".to_string()),
+            ..BookFilter::default()
+        },
+        100,
+        0,
+    )
+    .expect("find")
+    .books
+    .remove(0);
+    assert_eq!(
+        row.title.as_deref(),
+        Some("Handbook of Widgets"),
+        "the filter and the projection read different layers"
+    );
+}
+
+#[test]
+fn find_books_does_not_match_a_title_the_user_removed() {
+    let fx = Fixture::build();
+    let book = fx.seed_book("sha-nulled", "Provisional Title");
+    fx.override_title(book, None);
+
+    assert_eq!(
+        books_titled(&fx, "Provisional"),
+        Vec::<i64>::new(),
+        "a title the user deleted still answers the filter"
+    );
 }
 
 #[test]
@@ -125,14 +253,198 @@ fn find_books_batched_enrichment_resolves_title_per_intake() {
 }
 
 #[test]
+fn find_books_caps_the_page_at_max_list_limit() {
+    // Seed one row past the clamp so the cap is observable: the page
+    // must stop at MAX_LIST_LIMIT and report the held-back row through
+    // `total` and `truncated`, and the next page must pick it up.
+    let fx = Fixture::build();
+    let over_the_clamp = MAX_LIST_LIMIT as usize + 1;
+    for n in 0..over_the_clamp {
+        let _ = fx.seed_book(&format!("sha-{n}"), &format!("Title {n}"));
+    }
+
+    let page = find_books(&fx.ops, BookFilter::default(), MAX_LIST_LIMIT + 100, 0).expect("find");
+    assert_eq!(page.total, over_the_clamp as u64);
+    assert_eq!(
+        page.books.len(),
+        MAX_LIST_LIMIT as usize,
+        "a request over the clamp must still return at most MAX_LIST_LIMIT rows"
+    );
+    assert!(
+        page.truncated,
+        "the clamped page does not cover the full total"
+    );
+
+    let tail = find_books(
+        &fx.ops,
+        BookFilter::default(),
+        MAX_LIST_LIMIT,
+        MAX_LIST_LIMIT,
+    )
+    .expect("find tail");
+    assert_eq!(tail.total, over_the_clamp as u64);
+    assert_eq!(tail.books.len(), 1, "the second page holds the tail row");
+    assert!(!tail.truncated, "the second page exhausts the filter");
+}
+
+#[test]
+fn find_books_narrows_the_page_to_the_requested_categories() {
+    // `BookFilter.categories` must reach the catalog's category join.
+    // A filter that is silently dropped returns every row instead of
+    // the tagged one — a wrong result set, not an error.
+    let fx = Fixture::build();
+    let philosophy = fx.seed_book("sha-philo", "Alpha");
+    let biography = fx.seed_book("sha-bio", "Bravo");
+    let untagged = fx.seed_book("sha-plain", "Charlie");
+    fx.tag(philosophy, "philosophy");
+    fx.tag(biography, "biography");
+
+    let filter = BookFilter {
+        categories: vec!["philosophy".to_string()],
+        ..BookFilter::default()
+    };
+    let page = find_books(&fx.ops, filter, 10, 0).expect("find");
+    assert_eq!(
+        page.books.iter().map(|b| b.intake_id).collect::<Vec<_>>(),
+        vec![philosophy],
+        "only the book tagged `philosophy` matches"
+    );
+    assert_eq!(
+        page.total, 1,
+        "`total` counts the filtered set, not the shelf"
+    );
+
+    // Several categories widen the match to their union.
+    let either = BookFilter {
+        categories: vec!["philosophy".to_string(), "biography".to_string()],
+        ..BookFilter::default()
+    };
+    let page = find_books(&fx.ops, either, 10, 0).expect("find either");
+    let mut ids: Vec<i64> = page.books.iter().map(|b| b.intake_id).collect();
+    ids.sort_unstable();
+    let mut expected = vec![philosophy, biography];
+    expected.sort_unstable();
+    assert_eq!(ids, expected);
+    assert!(
+        !ids.contains(&untagged),
+        "an untagged book must not answer a category filter"
+    );
+}
+
+#[test]
 fn list_metadata_reports_not_truncated_when_the_clamped_page_covers_everything() {
     let fx = Fixture::build();
     let _ = fx.seed_book("sha-a", "Alpha");
     let _ = fx.seed_book("sha-b", "Bravo");
 
     let request_over_max = MAX_LIST_LIMIT + 1;
-    let page = list_metadata(&fx.ops, request_over_max, 0).expect("list");
+    let page =
+        list_metadata(&fx.ops, MetadataFilter::default(), request_over_max, 0).expect("list");
     assert_eq!(page.total, 2);
     assert_eq!(page.rows.len(), 2);
     assert!(!page.truncated);
+}
+
+#[test]
+fn the_two_listings_read_opposite_layers_of_the_same_book() {
+    // One book, one correction, one needle: the registry answers the
+    // title it reports, the review listing answers the title
+    // extraction wrote. Both are right, and each is the only way to
+    // reach the book by the value its caller holds.
+    let fx = Fixture::build();
+    let book = fx.seed_book("sha-typo", "Handbook of Widgts");
+    fx.override_title(book, Some("Handbook of Widgets"));
+    // A second book the needle must never reach, so a filter that is
+    // dropped rather than applied fails instead of coincidentally
+    // returning the right single row.
+    let _other = fx.seed_book("sha-other", "Manual of Gadgets");
+
+    assert_eq!(
+        books_titled(&fx, "Widgts"),
+        Vec::<i64>::new(),
+        "the registry must not answer the value curation replaced"
+    );
+
+    let filter = MetadataFilter {
+        title_substring: Some("Widgts".to_string()),
+        ..MetadataFilter::default()
+    };
+    let page = list_metadata(&fx.ops, filter, 100, 0).expect("list");
+    let ids: Vec<i64> = page.rows.iter().map(|r| r.intake_id).collect();
+    assert_eq!(
+        ids,
+        vec![book],
+        "the review listing must answer the extracted title"
+    );
+
+    let row = &page.rows[0];
+    assert_eq!(
+        row.title_raw.as_deref(),
+        Some("Handbook of Widgts"),
+        "the row must carry what extraction wrote"
+    );
+    assert_eq!(
+        row.title.as_deref(),
+        Some("Handbook of Widgets"),
+        "the row must carry what the book is shown as"
+    );
+}
+
+#[test]
+fn the_review_queue_preset_matches_the_filter_that_spells_it_out() {
+    // `list_pending_reviews` is a preset over the same listing. Held
+    // to the equivalent explicit filter, so the preset cannot drift
+    // into asking a different question.
+    let fx = Fixture::build();
+    let low = fx.seed_book("sha-low", "Low");
+    let high = fx.seed_book("sha-high", "High");
+    fx.set_confidence(low, "low");
+    fx.set_confidence(high, "high");
+
+    let preset = list_pending_reviews(&fx.ops, 100, 0).expect("preset");
+    let spelled_out = list_metadata(
+        &fx.ops,
+        MetadataFilter {
+            confidence_in: vec!["low".to_string(), "medium".to_string()],
+            review_status_in: vec!["pending".to_string(), "acknowledged".to_string()],
+            ..MetadataFilter::default()
+        },
+        100,
+        0,
+    )
+    .expect("explicit");
+
+    let preset_ids: Vec<i64> = preset.rows.iter().map(|r| r.intake_id).collect();
+    let explicit_ids: Vec<i64> = spelled_out.rows.iter().map(|r| r.intake_id).collect();
+    assert_eq!(preset_ids, explicit_ids);
+    assert_eq!(
+        preset_ids,
+        vec![low],
+        "the queue must hold the low-confidence book and not the high-confidence one"
+    );
+}
+
+#[test]
+fn find_books_filters_on_language() {
+    let fx = Fixture::build();
+    let german = fx.seed_book_in_language("sha-de", "Widget Design", "de");
+    let latin = fx.seed_book_in_language("sha-la", "Widget Design", "la");
+
+    let page = find_books(
+        &fx.ops,
+        BookFilter {
+            language: vec!["de".to_string()],
+            ..BookFilter::default()
+        },
+        100,
+        0,
+    )
+    .expect("find");
+    let ids: Vec<i64> = page.books.iter().map(|b| b.intake_id).collect();
+
+    assert_eq!(
+        ids,
+        vec![german],
+        "the latin book ({latin}) must not answer a german filter"
+    );
 }

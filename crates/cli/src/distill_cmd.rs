@@ -10,8 +10,12 @@
 //!   shape mirrors `bookrack ingest`: a `book.toml` file, a directory
 //!   holding one, a source file with a co-located `book.toml`, or a
 //!   list of any of these. `--recursive` walks directories the same
-//!   way ingest does; `--dry-run` prints coverage without touching
-//!   the database.
+//!   way ingest does; `--dry-run` prints coverage without writing
+//!   `reference.db`. It still records that it ran in `catalog.db` —
+//!   a `pipeline_runs` row and a `book_distill_audit` row — but only
+//!   where doing so costs the library nothing: a catalog behind this
+//!   binary's revision, or absent, is left alone rather than migrated
+//!   or created for a preview's bookkeeping.
 //! * `bookrack distill verify <PATH>...` — re-run distill into a
 //!   throwaway in-memory map and diff the entry set against the
 //!   persistent one. Surfaces added / removed / changed `entry_key`s
@@ -23,7 +27,10 @@
 //! These commands open `Refs` directly rather than going through the
 //! daemon's control plane. SQLite's WAL mode makes the local handle
 //! safe alongside the daemon's reads; the daemon itself does not
-//! write to `reference.db` today.
+//! write to `reference.db` today. `build` takes the writable door,
+//! which migrates the database to the current revision; `verify` and
+//! `list` take the read-only one, which refuses a database at any
+//! other revision instead of migrating it on a read command's behalf.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -38,6 +45,7 @@ use bookrack_cli_grammar::{
 use bookrack_config::Config;
 use bookrack_distill::{BookToml, Coverage, EntryDraft, StageReport, load_pipeline};
 use bookrack_refs::{IndexKind, IndexSpec, NewBook, NewEntry, Refs};
+use bookrack_runtime::pipeline_run_helpers::{RunHandle, close_run, open_run};
 use eyre::{Context as _, Result, bail, eyre};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 
@@ -253,22 +261,35 @@ fn visit_book_tomls(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
 fn build(paths: &DistillPaths, args: DistillBuildArgs) -> Result<()> {
     let books = resolve_paths(&args.paths, args.recursive)?;
     let distill_run_id = chrono::Utc::now().to_rfc3339();
-    let pipeline_run_id = open_distill_pipeline_run(paths, &args)?;
-    let mut run_status = "ok";
+    let run = open_distill_pipeline_run(paths, &args)?;
     let outcome = run_books(
         paths,
         &books,
         &args,
         &distill_run_id,
-        pipeline_run_id.as_deref(),
+        run.as_ref().map(RunHandle::id),
     );
-    if outcome.is_err() {
-        run_status = "error";
-    }
-    if let Some(pipeline_run_id) = pipeline_run_id.as_deref() {
-        finalize_pipeline_run(paths, pipeline_run_id, run_status);
+    if let Some(run) = run {
+        finalize_pipeline_run(paths, run, outcome.is_ok(), args.dry_run);
     }
     outcome
+}
+
+/// Open `catalog.db` for one of a build's bookkeeping writes.
+///
+/// A dry run takes the door that refuses to migrate: it reads a
+/// directory and prints a report, and neither creating a database nor
+/// moving one forward to a revision an older build can no longer open
+/// is a price a preview may pay for a row about itself. `Ok(None)` is
+/// that refusal, and every caller degrades to the branch it already
+/// had for a catalog it could not open. A real build takes the
+/// writable door, which migrates.
+fn open_distill_catalog(path: &Path, dry_run: bool) -> bookrack_catalog::Result<Option<Catalog>> {
+    if dry_run {
+        Catalog::open_if_current(path)
+    } else {
+        Catalog::open(path).map(Some)
+    }
 }
 
 /// Open a `pipeline_runs` row for this distill build. Audit-write
@@ -278,12 +299,13 @@ fn build(paths: &DistillPaths, args: DistillBuildArgs) -> Result<()> {
 fn open_distill_pipeline_run(
     paths: &DistillPaths,
     args: &DistillBuildArgs,
-) -> Result<Option<String>> {
+) -> Result<Option<RunHandle>> {
     if args.no_audit_write {
         return Ok(None);
     }
-    let catalog = match Catalog::open(&paths.catalog_path) {
-        Ok(c) => c,
+    let catalog = match open_distill_catalog(&paths.catalog_path, args.dry_run) {
+        Ok(Some(c)) => c,
+        Ok(None) => return Ok(None),
         Err(err) => {
             tracing::warn!(
                 error = %err,
@@ -298,30 +320,42 @@ fn open_distill_pipeline_run(
         .parent()
         .and_then(|p| p.to_str())
         .map(str::to_string);
-    let id = catalog
-        .open_pipeline_run("distill_build", None, library_root.as_deref())
-        .context("open pipeline run")?;
-    Ok(Some(id))
+    Ok(open_run(
+        &catalog,
+        &paths.catalog_path,
+        "distill_build",
+        library_root.as_deref(),
+    ))
 }
 
 /// Close the run row and refresh its rollup. Best-effort: any error
 /// here logs and the build's exit status stays untouched.
-fn finalize_pipeline_run(paths: &DistillPaths, pipeline_run_id: &str, status: &str) {
-    let catalog = match Catalog::open(&paths.catalog_path) {
-        Ok(c) => c,
+///
+/// The catalog opens a second time here, so this leg can fail where the
+/// open leg succeeded. It abandons the run when it does, leaving the
+/// `running` row together with the liveness record that lets a repair
+/// close it. A catalog that stopped being one this call may write
+/// between the two opens takes the same branch.
+fn finalize_pipeline_run(paths: &DistillPaths, run: RunHandle, ok: bool, dry_run: bool) {
+    let catalog = match open_distill_catalog(&paths.catalog_path, dry_run) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            run.abandon();
+            return;
+        }
         Err(err) => {
             tracing::warn!(
                 error = %err,
                 path = %paths.catalog_path.display(),
                 "distill: failed to open catalog.db to close pipeline run",
             );
+            run.abandon();
             return;
         }
     };
-    if let Err(err) = catalog.close_pipeline_run(pipeline_run_id, status) {
-        tracing::warn!(error = %err, pipeline_run_id, "distill: close_pipeline_run failed");
-    }
-    if let Err(err) = catalog.compute_run_summary(pipeline_run_id) {
+    let pipeline_run_id = run.id().to_string();
+    close_run(&catalog, Some(run), ok);
+    if let Err(err) = catalog.compute_run_summary(&pipeline_run_id) {
         tracing::warn!(error = %err, pipeline_run_id, "distill: compute_run_summary failed");
     }
 }
@@ -364,6 +398,7 @@ fn run_books(
                 &finished_at,
                 &gate_outcome,
                 pipeline_run_id,
+                args.dry_run,
             );
         }
         if let Some(err) = gate_outcome.error {
@@ -450,6 +485,7 @@ fn write_distill_audit(
     finished_at: &chrono::DateTime<chrono::Utc>,
     gate: &GateOutcome,
     pipeline_run_id: Option<&str>,
+    dry_run: bool,
 ) {
     let header = NewBookDistillAudit {
         book_slug: book.slug.clone(),
@@ -484,8 +520,9 @@ fn write_distill_audit(
         })
         .collect();
 
-    let mut catalog = match Catalog::open(&paths.catalog_path) {
-        Ok(c) => c,
+    let mut catalog = match open_distill_catalog(&paths.catalog_path, dry_run) {
+        Ok(Some(c)) => c,
+        Ok(None) => return,
         Err(err) => {
             tracing::warn!(
                 error = %err,
@@ -751,13 +788,10 @@ fn draft_to_new_entry(draft: &EntryDraft) -> NewEntry {
 fn verify(paths: &DistillPaths, args: DistillVerifyArgs) -> Result<Vec<BookDiff>> {
     let books = resolve_paths(&args.paths, args.recursive)?;
 
-    // Guard the `reference.db` location at the entry point rather than
-    // letting `Refs::open` create an empty SQLite file at any path it
-    // is handed: a typo or wrong directory would otherwise produce a
-    // brand-new empty database, the diff would compare every drafted
-    // entry against an empty `reference_entries` table, and the report
-    // would mislabel the whole book as `added`. Mirrors the no-DB
-    // branch in `list`.
+    // Guard the `reference.db` location at the entry point so a typo or
+    // wrong directory is named as such: the read-only door below would
+    // refuse it too, but as a SQLite open failure that does not say
+    // which path was wrong. Mirrors the no-DB branch in `list`.
     if !paths.refs_path.exists() {
         bail!(
             "verify: reference.db not found at {}",
@@ -771,7 +805,10 @@ fn verify(paths: &DistillPaths, args: DistillVerifyArgs) -> Result<Vec<BookDiff>
         );
     }
 
-    let prod_refs = Refs::open(&paths.refs_path)
+    // Read-only: verify diffs the drafted entries against the live ones
+    // and mutates neither side, which includes not migrating a database
+    // a read command happened to open.
+    let prod_refs = Refs::open_read_only(&paths.refs_path)
         .with_context(|| format!("open {}", paths.refs_path.display()))?;
 
     let distill_run_id = chrono::Utc::now().to_rfc3339();
@@ -904,7 +941,7 @@ fn list(paths: &DistillPaths, _args: DistillListArgs) -> Result<()> {
         }
         return Ok(());
     }
-    let refs = Refs::open(&paths.refs_path)
+    let refs = Refs::open_read_only(&paths.refs_path)
         .with_context(|| format!("open {}", paths.refs_path.display()))?;
     let rows = read_list_rows(&refs)?;
 
@@ -1039,6 +1076,12 @@ stages = [
         book_dir
     }
 
+    /// Byte length of `path`, the coarsest observable that separates a
+    /// database a command only read from one it migrated.
+    fn file_len(path: &Path) -> u64 {
+        fs::metadata(path).expect("stat reference.db").len()
+    }
+
     fn make_paths(root: &Path) -> DistillPaths {
         DistillPaths {
             refs_path: bookrack_config::reference_db_in(root),
@@ -1088,6 +1131,43 @@ stages = [
             recursive: false,
             sample_lines,
         }
+    }
+
+    /// `list` and `verify` report the state of `reference.db`; they do
+    /// not repair it. A file that exists but has never been migrated
+    /// must come back as an error with the database untouched, not as
+    /// a silently migrated empty catalogue.
+    #[test]
+    fn list_and_verify_do_not_migrate_reference_db() {
+        let tmp = TempDir::new().expect("tmp");
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
+        let paths = make_paths(tmp.path());
+        if let Some(parent) = paths.refs_path.parent() {
+            fs::create_dir_all(parent).expect("mkdir refs parent");
+        }
+        fs::File::create(&paths.refs_path).expect("create an unmigrated reference.db");
+
+        let listed = list(&paths, DistillListArgs {});
+        assert!(
+            listed.is_err(),
+            "list must refuse an unmigrated reference.db",
+        );
+        assert_eq!(
+            file_len(&paths.refs_path),
+            0,
+            "list migrated reference.db instead of reporting it",
+        );
+
+        let verified = verify(&paths, verify_args(vec![book_dir]));
+        assert!(
+            verified.is_err(),
+            "verify must refuse an unmigrated reference.db",
+        );
+        assert_eq!(
+            file_len(&paths.refs_path),
+            0,
+            "verify migrated reference.db instead of reporting it",
+        );
     }
 
     #[test]
@@ -1193,9 +1273,12 @@ stages = [
         // A dry-run does not touch reference.db, but the audit row is
         // exactly the kind of observation a dry-run is meant to leave
         // behind: it records what the pipeline would have produced.
+        // It records into a catalog that is already there rather than
+        // bringing one into existence, so the fixture creates it.
         let tmp = TempDir::new().expect("tmp");
         let book_dir = seed_book_dir(tmp.path(), "tiny");
         let paths = make_paths(tmp.path());
+        drop(Catalog::open(&paths.catalog_path).expect("initialise catalog.db"));
 
         build(&paths, build_args(vec![book_dir], true, false)).expect("dry-run build");
 
@@ -1239,6 +1322,9 @@ stages = [
         let tmp = TempDir::new().expect("tmp");
         let book_dir = seed_book_dir(tmp.path(), "tiny");
         let paths = make_paths(tmp.path());
+        // The run under test is a dry one, which records into an
+        // existing catalog rather than creating one.
+        drop(Catalog::open(&paths.catalog_path).expect("initialise catalog.db"));
 
         let mut args = build_args(vec![book_dir], true, false);
         args.no_retention_check = true;

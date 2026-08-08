@@ -16,10 +16,11 @@
 //! [`get`]: LibraryRegistry::get
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use bookrack_catalog::Catalog;
+use bookrack_catalog::{Catalog, RunHandle, RunLock};
+use bookrack_config::Config;
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_glean::{GleanParams, GleanReport};
@@ -29,6 +30,7 @@ use eyre::WrapErr;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::Ops;
+use crate::OpsError;
 
 /// Why a registry operation failed.
 #[derive(Debug, thiserror::Error)]
@@ -53,15 +55,35 @@ pub enum RegistryError {
     #[error("the library registry is empty")]
     Empty,
 
+    /// A mount was attempted under a name the registry already carries.
+    #[error("a library named {name:?} is already mounted")]
+    AlreadyMounted {
+        /// The name the caller asked to mount.
+        name: String,
+    },
+
     /// The internal `RwLock` guarding the default-library name was
     /// poisoned. Indicates a bug — a panic while a writer held the lock
     /// — rather than a misuse path the caller can recover from.
     #[error("internal: default-library lock poisoned")]
     DefaultLockPoisoned,
+
+    /// The internal `RwLock` guarding the mounted-library map was
+    /// poisoned. Indicates a bug — a panic while a writer held the lock
+    /// — rather than a misuse path the caller can recover from.
+    #[error("internal: mounted-library lock poisoned")]
+    LibsLockPoisoned,
 }
 
 /// A fallible registry operation.
 pub type Result<T> = std::result::Result<T, RegistryError>;
+
+/// An opaque token whose drop marks a mounted library as no longer
+/// held. The registry never inspects it; a host that guards a data root
+/// while it serves the library puts that guard here, so releasing it is
+/// tied to the lifetime of the handle rather than to the moment the
+/// name leaves the map.
+pub type MountGuard = Arc<dyn Send + Sync>;
 
 /// One named library bound to the scheduler — its short name and the
 /// warm [`Ops`] that drives its catalog, corpus, and vector store.
@@ -75,34 +97,133 @@ pub type Result<T> = std::result::Result<T, RegistryError>;
 /// without contention; only [`LibraryHandle::ingest_book`] takes the
 /// lock, so two queue workers — current and hypothetical — never run
 /// the catalog/corpus write path in parallel against the same library.
+///
+/// The handle also carries an opaque [`MountGuard`]. The runtime puts
+/// the data root's exclusive lock there, so the lock outlives every
+/// in-flight caller: a handle resolved before an unmount keeps the root
+/// locked until the last clone of that handle is dropped.
 pub struct LibraryHandle<E: Embedder> {
     name: String,
+    cfg: Arc<Config>,
+    templates: JobTemplates,
     ops: Arc<Ops<E>>,
     ingest_lock: AsyncMutex<()>,
     glean_lock: AsyncMutex<()>,
+    _mount_guard: Option<MountGuard>,
+}
+
+/// The pipeline parameters a queue job for this library starts from.
+///
+/// Resolved once per library, from that library's own configuration and
+/// data root: the audit profile and data overlays under
+/// `<data_root>/audit-rules/`, the heading patterns, and the embedding
+/// model its index profile declares. A job then patches only what the
+/// job itself carries (`force`, `hold_for_metadata`, a named
+/// `audit_profile`).
+///
+/// They live on the handle because the alternative is a process-wide
+/// template, and a process serving several libraries has no single
+/// right answer for one: whichever library the daemon was started
+/// under would decide how every other library's books are ingested.
+#[derive(Debug, Clone, Default)]
+pub struct JobTemplates {
+    /// Book-side ingest parameters.
+    pub ingest: IngestParams,
+    /// Paper-side glean parameters.
+    pub glean: GleanParams,
 }
 
 impl<E: Embedder> LibraryHandle<E> {
-    /// Wrap an already-warm [`Ops`] under the given short name.
-    pub fn new(name: impl Into<String>, ops: Ops<E>) -> Arc<LibraryHandle<E>> {
-        LibraryHandle::from_arc(name, Arc::new(ops))
+    /// Wrap an already-warm [`Ops`] under the given short name, paired
+    /// with the configuration that library resolves to.
+    ///
+    /// Job templates default; a host that runs pipeline jobs builds
+    /// them from the library's own configuration and passes them to
+    /// [`LibraryHandle::with_templates`] instead.
+    pub fn new(name: impl Into<String>, cfg: Arc<Config>, ops: Ops<E>) -> Arc<LibraryHandle<E>> {
+        LibraryHandle::from_arc(name, cfg, Arc::new(ops))
+    }
+
+    /// [`LibraryHandle::new`] with the pipeline parameters queue jobs
+    /// for this library start from, and the opaque token that marks
+    /// this library as held for as long as the handle lives.
+    pub fn with_templates(
+        name: impl Into<String>,
+        cfg: Arc<Config>,
+        ops: Ops<E>,
+        templates: JobTemplates,
+        guard: Option<MountGuard>,
+    ) -> Arc<LibraryHandle<E>> {
+        let handle = LibraryHandle::from_arc(name, cfg, Arc::new(ops));
+        // `from_arc` owns the construction guard; rebuilding the value
+        // here would duplicate it, so take the checked handle apart
+        // through its own fields.
+        Arc::new(LibraryHandle {
+            name: handle.name.clone(),
+            cfg: Arc::clone(&handle.cfg),
+            templates,
+            ops: Arc::clone(&handle.ops),
+            ingest_lock: AsyncMutex::new(()),
+            glean_lock: AsyncMutex::new(()),
+            _mount_guard: guard,
+        })
     }
 
     /// Wrap a pre-shared [`Arc<Ops>`] under the given short name.
     /// Useful when the caller already holds a shared handle and wants to
     /// register it without bumping the strong-count more than necessary.
-    pub fn from_arc(name: impl Into<String>, ops: Arc<Ops<E>>) -> Arc<LibraryHandle<E>> {
+    ///
+    /// `cfg` must be the configuration `ops` was opened from: the two
+    /// travel together from here on, and a handler that resolves a
+    /// handle takes both from it. Pairing a library's stores with
+    /// another library's configuration is the defect this pairing
+    /// exists to make impossible, so a mismatched pair trips a
+    /// debug assertion at the construction site rather than surfacing
+    /// as a library served under the wrong declaration.
+    pub fn from_arc(
+        name: impl Into<String>,
+        cfg: Arc<Config>,
+        ops: Arc<Ops<E>>,
+    ) -> Arc<LibraryHandle<E>> {
+        debug_assert_eq!(
+            cfg.catalog_db(),
+            ops.catalog_db(),
+            "a library handle's configuration and stores must be the same library's",
+        );
         Arc::new(LibraryHandle {
             name: name.into(),
+            cfg,
+            templates: JobTemplates::default(),
             ops,
             ingest_lock: AsyncMutex::new(()),
             glean_lock: AsyncMutex::new(()),
+            _mount_guard: None,
         })
     }
 
     /// The short name this library is registered under.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The configuration this library resolves to.
+    ///
+    /// The one way a caller holding a handle reaches that library's
+    /// configuration: a `Config` taken from anywhere else is some
+    /// other library's under an eager multi-mount daemon.
+    pub fn cfg(&self) -> &Config {
+        &self.cfg
+    }
+
+    /// A new strong reference to this library's configuration, for a
+    /// caller that has to move it into a task or a template.
+    pub fn cfg_arc(&self) -> Arc<Config> {
+        Arc::clone(&self.cfg)
+    }
+
+    /// The pipeline parameters a job for this library starts from.
+    pub fn templates(&self) -> &JobTemplates {
+        &self.templates
     }
 
     /// The warm [`Ops`] driving this library's stores.
@@ -274,14 +395,14 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
         // ownership of its lifecycle; otherwise this handle opens one
         // on the paper catalog so the `node_paper_audit` row lands
         // with a run id instead of NULL.
-        let owned_run_id = if params.pipeline_run_id.is_none() {
-            open_glean_pipeline_run(&catalog, catalog_db.parent().and_then(Path::to_str))
+        let owned_run = if params.pipeline_run_id.is_none() {
+            open_glean_pipeline_run(&catalog, catalog_db)
         } else {
             None
         };
         let mut effective = params.clone();
-        if let Some(id) = owned_run_id.as_deref() {
-            effective.pipeline_run_id = Some(id.to_string());
+        if let Some(run) = owned_run.as_ref() {
+            effective.pipeline_run_id = Some(run.id().to_string());
         }
         let result = bookrack_glean::glean_paper(
             path,
@@ -294,8 +415,8 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
         )
         .await
         .context("registry-mediated glean");
-        if let Some(id) = owned_run_id.as_deref() {
-            finalize_glean_pipeline_run(&catalog, id, result.is_ok());
+        if let Some(run) = owned_run {
+            finalize_glean_pipeline_run(&catalog, run, result.is_ok());
         }
         let report = result?;
         if let Some(library) = self.ops.papers_library() {
@@ -321,31 +442,37 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
     /// cached extraction envelope and write only the `confidence` /
     /// `audit_verdict` rollup. Returns the new and previous verdict /
     /// confidence pair.
+    ///
+    /// The audit itself is
+    /// [`crate::writes::papers_metadata::reaudit_paper_metadata`];
+    /// what this wrapper adds is the glean lock, which serializes the
+    /// re-audit against an ingest writing the same catalog.
     pub async fn reaudit_paper(
         &self,
         intake_id: i64,
         profile: &bookrack_glean::audit::PaperAuditProfile,
         data: &bookrack_glean::audit::PaperAuditData,
-    ) -> eyre::Result<bookrack_glean::reaudit::ReauditOutcome> {
-        let catalog_db = self
-            .ops
-            .papers_catalog_db()
-            .ok_or_else(|| eyre::eyre!("library handle has no papers backend"))?;
+    ) -> std::result::Result<crate::dto::writes::ReauditOutcome, OpsError> {
         let _guard = self.glean_lock.lock().await;
-        let catalog = Catalog::open_with_backup(catalog_db, self.ops.backup_dir())
-            .context("open papers catalog for reaudit")?;
-        bookrack_glean::reaudit::reaudit_paper(&catalog, intake_id, profile, data)
-            .map_err(|e| eyre::Report::from(e).wrap_err("registry-mediated paper reaudit"))
+        crate::writes::papers_metadata::reaudit_paper_metadata(
+            &self.ops,
+            crate::dto::writes::PaperReauditRequest { intake_id },
+            data,
+            profile,
+        )
     }
 }
 
-/// One row of [`LibraryRegistry::list`] — the registered name and the
-/// vector dimension the library's store was opened at (when search is
-/// available on the handle).
+/// One row of [`LibraryRegistry::list`] — the registered name, the root
+/// the library was opened at, and the vector dimension its store was
+/// opened at (when search is available on the handle).
 #[derive(Debug, Clone)]
 pub struct LibrarySummary {
     /// The library's registered short name.
     pub name: String,
+    /// The data root this library's handle is open on, taken from the
+    /// handle's own configuration rather than re-resolved.
+    pub data_dir: PathBuf,
     /// The embedder dimension the vector store was opened at; `None`
     /// for catalog-only handles.
     pub dimension: Option<usize>,
@@ -368,8 +495,17 @@ pub struct LibrarySummary {
 /// server, and the queue worker. Routing in this phase is "look up
 /// handle, hand it back"; future scheduling logic — priority,
 /// throttling, preemption — lands here without touching callers.
+///
+/// The mounted set is itself mutable: [`mount`] and [`unmount`] add and
+/// remove libraries while the host runs. Every read hands back a cloned
+/// `Arc`, so a caller that resolved a handle keeps serving from it —
+/// and keeps that handle's [`MountGuard`] alive — after the name has
+/// left the map.
+///
+/// [`mount`]: LibraryRegistry::mount
+/// [`unmount`]: LibraryRegistry::unmount
 pub struct LibraryRegistry<E: Embedder> {
-    libs: HashMap<String, Arc<LibraryHandle<E>>>,
+    libs: RwLock<HashMap<String, Arc<LibraryHandle<E>>>>,
     default: RwLock<String>,
 }
 
@@ -397,7 +533,7 @@ impl<E: Embedder> LibraryRegistry<E> {
             });
         }
         Ok(Arc::new(LibraryRegistry {
-            libs,
+            libs: RwLock::new(libs),
             default: RwLock::new(default),
         }))
     }
@@ -413,7 +549,7 @@ impl<E: Embedder> LibraryRegistry<E> {
         let mut libs: HashMap<String, Arc<LibraryHandle<E>>> = HashMap::new();
         libs.insert(name.clone(), handle);
         Arc::new(LibraryRegistry {
-            libs,
+            libs: RwLock::new(libs),
             default: RwLock::new(name),
         })
     }
@@ -428,24 +564,33 @@ impl<E: Embedder> LibraryRegistry<E> {
                 .map_err(|_| RegistryError::DefaultLockPoisoned)?
                 .clone(),
         };
-        self.libs
-            .get(&key)
+        let libs = self
+            .libs
+            .read()
+            .map_err(|_| RegistryError::LibsLockPoisoned)?;
+        libs.get(&key)
             .cloned()
             .ok_or_else(|| RegistryError::LibraryUnknown {
                 name: key,
-                available: sorted_names(&self.libs),
+                available: sorted_names(&libs),
             })
     }
 
     /// Move the default-library pointer to `name`. Returns
-    /// [`RegistryError::LibraryUnknown`] if the name is not registered;
+    /// [`RegistryError::LibraryUnknown`] if the name is not mounted;
     /// no state is changed in that case.
     pub fn set_default(&self, name: &str) -> Result<()> {
-        if !self.libs.contains_key(name) {
-            return Err(RegistryError::LibraryUnknown {
-                name: name.to_string(),
-                available: sorted_names(&self.libs),
-            });
+        {
+            let libs = self
+                .libs
+                .read()
+                .map_err(|_| RegistryError::LibsLockPoisoned)?;
+            if !libs.contains_key(name) {
+                return Err(RegistryError::LibraryUnknown {
+                    name: name.to_string(),
+                    available: sorted_names(&libs),
+                });
+            }
         }
         let mut guard = self
             .default
@@ -453,6 +598,46 @@ impl<E: Embedder> LibraryRegistry<E> {
             .map_err(|_| RegistryError::DefaultLockPoisoned)?;
         *guard = name.to_string();
         Ok(())
+    }
+
+    /// Add a library to the mounted set. Returns
+    /// [`RegistryError::AlreadyMounted`] when the name is already
+    /// served; the caller's handle is dropped in that case and nothing
+    /// changes.
+    pub fn mount(&self, handle: Arc<LibraryHandle<E>>) -> Result<()> {
+        let mut libs = self
+            .libs
+            .write()
+            .map_err(|_| RegistryError::LibsLockPoisoned)?;
+        if libs.contains_key(handle.name()) {
+            return Err(RegistryError::AlreadyMounted {
+                name: handle.name().to_string(),
+            });
+        }
+        libs.insert(handle.name().to_string(), handle);
+        Ok(())
+    }
+
+    /// Remove a library from the mounted set and hand its handle back.
+    /// Returns [`RegistryError::LibraryUnknown`] when the name is not
+    /// mounted.
+    ///
+    /// Removal takes the name out of routing immediately, but the
+    /// library's [`MountGuard`] is released only when the last clone of
+    /// the returned handle is dropped — including clones a caller
+    /// resolved before this call. Dropping the return value is
+    /// therefore a request to release, not a guarantee that the release
+    /// has happened.
+    pub fn unmount(&self, name: &str) -> Result<Arc<LibraryHandle<E>>> {
+        let mut libs = self
+            .libs
+            .write()
+            .map_err(|_| RegistryError::LibsLockPoisoned)?;
+        libs.remove(name)
+            .ok_or_else(|| RegistryError::LibraryUnknown {
+                name: name.to_string(),
+                available: sorted_names(&libs),
+            })
     }
 
     /// Read the current default-library name.
@@ -471,11 +656,15 @@ impl<E: Embedder> LibraryRegistry<E> {
             .read()
             .map_err(|_| RegistryError::DefaultLockPoisoned)?
             .clone();
-        let mut out: Vec<LibrarySummary> = self
+        let libs = self
             .libs
+            .read()
+            .map_err(|_| RegistryError::LibsLockPoisoned)?;
+        let mut out: Vec<LibrarySummary> = libs
             .values()
             .map(|h| LibrarySummary {
                 name: h.name().to_string(),
+                data_dir: h.cfg().data_dir().to_path_buf(),
                 dimension: h.ops().dimension(),
                 is_default: h.name() == default,
             })
@@ -484,44 +673,65 @@ impl<E: Embedder> LibraryRegistry<E> {
         Ok(out)
     }
 
-    /// Number of registered libraries.
+    /// Number of mounted libraries. A poisoned map reads as zero, the
+    /// same shape a caller already handles for an empty registry.
     pub fn len(&self) -> usize {
-        self.libs.len()
+        self.libs.read().map(|libs| libs.len()).unwrap_or(0)
     }
 
-    /// Whether the registry holds no libraries. Always `false` for
-    /// registries built through [`from_handles`] or [`single`], which
-    /// reject empty inputs; kept for completeness so `clippy` does not
-    /// flag a bare `len`.
+    /// Whether the registry holds no libraries. `false` for registries
+    /// built through [`from_handles`] or [`single`], which reject empty
+    /// inputs, until every library is unmounted.
     ///
     /// [`from_handles`]: LibraryRegistry::from_handles
     /// [`single`]: LibraryRegistry::single
     pub fn is_empty(&self) -> bool {
-        self.libs.is_empty()
+        self.len() == 0
     }
 }
 
 /// Open a `pipeline_runs` row on the paper catalog for one glean
-/// invocation. Run lifecycle is best-effort: an open failure demotes
-/// to a warning and the glean proceeds with a NULL `pipeline_run_id`.
-fn open_glean_pipeline_run(catalog: &Catalog, library_root: Option<&str>) -> Option<String> {
-    match catalog.open_pipeline_run("glean", None, library_root) {
-        Ok(id) => Some(id),
+/// invocation and take the run's liveness record beside `catalog_db`.
+/// Run lifecycle is best-effort: an open failure demotes to a warning
+/// and the glean proceeds with a NULL `pipeline_run_id`, and a record
+/// that cannot be taken leaves the run registered but untracked.
+fn open_glean_pipeline_run(catalog: &Catalog, catalog_db: &Path) -> Option<RunHandle> {
+    let library_root = catalog_db.parent().and_then(Path::to_str);
+    let pipeline_run_id = match catalog.open_pipeline_run("glean", None, library_root) {
+        Ok(id) => id,
         Err(err) => {
             tracing::warn!(error = %err, "glean: open_pipeline_run failed");
-            None
+            return None;
         }
-    }
+    };
+    let lock = bookrack_catalog::run_locks_dir(catalog_db).and_then(|dir| {
+        RunLock::acquire(&dir, &pipeline_run_id)
+            .inspect_err(|err| {
+                tracing::warn!(
+                    error = %err,
+                    pipeline_run_id,
+                    "glean: run liveness record could not be taken",
+                );
+            })
+            .ok()
+    });
+    Some(RunHandle::new(pipeline_run_id, lock))
 }
 
 /// Close the run row and refresh its rollup. Best-effort: any error
-/// here logs and the glean outcome stays untouched.
-fn finalize_glean_pipeline_run(catalog: &Catalog, pipeline_run_id: &str, ok: bool) {
+/// here logs and the glean outcome stays untouched. A row that could
+/// not be stamped keeps its liveness record, so a repair can close it
+/// later instead of it reading as a live run forever.
+fn finalize_glean_pipeline_run(catalog: &Catalog, run: RunHandle, ok: bool) {
     let status = if ok { "ok" } else { "error" };
-    if let Err(err) = catalog.close_pipeline_run(pipeline_run_id, status) {
+    let pipeline_run_id = run.id().to_string();
+    if let Err(err) = catalog.close_pipeline_run(&pipeline_run_id, status) {
         tracing::warn!(error = %err, pipeline_run_id, "glean: close_pipeline_run failed");
+        run.abandon();
+        return;
     }
-    if let Err(err) = catalog.compute_run_summary(pipeline_run_id) {
+    drop(run);
+    if let Err(err) = catalog.compute_run_summary(&pipeline_run_id) {
         tracing::warn!(error = %err, pipeline_run_id, "glean: compute_run_summary failed");
     }
 }
@@ -539,6 +749,8 @@ mod tests {
     use bookrack_embed::{EmbedError, Embedder};
     use bookrack_glean::GleanParams;
     use bookrack_ingest::IngestParams;
+
+    use bookrack_config::Config;
 
     use crate::{Caller, Ops};
 
@@ -558,34 +770,83 @@ mod tests {
         }
     }
 
-    fn fake_ops() -> Ops<FakeEmbedder> {
+    /// A configuration over a root that is never opened. Paths are
+    /// derived from it rather than written out, so the stores below and
+    /// the handle's configuration name the same library.
+    fn fake_cfg(root: &str) -> std::sync::Arc<Config> {
+        std::sync::Arc::new(Config::new(
+            PathBuf::from(root),
+            "http://127.0.0.1:11434".to_string(),
+        ))
+    }
+
+    fn fake_ops(cfg: &Config) -> Ops<FakeEmbedder> {
         Ops::catalog_only(
-            PathBuf::from("/dev/null/corpus.db"),
-            PathBuf::from("/dev/null/catalog.db"),
-            Path::new("/dev/null/lancedb"),
-            PathBuf::from("/dev/null/books"),
-            PathBuf::from("/dev/null/backup"),
+            cfg.corpus_db(),
+            cfg.catalog_db(),
+            &cfg.lancedb_dir(),
+            cfg.books_dir(),
+            cfg.backup_dir(),
             Caller::cli(),
         )
     }
 
     fn handle(name: &str) -> std::sync::Arc<LibraryHandle<FakeEmbedder>> {
-        LibraryHandle::new(name, fake_ops())
+        let cfg = fake_cfg(&format!("/dev/null/{name}"));
+        let ops = fake_ops(&cfg);
+        LibraryHandle::new(name, cfg, ops)
+    }
+
+    /// The construction guard is the whole point of pairing a handle's
+    /// configuration with its stores: a pair naming two different
+    /// libraries is the defect this pairing exists to prevent, so it
+    /// must not be constructible in a debug build.
+    ///
+    /// `debug_assert` compiles out under `--release`; this test asserts
+    /// the guard, so it is a debug-profile test by nature.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "the same library's")]
+    fn a_handle_pairing_two_libraries_trips_the_construction_guard() {
+        let cfg = fake_cfg("/dev/null/alpha");
+        let ops = fake_ops(&fake_cfg("/dev/null/beta"));
+        let _ = LibraryHandle::new("alpha", cfg, ops);
+    }
+
+    /// A paper catalog on disk, since the run's liveness record lives
+    /// beside the database file.
+    fn glean_catalog(dir: &tempfile::TempDir) -> (PathBuf, bookrack_catalog::Catalog) {
+        let path = dir.path().join("papers_catalog.db");
+        let catalog = bookrack_catalog::Catalog::open(&path).expect("open catalog");
+        (path, catalog)
     }
 
     #[test]
     fn glean_run_lifecycle_opens_closes_and_rolls_up() {
-        let catalog = bookrack_catalog::Catalog::open_in_memory().expect("open catalog");
-        let id = super::open_glean_pipeline_run(&catalog, Some("lib-a")).expect("run id");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (path, catalog) = glean_catalog(&dir);
+        let locks = bookrack_catalog::run_locks_dir(&path).expect("lock dir");
+
+        let handle = super::open_glean_pipeline_run(&catalog, &path).expect("run id");
+        let id = handle.id().to_string();
         let run = catalog.pipeline_run(&id).expect("read").expect("present");
         assert_eq!(run.command, "glean");
         assert_eq!(run.status.as_deref(), Some("running"));
         assert!(run.finished_at.is_none());
+        // An in-flight run is not mistakable for an abandoned one.
+        assert_eq!(
+            bookrack_catalog::run_liveness(&locks, &id),
+            bookrack_catalog::RunLiveness::Held,
+        );
 
-        super::finalize_glean_pipeline_run(&catalog, &id, true);
+        super::finalize_glean_pipeline_run(&catalog, handle, true);
         let run = catalog.pipeline_run(&id).expect("read").expect("present");
         assert_eq!(run.status.as_deref(), Some("ok"));
         assert!(run.finished_at.is_some());
+        assert_eq!(
+            bookrack_catalog::run_liveness(&locks, &id),
+            bookrack_catalog::RunLiveness::NoRecord,
+        );
         let summary = catalog
             .pipeline_run_summary(&id)
             .expect("read")
@@ -596,9 +857,11 @@ mod tests {
 
     #[test]
     fn glean_run_finalize_records_error_status() {
-        let catalog = bookrack_catalog::Catalog::open_in_memory().expect("open catalog");
-        let id = super::open_glean_pipeline_run(&catalog, None).expect("run id");
-        super::finalize_glean_pipeline_run(&catalog, &id, false);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (path, catalog) = glean_catalog(&dir);
+        let handle = super::open_glean_pipeline_run(&catalog, &path).expect("run id");
+        let id = handle.id().to_string();
+        super::finalize_glean_pipeline_run(&catalog, handle, false);
         let run = catalog.pipeline_run(&id).expect("read").expect("present");
         assert_eq!(run.status.as_deref(), Some("error"));
     }
@@ -699,6 +962,125 @@ mod tests {
             msg.contains("no papers backend"),
             "expected the no-papers-backend guard message, got: {msg}",
         );
+    }
+
+    /// A mount guard that records its own release, so a test can tell
+    /// "the name left the map" apart from "the token was dropped".
+    struct DropFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// A guarded handle plus the flag its guard sets when released.
+    fn guarded_handle(
+        name: &str,
+    ) -> (
+        std::sync::Arc<LibraryHandle<FakeEmbedder>>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let cfg = fake_cfg(&format!("/dev/null/{name}"));
+        let ops = fake_ops(&cfg);
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard: super::MountGuard = std::sync::Arc::new(DropFlag(std::sync::Arc::clone(&flag)));
+        let handle = LibraryHandle::with_templates(
+            name,
+            cfg,
+            ops,
+            super::JobTemplates::default(),
+            Some(guard),
+        );
+        (handle, flag)
+    }
+
+    fn released(flag: &std::sync::atomic::AtomicBool) -> bool {
+        flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[test]
+    fn mount_adds_a_name_to_the_listing() {
+        let reg = LibraryRegistry::from_handles([handle("a")], "a").unwrap();
+        reg.mount(handle("b")).unwrap();
+        let names: Vec<String> = reg.list().unwrap().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(reg.get(Some("b")).unwrap().name(), "b");
+        assert_eq!(reg.len(), 2);
+    }
+
+    #[test]
+    fn unmount_removes_it_and_drops_the_guard() {
+        let (b, flag) = guarded_handle("b");
+        let reg = LibraryRegistry::from_handles([handle("a")], "a").unwrap();
+        reg.mount(b).unwrap();
+        assert!(
+            !released(&flag),
+            "the guard is held while the library is mounted"
+        );
+
+        let removed = reg.unmount("b").unwrap();
+        assert_eq!(removed.name(), "b");
+        assert!(
+            !released(&flag),
+            "the caller still holds the returned handle, so the guard is still held",
+        );
+        drop(removed);
+        assert!(
+            released(&flag),
+            "dropping the last handle releases the mount guard",
+        );
+        assert!(matches!(
+            reg.get(Some("b")),
+            Err(RegistryError::LibraryUnknown { .. })
+        ));
+    }
+
+    /// The whole point of hanging the guard on the handle rather than on
+    /// the map entry: a caller that resolved a handle before the unmount
+    /// keeps the library held until it is done with it.
+    #[test]
+    fn unmount_keeps_the_guard_alive_while_a_handle_clone_lives() {
+        let (b, flag) = guarded_handle("b");
+        let reg = LibraryRegistry::from_handles([handle("a")], "a").unwrap();
+        reg.mount(b).unwrap();
+
+        let in_flight = reg.get(Some("b")).unwrap();
+        let removed = reg.unmount("b").unwrap();
+        drop(removed);
+        assert!(
+            !released(&flag),
+            "an in-flight caller's clone must keep the guard alive past the unmount",
+        );
+        drop(in_flight);
+        assert!(
+            released(&flag),
+            "the guard is released when the last clone goes away",
+        );
+    }
+
+    #[test]
+    fn mount_refuses_a_name_already_mounted() {
+        let reg = LibraryRegistry::from_handles([handle("a")], "a").unwrap();
+        match reg.mount(handle("a")) {
+            Err(RegistryError::AlreadyMounted { name }) => assert_eq!(name, "a"),
+            Err(other) => panic!("expected AlreadyMounted, got {other:?}"),
+            Ok(()) => panic!("expected error, got Ok"),
+        }
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn unmount_refuses_a_name_that_is_not_mounted() {
+        let reg = LibraryRegistry::from_handles([handle("a")], "a").unwrap();
+        match reg.unmount("ghost") {
+            Err(RegistryError::LibraryUnknown { name, available }) => {
+                assert_eq!(name, "ghost");
+                assert_eq!(available, vec!["a".to_string()]);
+            }
+            Err(other) => panic!("expected LibraryUnknown, got {other:?}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
     }
 
     #[test]

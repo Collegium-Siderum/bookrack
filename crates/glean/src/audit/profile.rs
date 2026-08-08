@@ -17,6 +17,7 @@ pub const PROFILE_OVERLAY_FILE: &str = "paper_audit_profile.local.toml";
 
 /// Schema version the loader accepts. Bumped only when a renamed or
 /// removed field changes its on-disk meaning.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// In-repo default profile source, embedded at build time.

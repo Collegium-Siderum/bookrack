@@ -16,11 +16,13 @@ use bookrack_cli_grammar::{
     PapersAction, PapersCorpusAction, PapersDryrunArgs, PapersFindArgs, PapersIngestArgs,
     PapersListArgs, PapersRemoveArgs, PapersStampsAction, PapersVectorsAction,
 };
+use bookrack_core::ItemKind;
 use eyre::Result;
 use serde_json::{Value, json};
 
 use super::helpers;
 use super::helpers::DestructivePrompt;
+use super::listing::{page_footer, row_id};
 
 pub async fn run(
     action: PapersAction,
@@ -92,14 +94,18 @@ async fn metadata(
             intake_id,
             field,
             value,
+            reason,
             confirmed,
         } => {
-            let params = json!({
+            let mut params = json!({
                 "intake_id": intake_id,
                 "field": field,
                 "value": value,
                 "confirmed": confirmed,
             });
+            if let Some(reason) = reason {
+                params["reason"] = Value::String(reason);
+            }
             let response =
                 helpers::call_with_progress_value(client, "papers.metadata.set", params).await?;
             emit_metadata_outcome(
@@ -108,8 +114,15 @@ async fn metadata(
             );
             Ok(())
         }
-        PapersMetadataAction::Clear { intake_id, field } => {
-            let params = json!({ "intake_id": intake_id, "field": field });
+        PapersMetadataAction::Clear {
+            intake_id,
+            field,
+            reason,
+        } => {
+            let mut params = json!({ "intake_id": intake_id, "field": field });
+            if let Some(reason) = reason {
+                params["reason"] = Value::String(reason);
+            }
             let response =
                 helpers::call_with_progress_value(client, "papers.metadata.clear", params).await?;
             let removed = response
@@ -124,49 +137,56 @@ async fn metadata(
             emit_metadata_outcome(&response, sentence);
             Ok(())
         }
-        PapersMetadataAction::Void { intake_id, field } => {
-            let params = json!({ "intake_id": intake_id, "field": field });
+        PapersMetadataAction::Void {
+            intake_id,
+            field,
+            reason,
+        } => {
+            let mut params = json!({ "intake_id": intake_id, "field": field });
+            if let Some(reason) = reason {
+                params["reason"] = Value::String(reason);
+            }
             let response =
                 helpers::call_with_progress_value(client, "papers.metadata.void", params).await?;
             emit_metadata_outcome(&response, format!("Voided {field} on paper {intake_id}."));
             Ok(())
         }
-        PapersMetadataAction::Ack { intake_id, notes } => {
+        PapersMetadataAction::Ack { intake_id, reason } => {
             review_status_call(
                 client,
                 "papers.metadata.ack",
                 intake_id,
-                notes,
+                Some(reason),
                 "acknowledged",
             )
             .await
         }
-        PapersMetadataAction::Approve { intake_id, notes } => {
+        PapersMetadataAction::Approve { intake_id, reason } => {
             review_status_call(
                 client,
                 "papers.metadata.approve",
                 intake_id,
-                notes,
+                reason,
                 "approved",
             )
             .await
         }
-        PapersMetadataAction::Reject { intake_id, notes } => {
+        PapersMetadataAction::Reject { intake_id, reason } => {
             review_status_call(
                 client,
                 "papers.metadata.reject",
                 intake_id,
-                notes,
+                Some(reason),
                 "rejected",
             )
             .await
         }
-        PapersMetadataAction::Reopen { intake_id, notes } => {
+        PapersMetadataAction::Reopen { intake_id, reason } => {
             review_status_call(
                 client,
                 "papers.metadata.reopen",
                 intake_id,
-                notes,
+                reason,
                 "pending",
             )
             .await
@@ -178,6 +198,7 @@ async fn metadata(
             family,
             given,
             orcid,
+            reason,
         } => {
             let mut params = json!({
                 "intake_id": intake_id,
@@ -193,6 +214,9 @@ async fn metadata(
             if let Some(orcid) = orcid {
                 params["orcid"] = Value::String(orcid);
             }
+            if let Some(reason) = reason {
+                params["reason"] = Value::String(reason);
+            }
             let response = helpers::call_with_progress_value(
                 client,
                 "papers.metadata.contributor_add",
@@ -207,8 +231,18 @@ async fn metadata(
             emit_metadata_outcome(&response, sentence);
             Ok(())
         }
-        PapersMetadataAction::ContributorRemove { contributor_id } => {
-            let params = json!({ "contributor_id": contributor_id });
+        PapersMetadataAction::ContributorRemove {
+            intake_id,
+            contributor_id,
+            reason,
+        } => {
+            let mut params = json!({
+                "intake_id": intake_id,
+                "contributor_id": contributor_id,
+            });
+            if let Some(reason) = reason {
+                params["reason"] = Value::String(reason);
+            }
             let response = helpers::call_with_progress_value(
                 client,
                 "papers.metadata.contributor_remove",
@@ -234,12 +268,12 @@ async fn review_status_call(
     client: std::sync::Arc<bookrack_control_client::ControlClient>,
     method: &str,
     intake_id: i64,
-    notes: Option<String>,
+    reason: Option<String>,
     pretty_status: &str,
 ) -> Result<()> {
     let mut params = json!({ "intake_id": intake_id });
-    if let Some(notes) = notes {
-        params["notes"] = Value::String(notes);
+    if let Some(reason) = reason {
+        params["reason"] = Value::String(reason);
     }
     let response = helpers::call_with_progress_value(client, method, params).await?;
     emit_metadata_outcome(
@@ -509,15 +543,25 @@ async fn list(args: PapersListArgs, runtime_dir: Option<PathBuf>) -> Result<()> 
 
 async fn find(args: PapersFindArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
     let client = helpers::connect(runtime_dir.as_deref()).await?;
-    let params = json!({
+    let mut params = json!({
         "title_substring": args.title,
         "contributor_name": args.contributor,
+        "contributor_role": args.contributor_role,
         "year": args.year,
         "venue_substring": args.venue,
         "doi": args.doi,
         "limit": args.limit,
         "offset": args.offset,
     });
+    // Sent only when passed: the method reads an absent list and an
+    // empty one the same way, and an empty array on the wire says the
+    // operator asked for a filter they did not.
+    if !args.language.is_empty() {
+        params["language"] = Value::from(args.language.clone());
+    }
+    if !args.status.is_empty() {
+        params["statuses"] = Value::from(args.status.clone());
+    }
     let response = helpers::dispatch(&client, "library.find_papers", params).await?;
     emit_paper_list(&response);
     Ok(())
@@ -543,26 +587,36 @@ async fn show(intake_id: i64, runtime_dir: Option<PathBuf>) -> Result<()> {
 }
 
 fn emit_paper_list(response: &Value) {
-    if ctx().is_json() {
-        helpers::print_value(response);
-        return;
+    if let Some(text) = paper_list_output(ctx().output(), response) {
+        println!("{text}");
     }
-    if ctx().is_quiet() {
-        return;
-    }
-    render_paper_list(response);
 }
 
-fn render_paper_list(response: &Value) {
-    println!("{}", format_paper_list(response));
+/// What one listing page prints, by output mode.
+///
+/// `--json` forwards the control-plane response verbatim. The typed id
+/// a row prints is composed by the human renderer alone, so a script
+/// reading the payload still sees the wire shape the method documents:
+/// an `intake_id` beside a `kind`.
+pub(super) fn paper_list_output(mode: OutputMode, response: &Value) -> Option<String> {
+    match mode {
+        OutputMode::Quiet => None,
+        OutputMode::Json => {
+            Some(serde_json::to_string_pretty(response).unwrap_or_else(|_| response.to_string()))
+        }
+        OutputMode::Human => Some(format_paper_list(response)),
+    }
 }
 
 /// Renders one `library.list_papers` / `library.find_papers` page as
 /// a table of `id`, `title`, `author`, `year`, and `container`, each
-/// cell cut to a fixed width. A page that covers less than the whole
-/// result set carries a trailing count line; an empty page is one
-/// sentence and no table.
-fn format_paper_list(response: &Value) -> String {
+/// cell cut to a fixed width. A row whose title the identify pass did
+/// not extract shows its `source_filename` in the title cell instead,
+/// so the row is still identifiable without widening the table; the
+/// cell reads `-` only when neither is recorded. A page that covers
+/// less than the whole result set carries a trailing count line; an
+/// empty page is one sentence and no table.
+pub(super) fn format_paper_list(response: &Value) -> String {
     let papers = response.get("papers").and_then(Value::as_array);
     let rows = match papers {
         Some(arr) if !arr.is_empty() => arr,
@@ -573,11 +627,13 @@ fn format_paper_list(response: &Value) -> String {
         let id = row
             .get("intake_id")
             .and_then(Value::as_i64)
-            .map(|i| i.to_string())
+            .and_then(|i| row_id(ItemKind::Paper, i))
+            .map(|id| id.to_string())
             .unwrap_or_else(|| "-".to_string());
         let title = row
             .get("title")
             .and_then(Value::as_str)
+            .or_else(|| row.get("source_filename").and_then(Value::as_str))
             .map(|s| truncate_to(s, 48))
             .unwrap_or_else(|| "-".to_string());
         let author = row
@@ -598,21 +654,9 @@ fn format_paper_list(response: &Value) -> String {
         table.push_row([id, title, author, year, container]);
     }
     let mut out = table.render();
-    let truncated = response
-        .get("truncated")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    // A response that carries no total says nothing about the size of
-    // the result set, so neither does the footer.
-    if let Some(total) = response.get("total").and_then(Value::as_u64) {
-        if truncated {
-            out.push_str(&format!(
-                "\n(showing {} of {total}; pass --limit to see more)",
-                rows.len()
-            ));
-        } else if total as usize != rows.len() {
-            out.push_str(&format!("\n({} of {total})", rows.len()));
-        }
+    if let Some(footer) = page_footer(response, rows.len()) {
+        out.push('\n');
+        out.push_str(&footer);
     }
     out
 }
@@ -629,15 +673,19 @@ fn render_paper_detail(response: &Value) {
 const BIBLIO_KEYS_ROWED_SEPARATELY: [&str; 2] = ["abstract_text", "title"];
 
 /// Renders one `library.show_paper` response as a key-value card:
-/// the intake identity, the audit verdict and the profile that
-/// produced it, the effective biblio section, contributor and
-/// override counts, and the first line of the abstract.
-fn format_paper_detail(response: &Value) -> String {
+/// the intake identity, the basename of the ingested file, the audit
+/// verdict and the profile that produced it, the effective biblio
+/// section, contributor and override counts, and the first line of the
+/// abstract. The rest of the source-side record — the recorded path,
+/// the hash, the intake timestamp, the page count and the byte size —
+/// stays in the `--json` payload: the card names the file, it does not
+/// reproduce the intake row.
+pub(super) fn format_paper_detail(response: &Value) -> String {
     let mut t = KvTable::new();
     if let Some(id) = response.get("intake_id").and_then(Value::as_i64) {
         t.push("intake_id", id.to_string());
     }
-    for key in ["title", "status", "format"] {
+    for key in ["title", "status", "format", "source_filename"] {
         if let Some(val) = response.get(key).and_then(Value::as_str) {
             t.push(key, val);
         }
@@ -736,6 +784,12 @@ mod tests {
             "contributors": [{ "name": "Rivera" }],
             "overrides": [],
             "abstract_text": ABSTRACT,
+            "source_path": "inbox/2020/tight-bounds.pdf",
+            "source_filename": "tight-bounds.pdf",
+            "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "intake_at": "2026-01-01T00:00:00Z",
+            "page_count": 14,
+            "byte_size": 402_137,
         })
     }
 
@@ -948,6 +1002,62 @@ mod tests {
             card.matches("On Tight Bounds").count(),
             1,
             "the title is rendered more than once:\n{card}"
+        );
+    }
+
+    #[test]
+    fn detail_card_names_the_source_file_and_nothing_else_of_the_intake_row() {
+        let card = format_paper_detail(&detail_response());
+        assert!(
+            card.contains("tight-bounds.pdf"),
+            "the card must name the file the paper was ingested from:\n{card}"
+        );
+        for needle in [
+            "inbox/2020/tight-bounds.pdf",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "2026-01-01T00:00:00Z",
+            "402137",
+        ] {
+            assert!(
+                !card.contains(needle),
+                "{needle:?} belongs to the --json payload, not the card:\n{card}"
+            );
+        }
+    }
+
+    #[test]
+    fn detail_card_omits_the_source_row_when_no_path_was_recorded() {
+        let mut response = detail_response();
+        response["source_filename"] = Value::Null;
+        let card = format_paper_detail(&response);
+        assert!(
+            !card.contains("source_filename"),
+            "an intake with no recorded path has no source row to render:\n{card}"
+        );
+    }
+
+    #[test]
+    fn a_list_row_without_a_title_falls_back_to_its_source_filename() {
+        let papers = json!([{ "intake_id": 12, "source_filename": "untitled-scan.pdf" }]);
+        let table = format_paper_list(&list_response(papers, Some(1), false));
+        assert!(
+            table.contains("untitled-scan.pdf"),
+            "a titleless row must name its source file:\n{table}"
+        );
+    }
+
+    #[test]
+    fn a_titled_list_row_keeps_its_title() {
+        let papers = json!([{
+            "intake_id": 12,
+            "title": "On Tight Bounds",
+            "source_filename": "untitled-scan.pdf",
+        }]);
+        let table = format_paper_list(&list_response(papers, Some(1), false));
+        assert!(table.contains("On Tight Bounds"), "in:\n{table}");
+        assert!(
+            !table.contains("untitled-scan.pdf"),
+            "the filename is a fallback, not a second title cell:\n{table}"
         );
     }
 

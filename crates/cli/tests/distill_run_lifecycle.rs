@@ -204,6 +204,10 @@ async fn failed_build_closes_the_run_with_error_status() {
 async fn dry_run_still_registers_the_run_and_stamps_the_audit_row() {
     let tmp = TempDir::new().expect("tmp");
     let book_dir = seed_book_dir(tmp.path(), "tiny");
+    // A preview records into a catalog that is already there. It does
+    // not bring one into existence for the sake of its own bookkeeping,
+    // so the fixture creates it rather than letting the dry run do it.
+    drop(Catalog::open(&catalog_path(tmp.path())).expect("initialise catalog.db"));
 
     let mut args = build_args(vec![book_dir]);
     args.dry_run = true;
@@ -226,6 +230,63 @@ async fn dry_run_still_registers_the_run_and_stamps_the_audit_row() {
     assert_eq!(
         rows[0].pipeline_run_id.as_deref(),
         Some(run.pipeline_run_id.as_str()),
+    );
+}
+
+/// A `catalog.db` the preview would have to migrate before it could
+/// record anything is left without a schema.
+///
+/// The fixture is an empty file, which reads as schema revision 0 and
+/// so takes the same verdict an outdated database takes — without
+/// pinning a historical schema into the test. The witness is that a
+/// read-only open still finds no tables: a migrated file opens cleanly
+/// there. Migration is forward-only and this door takes no backup, so
+/// a command that reads a directory and prints a report could
+/// otherwise move a library to a revision an older build can no longer
+/// open, for the sake of one bookkeeping row.
+#[tokio::test]
+async fn a_dry_run_does_not_migrate_the_catalog_it_records_into() {
+    let tmp = TempDir::new().expect("tmp");
+    let book_dir = seed_book_dir(tmp.path(), "tiny");
+    fs::write(catalog_path(tmp.path()), b"").expect("seed an uninitialised catalog.db");
+
+    let mut args = build_args(vec![book_dir]);
+    args.dry_run = true;
+    distill_build(tmp.path(), args)
+        .await
+        .expect("a dry run proceeds whether or not it can record itself");
+
+    let err = Catalog::open_read_only(&catalog_path(tmp.path()))
+        .err()
+        .expect("the dry run migrated catalog.db");
+    assert!(
+        matches!(err, bookrack_catalog::CatalogError::Verify(_)),
+        "{err:?}"
+    );
+}
+
+/// The peer of the test above: a real build still takes the door that
+/// migrates. Deciding not to migrate for a preview must not turn into
+/// refusing to migrate for the command that owns the write.
+#[tokio::test]
+async fn a_real_build_still_migrates_the_catalog() {
+    let tmp = TempDir::new().expect("tmp");
+    let book_dir = seed_book_dir(tmp.path(), "tiny");
+    fs::write(catalog_path(tmp.path()), b"").expect("seed an uninitialised catalog.db");
+
+    distill_build(tmp.path(), build_args(vec![book_dir]))
+        .await
+        .expect("build");
+
+    let catalog = Catalog::open_read_only(&catalog_path(tmp.path()))
+        .expect("a real build must have brought the catalog to this revision");
+    assert_eq!(
+        catalog
+            .list_pipeline_runs(Some("distill_build"), None)
+            .expect("list runs")
+            .len(),
+        1,
+        "the migrated catalog carries the run the build opened",
     );
 }
 

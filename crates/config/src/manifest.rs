@@ -33,6 +33,7 @@ pub const MANIFEST_FORMAT: &str = "bookrack-library";
 /// Supported manifest schema version. A file declaring a higher version
 /// is rejected rather than silently misread; a v1 reader tolerates
 /// unknown keys within v1.x.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
 
 /// A data root's identity, read from or written to its manifest. The

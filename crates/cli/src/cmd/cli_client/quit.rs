@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use bookrack_cli::library_param;
 use bookrack_control_client::ControlError;
 use eyre::Result;
 use serde_json::Value;
@@ -33,6 +34,11 @@ pub async fn run(runtime_dir: Option<PathBuf>) -> Result<()> {
     // Best-effort shutdown: the daemon writes its final response,
     // then tears down the listener. A `Closed` error here is the
     // expected race.
-    let _ = client.call_raw("daemon.shutdown", Value::Null).await;
+    // Same gate as every other outgoing call, though `daemon.shutdown`
+    // is process-facing and the gate is a no-op on it: the exemption
+    // the source check grants this file is about the call shape, not
+    // about skipping the selection rules.
+    let params = library_param::apply("daemon.shutdown", Value::Null)?;
+    let _ = client.call_raw("daemon.shutdown", params).await;
     Ok(())
 }

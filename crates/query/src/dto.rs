@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! DTOs the read-only query facade hands back to its consumers.
+//! DTOs the read-only catalog-browse reads hand back to their consumers.
+//!
+//! The reads themselves live in `bookrack_ops::reads`, which re-exports
+//! this module as `bookrack_ops::dto`; the shapes sit here so they stay
+//! next to the search facade that shares their vocabulary.
 //!
 //! The MCP server and the CLI both serialize these directly to JSON.
 //! They are decoupled from the catalog row structs on purpose: a
@@ -24,41 +28,82 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use bookrack_catalog::{
-    EffectiveAttrs, Intake, IntakeStatus, NodeContributor, NodeOverride, OcrPending,
+    CONFIDENCE_LEVELS, EffectiveAttrs, Intake, IntakeStatus, NodeContributor, NodeOverride,
+    OcrPending, REVIEW_STATUSES,
 };
+use bookrack_core::ItemKind;
 use bookrack_corpus::{Node, TocQuery};
 
 /// Server-side ceiling on a single list page. Larger requests are
 /// silently clamped; the response then carries `truncated = true` if
 /// and only if the clamped page still does not cover the full filter
 /// result.
+// setting: reads.list_limit_max
 pub const MAX_LIST_LIMIT: u32 = 100;
 
 /// Default page size when the caller does not specify one.
+// setting: reads.list_limit_default
 pub const DEFAULT_LIST_LIMIT: u32 = 20;
 
 /// Maximum TOC nodes one [`Toc`] may carry. Books at the current
 /// pilot scale fit well under this; the cap is a safety net against
 /// pathological inputs and reflects in [`Toc::truncated`].
+// setting: reads.toc_nodes_max
 pub const MAX_TOC_NODES: usize = 2000;
 
 /// Maximum leaves on either side of the anchor a context-window read
 /// may request. Larger requests are clamped and the response carries
 /// `truncated = true`.
+// setting: reads.context_radius_max
 pub const MAX_CONTEXT_RADIUS: u32 = 20;
+
+/// Leaves on either side of the anchor a context-window read returns
+/// when the caller names no radius. Shared by every surface offering
+/// the read — the `library.read_context` tool, the control plane's
+/// method of the same name — so the window a caller gets does not
+/// depend on which one it asked.
+// setting: reads.context_radius_default
+pub const DEFAULT_CONTEXT_RADIUS: u32 = 3;
 
 /// Character budget for the passage text one read response may carry.
 /// A response stops adding passages once the budget is spent; the
 /// caller pages with the returned cursor instead of receiving an
 /// unbounded body.
+// setting: reads.read_chars_max
 pub const MAX_READ_CHARS: usize = 30_000;
 
 /// Maximum leaf rows one span read fetches from the corpus. A backstop
 /// behind [`MAX_READ_CHARS`]: the character budget normally fires
 /// first, this cap bounds the row fetch when passages are tiny.
+// setting: reads.span_leaves_max
 pub const MAX_SPAN_LEAVES: usize = 2000;
 
-/// One row of [`Catalog::list_books`] / [`Catalog::find_books`]: just
+bookrack_core::fixed_settings! {
+    owner = "query";
+    "reads.context_radius_default" = DEFAULT_CONTEXT_RADIUS,
+        "leaves on either side of the anchor one context read returns unasked",
+        acts on "library.read_context";
+    "reads.context_radius_max" = MAX_CONTEXT_RADIUS,
+        "leaves on either side of the anchor one context read may ask for",
+        acts on "library.read_context";
+    "reads.list_limit_default" = DEFAULT_LIST_LIMIT,
+        "rows one list page carries when the caller names no limit",
+        acts on "library.list_books, library.find_books, library.list_papers";
+    "reads.list_limit_max" = MAX_LIST_LIMIT,
+        "rows one list page carries at most, whatever limit is asked for",
+        acts on "library.list_books, library.find_books, library.list_papers";
+    "reads.read_chars_max" = MAX_READ_CHARS,
+        "characters of passage text one read response carries",
+        acts on "library.read_context, library.read_span";
+    "reads.span_leaves_max" = MAX_SPAN_LEAVES,
+        "leaf rows one span read fetches before the character budget applies",
+        acts on "library.read_span";
+    "reads.toc_nodes_max" = MAX_TOC_NODES,
+        "nodes one table of contents carries before it reports truncation",
+        acts on "library.show_toc";
+}
+
+/// One row of a `library.list_books` / `library.find_books` page: just
 /// enough to render a list entry without a second fetch.
 #[derive(Debug, Clone, Serialize)]
 pub struct BookSummary {
@@ -82,7 +127,7 @@ pub struct BookSummary {
     pub source_filename: Option<String>,
 }
 
-/// One [`Catalog::show_book`] response: the full bibliographic record
+/// One `library.show_book` response: the full bibliographic record
 /// plus all contributors.
 #[derive(Debug, Clone, Serialize)]
 pub struct BookDetail {
@@ -490,6 +535,120 @@ pub struct BookFilter {
     /// Match books carrying at least one of these category tags.
     /// Empty means no filter.
     pub categories: Vec<String>,
+    /// Match the reported language against this set. Empty means no
+    /// filter.
+    pub language: Vec<String>,
+}
+
+/// A filter value outside the vocabulary its parameter accepts,
+/// carrying what was received and what would have been accepted.
+///
+/// The caller words its own message: a JSON-RPC error and an MCP tool
+/// error are not the same sentence. What is shared is this triple, so
+/// neither front end writes out a vocabulary of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownFilterValue {
+    /// The wire parameter that carried the value.
+    pub parameter: &'static str,
+    /// The value as received.
+    pub value: String,
+    /// Every value that parameter accepts.
+    pub accepted: Vec<&'static str>,
+}
+
+/// Parse wire status strings into [`IntakeStatus`], failing on the
+/// first one `kind`'s pipeline cannot reach.
+///
+/// The wire vocabulary is the stored form — `"embedded"`,
+/// `"needs_ocr"` — so what a caller reads back in a row is what it
+/// sends to filter on.
+///
+/// The accepted set narrows with `kind`: a status no pipeline writes
+/// for that item is refused rather than accepted into a filter that
+/// can only ever match nothing. Membership and the `accepted` list in
+/// the refusal read the same binding, so the set reported is by
+/// construction the set applied.
+pub fn parse_statuses(
+    kind: ItemKind,
+    values: &[String],
+) -> Result<Vec<IntakeStatus>, UnknownFilterValue> {
+    let accepted = IntakeStatus::accepted_for(kind);
+    values
+        .iter()
+        .map(|value| {
+            accepted
+                .iter()
+                .copied()
+                .find(|status| status.as_str() == value)
+                .ok_or_else(|| UnknownFilterValue {
+                    parameter: "statuses",
+                    value: value.clone(),
+                    accepted: accepted.iter().map(|s| s.as_str()).collect(),
+                })
+        })
+        .collect()
+}
+
+/// Check every value against `accepted`, failing on the first one
+/// outside it.
+///
+/// For the vocabularies that stay strings all the way to the SQL —
+/// audit confidence, review status — where there is no enum to parse
+/// into but the same refusal is owed.
+pub fn checked_vocabulary(
+    parameter: &'static str,
+    values: Vec<String>,
+    accepted: &[&'static str],
+) -> Result<Vec<String>, UnknownFilterValue> {
+    if let Some(bad) = values.iter().find(|v| !accepted.contains(&v.as_str())) {
+        return Err(UnknownFilterValue {
+            parameter,
+            value: bad.clone(),
+            accepted: accepted.to_vec(),
+        });
+    }
+    Ok(values)
+}
+
+/// Facade-level filter for the metadata listings.
+///
+/// Its attribute predicate reads the **base** layer — what extraction
+/// and enrichment wrote — because that is the layer a review pass asks
+/// about. The registry filters (`find_books`, `find_papers`) read the
+/// curated values instead.
+#[derive(Debug, Default, Clone)]
+pub struct MetadataFilter {
+    /// Substring match against the extracted title.
+    pub title_substring: Option<String>,
+    /// Match the audit's row-level confidence against this set. Empty
+    /// means no filter.
+    pub confidence_in: Vec<String>,
+    /// Match the review status against this set, where a book never
+    /// reviewed counts as `pending`. Empty means no filter.
+    pub review_status_in: Vec<String>,
+}
+
+impl MetadataFilter {
+    /// Build the filter from wire values, refusing a confidence grade
+    /// or review status outside the vocabulary the column carries.
+    ///
+    /// Both front ends build it through here, so neither can accept a
+    /// value the other refuses.
+    pub fn checked(
+        title_substring: Option<String>,
+        confidence_in: Vec<String>,
+        review_status_in: Vec<String>,
+    ) -> Result<MetadataFilter, UnknownFilterValue> {
+        Ok(MetadataFilter {
+            title_substring,
+            confidence_in: checked_vocabulary("confidence_in", confidence_in, &CONFIDENCE_LEVELS)?,
+            review_status_in: checked_vocabulary(
+                "review_status_in",
+                review_status_in,
+                &REVIEW_STATUSES,
+            )?,
+        })
+    }
 }
 
 /// The basename of a path recorded at intake time. `None` when no path
@@ -659,6 +818,11 @@ pub struct PaperSummary {
     pub container_title: Option<String>,
     /// Year string as carried by the publication-attrs row.
     pub year: Option<String>,
+    /// Basename of the path recorded at intake time, which identifies
+    /// the file a row came from when [`Self::title`] is absent. The full
+    /// path and the source hash are in [`PaperDetail`]: a list page
+    /// carries the basename only.
+    pub source_filename: Option<String>,
 }
 
 /// One `library.show_paper` response. Mirrors [`BookDetail`] for the
@@ -675,6 +839,23 @@ pub struct PaperDetail {
     pub format: Option<String>,
     /// Coarse lifecycle status.
     pub status: String,
+    /// Path as recorded at intake time. May be relative or no longer
+    /// exist on disk — bookrack stores it verbatim from the original
+    /// submission and never re-canonicalises it. Unlike
+    /// [`PaperSource::path`], which locates the archived copy, this is
+    /// the file the operator submitted.
+    pub source_path: Option<String>,
+    /// Basename derived from [`Self::source_path`], if any.
+    pub source_filename: Option<String>,
+    /// Whole-file SHA-256 of the original source.
+    pub source_sha256: String,
+    /// When the file was first registered, ISO-8601 UTC.
+    pub intake_at: String,
+    /// Physical sheet count of the source PDF. `None` for rows
+    /// registered before the column existed.
+    pub page_count: Option<i64>,
+    /// Size of the source file in bytes, as recorded at intake.
+    pub byte_size: Option<i64>,
     /// Effective bibliographic attributes (paper scope), merged with
     /// any human override.
     pub effective_biblio: BTreeMap<String, String>,
@@ -741,12 +922,22 @@ pub struct PaperFilter {
     pub title_substring: Option<String>,
     /// Exact-equality match against a contributor name.
     pub contributor_name: Option<String>,
+    /// Restrict the contributor JOIN to one role. Only takes effect
+    /// when `contributor_name` is also set; on its own it is ignored
+    /// rather than refused.
+    pub contributor_role: Option<String>,
+    /// Match against this set of lifecycle statuses. Empty means no
+    /// filter.
+    pub statuses: Vec<IntakeStatus>,
     /// Exact-equality match against the year column.
     pub year: Option<String>,
     /// Substring match against the container title.
     pub venue_substring: Option<String>,
     /// Exact-equality match against the DOI.
     pub doi: Option<String>,
+    /// Match the reported language against this set. Empty means no
+    /// filter.
+    pub language: Vec<String>,
 }
 
 /// Result page for `library.list_papers` / `library.find_papers`.
@@ -792,6 +983,7 @@ impl PaperSummary {
             arxiv_id,
             container_title,
             year,
+            source_filename: source_filename(intake.original_path.as_deref()),
         }
     }
 }
@@ -813,11 +1005,18 @@ impl PaperDetail {
         }
         let title = effective_biblio.get("title").cloned();
         let abstract_text = effective_biblio.get("abstract_text").cloned();
+        let source_filename = source_filename(intake.original_path.as_deref());
         PaperDetail {
             intake_id: intake.intake_id,
             title,
             format: intake.format,
             status: intake.status.as_str().to_string(),
+            source_path: intake.original_path,
+            source_filename,
+            source_sha256: intake.source_sha256,
+            intake_at: intake.intake_at,
+            page_count: intake.page_count,
+            byte_size: intake.byte_size,
             effective_biblio,
             overrides: overrides.into_iter().map(OverrideEntry::from_row).collect(),
             contributors: contributors
@@ -828,5 +1027,41 @@ impl PaperDetail {
             audit,
             toc_stats,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wire(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn paper_statuses_refuse_a_book_only_state_and_report_the_reachable_set() {
+        let err = parse_statuses(ItemKind::Paper, &wire(&["needs_ocr"]))
+            .expect_err("needs_ocr is book-side only, so the paper filter must refuse it");
+
+        assert_eq!(err.parameter, "statuses");
+        assert_eq!(err.value, "needs_ocr");
+        assert_eq!(
+            err.accepted,
+            vec!["pending", "extracted", "embedded"],
+            "the refusal must list exactly the states glean can write"
+        );
+    }
+
+    #[test]
+    fn book_statuses_still_accept_every_state() {
+        let parsed = parse_statuses(ItemKind::Book, &wire(&["needs_ocr"]))
+            .expect("needs_ocr stays valid on the book side");
+        assert_eq!(parsed, vec![IntakeStatus::NeedsOcr]);
+
+        assert_eq!(
+            IntakeStatus::accepted_for(ItemKind::Book),
+            IntakeStatus::ALL.as_slice(),
+            "narrowing the published book-side vocabulary would be a behaviour regression"
+        );
     }
 }

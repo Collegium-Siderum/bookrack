@@ -18,7 +18,7 @@ use bookrack_core::queue::{JobState, QueueState};
 use bookrack_core::{ItemKind, KindedNodeId, NodeId};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::{LogEvent, LogStreamHandle};
-use bookrack_ops::dto::{BookFilter, PaperFilter};
+use bookrack_ops::dto::{BookFilter, MetadataFilter, PaperFilter, parse_statuses};
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, OpsError, SearchOptions, reads, with_caller_override, writes};
@@ -35,7 +35,7 @@ mod error_map;
 mod reference;
 use error_map::{
     invalid_params_err, ops_error_to_edit_error, ops_error_to_internal, reference_error_to_mcp,
-    respond_with,
+    respond_with, unknown_filter_value_to_mcp,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -174,7 +174,8 @@ pub struct ListBooksArgs {
 /// Arguments for the `library.find_books` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct FindBooksArgs {
-    /// Substring match against the book title.
+    /// Substring match against the book title as reported, i.e. with
+    /// the curator's corrections applied.
     #[serde(default)]
     pub title_substring: Option<String>,
     /// Exact-equality match against a contributor name.
@@ -188,11 +189,24 @@ pub struct FindBooksArgs {
     /// Exact-equality match against the file format (`epub`, `pdf`).
     #[serde(default)]
     pub format: Option<String>,
-    /// Reserved hook for category-based filtering. Accepted on the
-    /// wire today but not honoured server-side; will be enabled in a
-    /// future release.
+    /// Match books whose lifecycle status is one of these, named as
+    /// they are reported in a row's `status`: `pending`, `extracted`,
+    /// `dedup_hold`, `embedded`, `aborted`, `needs_ocr`. Only an
+    /// `embedded` book has vectors, so only an `embedded` book can be
+    /// recalled by the search tools. An unrecognised name is refused
+    /// rather than dropped.
+    #[serde(default)]
+    pub statuses: Option<Vec<String>>,
+    /// Match books carrying at least one of these category tags. An
+    /// empty list, like an absent one, imposes no category filter.
     #[serde(default)]
     pub categories: Option<Vec<String>>,
+    /// Match books whose reported language is one of these, compared
+    /// as text against the value the row carries (`de`, `en`, ...).
+    /// The pipeline does not normalise the tag, so match what
+    /// `show_book` reports.
+    #[serde(default)]
+    pub language: Option<Vec<String>>,
     /// Maximum number of books in this page.
     #[serde(default)]
     pub limit: Option<u32>,
@@ -283,20 +297,41 @@ pub struct ListPapersArgs {
 /// Arguments for the `library.find_papers` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct FindPapersArgs {
-    /// Substring match against the paper title.
+    /// Substring match against the paper title as reported, i.e. with
+    /// the curator's corrections applied. The three bibliographic
+    /// filters below read the same layer.
     #[serde(default)]
     pub title_substring: Option<String>,
     /// Exact-equality match against a contributor name.
     #[serde(default)]
     pub contributor_name: Option<String>,
-    /// Exact-equality match against the year column.
+    /// Restrict the contributor filter to one role (`author` /
+    /// `translator` / `editor` / `other`). Only takes effect with
+    /// `contributor_name`.
+    #[serde(default)]
+    pub contributor_role: Option<String>,
+    /// Match papers whose lifecycle status is one of these, named as
+    /// they are reported in a row's `status`: `pending`, `extracted`,
+    /// `embedded`. Only an `embedded` paper has vectors, so only an
+    /// `embedded` paper can be recalled by the search tools. The book
+    /// pipeline's three further states are not reachable here and are
+    /// refused, as is an unrecognised name.
+    #[serde(default)]
+    pub statuses: Option<Vec<String>>,
+    /// Match papers whose reported language is one of these, compared
+    /// as text against the value the row carries (`de`, `en`, ...).
+    /// The pipeline does not normalise the tag, so match what
+    /// `show_paper` reports.
+    #[serde(default)]
+    pub language: Option<Vec<String>>,
+    /// Exact-equality match against the reported year.
     #[serde(default)]
     pub year: Option<String>,
-    /// Substring match against the container title (journal,
+    /// Substring match against the reported container title (journal,
     /// proceedings, ...).
     #[serde(default)]
     pub venue_substring: Option<String>,
-    /// Exact-equality match against the DOI.
+    /// Exact-equality match against the reported DOI.
     #[serde(default)]
     pub doi: Option<String>,
     /// Maximum number of papers in this page.
@@ -359,10 +394,6 @@ impl SearchInPaperArgs {
     }
 }
 
-/// Default number of leaves on each side of the anchor when a
-/// `library.read_context` call does not specify a radius.
-pub const READ_CONTEXT_DEFAULT_RADIUS: u32 = 3;
-
 /// Arguments for the `library.read_context` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReadContextArgs {
@@ -419,6 +450,23 @@ pub struct ReadSpanArgs {
 /// differ only in which catalog rows they include.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MetadataPageArgs {
+    /// Substring match against the title as extraction and enrichment
+    /// wrote it, before any correction — the layer a review pass asks
+    /// about. To search the titles rows report, use
+    /// `library.find_books`.
+    #[serde(default)]
+    pub title_substring: Option<String>,
+    /// Match the audit's row-level confidence against this set:
+    /// `low`, `medium`, `high`. An unrecognised name is refused rather
+    /// than dropped.
+    #[serde(default)]
+    pub confidence_in: Option<Vec<String>>,
+    /// Match the review status against this set: `pending`,
+    /// `approved`, `acknowledged`, `rejected`. A book never reviewed
+    /// counts as `pending`. An unrecognised name is refused rather
+    /// than dropped.
+    #[serde(default)]
+    pub review_status_in: Option<Vec<String>>,
     /// Maximum number of rows in this page.
     #[serde(default)]
     pub limit: Option<u32>,
@@ -471,17 +519,12 @@ pub struct SessionInfoResult {
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct SessionLogsTailArgs {
     /// Maximum number of log events to return, from the most recent.
-    /// Capped server-side at [`SESSION_LOGS_TAIL_MAX`]. Defaults to
-    /// [`SESSION_LOGS_TAIL_DEFAULT`] when omitted.
+    /// Capped server-side at [`bookrack_obs::stream::TAIL_REQUEST_MAX`];
+    /// defaults to [`bookrack_obs::stream::TAIL_REQUEST_DEFAULT`] when
+    /// omitted.
     #[serde(default)]
     pub n: Option<usize>,
 }
-
-/// Default `n` when [`SessionLogsTailArgs::n`] is omitted.
-pub const SESSION_LOGS_TAIL_DEFAULT: usize = 100;
-
-/// Server-side cap on `n` for `session.logs_tail`.
-pub const SESSION_LOGS_TAIL_MAX: usize = 1024;
 
 /// Response shape returned by `session.logs_tail`: a slice of the
 /// daemon's in-memory log ring buffer, oldest first.
@@ -541,6 +584,7 @@ pub struct SessionQueueStatusResult {
 }
 
 /// Cap on the `recent` field returned by `session.queue_status`.
+// setting: mcp.queue_status_recent
 pub const SESSION_QUEUE_STATUS_RECENT: usize = 10;
 
 /// Arguments for `session.shutdown`. The tool takes no inputs.
@@ -903,8 +947,8 @@ impl BookrackServer {
         respond_with(&page)
     }
 
-    /// Find books by title substring, contributor, format, status,
-    /// or category tags.
+    /// Find books by title substring, contributor, format, lifecycle
+    /// status, or category tags.
     #[tool(
         name = "library.find_books",
         description = "Search the book registry by title substring (fuzzy), contributor \
@@ -916,13 +960,16 @@ impl BookrackServer {
         Parameters(args): Parameters<FindBooksArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
+        let statuses = parse_statuses(ItemKind::Book, &args.statuses.unwrap_or_default())
+            .map_err(|unknown| unknown_filter_value_to_mcp(&unknown))?;
         let filter = BookFilter {
             title_substring: args.title_substring,
             contributor_name: args.contributor_name,
             contributor_role: args.contributor_role,
             format: args.format,
+            statuses,
             categories: args.categories.unwrap_or_default(),
-            ..BookFilter::default()
+            language: args.language.unwrap_or_default(),
         };
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
@@ -1001,7 +1048,10 @@ impl BookrackServer {
         name = "library.list_papers",
         description = "List papers known to the library, paginated. Mirrors \
                        library.list_books for the paper pipeline. Returns paper \
-                       summaries plus the total matching count and a truncated flag."
+                       summaries plus the total matching count and a truncated flag. \
+                       Each summary carries source_filename, the basename of the file \
+                       the paper was ingested from, which identifies a paper whose \
+                       title the identify pass did not extract."
     )]
     async fn library_list_papers(
         &self,
@@ -1026,19 +1076,25 @@ impl BookrackServer {
         description = "Search the paper registry by title substring (fuzzy), \
                        contributor name (exact), year (exact), venue substring \
                        (matched against container title), or DOI (exact). Mirrors \
-                       library.find_books for the paper pipeline."
+                       library.find_books for the paper pipeline; rows carry \
+                       source_filename like library.list_papers."
     )]
     async fn library_find_papers(
         &self,
         Parameters(args): Parameters<FindPapersArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
+        let statuses = parse_statuses(ItemKind::Paper, &args.statuses.unwrap_or_default())
+            .map_err(|unknown| unknown_filter_value_to_mcp(&unknown))?;
         let filter = PaperFilter {
             title_substring: args.title_substring,
             contributor_name: args.contributor_name,
+            contributor_role: args.contributor_role,
+            statuses,
             year: args.year,
             venue_substring: args.venue_substring,
             doi: args.doi,
+            language: args.language.unwrap_or_default(),
         };
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
@@ -1058,7 +1114,12 @@ impl BookrackServer {
         description = "Fetch the full bibliographic record for one paper by intake \
                        id. Mirrors library.show_book for the paper pipeline, \
                        toc_stats included; the abstract text is in the detail \
-                       response, not in list summaries. Returns null when no such \
+                       response, not in list summaries. Also returns the source-side \
+                       record of the ingested file (source_path / source_filename / \
+                       source_sha256 / intake_at / page_count / byte_size; \
+                       source_path is recorded verbatim at intake, so it may be \
+                       relative or no longer exist on disk — papers.fetch_source \
+                       locates the archived copy instead). Returns null when no such \
                        paper is registered."
     )]
     async fn library_show_paper(
@@ -1179,8 +1240,12 @@ impl BookrackServer {
         Parameters(args): Parameters<ReadContextArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
-        let before = args.before.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
-        let after = args.after.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
+        let before = args
+            .before
+            .unwrap_or(bookrack_query::dto::DEFAULT_CONTEXT_RADIUS);
+        let after = args
+            .after
+            .unwrap_or(bookrack_query::dto::DEFAULT_CONTEXT_RADIUS);
         let target = KindedNodeId {
             kind: args.kind,
             node_id: NodeId::new(args.node_id),
@@ -1282,21 +1347,31 @@ impl BookrackServer {
         }
     }
 
-    /// Return every registered book with its confidence and review
-    /// status, unfiltered.
+    /// Return registered books with their confidence and review
+    /// status, optionally narrowed by the extracted title, the audit
+    /// verdict, or the review state.
     #[tool(
         name = "library.list_metadata",
-        description = "List every registered book with its current confidence and review \
-                       status, regardless of audit verdict. Paginated."
+        description = "List registered books with their current confidence and review \
+                       status, regardless of audit verdict. Filters match the metadata as \
+                       extracted, before curation, so this is the tool for finding records \
+                       that need fixing; `library.find_books` searches the corrected \
+                       values. Paginated."
     )]
     async fn library_list_metadata(
         &self,
         Parameters(args): Parameters<MetadataPageArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
+        let filter = MetadataFilter::checked(
+            args.title_substring,
+            args.confidence_in.unwrap_or_default(),
+            args.review_status_in.unwrap_or_default(),
+        )
+        .map_err(|unknown| unknown_filter_value_to_mcp(&unknown))?;
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
-        let page = reads::metadata::list_metadata(handle.ops(), limit, offset)
+        let page = reads::metadata::list_metadata(handle.ops(), filter, limit, offset)
             .map_err(ops_error_to_internal)?;
         respond_with(&page)
     }
@@ -1331,6 +1406,112 @@ impl BookrackServer {
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
         match reads::metadata::show_audit_trail(handle.ops(), args.intake_id) {
+            Ok(trail) => respond_with(&Some(trail)),
+            Err(OpsError::IntakeNotFound { .. }) => {
+                respond_with::<Option<Vec<bookrack_ops::dto::audit::AuditTrailEntry>>>(&None)
+            }
+            Err(e) => Err(ops_error_to_internal(e)),
+        }
+    }
+
+    /// Recompute and return the full per-field metadata audit report
+    /// for one paper.
+    #[tool(
+        name = "library.show_paper_metadata_report",
+        description = "Recompute the metadata plausibility audit for one paper from \
+                       its cached extraction and return the full per-field report: \
+                       origin (extracted / override / override_confirmed / voided), \
+                       grade, flags, and hint per field, plus the cross-field flags \
+                       and the CSL type the required-field matrix was selected by. \
+                       Each response also carries the judgement stored on the paper's \
+                       audit row; the two disagreeing means the paper was edited after \
+                       that judgement was made, and papers.metadata.reaudit is the \
+                       write path that brings the row back in line. Runs the default \
+                       audit profile; nothing is written back. Returns null when no \
+                       such paper is registered."
+    )]
+    async fn library_show_paper_metadata_report(
+        &self,
+        Parameters(args): Parameters<BookIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let audit_data = bookrack_ops::PaperAuditData::default_data();
+        let audit_profile = bookrack_ops::PaperAuditProfile::default_profile();
+        match reads::papers_metadata::show_paper_metadata_report(
+            handle.ops(),
+            args.intake_id,
+            &audit_data,
+            &audit_profile,
+        ) {
+            Ok(report) => respond_with(&Some(report)),
+            Err(OpsError::IntakeNotFound { .. }) => respond_with::<
+                Option<bookrack_ops::dto::metadata_report::PaperMetadataAuditReport>,
+            >(&None),
+            Err(e) => Err(ops_error_to_internal(e)),
+        }
+    }
+
+    /// Return registered papers with their confidence and review
+    /// status.
+    #[tool(
+        name = "library.list_paper_metadata",
+        description = "List registered papers with their current confidence and \
+                       review status, regardless of audit verdict. Filters match \
+                       the metadata as extracted, before curation, so this is the \
+                       tool for finding records that need fixing; \
+                       `library.find_papers` searches the corrected values. \
+                       Paginated."
+    )]
+    async fn library_list_paper_metadata(
+        &self,
+        Parameters(args): Parameters<MetadataPageArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let filter = MetadataFilter::checked(
+            args.title_substring,
+            args.confidence_in.unwrap_or_default(),
+            args.review_status_in.unwrap_or_default(),
+        )
+        .map_err(|unknown| unknown_filter_value_to_mcp(&unknown))?;
+        let limit = args.limit.unwrap_or(0);
+        let offset = args.offset.unwrap_or(0);
+        let page = reads::papers_metadata::list_paper_metadata(handle.ops(), filter, limit, offset)
+            .map_err(ops_error_to_internal)?;
+        respond_with(&page)
+    }
+
+    /// Return papers still on the metadata review queue.
+    #[tool(
+        name = "library.list_paper_pending_reviews",
+        description = "List papers whose metadata audit confidence is low or medium \
+                       and whose review is still pending or acknowledged. Paginated."
+    )]
+    async fn library_list_paper_pending_reviews(
+        &self,
+        Parameters(args): Parameters<MetadataPageArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let limit = args.limit.unwrap_or(0);
+        let offset = args.offset.unwrap_or(0);
+        let page = reads::papers_metadata::list_paper_pending_reviews(handle.ops(), limit, offset)
+            .map_err(ops_error_to_internal)?;
+        respond_with(&page)
+    }
+
+    /// Return the metadata-edit audit trail for one paper.
+    #[tool(
+        name = "library.show_paper_audit_trail",
+        description = "Return the metadata-edit audit trail for one paper, oldest \
+                       first: who changed which field, what it said before, and why. \
+                       Returns null when no such paper is registered and no edits \
+                       were ever recorded against the id."
+    )]
+    async fn library_show_paper_audit_trail(
+        &self,
+        Parameters(args): Parameters<BookIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        match reads::papers_metadata::show_paper_audit_trail(handle.ops(), args.intake_id) {
             Ok(trail) => respond_with(&Some(trail)),
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<Vec<bookrack_ops::dto::audit::AuditTrailEntry>>>(&None)
@@ -1427,8 +1608,8 @@ impl BookrackServer {
     ) -> Result<CallToolResult, ErrorData> {
         let n = args
             .n
-            .unwrap_or(SESSION_LOGS_TAIL_DEFAULT)
-            .min(SESSION_LOGS_TAIL_MAX);
+            .unwrap_or(bookrack_obs::stream::TAIL_REQUEST_DEFAULT)
+            .min(bookrack_obs::stream::TAIL_REQUEST_MAX);
         let events = self.log_stream.tail(n);
         let returned = events.len();
         respond_with(&SessionLogsTailResult { events, returned })
@@ -1765,8 +1946,8 @@ impl BookrackServer {
     // ----- reference-book surface (v2 distill phase 9) -----
 
     /// Polymorphic reference-book lookup. Returns the
-    /// disambiguation array shape from mother doc §5.10 even for a
-    /// single-hit query, so callers do not branch on cardinality.
+    /// disambiguation array shape even for a single-hit query, so
+    /// callers do not branch on cardinality.
     #[tool(
         name = "reference.lookup",
         description = "Look up a reference-book entry by its normalized key. \
@@ -1799,7 +1980,7 @@ impl BookrackServer {
         name = "reference.overlay_set",
         description = "Layer a user edit on top of one reference entry. Every key \
                        in `overlay` must be in property_catalog.toml. `reason` is \
-                       recorded on the overlay row (mother doc §5.8). The \
+                       a free-text edit summary recorded on the overlay row. The \
                        `edited_at` stamp is set to the daemon's current UTC time."
     )]
     async fn reference_overlay_set(
@@ -1820,9 +2001,20 @@ impl BookrackServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for BookrackServer {
+    /// The published identity is this workspace's own, not the SDK's:
+    /// rmcp's default fills `serverInfo` from the environment of the
+    /// crate that compiled it, which names the SDK rather than the
+    /// server. Agent clients list what this returns, and
+    /// `bookrack doctor` matches the name to tell this daemon apart
+    /// from another service on the same address.
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "Search and browse a local, offline library of books. Tools: \
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(rmcp::model::Implementation::new(
+                bookrack_config::MCP_SERVER_NAME,
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(
+                "Search and browse a local, offline library of books. Tools: \
              `library.stats` (counts), `library.list_books` / `library.find_books` \
              (browse and search the registry), `library.show_book` / `library.show_toc` \
              (per-book metadata and table of contents), `library.search` (vector \
@@ -1830,8 +2022,8 @@ impl ServerHandler for BookrackServer {
              search confined to one book). Curation tools also write: the \
              `library.metadata.*` family edits a book's bibliographic record and \
              review status, and `reference.overlay_set` edits a reference entry."
-                .to_string(),
-        )
+                    .to_string(),
+            )
     }
 
     /// Override the `#[tool_handler]`-generated dispatch so every tool
@@ -1853,8 +2045,14 @@ impl ServerHandler for BookrackServer {
     }
 }
 
-/// Bind the streamable-HTTP server at `addr` and serve until the
-/// shutdown channel fires.
+/// Serve the streamable-HTTP surface on an already-bound `listener`
+/// until the shutdown channel fires.
+///
+/// The socket arrives bound rather than as an address to bind: the
+/// daemon takes it during bring-up
+/// ([`bookrack_runtime::mcp_endpoint::bind_listener`]) so a port it
+/// cannot have refuses the whole start, instead of failing inside a
+/// task nobody observes until shutdown.
 ///
 /// Two HTTP routes are mounted:
 ///
@@ -1904,7 +2102,7 @@ pub async fn serve(
     log_stream: LogStreamHandle,
     queue_state: Arc<Mutex<QueueState>>,
     shutdown_tx: broadcast::Sender<()>,
-    addr: &str,
+    listener: tokio::net::TcpListener,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> eyre::Result<()> {
     let log_stream_for_sse = log_stream.clone();
@@ -1929,9 +2127,10 @@ pub async fn serve(
             sse_logs_handler(handle)
         }),
     );
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("bind MCP server to {addr}"))?;
+    let addr = listener
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
     tracing::info!(%addr, "bookrack MCP server listening on /mcp");
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -1971,24 +2170,36 @@ async fn sse_logs_handler(
 }
 
 /// Spawn the MCP listener as a session-scoped task against a running
-/// [`DaemonRuntime`](bookrack_runtime::DaemonRuntime). Returns `None`
-/// when the runtime came up with MCP disabled (`mcp_label ==
-/// "disabled"`), so the daemon runs without an HTTP surface. Shared by
-/// every daemon host (CLI, GUI) so the listener wiring has one source.
+/// [`DaemonRuntime`](bookrack_runtime::DaemonRuntime), taking the
+/// socket the runtime bound during bring-up. Returns `None` when the
+/// runtime came up with MCP disabled (`--no-mcp`), so the daemon runs
+/// without an HTTP surface. Shared by every daemon host (CLI, GUI,
+/// headless) so the listener wiring has one source.
+///
+/// Takes `&mut` because the bound socket moves out of the runtime and
+/// into the task: a second call finds nothing left to serve and is a
+/// caller-side bug, reported as such rather than silently leaving the
+/// session without the endpoint it announced.
 pub fn spawn_listener(
-    runtime: &bookrack_runtime::DaemonRuntime,
+    runtime: &mut bookrack_runtime::DaemonRuntime,
 ) -> Option<tokio::task::JoinHandle<eyre::Result<()>>> {
-    if runtime.mcp_label == "disabled" {
-        tracing::info!("MCP listener disabled (--no-mcp); session running without /mcp");
+    let Some(listener) = runtime.mcp_listener.take() else {
+        if runtime.mcp_label == "disabled" {
+            tracing::info!("MCP listener disabled (--no-mcp); session running without /mcp");
+        } else {
+            tracing::error!(
+                mcp = %runtime.mcp_label,
+                "MCP socket already taken; session running without /mcp",
+            );
+        }
         return None;
-    }
+    };
     let registry = Arc::clone(&runtime.registry);
     let info_context = runtime.info_context.clone();
     let started_at = runtime.started_at;
     let log_stream = runtime.log_stream.clone();
     let queue_state = Arc::clone(&runtime.queue_state);
     let shutdown_tx = runtime.shutdown_tx.clone();
-    let addr = runtime.mcp_label.clone();
     let rx = runtime.shutdown_tx.subscribe();
     Some(tokio::spawn(async move {
         serve(
@@ -1998,11 +2209,18 @@ pub fn spawn_listener(
             log_stream,
             queue_state,
             shutdown_tx,
-            &addr,
+            listener,
             rx,
         )
         .await
     }))
+}
+
+bookrack_core::fixed_settings! {
+    owner = "mcp";
+    "mcp.queue_status_recent" = SESSION_QUEUE_STATUS_RECENT,
+        "recent jobs one queue-status answer carries alongside the counts",
+        acts on "session.queue_status";
 }
 
 /// Enumerate every MCP tool the live server exposes. Calls into the
@@ -2359,6 +2577,7 @@ mod tests {
             arxiv_id: Some("0000.00001".to_string()),
             container_title: Some("Synthetic Journal".to_string()),
             year: Some("2020".to_string()),
+            source_filename: Some("paper.pdf".to_string()),
         };
         let value = serde_json::to_value(&summary).expect("serialize");
         assert_eq!(value["intake_id"], 1);
@@ -2366,6 +2585,7 @@ mod tests {
         assert_eq!(value["arxiv_id"], "0000.00001");
         assert_eq!(value["container_title"], "Synthetic Journal");
         assert_eq!(value["year"], "2020");
+        assert_eq!(value["source_filename"], "paper.pdf");
     }
 
     #[test]
@@ -2413,6 +2633,7 @@ mod tests {
         for err in [
             OpsError::UnknownMetadataField {
                 field: "bogus".to_string(),
+                editable: vec!["title".to_string()],
             },
             OpsError::UnknownContributorRole {
                 role: "bogus".to_string(),
@@ -2453,5 +2674,33 @@ mod tests {
             },
         ));
         assert_eq!(mapped.code, ErrorCode::INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn the_find_books_schema_does_not_disclaim_the_category_filter() {
+        // A field's doc comment becomes that parameter's `description`
+        // in the published tool schema, which is all a client reads
+        // before deciding whether a parameter is worth sending. A
+        // disclaimer there makes an implemented, tested filter
+        // unreachable in practice, however the tool description and
+        // `docs/control-plane.md` word it.
+        let tool = super::BookrackServer::tool_router()
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "library.find_books")
+            .expect("library.find_books is a published tool");
+        let schema = serde_json::to_string(&tool.input_schema).expect("serialise input schema");
+
+        for disclaimer in ["not honoured", "Reserved hook", "future release"] {
+            assert!(
+                !schema.contains(disclaimer),
+                "the parameter schema says {disclaimer:?} about a filter the server applies: \
+                 {schema}"
+            );
+        }
+        assert!(
+            schema.contains("categories"),
+            "the schema carries no `categories` parameter at all: {schema}"
+        );
     }
 }

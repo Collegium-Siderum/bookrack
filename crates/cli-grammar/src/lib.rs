@@ -5,6 +5,8 @@
 
 use std::path::PathBuf;
 
+use bookrack_core::{ItemKind, TypedIdParseError, TypedItemId};
+
 #[doc(hidden)]
 pub mod help_gate;
 
@@ -122,6 +124,7 @@ pub struct IngestArgs {
 pub struct RemoveArgs {
     /// Intake id of the book to drop. Mutually exclusive with `--sha`;
     /// exactly one of the two must be supplied.
+    #[arg(value_parser = book_intake_id)]
     pub intake_id: Option<i64>,
     /// Drop the book whose source SHA-256 starts with this hex prefix.
     /// Mutually exclusive with the positional intake id.
@@ -421,13 +424,20 @@ pub enum RetrievalAction {
 #[derive(clap::Subcommand, Debug)]
 pub enum WriteMetadataAction {
     /// Set (or change) one metadata field's value.
+    #[command(after_long_help = crate::examples![
+        "metadata set 12 --field title --value \"Sample Title\"",
+        "metadata set 12 --field title --value \"Sample Title\" --confirmed",
+    ])]
     Set {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
         /// The field column on `node_publication_attrs` to write
         /// (e.g. `title`, `publisher`, `year`, `language`).
+        #[arg(long)]
         field: String,
         /// The new value.
+        #[arg(long)]
         value: String,
         /// Optional note on why this value is correct, recorded on the
         /// audit row.
@@ -441,10 +451,16 @@ pub enum WriteMetadataAction {
         confirmed: bool,
     },
     /// Clear an override, falling back to the extracted base value.
+    #[command(after_long_help = crate::examples![
+        "metadata clear 12 --field title",
+        "metadata clear 12 --field publisher --library demo",
+    ])]
     Clear {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
         /// The field whose override is removed.
+        #[arg(long)]
         field: String,
         /// Optional note on why the override is removed, recorded on
         /// the audit row.
@@ -455,10 +471,16 @@ pub enum WriteMetadataAction {
     ///
     /// The field reads as absent until a correct value is set. `clear`
     /// removes the suppression.
+    #[command(after_long_help = crate::examples![
+        "metadata void 12 --field publisher",
+        "metadata void 12 --field publisher --json",
+    ])]
     Void {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
         /// The field whose extracted value is suppressed.
+        #[arg(long)]
         field: String,
         /// Optional note on why the extracted value is wrong, recorded
         /// on the audit row.
@@ -471,18 +493,26 @@ pub enum WriteMetadataAction {
     /// current effective metadata. The review status is untouched.
     Reaudit {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
     },
     /// Attribute a contributor to the book.
     ///
     /// Adds a row with origin `user`, appended after the role's existing
     /// contributors. User rows survive a re-ingest.
+    #[command(after_long_help = crate::examples![
+        "metadata contributor-add 12 --role author --name \"Doe, Jane\"",
+        "metadata contributor-add 12 --role author --name \"Doe, Jane\" --json",
+    ])]
     ContributorAdd {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
         /// Contribution role: author / translator / editor / other.
+        #[arg(long)]
         role: String,
         /// The contributor's name.
+        #[arg(long)]
         name: String,
         /// The contributor's nationality, when known.
         #[arg(long)]
@@ -497,10 +527,16 @@ pub enum WriteMetadataAction {
     /// The id is the one listed by `show_book`. The row is removed
     /// whatever its origin — this is the path for stripping a wrong
     /// extracted attribution.
+    #[command(after_long_help = crate::examples![
+        "metadata contributor-remove 12 --contributor-id 7",
+        "metadata contributor-remove 12 --contributor-id 7 --library demo",
+    ])]
     ContributorRemove {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
         /// The contributor row's surrogate id.
+        #[arg(long)]
         contributor_id: i64,
         /// Optional note on why the attribution is removed, recorded
         /// on the audit row.
@@ -512,6 +548,7 @@ pub enum WriteMetadataAction {
     /// Signs the override with a reason for the audit trail.
     Ack {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
         /// Why the gap was accepted.
         #[arg(long)]
@@ -523,6 +560,7 @@ pub enum WriteMetadataAction {
     /// pipeline never writes this status itself.
     Approve {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
         /// Optional note for the audit trail.
         #[arg(long)]
@@ -535,6 +573,7 @@ pub enum WriteMetadataAction {
     /// the rejected status.
     Reject {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
         /// Why the book was rejected.
         #[arg(long)]
@@ -543,6 +582,7 @@ pub enum WriteMetadataAction {
     /// Resume CHUNK→EMBED for a book held at the metadata gate.
     Advance {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
     },
 }
@@ -680,6 +720,37 @@ pub enum CorpusAction {
     },
 }
 
+/// Actions on the control-plane escape hatch.
+#[derive(clap::Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum RpcAction {
+    /// List the control-plane methods the running daemon answers.
+    ///
+    /// The daemon's own table, not this binary's copy of it, so it is
+    /// authoritative for the version that is actually serving. The MCP
+    /// endpoint tools are listed alongside for visibility; they are
+    /// reachable only from an MCP client.
+    #[command(after_long_help = crate::examples![
+        "rpc list",
+        "rpc list --json",
+    ])]
+    List,
+    /// Call one control-plane method by name.
+    ///
+    /// Method names are namespaced (`<namespace>.<verb>`); `rpc list`
+    /// prints the live set and `docs/control-plane.md` documents each
+    /// method's params and response.
+    #[command(after_long_help = crate::examples![
+        "rpc call daemon.version",
+        "rpc call library.info {}",
+    ])]
+    Call {
+        /// Namespaced method name, e.g. `library.show_book`.
+        method: String,
+        /// JSON params object. Defaults to `null` when omitted.
+        params: Option<String>,
+    },
+}
+
 /// Index-stamp reconciliation.
 ///
 /// Prefer `bookrack index-profile apply`; this namespace is the
@@ -693,6 +764,64 @@ pub enum StampsAction {
     /// is unstamped. Fails on a stamp mismatch — the operator can then
     /// decide whether to rebuild.
     Reconcile,
+}
+
+/// Accept a paper's catalog intake id either bare or kind-prefixed.
+///
+/// Parsing here rather than in the command body keeps the field an
+/// `i64`, so what reaches the control plane is the bare number the wire
+/// has always carried. A `book:` prefix names the other catalog, whose
+/// ids number independently, so clap reports it and exits 2 before any
+/// dispatch.
+fn paper_intake_id(raw: &str) -> Result<i64, String> {
+    if let Ok(intake_id) = raw.parse::<i64>() {
+        return Ok(intake_id);
+    }
+    match raw.parse::<TypedItemId>() {
+        Ok(TypedItemId::Paper(intake_id)) => Ok(intake_id),
+        // Well formed, wrong catalog. The payload is read back off the
+        // input so the message can offer it under this namespace's own
+        // kind.
+        Ok(other) => Err(TypedIdParseError::CatalogMismatch {
+            kind: other.kind(),
+            payload: raw
+                .split_once(':')
+                .map_or(raw, |(_, rest)| rest)
+                .to_string(),
+            expected: ItemKind::Paper,
+        }
+        .to_string()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Accept a book's catalog intake id either bare or kind-prefixed.
+///
+/// Peer of [`paper_intake_id`], and the same shape for the same reason:
+/// the field stays an `i64`, so what reaches the control plane is the
+/// bare number the wire has always carried. A `paper:` prefix names the
+/// other catalog, whose ids number independently, so clap reports it
+/// and exits 2 before any dispatch.
+fn book_intake_id(raw: &str) -> Result<i64, String> {
+    if let Ok(intake_id) = raw.parse::<i64>() {
+        return Ok(intake_id);
+    }
+    match raw.parse::<TypedItemId>() {
+        Ok(TypedItemId::Book(intake_id)) => Ok(intake_id),
+        // Well formed, wrong catalog. The payload is read back off the
+        // input so the message can offer it under the kind this command
+        // reads.
+        Ok(other) => Err(TypedIdParseError::CatalogMismatch {
+            kind: other.kind(),
+            payload: raw
+                .split_once(':')
+                .map_or(raw, |(_, rest)| rest)
+                .to_string(),
+            expected: ItemKind::Book,
+        }
+        .to_string()),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -723,18 +852,22 @@ pub enum PapersAction {
     #[command(after_long_help = crate::examples![
         "papers show 101",
         "papers show 101 --json",
+        "papers show paper:101",
     ])]
     Show {
         /// The intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
     },
     /// Print the table of contents of one paper.
     #[command(after_long_help = crate::examples![
         "papers toc 101",
         "papers toc 101 --json",
+        "papers toc paper:101",
     ])]
     Toc {
         /// The intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
     },
     /// Project one paper's stored bibliographic row onto CSL-JSON and
@@ -742,9 +875,11 @@ pub enum PapersAction {
     #[command(after_long_help = crate::examples![
         "papers export-csl 101",
         "papers export-csl 101 --library demo",
+        "papers export-csl paper:101",
     ])]
     ExportCsl {
         /// The intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
     },
     /// Print the locator of one paper's archived source PDF.
@@ -755,9 +890,11 @@ pub enum PapersAction {
     #[command(after_long_help = crate::examples![
         "papers source 101",
         "papers source 101 --json",
+        "papers source paper:101",
     ])]
     Source {
         /// The intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
     },
     /// Drop one paper from every paper-side store.
@@ -768,6 +905,7 @@ pub enum PapersAction {
     #[command(after_long_help = crate::examples![
         "papers remove 101",
         "papers remove --sha a1b2c3d4 --yes",
+        "papers remove paper:101 --dry-run",
     ])]
     Remove(PapersRemoveArgs),
     /// Write the paper-side corpus.
@@ -823,14 +961,16 @@ pub enum PapersMetadataAction {
     /// Re-run the paper-side metadata audit on an existing intake's
     /// cached extraction.
     ///
-    /// Writes only the `confidence` / `audit_verdict` rollup; the base
-    /// attrs, contributors, and review status all stay as they are.
+    /// Rewrites the whole audit projection and the stored report; the
+    /// base attrs, contributors, and review status all stay as they
+    /// are.
     #[command(after_long_help = crate::examples![
         "papers metadata reaudit 101",
         "papers metadata reaudit 101 --audit-profile strict",
     ])]
     Reaudit {
         /// The intake id of the paper to re-audit.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
         /// Optional named audit profile. When absent the daemon's
         /// effective profile (default + overlay) is used.
@@ -844,6 +984,7 @@ pub enum PapersMetadataAction {
     ])]
     Set {
         /// Intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
         /// Column on the paper attrs row to override (e.g. `title`,
         /// `year`, `container_title`, `doi`).
@@ -852,6 +993,10 @@ pub enum PapersMetadataAction {
         /// The new value.
         #[arg(long)]
         value: String,
+        /// Optional note on why this value is correct, recorded on the
+        /// audit row.
+        #[arg(long)]
+        reason: Option<String>,
         /// Mark the override as confirmed against the source.
         #[arg(long)]
         confirmed: bool,
@@ -864,10 +1009,15 @@ pub enum PapersMetadataAction {
     ])]
     Clear {
         /// Intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
         /// The field whose override is removed.
         #[arg(long)]
         field: String,
+        /// Optional note on why the override is removed, recorded on
+        /// the audit row.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Set an override that deliberately voids one field's value.
     #[command(after_long_help = crate::examples![
@@ -876,23 +1026,29 @@ pub enum PapersMetadataAction {
     ])]
     Void {
         /// Intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
         /// The field whose extracted value is suppressed.
         #[arg(long)]
         field: String,
+        /// Optional note on why the extracted value is wrong, recorded
+        /// on the audit row.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Acknowledge a flagged paper without changing its metadata —
     /// move the review row to `acknowledged`.
     #[command(after_long_help = crate::examples![
-        "papers metadata ack 101",
-        "papers metadata ack 101 --library demo",
+        "papers metadata ack 101 --reason \"venue lists no DOI\"",
+        "papers metadata ack 101 --reason \"venue lists no DOI\" --library demo",
     ])]
     Ack {
         /// Intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
-        /// Optional note for the audit trail.
+        /// Why the gap was accepted.
         #[arg(long)]
-        notes: Option<String>,
+        reason: String,
     },
     /// Approve a paper's metadata as correct.
     #[command(after_long_help = crate::examples![
@@ -901,22 +1057,24 @@ pub enum PapersMetadataAction {
     ])]
     Approve {
         /// Intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
         /// Optional note for the audit trail.
         #[arg(long)]
-        notes: Option<String>,
+        reason: Option<String>,
     },
     /// Reject a paper's metadata as wrong.
     #[command(after_long_help = crate::examples![
-        "papers metadata reject 101",
-        "papers metadata reject 101 --library demo",
+        "papers metadata reject 101 --reason \"wrong source file\"",
+        "papers metadata reject 101 --reason \"wrong source file\" --library demo",
     ])]
     Reject {
         /// Intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
-        /// Optional note for the audit trail.
+        /// Why the paper was rejected.
         #[arg(long)]
-        notes: Option<String>,
+        reason: String,
     },
     /// Move a previously approved / rejected paper back to
     /// `pending`.
@@ -926,10 +1084,11 @@ pub enum PapersMetadataAction {
     ])]
     Reopen {
         /// Intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
         /// Optional note for the audit trail.
         #[arg(long)]
-        notes: Option<String>,
+        reason: Option<String>,
     },
     /// Add a contributor row to a paper.
     #[command(after_long_help = crate::examples![
@@ -938,6 +1097,7 @@ pub enum PapersMetadataAction {
     ])]
     ContributorAdd {
         /// Intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
         /// Contribution role (author / editor / translator / other).
         #[arg(long)]
@@ -955,16 +1115,28 @@ pub enum PapersMetadataAction {
         /// The contributor's ORCID identifier, when known.
         #[arg(long)]
         orcid: Option<String>,
+        /// Optional note on why this attribution is correct, recorded
+        /// on the audit row.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Remove a contributor row by id.
     #[command(after_long_help = crate::examples![
-        "papers metadata contributor-remove 7",
-        "papers metadata contributor-remove 7 --library demo",
+        "papers metadata contributor-remove 101 --contributor-id 7",
+        "papers metadata contributor-remove 101 --contributor-id 7 --library demo",
     ])]
     ContributorRemove {
+        /// Intake id of the paper the row belongs to.
+        #[arg(value_parser = paper_intake_id)]
+        intake_id: i64,
         /// Surrogate id of the contributor row to remove (listed by
         /// `papers show`).
+        #[arg(long)]
         contributor_id: i64,
+        /// Optional note on why the attribution is removed, recorded
+        /// on the audit row.
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 
@@ -1146,7 +1318,7 @@ pub struct PapersDryrunArgs {
 /// Positional + flag bundle for `papers ingest`. Mirrors
 /// [`IngestArgs`] for the paper pipeline. `--priority` controls the
 /// queue priority of the resulting job.
-#[derive(clap::Args, Debug, Clone)]
+#[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
 pub struct PapersIngestArgs {
     /// Source file, or a directory the ingest walks recursively (with
     /// `--recursive`).
@@ -1172,6 +1344,135 @@ pub struct PapersIngestArgs {
     pub no_wait: bool,
 }
 
+/// Which catalogs a top-level read verb reaches.
+///
+/// The variant names render as the catalog `scope` strings themselves
+/// — `book` and `paper` — so the flag's vocabulary and the wire's are
+/// the same words rather than two tables to keep in step. `reference`
+/// has no value here: its rows are addressed by slug and no
+/// control-plane method lists them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum Scope {
+    /// The book catalog only.
+    Book,
+    /// The paper catalog only.
+    Paper,
+    /// Both catalogs. The default: reading across the pipelines is
+    /// what these verbs exist for, and the per-side namespaces are
+    /// still there for one side at a time.
+    #[default]
+    All,
+}
+
+impl std::fmt::Display for Scope {
+    /// Renders the value clap accepts, read back off the derived
+    /// vocabulary so the two cannot disagree.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        clap::ValueEnum::to_possible_value(self)
+            .expect("no variant is skipped")
+            .get_name()
+            .fmt(f)
+    }
+}
+
+/// Side selection and pagination for `bookrack list`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct ListArgs {
+    /// Which catalogs to browse.
+    #[arg(long, value_enum, default_value_t = Scope::All)]
+    pub scope: Scope,
+    /// Maximum number of rows per side, so `--scope all` can return up
+    /// to twice this many. The server-side cap applies to each side.
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Number of leading rows to skip, applied to each side.
+    #[arg(long)]
+    pub offset: Option<u32>,
+}
+
+/// Query and scope for `bookrack search`.
+///
+/// Unlike `list` and `find`, one method answers every scope: the
+/// merged search ranks both corpora against the same query, which is
+/// something neither catalog listing can do. There is therefore no
+/// paging here — `--top-k` is the whole result set.
+///
+/// The index-level knobs the method accepts — bypassing the ANN index,
+/// probe counts, refine factors — have no flags. They are per-call
+/// overrides of an index profile, and a flag would make tuning
+/// something done per invocation instead of on the profile that
+/// records it.
+#[derive(clap::Args, Debug, Clone)]
+pub struct SearchArgs {
+    /// What to search for.
+    pub query: String,
+    /// Which catalogs to search. `all` ranks both against the same
+    /// query; the control-plane method defaults to the book side
+    /// alone, so this flag is always sent rather than left out.
+    #[arg(long, value_enum, default_value_t = Scope::All)]
+    pub scope: Scope,
+    /// Maximum number of passages to return.
+    #[arg(long = "top-k")]
+    pub top_k: Option<usize>,
+}
+
+/// Filters and pagination for `bookrack find`.
+///
+/// The flags divide in two. The shared ones name a column both
+/// catalogs carry and are sent to whichever sides the scope reaches.
+/// The side-specific ones — `--format` on the book side, `--year` /
+/// `--venue` / `--doi` on the paper side — name a column only one
+/// catalog has, so each requires `--scope`, and the verb refuses a
+/// scope that reaches the other side before sending anything.
+///
+/// `--categories` has no flag: the dimension is empty on every real
+/// library, and a filter that always matches nothing is worse in help
+/// than absent.
+#[derive(clap::Args, Debug, Clone)]
+pub struct FindArgs {
+    /// Which catalogs to search. Defaults to both.
+    #[arg(long, value_enum, default_value_t = Scope::All)]
+    pub scope: Scope,
+    /// Substring match against the title.
+    #[arg(long)]
+    pub title: Option<String>,
+    /// Exact-equality match against a contributor name.
+    #[arg(long)]
+    pub contributor: Option<String>,
+    /// Exact-equality match against a contributor's role.
+    #[arg(long = "contributor-role")]
+    pub contributor_role: Option<String>,
+    /// Language code to match; repeat the flag to accept any of
+    /// several.
+    #[arg(long)]
+    pub language: Vec<String>,
+    /// Lifecycle status to match; repeat the flag to accept any of
+    /// several. The vocabulary differs per side and is enforced by the
+    /// daemon.
+    #[arg(long)]
+    pub status: Vec<String>,
+    /// File format (`epub`, `pdf`, ...). Book side only.
+    #[arg(long, requires = "scope")]
+    pub format: Option<String>,
+    /// Exact-equality match against the year column. Paper side only.
+    #[arg(long, requires = "scope")]
+    pub year: Option<String>,
+    /// Substring match against the container title (journal,
+    /// proceedings, ...). Paper side only.
+    #[arg(long, requires = "scope")]
+    pub venue: Option<String>,
+    /// Exact-equality match against the DOI. Paper side only.
+    #[arg(long, requires = "scope")]
+    pub doi: Option<String>,
+    /// Maximum number of rows per side, so `--scope all` can return up
+    /// to twice this many. The server-side cap applies to each side.
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Number of leading rows to skip, applied to each side.
+    #[arg(long)]
+    pub offset: Option<u32>,
+}
+
 /// Pagination bundle for `papers list`.
 #[derive(clap::Args, Debug, Clone)]
 pub struct PapersListArgs {
@@ -1193,6 +1494,17 @@ pub struct PapersFindArgs {
     /// Exact-equality match against a contributor name.
     #[arg(long)]
     pub contributor: Option<String>,
+    /// Exact-equality match against a contributor's role.
+    #[arg(long = "contributor-role")]
+    pub contributor_role: Option<String>,
+    /// Language code to match; repeat the flag to accept any of
+    /// several.
+    #[arg(long)]
+    pub language: Vec<String>,
+    /// Lifecycle status to match; repeat the flag to accept any of
+    /// several.
+    #[arg(long)]
+    pub status: Vec<String>,
     /// Exact-equality match against the year column.
     #[arg(long)]
     pub year: Option<String>,
@@ -1248,6 +1560,7 @@ pub struct LogsArgs {
 pub struct PapersRemoveArgs {
     /// The intake id of the paper to drop. Mutually exclusive with
     /// `--sha`; exactly one of the two must be supplied.
+    #[arg(value_parser = paper_intake_id)]
     pub intake_id: Option<i64>,
     /// Drop the paper whose source SHA-256 starts with this hex
     /// prefix. Mutually exclusive with the positional intake id.
@@ -1306,6 +1619,7 @@ mod tests {
             #[command(subcommand)]
             action: WriteMetadataAction,
         },
+        Remove(RemoveArgs),
         Vectors {
             #[command(subcommand)]
             action: WriteVectorsAction,
@@ -1338,6 +1652,201 @@ mod tests {
         match TestCli::try_parse_from(tokens).expect("parse").command {
             TestCommand::Intake { action } => action,
             other => panic!("expected intake, got {other:?}"),
+        }
+    }
+
+    /// Every book-side position that takes an intake id, paired with
+    /// the arguments it cannot parse without. Peer of
+    /// `PAPERS_INTAKE_ID_POSITIONS`; a position that never grew a
+    /// `value_parser` fails here rather than only in whichever leaf
+    /// happened to gain an example.
+    const BOOK_INTAKE_ID_POSITIONS: &[(&[&str], &[&str])] = &[
+        (&["remove"], &[]),
+        (&["metadata", "reaudit"], &[]),
+        (
+            &["metadata", "set"],
+            &["--field", "title", "--value", "Sample Title"],
+        ),
+        (&["metadata", "clear"], &["--field", "title"]),
+        (&["metadata", "void"], &["--field", "publisher"]),
+        (&["metadata", "ack"], &["--reason", "wrong source file"]),
+        (&["metadata", "approve"], &[]),
+        (&["metadata", "reject"], &["--reason", "wrong source file"]),
+        (&["metadata", "advance"], &[]),
+        (
+            &["metadata", "contributor-add"],
+            &["--role", "author", "--name", "Doe, Jane"],
+        ),
+        (
+            &["metadata", "contributor-remove"],
+            &["--contributor-id", "7"],
+        ),
+    ];
+
+    fn book_argv<'a>(leaf: &[&'a str], id: &'a str, rest: &[&'a str]) -> Vec<&'a str> {
+        let mut argv = Vec::from(leaf);
+        argv.push(id);
+        argv.extend_from_slice(rest);
+        argv
+    }
+
+    /// The prefixed form projects onto the same parsed command as the
+    /// bare one — the prefix is read and dropped, not carried further.
+    #[test]
+    fn every_book_intake_id_position_accepts_both_forms() {
+        for (leaf, rest) in BOOK_INTAKE_ID_POSITIONS {
+            let bare = book_argv(leaf, "12", rest);
+            let typed = book_argv(leaf, "book:12", rest);
+            let parsed = |argv: &Vec<&str>| {
+                format!(
+                    "{:?}",
+                    TestCli::try_parse_from(argv.iter().copied())
+                        .unwrap_or_else(|err| panic!("{argv:?} must parse: {err}"))
+                        .command
+                )
+            };
+            assert_eq!(parsed(&bare), parsed(&typed), "{leaf:?}");
+        }
+    }
+
+    /// A paper id is well formed and names the other catalog, whose ids
+    /// number independently. Accepting it here would act on whichever
+    /// book happens to carry that number.
+    #[test]
+    fn every_book_intake_id_position_rejects_a_paper_id() {
+        for (leaf, rest) in BOOK_INTAKE_ID_POSITIONS {
+            let argv = book_argv(leaf, "paper:101", rest);
+            let Err(err) = TestCli::try_parse_from(argv.iter().copied()) else {
+                panic!("{argv:?} must not resolve a paper id");
+            };
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// The parser hangs off the group member, so the two locators stay
+    /// mutually exclusive in the prefixed form too.
+    #[test]
+    fn remove_keeps_its_exclusive_group_with_a_typed_id() {
+        TestCli::try_parse_from(["remove", "book:12"]).expect("a typed id is a locator");
+        assert!(
+            TestCli::try_parse_from(["remove", "book:12", "--sha", "deadbeef"]).is_err(),
+            "a typed id and --sha must stay mutually exclusive"
+        );
+    }
+
+    /// The refusal names both catalogs and rewrites the id for the one
+    /// being read. The book side has no namespace to name, which is
+    /// what the catalog wording is for.
+    #[test]
+    fn a_paper_id_in_a_book_command_names_both_kinds() {
+        let Err(err) = TestCli::try_parse_from(["metadata", "approve", "paper:101"]) else {
+            panic!("a paper id must not resolve in a book-side command");
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("names the paper catalog"), "{rendered}");
+        assert!(rendered.contains("reads the book catalog"), "{rendered}");
+        assert!(rendered.contains("`book:101`"), "{rendered}");
+    }
+
+    fn parse_metadata(tokens: &[&str]) -> WriteMetadataAction {
+        match TestCli::try_parse_from(tokens).expect("parse").command {
+            TestCommand::Metadata { action } => action,
+            other => panic!("expected metadata, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn book_side_metadata_names_every_operand_the_way_the_paper_side_does() {
+        match parse_metadata(&[
+            "metadata",
+            "set",
+            "12",
+            "--field",
+            "title",
+            "--value",
+            "Sample Title",
+        ]) {
+            WriteMetadataAction::Set {
+                book, field, value, ..
+            } => {
+                assert_eq!(book, 12);
+                assert_eq!(field, "title");
+                assert_eq!(value, "Sample Title");
+            }
+            other => panic!("expected set, got {other:?}"),
+        }
+
+        match parse_metadata(&["metadata", "clear", "12", "--field", "publisher"]) {
+            WriteMetadataAction::Clear { book, field, .. } => {
+                assert_eq!(book, 12);
+                assert_eq!(field, "publisher");
+            }
+            other => panic!("expected clear, got {other:?}"),
+        }
+
+        match parse_metadata(&["metadata", "void", "12", "--field", "publisher"]) {
+            WriteMetadataAction::Void { book, field, .. } => {
+                assert_eq!(book, 12);
+                assert_eq!(field, "publisher");
+            }
+            other => panic!("expected void, got {other:?}"),
+        }
+
+        match parse_metadata(&[
+            "metadata",
+            "contributor-add",
+            "12",
+            "--role",
+            "author",
+            "--name",
+            "Doe, Jane",
+        ]) {
+            WriteMetadataAction::ContributorAdd {
+                book, role, name, ..
+            } => {
+                assert_eq!(book, 12);
+                assert_eq!(role, "author");
+                assert_eq!(name, "Doe, Jane");
+            }
+            other => panic!("expected contributor-add, got {other:?}"),
+        }
+
+        match parse_metadata(&[
+            "metadata",
+            "contributor-remove",
+            "12",
+            "--contributor-id",
+            "7",
+        ]) {
+            WriteMetadataAction::ContributorRemove {
+                book,
+                contributor_id,
+                ..
+            } => {
+                assert_eq!(book, 12);
+                assert_eq!(contributor_id, 7);
+            }
+            other => panic!("expected contributor-remove, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_positional_operand_grammar_no_longer_parses_on_the_book_side() {
+        for tokens in [
+            vec!["metadata", "set", "12", "title", "Sample Title"],
+            vec!["metadata", "clear", "12", "publisher"],
+            vec!["metadata", "void", "12", "publisher"],
+            vec!["metadata", "contributor-add", "12", "author", "Doe, Jane"],
+            vec!["metadata", "contributor-remove", "12", "7"],
+        ] {
+            assert!(
+                TestCli::try_parse_from(&tokens).is_err(),
+                "the positional form {tokens:?} must be refused, not silently accepted"
+            );
         }
     }
 
@@ -1477,6 +1986,122 @@ mod tests {
             PapersAction::ExportCsl { intake_id } => assert_eq!(intake_id, 42),
             other => panic!("expected papers export-csl, got {other:?}"),
         }
+    }
+
+    /// Every papers position that takes an intake id, paired with the
+    /// arguments it cannot parse without. A position that never grew a
+    /// `value_parser` fails here rather than only in whichever leaf
+    /// happened to gain an example.
+    const PAPERS_INTAKE_ID_POSITIONS: &[(&[&str], &[&str])] = &[
+        (&["show"], &[]),
+        (&["toc"], &[]),
+        (&["export-csl"], &[]),
+        (&["source"], &[]),
+        (&["remove"], &[]),
+        (&["metadata", "reaudit"], &[]),
+        (
+            &["metadata", "set"],
+            &["--field", "title", "--value", "Sample Title"],
+        ),
+        (&["metadata", "clear"], &["--field", "title"]),
+        (&["metadata", "void"], &["--field", "publisher"]),
+        (&["metadata", "ack"], &["--reason", "venue lists no DOI"]),
+        (&["metadata", "approve"], &[]),
+        (&["metadata", "reject"], &["--reason", "wrong source file"]),
+        (&["metadata", "reopen"], &[]),
+        (
+            &["metadata", "contributor-add"],
+            &["--role", "author", "--name", "Doe, Jane"],
+        ),
+        (
+            &["metadata", "contributor-remove"],
+            &["--contributor-id", "7"],
+        ),
+    ];
+
+    fn papers_argv<'a>(leaf: &[&'a str], id: &'a str, rest: &[&'a str]) -> Vec<&'a str> {
+        let mut argv = vec!["papers"];
+        argv.extend_from_slice(leaf);
+        argv.push(id);
+        argv.extend_from_slice(rest);
+        argv
+    }
+
+    /// The prefixed form projects onto the same parsed command as the
+    /// bare one — the prefix is read and dropped, not carried further.
+    #[test]
+    fn every_papers_intake_id_position_accepts_both_forms() {
+        for (leaf, rest) in PAPERS_INTAKE_ID_POSITIONS {
+            let bare = papers_argv(leaf, "101", rest);
+            let typed = papers_argv(leaf, "paper:101", rest);
+            let parsed = |argv: &Vec<&str>| {
+                format!(
+                    "{:?}",
+                    TestCli::try_parse_from(argv.iter().copied())
+                        .unwrap_or_else(|err| panic!("{argv:?} must parse: {err}"))
+                        .command
+                )
+            };
+            assert_eq!(parsed(&bare), parsed(&typed), "{leaf:?}");
+        }
+    }
+
+    /// A book id is well formed and names the other catalog, whose ids
+    /// number independently. Accepting it here would act on whichever
+    /// paper happens to carry that number.
+    #[test]
+    fn every_papers_intake_id_position_rejects_a_book_id() {
+        for (leaf, rest) in PAPERS_INTAKE_ID_POSITIONS {
+            let argv = papers_argv(leaf, "book:12", rest);
+            let Err(err) = TestCli::try_parse_from(argv.iter().copied()) else {
+                panic!("{argv:?} must not resolve a book id");
+            };
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// The refusal names both catalogs and rewrites the id for the one
+    /// being read, rather than reporting only that a value was bad.
+    #[test]
+    fn a_book_id_in_the_papers_namespace_names_both_kinds() {
+        let Err(err) = TestCli::try_parse_from(["papers", "show", "book:12"]) else {
+            panic!("a book id must not resolve in the papers namespace");
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("names the book catalog"), "{rendered}");
+        assert!(rendered.contains("reads the paper catalog"), "{rendered}");
+        assert!(rendered.contains("`paper:12`"), "{rendered}");
+    }
+
+    /// A `value_parser` can only return one line, so the three-part
+    /// wording is flattened into it. The next step has to survive that
+    /// flattening — it is the whole reason the summary stays terse.
+    #[test]
+    fn a_malformed_id_reaches_clap_with_its_next_step_attached() {
+        let Err(err) = TestCli::try_parse_from(["papers", "show", "chapter:1"]) else {
+            panic!("an unknown kind must not resolve");
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("unknown item kind"), "{rendered}");
+        assert!(rendered.contains("`paper`"), "{rendered}");
+    }
+
+    /// The parser hangs off the group member, so the two locators stay
+    /// mutually exclusive in the prefixed form too.
+    #[test]
+    fn papers_remove_keeps_its_exclusive_group_with_a_typed_id() {
+        TestCli::try_parse_from(["papers", "remove", "paper:101"])
+            .expect("a typed id is a locator");
+        let Err(err) =
+            TestCli::try_parse_from(["papers", "remove", "paper:101", "--sha", "deadbeef"])
+        else {
+            panic!("the two selectors must not be combined");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

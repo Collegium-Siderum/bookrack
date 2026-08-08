@@ -47,6 +47,13 @@ use bookrack_extract::{ExtractOutcome, Extraction};
 use sha2::{Digest, Sha256};
 use tracing::Instrument;
 
+bookrack_core::fixed_settings! {
+    owner = "ingest";
+    "ingest.ann_rebuild_floor" = embed_run::L2_ABSOLUTE_FLOOR,
+        "chunks of accumulated churn below which the ANN index is not rebuilt",
+        acts on "how often an ingest pays for an index rebuild";
+}
+
 /// The index stamps this binary builds an index with.
 ///
 /// The single assembly point for "what this build expects": the model and
@@ -994,6 +1001,10 @@ pub(crate) fn audit_as(
 /// entry-point prefix plus a nanosecond timestamp. All books touched by
 /// one invocation share the id, so `pipeline_audit_for_run` groups the
 /// whole pass.
+///
+/// This id lives in `item_pipeline_audit`'s namespace and is separate
+/// from the `pipeline_runs` registry the `reembed` / `reset` commands
+/// open at their entry point; the two are not expected to match.
 pub(crate) fn maintenance_run_id(prefix: &str) -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1003,8 +1014,10 @@ pub(crate) fn maintenance_run_id(prefix: &str) -> String {
 }
 
 /// How many leading blocks contribute text to the audit's body sample.
+// setting: internal -- how much of a book the metadata sample reads, alongside the character bound
 const METADATA_BODY_SAMPLE_BLOCKS: usize = 10;
 /// Maximum characters in the body sample carried into the audit.
+// setting: internal -- how much of a book the metadata sample reads, alongside the block bound
 const METADATA_BODY_SAMPLE_CHARS: usize = 4096;
 /// Run the non-blocking metadata sub-step in place: seed the
 /// publication-attrs base from the extracted [`Biblio`], run the

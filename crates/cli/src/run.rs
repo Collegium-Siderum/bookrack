@@ -11,8 +11,9 @@
 //!
 //! The daemon owns no stdin and runs headless. Operators reach it through
 //! the control-plane JSON-RPC socket: one-shot subcommands (`bookrack
-//! ingest`, `bookrack metadata set`, ...), `bookrack exec <method>` for
-//! ad-hoc calls, the desktop tray, and the MCP server for agent clients.
+//! ingest`, `bookrack metadata set`, ...), `bookrack rpc call <method>`
+//! for ad-hoc calls, the desktop tray, and the MCP server for agent
+//! clients.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -20,9 +21,12 @@ use std::time::Duration;
 
 use bookrack_cli::error::BookrackCliError;
 use bookrack_config::{LibrarySelection, LogConfig};
+use bookrack_core::Explain;
 use bookrack_ops::Caller;
 use bookrack_runtime::backend_probe::PreflightRefusal;
 use bookrack_runtime::control::HealthProbe;
+use bookrack_runtime::mcp_endpoint::McpBindRefusal;
+use bookrack_runtime::queue::QueueLoadError;
 use bookrack_runtime::{DaemonRuntime, LaunchMode, RuntimeOpts};
 use eyre::{Context, Result};
 use serde_json::Value;
@@ -63,7 +67,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
         launch_mode: LaunchMode::Cli,
     };
 
-    let runtime = match DaemonRuntime::start(runtime_opts).await {
+    let mut runtime = match DaemonRuntime::start(runtime_opts).await {
         Ok(rt) => rt,
         Err(err) => {
             if bookrack_session::is_lock_conflict(&err) {
@@ -79,10 +83,32 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
                 }
                 .into());
             }
+            // An endpoint the daemon cannot take is the same class of
+            // failure: refuse before announcing an address, so no
+            // success line goes out for a surface that is not there.
+            if let Some(refusal) = err.downcast_ref::<McpBindRefusal>() {
+                return Err(BookrackCliError::PreflightRefused {
+                    problem: refusal.problem.clone(),
+                }
+                .into());
+            }
+            // A queue document this binary will not read is the third:
+            // the state is intact and the version that wrote it still
+            // reads it, so the operator has a next step and the failure
+            // is not a bug report.
+            if let Some(refusal) = err.downcast_ref::<QueueLoadError>() {
+                return Err(BookrackCliError::PreflightRefused {
+                    problem: refusal.explain(),
+                }
+                .into());
+            }
             return Err(err);
         }
     };
 
+    // The listener socket is bound by now, so `mcp_label` is the
+    // address a client can connect to — including the port the kernel
+    // assigned when the configuration asked for `port 0`.
     println!(
         "bookrack daemon running: pid={} mcp={} control_sock={}",
         std::process::id(),
@@ -91,7 +117,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     );
     println!("stop with Ctrl-C or `bookrack quit`");
 
-    let mcp_handle = bookrack_mcp::spawn_listener(&runtime);
+    let mcp_handle = bookrack_mcp::spawn_listener(&mut runtime);
 
     // Foreground task: an async future that resolves on the shutdown
     // broadcast. Mirrors the headless pattern used by the Tauri shell
@@ -148,6 +174,7 @@ async fn handle_lock_conflict(err: eyre::Report, lock_path: &Path, mode: LaunchM
         }
         (_, HealthProbe::Stale) => Err(BookrackCliError::StaleSessionLock {
             path: lock_path.to_path_buf(),
+            pid: info.pid,
         }
         .into()),
         (_, HealthProbe::Unprobeable) => Err(BookrackCliError::SessionLockUnreadable {

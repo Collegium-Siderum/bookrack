@@ -14,7 +14,7 @@ use serde_json::{Value as JsonValue, json};
 
 use crate::core::{Ctx, SplitEntry, StageData};
 use crate::error::ParseError;
-use crate::patterns::{PatternRef, match_pattern};
+use crate::patterns::{PatternRef, match_pattern, match_pattern_skipping};
 use crate::pipeline::Stage;
 
 // --- public stage constructors ----------------------------------------------
@@ -69,6 +69,7 @@ pub fn partition_body_around_match(
     first_to: Option<String>,
     rest_to: Option<String>,
     tail_to: Option<String>,
+    skip_inner: Vec<String>,
 ) -> Result<Box<dyn Stage>, ParseError> {
     let head_split_by = match head_split_by.as_deref().filter(|p| !p.is_empty()) {
         Some(p) => Some(Regex::new(p).map_err(|e| {
@@ -85,6 +86,7 @@ pub fn partition_body_around_match(
         first_to,
         rest_to,
         tail_to,
+        skip_inner,
     }))
 }
 
@@ -146,6 +148,7 @@ struct PartitionBodyAroundMatch {
     first_to: Option<String>,
     rest_to: Option<String>,
     tail_to: Option<String>,
+    skip_inner: Vec<String>,
 }
 struct UnpackPairedBody {
     head_marker: String,
@@ -392,7 +395,7 @@ impl Stage for PartitionBodyAroundMatch {
     fn run(&self, data: StageData, _ctx: &mut Ctx) -> Result<StageData, ParseError> {
         let splits = data.expect_splits(self.name())?;
         let out = map_splits(splits, |mut s| {
-            if let Some(m) = match_pattern(&self.pattern, &s.body) {
+            if let Some(m) = match_pattern_skipping(&self.pattern, &s.body, &self.skip_inner) {
                 let head = s.body[..m.start].trim().to_string();
                 let tail = s.body[m.end..].trim().to_string();
 
@@ -459,17 +462,29 @@ impl Stage for UnpackPairedBody {
                 let body_text = body[body_start + self.body_marker.len()..]
                     .trim()
                     .to_string();
-                s.payload
-                    .insert(self.original_to.clone(), JsonValue::String(original));
+                s.payload.insert(
+                    self.original_to.clone(),
+                    JsonValue::String(original.clone()),
+                );
                 s.payload
                     .insert(self.head_to.clone(), JsonValue::String(head_text));
                 s.payload
                     .insert(self.body_to.clone(), JsonValue::String(body_text));
-                s.body = String::new();
+                // The primary-language side stays in the body: the
+                // `extract_*` stages a recipe declares after this one
+                // scan `body`, and consuming it here would leave them
+                // nothing to work on for every paired entry.
+                s.body = original;
+            } else if !s.body.trim().is_empty() {
+                // Without both markers the entry carries one side of the
+                // pair only. Record it under the key the paired branch
+                // uses for the same text, so the finalize stage — which
+                // copies declared payload keys and nothing else — has
+                // something to carry forward.
+                let unpaired = s.body.trim().to_string();
+                s.payload
+                    .insert(self.original_to.clone(), JsonValue::String(unpaired));
             }
-            // Without both markers in order, the entry passes through
-            // untouched: no payload keys are declared, and the body is
-            // left as-is.
             s
         });
         Ok(StageData::Splits(out))
@@ -769,6 +784,7 @@ mod tests {
                 Some("chinese_name".to_string()),
                 Some("variants".to_string()),
                 Some("bio_annotation".to_string()),
+                vec![],
             )
             .expect("compile head_split_by"),
             inputs,
@@ -800,12 +816,93 @@ mod tests {
                 None,
                 None,
                 None,
+                vec![],
             )
             .expect("compile head_split_by"),
             inputs,
         );
         assert!(out[0].payload.is_empty());
         assert_eq!(out[0].body, "no brackets here");
+    }
+
+    /// A book may spell more than one kind of tag with the same bracket
+    /// shape — a country marker and a name-type marker both in angle
+    /// brackets. `skip_inner` names the values that are not the tag this
+    /// stage is after, so the leftmost-match rule walks past them
+    /// instead of writing a name-type marker into the country key.
+    #[test]
+    fn partition_body_around_match_walks_past_a_skipped_inner_value() {
+        // "<surname>" precedes "[Japanese]"; only the latter is a
+        // country tag.
+        let body = "\u{5343}\u{6D66}\u{3008}\u{59D3}\u{3009}[\u{65E5}]";
+        let stage = || {
+            partition_body_around_match(
+                PatternRef::BracketedTag {
+                    brackets: vec![BracketKind::Angle, BracketKind::Square],
+                },
+                "country".to_string(),
+                None,
+                Some("chinese_name".to_string()),
+                None,
+                None,
+                vec!["\u{59D3}".to_string(), "\u{540D}".to_string()],
+            )
+            .expect("compile head_split_by")
+        };
+        let out = run(stage(), vec![split("Chiura", body)]);
+        assert_eq!(out[0].payload.get("country").unwrap(), "\u{65E5}");
+        assert_eq!(
+            out[0].payload.get("chinese_name").unwrap(),
+            "\u{5343}\u{6D66}\u{3008}\u{59D3}\u{3009}",
+            "the skipped tag stays in the head rather than being cut out"
+        );
+    }
+
+    /// Without the list the leftmost match still wins, so the skip is a
+    /// declared opt-in and not a change of the default rule.
+    #[test]
+    fn partition_body_around_match_takes_the_leftmost_match_without_a_skip_list() {
+        let body = "\u{5343}\u{6D66}\u{3008}\u{59D3}\u{3009}[\u{65E5}]";
+        let out = run(
+            partition_body_around_match(
+                PatternRef::BracketedTag {
+                    brackets: vec![BracketKind::Angle, BracketKind::Square],
+                },
+                "country".to_string(),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )
+            .expect("compile head_split_by"),
+            vec![split("Chiura", body)],
+        );
+        assert_eq!(out[0].payload.get("country").unwrap(), "\u{59D3}");
+    }
+
+    /// Every candidate being skipped is the same as no match at all: the
+    /// entry passes through with its body intact.
+    #[test]
+    fn partition_body_around_match_skipping_every_candidate_is_no_match() {
+        let body = "\u{5343}\u{6D66}\u{3008}\u{59D3}\u{3009}";
+        let out = run(
+            partition_body_around_match(
+                PatternRef::BracketedTag {
+                    brackets: vec![BracketKind::Angle],
+                },
+                "country".to_string(),
+                None,
+                None,
+                None,
+                None,
+                vec!["\u{59D3}".to_string()],
+            )
+            .expect("compile head_split_by"),
+            vec![split("Chiura", body)],
+        );
+        assert!(out[0].payload.is_empty());
+        assert_eq!(out[0].body, body);
     }
 
     #[test]
@@ -819,6 +916,7 @@ mod tests {
             None,
             None,
             None,
+            vec![],
         );
         match result {
             Err(ParseError::CatalogViolation(msg)) => {
@@ -864,18 +962,62 @@ mod tests {
         );
     }
 
+    fn unpack_stage() -> Box<dyn Stage> {
+        unpack_paired_body(
+            "<<<translation_head>>>".to_string(),
+            "<<<translation_body>>>".to_string(),
+            "zh_head".to_string(),
+            "zh_text".to_string(),
+            "en_text".to_string(),
+        )
+    }
+
+    /// Recipes declare their `extract_*` stages after this one, and
+    /// those stages scan `body`. Consuming the body here would leave
+    /// every paired entry with nothing to extract from, so the
+    /// primary-language side stays in place; the payload holds a copy.
     #[test]
-    fn unpack_paired_body_without_both_markers_leaves_payload_untouched() {
-        let inputs = vec![split("philosophical", "no markers here")];
+    fn unpack_paired_body_leaves_the_primary_side_in_the_body() {
+        let body = "[from Latin] relating to philosophy<<<translation_head>>>\
+            \u{54F2}\u{5B66}\u{77E5}\u{8BC6}<<<translation_body>>>\
+            related to phil knowledge";
+        let out = run(unpack_stage(), vec![split("philosophical", body)]);
+        assert_eq!(out[0].body, "[from Latin] relating to philosophy");
+    }
+
+    /// An entry the pairing stage could not pair reaches this stage
+    /// without markers. Its body is the primary-language text, so it
+    /// goes under the same key the paired branch uses; leaving it in the
+    /// payload-free state would drop it at the finalize stage, which
+    /// copies declared payload keys and nothing else.
+    #[test]
+    fn unpack_paired_body_records_an_unpaired_body_under_the_original_key() {
         let out = run(
-            unpack_paired_body(
-                "<<<translation_head>>>".to_string(),
-                "<<<translation_body>>>".to_string(),
-                "zh_head".to_string(),
-                "zh_text".to_string(),
-                "en_text".to_string(),
-            ),
-            inputs,
+            unpack_stage(),
+            vec![split("philosophical", "relating to philosophy")],
+        );
+        assert_eq!(
+            out[0].payload.get("en_text").unwrap(),
+            "relating to philosophy"
+        );
+        assert!(
+            !out[0].payload.contains_key("zh_head"),
+            "an unpaired entry must not claim a secondary-language head"
+        );
+        assert!(
+            !out[0].payload.contains_key("zh_text"),
+            "an unpaired entry must not claim a secondary-language body"
+        );
+        assert_eq!(out[0].body, "relating to philosophy");
+    }
+
+    /// An entry with neither markers nor a body — a bare cross-reference
+    /// headword — declares nothing rather than an empty string.
+    #[test]
+    fn unpack_paired_body_declares_nothing_for_a_bodyless_entry() {
+        let out = run(
+            unpack_stage(),
+            vec![split("consequentialism, see ethics", "")],
         );
         assert!(out[0].payload.is_empty());
     }

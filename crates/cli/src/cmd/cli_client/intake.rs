@@ -12,10 +12,12 @@ use std::path::PathBuf;
 use bookrack_cli::render::human::{basename_or_dash, truncate_to};
 use bookrack_cli::render::table::RowTable;
 use bookrack_cli_grammar::IntakeAction;
+use bookrack_core::ItemKind;
 use eyre::Result;
 use serde_json::{Value, json};
 
 use super::helpers;
+use super::listing::row_id;
 
 pub async fn run(
     action: IntakeAction,
@@ -92,19 +94,30 @@ pub async fn run(
     }
 }
 
+fn render_ocr_pending(response: &Value) {
+    println!("{}", format_ocr_pending(response));
+}
+
 /// Render an `OcrPendingResult` as a human table: one row per scan
 /// source awaiting OCR, followed by a count line. The `source_path` is
 /// shown by its basename; the full path is in the `--json` manifest.
-fn render_ocr_pending(response: &Value) {
+///
+/// The `intake` column prints the same typed id the item listings do,
+/// so an operator does not have to know which tables carry a prefix.
+/// Every row is a book row: the worklist reads the book-side catalog,
+/// and `distill` registers no intake, so no other pipeline has a row
+/// that could reach this table under the wrong kind.
+pub(super) fn format_ocr_pending(response: &Value) -> String {
     let items = response.get("items").and_then(Value::as_array);
-    match items {
+    let mut out = match items {
         Some(items) if !items.is_empty() => {
             let mut table = RowTable::new(["intake", "pages", "source", "reason"]);
             for item in items {
                 let intake_id = item
                     .get("intake_id")
                     .and_then(Value::as_i64)
-                    .map(|n| n.to_string())
+                    .and_then(|n| row_id(ItemKind::Book, n))
+                    .map(|id| id.to_string())
                     .unwrap_or_else(|| "-".to_string());
                 let pages = item
                     .get("pages")
@@ -123,21 +136,23 @@ fn render_ocr_pending(response: &Value) {
                     .unwrap_or_else(|| "-".to_string());
                 table.push_row([intake_id, pages, source, reason]);
             }
-            println!("{}", table.render());
+            table.render()
         }
-        _ => {
-            println!("no sources awaiting OCR");
-        }
-    }
+        _ => "no sources awaiting OCR".to_string(),
+    };
     let total = response.get("total").and_then(Value::as_u64).unwrap_or(0);
     let truncated = response
         .get("truncated")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    out.push('\n');
     if truncated {
         let shown = items.map(Vec::len).unwrap_or(0);
-        println!("showing {shown} of {total} pending (use --limit / --offset)");
+        out.push_str(&format!(
+            "showing {shown} of {total} pending (use --limit / --offset)"
+        ));
     } else {
-        println!("total {total} pending");
+        out.push_str(&format!("total {total} pending"));
     }
+    out
 }

@@ -39,6 +39,11 @@ pub enum ItemKind {
 }
 
 impl ItemKind {
+    /// Every pipeline, in declaration order. Lets a caller walk the
+    /// vocabulary instead of transcribing it, so a new pipeline reaches
+    /// the walkers without a second edit.
+    pub const ALL: [ItemKind; 3] = [ItemKind::Book, ItemKind::Paper, ItemKind::Reference];
+
     /// The string the catalog writes into its `scope` column. Returned
     /// as `&'static str` so callers can bind it directly into prepared
     /// SQL parameters or pass it where a `&str` is expected.
@@ -48,6 +53,22 @@ impl ItemKind {
             ItemKind::Paper => "paper",
             ItemKind::Reference => "reference",
         }
+    }
+
+    /// The kind a catalog `scope` string names, or `None` when the
+    /// string is not one this build writes. Exact inverse of
+    /// [`ItemKind::as_scope_str`].
+    ///
+    /// Derived by walking [`ItemKind::ALL`] rather than by a second
+    /// `match`, so the accepted spellings cannot drift from what the
+    /// catalog column holds. The comparison is exact: no alias, no
+    /// plural, no case folding — a caller that wants to be generous
+    /// about near misses classifies them itself, where it can say what
+    /// it guessed.
+    pub fn from_scope_str(s: &str) -> Option<ItemKind> {
+        ItemKind::ALL
+            .into_iter()
+            .find(|kind| kind.as_scope_str() == s)
     }
 }
 
@@ -60,6 +81,49 @@ mod tests {
         assert_eq!(ItemKind::Book.as_scope_str(), "book");
         assert_eq!(ItemKind::Paper.as_scope_str(), "paper");
         assert_eq!(ItemKind::Reference.as_scope_str(), "reference");
+    }
+
+    /// The two directions agree on every kind. The `match` is
+    /// exhaustive on purpose: adding a pipeline breaks the build here
+    /// rather than silently leaving its rows unaddressable.
+    #[test]
+    fn a_scope_string_reads_back_as_the_kind_that_wrote_it() {
+        for kind in ItemKind::ALL {
+            let scope = match kind {
+                ItemKind::Book => "book",
+                ItemKind::Paper => "paper",
+                ItemKind::Reference => "reference",
+            };
+            assert_eq!(scope, kind.as_scope_str());
+            assert_eq!(ItemKind::from_scope_str(scope), Some(kind));
+        }
+    }
+
+    /// Only the exact column values name a kind.
+    ///
+    /// The vocabulary is what an id prefix is parsed against and what a
+    /// listing row prints, so a spelling accepted here becomes a
+    /// spelling the whole surface accepts. `books` is the command
+    /// namespace and `Book` is the variant name — both are near misses
+    /// an implementation is tempted to be generous about, and the
+    /// generosity belongs where the guess can be reported, not here.
+    #[test]
+    fn a_near_miss_names_no_kind() {
+        for miss in [
+            "books",
+            "papers",
+            "Book",
+            "BOOK",
+            "",
+            " book",
+            "reference/x",
+        ] {
+            assert_eq!(
+                ItemKind::from_scope_str(miss),
+                None,
+                "{miss:?} was accepted as a kind"
+            );
+        }
     }
 
     #[test]

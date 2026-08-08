@@ -41,6 +41,12 @@ use super::report::{
 /// extracted `biblio` and `provenance` for signals that depend on
 /// the raw extraction (DOI / arXiv / ISSN format checks, contributor
 /// list, source-format prior, text-layer quality).
+///
+/// `csl_type` is read from `effective` as well, falling back to the
+/// extracted one. It is not an extraction-dependent signal but a
+/// graded, overridable field, and it selects the required-field
+/// matrix every other grade is rolled up against — so an override
+/// that corrects it has to reach the matrix, not just the display.
 pub struct PaperAuditInput<'a> {
     pub biblio: &'a Biblio,
     pub provenance: &'a Provenance,
@@ -52,6 +58,34 @@ pub struct PaperAuditInput<'a> {
     /// The source file's stem (no extension). Used to flag a title
     /// that merely echoes the filename.
     pub source_stem: Option<&'a str>,
+}
+
+/// The CSL type this audit judges by: the effective value when it
+/// parses, the extracted one otherwise.
+///
+/// An unparseable effective value falls back rather than failing or
+/// clearing the type. The metadata write surface validates field
+/// *names*, not values, so `csl_type = "nonsense"` is a reachable
+/// input, and judging such a paper by the type extraction inferred
+/// beats judging it by no type at all.
+fn effective_csl_type(input: &PaperAuditInput) -> Option<CslType> {
+    input
+        .effective
+        .get("csl_type")
+        .and_then(parse_csl_type)
+        .or(input.biblio.csl_type)
+}
+
+/// Parse a stored `csl_type` string back into the enum through
+/// [`CslType`]'s own serde representation, which is the CSL strings
+/// verbatim. Reusing it rather than hand-writing a match keeps this
+/// the exact inverse of
+/// [`super::projection::csl_type_token`].
+fn parse_csl_type(raw: &str) -> Option<CslType> {
+    use serde::Deserialize as _;
+    use serde::de::IntoDeserializer as _;
+    let de: serde::de::value::StrDeserializer<serde::de::value::Error> = raw.into_deserializer();
+    CslType::deserialize(de).ok()
 }
 
 /// Run the audit over the prepared input under one profile and data
@@ -67,6 +101,7 @@ pub fn audit_paper(
             verdict: PaperVerdict::Clean,
             confidence: PaperConfidence::Medium,
             cross_field_flags: Vec::new(),
+            csl_type: None,
         };
     }
 
@@ -88,13 +123,15 @@ pub fn audit_paper(
         cross_field_flags.push(PaperFlag::NoStableIdentifier);
     }
 
-    let (verdict, confidence) = roll_up(input.biblio.csl_type, &fields, &cross_field_flags);
+    let csl_type = effective_csl_type(input);
+    let (verdict, confidence) = roll_up(csl_type, &fields, &cross_field_flags);
 
     PaperReport {
         fields,
         verdict,
         confidence,
         cross_field_flags,
+        csl_type,
     }
 }
 
@@ -599,6 +636,218 @@ static ARXIV_OLD_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 static PDF_DATE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^D:[0-9]{8,}").expect("PDF date regex"));
+
+#[cfg(test)]
+mod csl_type_tests {
+    use super::*;
+    use bookrack_catalog::{Catalog, NewIntake, NewOverride, NewPublicationAttrs};
+    use bookrack_core::ItemKind;
+    use bookrack_extract::{ContributorRole, TextLayerQuality};
+
+    use crate::audit::data::PaperAuditData;
+    use crate::audit::profile::PaperAuditProfile;
+    use crate::audit::report::PaperFieldGrade;
+
+    /// A paper extracted as `article-journal` with everything that
+    /// type requires — title, author, year, container_title, doi —
+    /// and no `publisher`, which only Thesis requires. Judged as
+    /// `article-journal` it is Clean; judged as Thesis it is not.
+    fn journal_shaped_biblio() -> Biblio {
+        Biblio {
+            title: Some("Synthetic Findings in Test Spaces".to_string()),
+            subtitle: None,
+            publisher: None,
+            year: Some(2019),
+            year_raw: Some("2019".to_string()),
+            isbn: None,
+            series: None,
+            language: Some("en".to_string()),
+            contributors: vec![Contributor {
+                name: "Alex Sample".to_string(),
+                role: ContributorRole::Author,
+                family: Some("Sample".to_string()),
+                given: Some("Alex".to_string()),
+                orcid: None,
+            }],
+            doi: Some("10.18653/v1/n19-1423".to_string()),
+            arxiv_id: None,
+            issn: None,
+            container_title: Some("Journal of Synthetic Results".to_string()),
+            abstract_text: Some(
+                "A synthetic abstract long enough to clear the minimum length \
+                 the default profile requires for the abstract field."
+                    .to_string(),
+            ),
+            csl_type: Some(CslType::ArticleJournal),
+        }
+    }
+
+    fn provenance() -> Provenance {
+        Provenance {
+            adapter: "pdf".to_string(),
+            extractor_version: 1,
+            text_layer_quality: TextLayerQuality::Usable,
+            skipped_units: Vec::new(),
+            derived_from_sha256: None,
+            partial_pages: None,
+            source_of_structure: None,
+            fallbacks: Vec::new(),
+        }
+    }
+
+    /// Seed the extracted biblio into `node_publication_attrs`, apply
+    /// `csl_type_override` if given, and run the real audit over the
+    /// resulting effective attrs.
+    fn audit_with_override(csl_type_override: Option<&str>) -> PaperReport {
+        let biblio = journal_shaped_biblio();
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let intake_id = catalog
+            .register_intake(
+                ItemKind::Paper,
+                &NewIntake::new("cafebabe".to_string()).format("pdf".to_string()),
+            )
+            .expect("register")
+            .into_intake()
+            .intake_id;
+
+        let mut attrs = NewPublicationAttrs::new(intake_id, ItemKind::Paper);
+        attrs.title = biblio.title.clone();
+        attrs.year = biblio.year.map(|y| y.to_string());
+        attrs.doi = biblio.doi.clone();
+        attrs.container_title = biblio.container_title.clone();
+        attrs.abstract_text = biblio.abstract_text.clone();
+        attrs.language = biblio.language.clone();
+        attrs.csl_type = Some("article-journal".to_string());
+        catalog.upsert_publication_attrs(&attrs).expect("attrs");
+
+        if let Some(value) = csl_type_override {
+            catalog
+                .set_override(&NewOverride::new(
+                    intake_id,
+                    ItemKind::Paper,
+                    "csl_type",
+                    Some(value.to_string()),
+                    "human",
+                ))
+                .expect("override");
+        }
+
+        let effective = catalog
+            .effective_publication_attrs(intake_id, ItemKind::Paper)
+            .expect("effective");
+        let provenance = provenance();
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &effective,
+            body_sample: "A synthetic body sample in English.",
+            source_stem: None,
+        };
+        audit_paper(
+            &input,
+            &PaperAuditProfile::default_profile(),
+            &PaperAuditData::default_data(),
+        )
+    }
+
+    /// The operator corrects a misidentified thesis. The correction is
+    /// visible in the effective view and on every display surface; it
+    /// has to reach the matrix too, or the audit keeps grading the
+    /// paper against the type the operator just said was wrong.
+    #[test]
+    fn an_override_selects_the_matrix_the_judgement_uses() {
+        let report = audit_with_override(Some("thesis"));
+        assert_eq!(
+            report.csl_type,
+            Some(CslType::Thesis),
+            "the judgement must name the type it graded by",
+        );
+        assert_eq!(
+            report.fields.get("publisher").map(|f| f.grade),
+            Some(PaperFieldGrade::Missing),
+            "publisher is absent either way; only the matrix decides whether it counts",
+        );
+        assert_eq!(
+            report.verdict,
+            PaperVerdict::NeedsWork,
+            "a thesis with no publisher is not clean: {report:?}",
+        );
+    }
+
+    /// The reverse: with no override the extracted type still selects
+    /// the matrix, so this is not a change of default.
+    #[test]
+    fn without_an_override_the_extracted_type_still_selects_the_matrix() {
+        let report = audit_with_override(None);
+        assert_eq!(report.csl_type, Some(CslType::ArticleJournal));
+        assert_eq!(
+            report.verdict,
+            PaperVerdict::Clean,
+            "every article-journal requirement is met: {report:?}",
+        );
+    }
+
+    /// The write surface validates field names, not values, so an
+    /// unparseable `csl_type` is reachable. It falls back to the
+    /// extracted type rather than panicking or clearing the type,
+    /// which would silently demote the paper to the generic minimum.
+    #[test]
+    fn an_unparseable_override_falls_back_to_the_extracted_type() {
+        let report = audit_with_override(Some("nonsense"));
+        assert_eq!(report.csl_type, Some(CslType::ArticleJournal));
+        assert_eq!(report.verdict, PaperVerdict::Clean);
+    }
+
+    /// Every token the projection writes parses back to the variant
+    /// it came from. The two directions live in different modules, so
+    /// nothing but this test stops them drifting.
+    #[test]
+    fn every_written_token_parses_back_to_its_variant() {
+        for t in [
+            CslType::ArticleJournal,
+            CslType::PaperConference,
+            CslType::Book,
+            CslType::Chapter,
+            CslType::Thesis,
+            CslType::Report,
+            CslType::Webpage,
+        ] {
+            let token = crate::audit::projection::csl_type_token(t);
+            assert_eq!(parse_csl_type(token), Some(t), "token {token}");
+        }
+    }
+
+    /// A profile with the audit switched off judges nothing, so it
+    /// names no type — rather than reporting one it never consulted.
+    #[test]
+    fn a_disabled_audit_reports_no_type() {
+        let biblio = journal_shaped_biblio();
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let intake_id = catalog
+            .register_intake(
+                ItemKind::Paper,
+                &NewIntake::new("f00dface".to_string()).format("pdf".to_string()),
+            )
+            .expect("register")
+            .into_intake()
+            .intake_id;
+        let effective = catalog
+            .effective_publication_attrs(intake_id, ItemKind::Paper)
+            .expect("effective");
+        let provenance = provenance();
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &effective,
+            body_sample: "",
+            source_stem: None,
+        };
+        let mut profile = PaperAuditProfile::default_profile();
+        profile.audit_enabled = false;
+        let report = audit_paper(&input, &profile, &PaperAuditData::default_data());
+        assert_eq!(report.csl_type, None);
+    }
+}
 
 #[cfg(test)]
 mod tests {

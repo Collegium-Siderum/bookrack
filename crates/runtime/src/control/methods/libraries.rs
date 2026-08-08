@@ -18,9 +18,9 @@ use serde_json::{Value, json};
 #[cfg(test)]
 use ts_rs::TS;
 
-use super::super::error_map::{config_err, registry_err};
+use super::super::error_map::{config_err, mount_err, registry_err, write_err};
 use super::super::events::Event;
-use super::super::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
+use super::super::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, NOT_READY, RpcError};
 use super::MethodContext;
 use super::run_write;
 use crate::cmd::libraries::CopyMode;
@@ -41,6 +41,14 @@ pub struct LibraryForkParams {
     /// forwards `yes: true` once the operator confirms.
     #[serde(default)]
     pub yes: bool,
+    /// The library being forked — the source of the clone. Absent
+    /// means the registry's current default. `library.fork` is the one
+    /// method that legitimately holds two libraries at once, so the
+    /// source is named explicitly rather than inherited from whichever
+    /// library the daemon came up under.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 fn default_copy_mode() -> String {
@@ -76,22 +84,42 @@ pub async fn fork(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
              platform config directory is available",
         )
     })?;
-    let cfg = ctx.cfg.clone();
+    let handle = ctx
+        .registry
+        .get(parsed.library.as_deref())
+        .map_err(registry_err)?;
+    let cfg = handle.cfg_arc();
     let target = parsed.data_dir.clone();
     let new_name = parsed.new_name.clone();
-    run_write(ctx, move || async move {
+    // A daemon that cannot mount still forks: the clone is a real
+    // library on disk either way, and refusing to make one because
+    // this process cannot serve it would be the wrong trade.
+    let mounter = ctx.mounter.clone();
+    run_write(ctx, handle.name(), move || async move {
         crate::cmd::libraries::fork(&cfg, &new_name, &target, &registry_path, mode, true, |_| {
             Ok(true)
         })
-        .map_err(|e| {
-            RpcError::new(
-                crate::control::jsonrpc::INTERNAL_ERROR,
-                format!("library.fork: {e:#}"),
-            )
-        })?;
+        .map_err(|e| write_err("library.fork", e))?;
+        // Mount failure does not roll the fork back: the library is
+        // built and registered by now, and undoing it would delete
+        // data to report a serving problem. The fork succeeds and says
+        // it is not being served, which leaves the operator one
+        // `libraries mount` away instead of one restore.
+        let mounted = match mounter {
+            Some(mounter) => match mounter.mount(&new_name).await {
+                Ok(()) => Ok(()),
+                Err(e) => Err(format!("{e:#}")),
+            },
+            None => Err(
+                "this daemon dispatches without library mounts, so it cannot serve the clone"
+                    .to_string(),
+            ),
+        };
         Ok(json!({
             "new_name": new_name,
             "data_dir": target,
+            "mounted": mounted.is_ok(),
+            "mount_error": mounted.err(),
         }))
     })
     .await
@@ -120,9 +148,17 @@ pub async fn set_default(params: &Option<Value>, ctx: &MethodContext) -> Result<
     let parsed: LibrarySetDefaultParams = serde_json::from_value(raw)
         .map_err(|e| RpcError::new(INVALID_PARAMS, format!("library.set_default params: {e}")))?;
 
-    // Validate against the registered libraries before touching disk, so
-    // an unknown name fails without a write.
-    ctx.registry.get(Some(&parsed.name)).map_err(registry_err)?;
+    // Validate before touching disk, so an unknown name fails without a
+    // write. The mounted set is not the whole answer: a library the
+    // registry carries but this daemon is not serving is a legitimate
+    // target, and refusing it would mean the pointer could only ever
+    // move between the libraries that happened to be mounted. Mount it
+    // instead, so the daemon is serving whatever it is about to route
+    // unnamed calls to.
+    if ctx.registry.get(Some(&parsed.name)).is_err() {
+        let mounter = require_mounter("library.set_default", ctx)?;
+        mounter.mount(&parsed.name).await.map_err(mount_err)?;
+    }
 
     // Persist to the registry, then refresh the in-memory cache.
     let registry_path = registry_target_path().ok_or_else(|| {
@@ -141,3 +177,110 @@ pub async fn set_default(params: &Option<Value>, ctx: &MethodContext) -> Result<
     });
     Ok(json!({ "ok": true, "name": parsed.name }))
 }
+
+#[derive(Debug, Deserialize)]
+pub struct LibraryMountParams {
+    pub name: String,
+}
+
+/// Open a registered library and add it to the set this daemon serves.
+///
+/// The name is a registry name, never a path: the daemon resolves it
+/// through the registry, so what it mounts is what the registry
+/// declares, and registering a new root stays a separate act with its
+/// own failure modes.
+///
+/// Runs through [`run_write`] like every other change to what the
+/// daemon serves: the write mutex keeps a mount from racing another
+/// write, MCP is paused for its duration, and the `library.changed`
+/// event a subscriber needs to refresh its view of the library set is
+/// published on success by the wrapper itself.
+pub async fn mount(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let name = mount_target("library.mount", params)?;
+    let mounter = require_mounter("library.mount", ctx)?;
+    let target = name.clone();
+    run_write(ctx, &name, move || async move {
+        mounter.mount(&target).await.map_err(mount_err)?;
+        tracing::info!(library = %target, "library mounted at runtime");
+        Ok(json!({ "ok": true, "name": target }))
+    })
+    .await
+}
+
+/// Stop serving a library and let go of its data root.
+///
+/// Refuses the registry default, the library the daemon came up under,
+/// and a library with queued work; see [`crate::mount::Mounter::unmount`]
+/// for why each of the three would otherwise leave the daemon
+/// describing something it no longer serves.
+///
+/// The root lock is released when the last caller holding the library's
+/// handle is done with it, which may be after this call returns: an
+/// in-flight read keeps the root held until it finishes.
+pub async fn unmount(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let name = mount_target("library.unmount", params)?;
+    let mounter = require_mounter("library.unmount", ctx)?;
+    let primary = ctx.info_context.library_name.clone();
+    let queued_jobs = queued_against(ctx, &name)?;
+    let target = name.clone();
+    run_write(ctx, &name, move || async move {
+        let facts = crate::mount::UnmountFacts {
+            primary: primary.as_deref(),
+            queued_jobs,
+        };
+        let handle = mounter.unmount(&target, facts).map_err(mount_err)?;
+        drop(handle);
+        tracing::info!(library = %target, "library unmounted at runtime");
+        Ok(json!({ "ok": true, "name": target }))
+    })
+    .await
+}
+
+/// Count the jobs against `library` the worker has not finished with.
+fn queued_against(ctx: &MethodContext, library: &str) -> Result<usize, RpcError> {
+    let state = ctx.queue_state.lock().map_err(|_| {
+        RpcError::new(
+            crate::control::jsonrpc::INTERNAL_ERROR,
+            "library.unmount: the queue state lock is poisoned",
+        )
+    })?;
+    Ok(state
+        .jobs
+        .iter()
+        .filter(|job| {
+            job.library == library
+                && matches!(
+                    job.state,
+                    bookrack_core::queue::JobState::Pending
+                        | bookrack_core::queue::JobState::Running
+                )
+        })
+        .count())
+}
+
+fn mount_target(method: &str, params: &Option<Value>) -> Result<String, RpcError> {
+    let raw = params
+        .clone()
+        .ok_or_else(|| RpcError::new(INVALID_PARAMS, format!("{method}: missing params")))?;
+    let parsed: LibraryMountParams = serde_json::from_value(raw)
+        .map_err(|e| RpcError::new(INVALID_PARAMS, format!("{method} params: {e}")))?;
+    Ok(parsed.name)
+}
+
+/// The mount capability, or the refusal an entry point without one
+/// owes its caller. Same shape as a queue-bound method reaching a
+/// daemon that spawned no worker: the method exists, this process
+/// cannot serve it.
+fn require_mounter(
+    method: &str,
+    ctx: &MethodContext,
+) -> Result<std::sync::Arc<crate::mount::Mounter>, RpcError> {
+    ctx.mounter.clone().ok_or_else(|| {
+        RpcError::new(
+            NOT_READY,
+            format!("{method} is not available in this entry point: it dispatches without a daemon bring-up, so it holds no library mounts"),
+        )
+    })
+}
+
+routed_params!(LibraryForkParams);

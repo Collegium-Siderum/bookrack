@@ -172,6 +172,34 @@ impl IntakeStatus {
         IntakeStatus::NeedsOcr,
     ];
 
+    /// The statuses the `glean` pipeline can write. `NeedsOcr` and
+    /// `Aborted` are reached only from the OCR quality gate, which is
+    /// book-side; `DedupHold` has no writer at all.
+    pub const PAPER_REACHABLE: [IntakeStatus; 3] = [
+        IntakeStatus::Pending,
+        IntakeStatus::Extracted,
+        IntakeStatus::Embedded,
+    ];
+
+    /// The statuses a filter over `kind` may be given.
+    ///
+    /// This is a snapshot of what each pipeline writes today, not an
+    /// invariant the type enforces: teaching `glean` to park a
+    /// suspected duplicate would make `DedupHold` reachable for
+    /// papers, and this array is where that has to be recorded. **No
+    /// test guards the drift** — one can pin that a refusal happens,
+    /// not that the set refused is the right one.
+    ///
+    /// `Reference` yields an empty slice: `distill` registers no
+    /// intake rows, so no status is reachable through it.
+    pub const fn accepted_for(kind: ItemKind) -> &'static [IntakeStatus] {
+        match kind {
+            ItemKind::Book => &Self::ALL,
+            ItemKind::Paper => &Self::PAPER_REACHABLE,
+            ItemKind::Reference => &[],
+        }
+    }
+
     /// The database string form.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -190,6 +218,31 @@ impl IntakeStatus {
     }
 }
 
+/// Which layer an attribute predicate compares against.
+///
+/// The base layer is what the extraction and enrichment pipeline
+/// wrote into `node_publication_attrs`; the effective layer is that
+/// with the user's `node_overrides` applied — the same value the read
+/// paths render, computed by the same rule as
+/// [`Catalog::effective_publication_attrs`].
+///
+/// Only the `node_publication_attrs` predicates observe this. The
+/// `intake`, `node_reviews` and `node_categories` predicates have no
+/// override layer to consult, and `confidence` is an audit verdict
+/// rather than a curated field, so it is not editable and stays on the
+/// base layer whichever variant is set.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum MatchLayer {
+    /// Compare against the `node_publication_attrs` columns as stored.
+    #[default]
+    Base,
+    /// Compare against the base columns with overrides applied: an
+    /// override with a value replaces the base value, and an override
+    /// that is an explicit NULL removes the field, so no predicate
+    /// matches it.
+    Effective,
+}
+
 /// What [`Catalog::find_intakes`] and [`Catalog::count_find_intakes`]
 /// filter on. Each field is an optional predicate AND-combined with the
 /// others; the default value (`IntakeFilter::default()`) imposes none and
@@ -204,6 +257,9 @@ pub struct IntakeFilter<'a> {
     /// pipeline (the default), `Paper` for the glean pipeline. Every
     /// `node_*` JOIN this filter builds picks up the matching scope.
     pub kind: ItemKind,
+    /// Which layer the `node_publication_attrs` predicates compare
+    /// against. See [`MatchLayer`]; the default is the base layer.
+    pub layer: MatchLayer,
     /// Substring match against the root publication-attrs title, i.e.
     /// `node_publication_attrs.title LIKE '%' || ? || '%'` joined on the
     /// item scope. ASCII case is ignored (`LIKE` folds it). `%` and `_`
@@ -248,6 +304,9 @@ pub struct IntakeFilter<'a> {
     /// `node_categories`, joined on the item scope. An empty slice
     /// means "no filter".
     pub categories: &'a [&'a str],
+    /// Match the root publication-attrs `language` column against this
+    /// set, comparing as text. An empty slice means "no filter".
+    pub language: &'a [&'a str],
 }
 
 /// The list of `intake` columns qualified with the `i.` alias used by
@@ -260,6 +319,50 @@ fn intake_columns_qualified() -> String {
         .join(", ")
 }
 
+/// The `node_publication_attrs` columns whose predicate this filter
+/// activates and whose value an override may replace, in a fixed order
+/// so the JOIN text and its parameters stay in step. Empty on
+/// [`MatchLayer::Base`], which reads the base columns directly.
+fn overridden_columns(filter: &IntakeFilter<'_>) -> Vec<&'static str> {
+    if filter.layer == MatchLayer::Base {
+        return Vec::new();
+    }
+    let active = [
+        ("title", filter.title_substring.is_some()),
+        ("year", filter.year.is_some()),
+        ("container_title", filter.venue_substring.is_some()),
+        ("doi", filter.doi.is_some()),
+        ("language", !filter.language.is_empty()),
+    ];
+    active
+        .into_iter()
+        .filter_map(|(column, wanted)| wanted.then_some(column))
+        .collect()
+}
+
+/// The JOIN alias carrying `column`'s override row.
+fn override_alias(column: &str) -> String {
+    format!("o_{column}")
+}
+
+/// The SQL expression a predicate on `column` compares against.
+///
+/// On the effective layer the override row's presence decides, not its
+/// value: an override storing an explicit NULL means the field was
+/// deliberately removed, so the expression is NULL and no predicate
+/// matches it. `COALESCE` would read that same row as "no override"
+/// and fall back to the base value, turning a deletion into an
+/// untouched field.
+fn attr_expr(filter: &IntakeFilter<'_>, column: &str) -> String {
+    match filter.layer {
+        MatchLayer::Base => format!("npa.{column}"),
+        MatchLayer::Effective => {
+            let alias = override_alias(column);
+            format!("CASE WHEN {alias}.intake_id IS NULL THEN npa.{column} ELSE {alias}.value END")
+        }
+    }
+}
+
 fn build_filter_fragments(filter: &IntakeFilter<'_>) -> (String, String, Vec<Box<dyn ToSql>>) {
     let mut joins = String::new();
     let mut where_parts: Vec<String> = Vec::new();
@@ -269,12 +372,26 @@ fn build_filter_fragments(filter: &IntakeFilter<'_>) -> (String, String, Vec<Box
         || !filter.confidence_in.is_empty()
         || filter.year.is_some()
         || filter.venue_substring.is_some()
-        || filter.doi.is_some();
+        || filter.doi.is_some()
+        || !filter.language.is_empty();
     if need_npa {
         joins.push_str(
             " LEFT JOIN node_publication_attrs npa \
              ON npa.intake_id = i.intake_id AND npa.scope = ?",
         );
+        params.push(Box::new(filter.kind.as_scope_str().to_string()));
+    }
+    // One override JOIN per column an effective-layer predicate reads.
+    // `node_overrides` is keyed on (intake_id, scope, field), so each
+    // one matches at most a single row and none of them fans out.
+    for column in overridden_columns(filter) {
+        joins.push_str(&format!(
+            " LEFT JOIN node_overrides {alias} \
+             ON {alias}.intake_id = i.intake_id \
+             AND {alias}.scope = ? \
+             AND {alias}.field = '{column}'",
+            alias = override_alias(column),
+        ));
         params.push(Box::new(filter.kind.as_scope_str().to_string()));
     }
     if filter.contributor_name.is_some() {
@@ -293,7 +410,10 @@ fn build_filter_fragments(filter: &IntakeFilter<'_>) -> (String, String, Vec<Box
     }
 
     if let Some(needle) = filter.title_substring {
-        where_parts.push(format!("npa.title LIKE ? ESCAPE '{LIKE_ESCAPE}'"));
+        where_parts.push(format!(
+            "{} LIKE ? ESCAPE '{LIKE_ESCAPE}'",
+            attr_expr(filter, "title")
+        ));
         params.push(Box::new(format!("%{}%", like_escape(needle))));
     }
     if let Some(name) = filter.contributor_name {
@@ -347,16 +467,34 @@ fn build_filter_fragments(filter: &IntakeFilter<'_>) -> (String, String, Vec<Box
         }
     }
     if let Some(year) = filter.year {
-        where_parts.push("npa.year = ?".to_string());
+        where_parts.push(format!("{} = ?", attr_expr(filter, "year")));
         params.push(Box::new(year.to_string()));
     }
     if let Some(needle) = filter.venue_substring {
-        where_parts.push(format!("npa.container_title LIKE ? ESCAPE '{LIKE_ESCAPE}'"));
+        where_parts.push(format!(
+            "{} LIKE ? ESCAPE '{LIKE_ESCAPE}'",
+            attr_expr(filter, "container_title")
+        ));
         params.push(Box::new(format!("%{}%", like_escape(needle))));
     }
     if let Some(doi) = filter.doi {
-        where_parts.push("npa.doi = ?".to_string());
+        where_parts.push(format!("{} = ?", attr_expr(filter, "doi")));
         params.push(Box::new(doi.to_string()));
+    }
+    if !filter.language.is_empty() {
+        debug_assert!(
+            filter.language.len() <= 8,
+            "IntakeFilter.language takes at most 8 entries, got {}",
+            filter.language.len()
+        );
+        let placeholders = vec!["?"; filter.language.len()].join(", ");
+        where_parts.push(format!(
+            "{} IN ({placeholders})",
+            attr_expr(filter, "language")
+        ));
+        for value in filter.language {
+            params.push(Box::new((*value).to_string()));
+        }
     }
     if !filter.categories.is_empty() {
         debug_assert!(
@@ -2217,6 +2355,241 @@ mod tests {
         assert_eq!(ids_either, vec![philo, bio]);
 
         assert_eq!(catalog.count_find_intakes(&filter).expect("count"), 1);
+    }
+
+    /// Register one book with `base` as its stored title, then record
+    /// `override_value` as the user's title override: `Some` to
+    /// replace it, `None` for the explicit NULL that removes the
+    /// field. Returns the intake id.
+    fn book_with_title_override(
+        catalog: &mut Catalog,
+        sha: &str,
+        base: &str,
+        override_value: Option<&str>,
+    ) -> i64 {
+        let intake_id = catalog
+            .register_intake(ItemKind::Book, &NewIntake::new(sha))
+            .expect("register")
+            .intake()
+            .intake_id;
+        let mut attrs = crate::NewPublicationAttrs::new(intake_id, ItemKind::Book);
+        attrs.title = Some(base.to_string());
+        catalog
+            .upsert_publication_attrs(&attrs)
+            .expect("seed attrs");
+        catalog
+            .set_override(&crate::NewOverride::new(
+                intake_id,
+                ItemKind::Book,
+                "title",
+                override_value.map(str::to_string),
+                "human",
+            ))
+            .expect("write override");
+        intake_id
+    }
+
+    /// Ids whose title matches `needle` on `layer`, asserting that the
+    /// paged find and the count agree — they share one fragment
+    /// builder, so a predicate that reaches only one of them is a bug
+    /// this helper catches everywhere it is used.
+    fn titles_matching(catalog: &Catalog, layer: MatchLayer, needle: &str) -> Vec<i64> {
+        let filter = IntakeFilter {
+            layer,
+            title_substring: Some(needle),
+            ..IntakeFilter::default()
+        };
+        let hits = catalog.find_intakes(&filter, 100, 0).expect("find");
+        let ids: Vec<i64> = hits.iter().map(|i| i.intake_id).collect();
+        assert_eq!(
+            catalog.count_find_intakes(&filter).expect("count") as usize,
+            ids.len(),
+            "the count and the page disagree about how many rows match"
+        );
+        ids
+    }
+
+    #[test]
+    fn the_effective_layer_matches_the_curated_title() {
+        let mut catalog = catalog();
+        let book = book_with_title_override(
+            &mut catalog,
+            "sha-curated",
+            "Base Title",
+            Some("Curated Title"),
+        );
+        assert_eq!(
+            titles_matching(&catalog, MatchLayer::Effective, "Curated"),
+            vec![book],
+            "a title the user corrected is not reachable by the corrected value"
+        );
+    }
+
+    #[test]
+    fn the_effective_layer_misses_the_replaced_title() {
+        let mut catalog = catalog();
+        book_with_title_override(
+            &mut catalog,
+            "sha-curated",
+            "Base Title",
+            Some("Curated Title"),
+        );
+        assert_eq!(
+            titles_matching(&catalog, MatchLayer::Effective, "Base"),
+            Vec::<i64>::new(),
+            "a value the user replaced still answers the filter, and the row it \
+             returns renders the replacement — a hit whose title does not contain \
+             the needle"
+        );
+    }
+
+    #[test]
+    fn an_explicit_null_override_removes_the_field_from_the_match() {
+        let mut catalog = catalog();
+        book_with_title_override(&mut catalog, "sha-nulled", "Base Title", None);
+        assert_eq!(
+            titles_matching(&catalog, MatchLayer::Effective, "Base"),
+            Vec::<i64>::new(),
+            "an override that deliberately nullifies the title still matches on the \
+             base value, so a deletion reads as an untouched field"
+        );
+    }
+
+    #[test]
+    fn the_base_layer_is_unaffected_by_an_override() {
+        // The default layer is what `list_metadata`, `list_pending_reviews`
+        // and `verify` filter on: they audit what the pipeline wrote, so
+        // no override may reach them.
+        let mut catalog = catalog();
+        let book = book_with_title_override(
+            &mut catalog,
+            "sha-curated",
+            "Base Title",
+            Some("Curated Title"),
+        );
+        assert_eq!(
+            titles_matching(&catalog, MatchLayer::Base, "Base"),
+            vec![book]
+        );
+        assert_eq!(
+            titles_matching(&catalog, MatchLayer::Base, "Curated"),
+            Vec::<i64>::new()
+        );
+    }
+
+    /// Register one book carrying `base` as its stored language, and
+    /// optionally record the curator's correction to it: `Some` to
+    /// replace it, `None` for the explicit NULL that removes the
+    /// field. Returns the intake id.
+    fn book_with_language(
+        catalog: &mut Catalog,
+        sha: &str,
+        base: &str,
+        override_value: Option<Option<&str>>,
+    ) -> i64 {
+        let intake_id = catalog
+            .register_intake(ItemKind::Book, &NewIntake::new(sha))
+            .expect("register")
+            .intake()
+            .intake_id;
+        let mut attrs = crate::NewPublicationAttrs::new(intake_id, ItemKind::Book);
+        attrs.language = Some(base.to_string());
+        catalog
+            .upsert_publication_attrs(&attrs)
+            .expect("seed attrs");
+        if let Some(value) = override_value {
+            catalog
+                .set_override(&crate::NewOverride::new(
+                    intake_id,
+                    ItemKind::Book,
+                    "language",
+                    value.map(str::to_string),
+                    "human",
+                ))
+                .expect("write override");
+        }
+        intake_id
+    }
+
+    /// Ids whose language is one of `wanted` on `layer`, holding the
+    /// paged find and the count to the same answer.
+    fn languages_matching(catalog: &Catalog, layer: MatchLayer, wanted: &[&str]) -> Vec<i64> {
+        let filter = IntakeFilter {
+            layer,
+            language: wanted,
+            ..IntakeFilter::default()
+        };
+        let hits = catalog.find_intakes(&filter, 100, 0).expect("find");
+        let ids: Vec<i64> = hits.iter().map(|i| i.intake_id).collect();
+        assert_eq!(
+            catalog.count_find_intakes(&filter).expect("count") as usize,
+            ids.len(),
+            "the count and the page disagree about how many rows match"
+        );
+        ids
+    }
+
+    #[test]
+    fn language_selects_one_book_out_of_two_on_either_layer() {
+        let mut catalog = catalog();
+        let german = book_with_language(&mut catalog, "sha-de", "de", None);
+        let latin = book_with_language(&mut catalog, "sha-la", "la", None);
+
+        for layer in [MatchLayer::Base, MatchLayer::Effective] {
+            assert_eq!(
+                languages_matching(&catalog, layer, &["de"]),
+                vec![german],
+                "the latin book ({latin}) must not match a german filter on {layer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn language_takes_several_values_and_excludes_the_rest() {
+        let mut catalog = catalog();
+        let german = book_with_language(&mut catalog, "sha-de", "de", None);
+        let latin = book_with_language(&mut catalog, "sha-la", "la", None);
+        let english = book_with_language(&mut catalog, "sha-en", "en", None);
+
+        for layer in [MatchLayer::Base, MatchLayer::Effective] {
+            assert_eq!(
+                languages_matching(&catalog, layer, &["de", "la"]),
+                vec![german, latin],
+                "a multi-value filter must match either listed language and \
+                 nothing else; the english book ({english}) must stay out on {layer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_effective_layer_matches_the_curated_language() {
+        let mut catalog = catalog();
+        let book = book_with_language(&mut catalog, "sha-curated", "de", Some(Some("la")));
+
+        assert_eq!(
+            languages_matching(&catalog, MatchLayer::Effective, &["la"]),
+            vec![book],
+            "a language the curator corrected is not reachable by the corrected value"
+        );
+        assert_eq!(
+            languages_matching(&catalog, MatchLayer::Effective, &["de"]),
+            Vec::<i64>::new(),
+            "a value the curator replaced still answers the filter, so a hit \
+             renders a language the filter did not ask for"
+        );
+    }
+
+    #[test]
+    fn an_explicit_null_language_override_removes_the_field_from_the_match() {
+        let mut catalog = catalog();
+        book_with_language(&mut catalog, "sha-nulled", "de", Some(None));
+
+        assert_eq!(
+            languages_matching(&catalog, MatchLayer::Effective, &["de"]),
+            Vec::<i64>::new(),
+            "an override that deliberately nullifies the language still matches on \
+             the base value, so a deletion reads as an untouched field"
+        );
     }
 
     #[test]

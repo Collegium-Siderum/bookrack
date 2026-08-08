@@ -45,16 +45,16 @@ pub enum ParseError {
     /// build with this variant.
     #[error(
         "@script::{0} stage references are not implemented; \
-         see the v2 distill execution manual §1.4"
+         the hatch is reserved for a future embedded scripting engine"
     )]
     ScriptRefForbidden(String),
 
     /// A `book.toml` referenced a stage with the `@llm::<fn>` form.
-    /// The LLM-assist hook is mother doc §8.1, deferred past v1; the
-    /// loader in phase 7 fails the build with this variant.
+    /// The LLM-assist hook is deferred past v1; the loader in phase 7
+    /// fails the build with this variant.
     #[error(
         "@llm::{0} stage references are not implemented; \
-         see the v2 distill investigation doc §8.1"
+         the LLM-assist hook is deferred past v1"
     )]
     LlmHookNotImplemented(String),
 

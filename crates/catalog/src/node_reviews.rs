@@ -59,6 +59,16 @@ pub const STATUS_ACKNOWLEDGED: &str = "acknowledged";
 /// rejected outright.
 pub const STATUS_REJECTED: &str = "rejected";
 
+/// Every value `node_reviews.status` carries, built from the four
+/// constants above so a filter validating caller input and the writers
+/// cannot name different sets.
+pub const REVIEW_STATUSES: [&str; 4] = [
+    STATUS_PENDING,
+    STATUS_APPROVED,
+    STATUS_ACKNOWLEDGED,
+    STATUS_REJECTED,
+];
+
 /// The single source of truth for the `node_reviews` table's schema. Its
 /// DDL is rendered from this spec.
 pub(crate) const SPEC: TableSpec = TableSpec {
@@ -94,6 +104,11 @@ const UPSERT_SQL: &str = "INSERT INTO node_reviews \
        reviewed_by = excluded.reviewed_by, \
        status = excluded.status, \
        notes = COALESCE(excluded.notes, node_reviews.notes)";
+
+/// Replace `notes` on an existing row and nothing else. No `INSERT`
+/// leg: see [`Catalog::update_review_notes`].
+const UPDATE_NOTES_SQL: &str = "UPDATE node_reviews SET notes = :notes \
+     WHERE intake_id = :intake_id AND scope = :scope";
 
 /// A `SELECT` of every column with `tail` appended; column list from
 /// [`SPEC`].
@@ -184,6 +199,31 @@ impl Catalog {
             },
         )?;
         Ok(())
+    }
+
+    /// Replace one review row's `notes`, leaving `status`,
+    /// `reviewed_by`, and `reviewed_at` exactly as they are. Returns
+    /// whether a row was there to update.
+    ///
+    /// This is the mirror of [`Catalog::upsert_review`], which
+    /// preserves notes across a status change: a recomputation that
+    /// refreshes the stored report has the opposite need, and routing
+    /// it through the upsert would flip an `approved` row back to
+    /// whatever status the caller passed.
+    ///
+    /// A missing row is not inserted. The row is the review queue's
+    /// work item, opened when the item was taken in; a recomputation
+    /// does not open one.
+    pub fn update_review_notes(&self, intake_id: i64, kind: ItemKind, notes: &str) -> Result<bool> {
+        let affected = self.conn.execute(
+            UPDATE_NOTES_SQL,
+            named_params! {
+                ":intake_id": intake_id,
+                ":scope": kind.as_scope_str(),
+                ":notes": notes,
+            },
+        )?;
+        Ok(affected > 0)
     }
 
     /// Number of node reviews whose `status` falls in `statuses`. An
@@ -289,6 +329,44 @@ mod tests {
             ],
             "node_reviews schema must not absorb paper-only audit columns",
         );
+    }
+
+    /// Refreshing the stored report must not disturb the reviewer's
+    /// own verdict. Routing this through `upsert_review` would set
+    /// `status` to whatever the caller passed, which for a
+    /// recomputation is a value it has no business choosing.
+    #[test]
+    fn update_review_notes_replaces_the_note_and_leaves_the_verdict() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        catalog
+            .upsert_review(&NewReview::new(1, KIND, "human:reviewer", STATUS_APPROVED).notes("old"))
+            .expect("seed");
+
+        assert!(
+            catalog
+                .update_review_notes(1, KIND, "fresh report")
+                .expect("update"),
+            "an existing row must report as updated",
+        );
+
+        let read = catalog.review(1, KIND).expect("read").expect("present");
+        assert_eq!(read.notes.as_deref(), Some("fresh report"));
+        assert_eq!(read.status, STATUS_APPROVED, "the verdict must not move");
+        assert_eq!(read.reviewed_by, "human:reviewer");
+    }
+
+    /// A recomputation does not open a work item. The review row is
+    /// the queue's, created when the item was taken in.
+    #[test]
+    fn update_review_notes_does_not_insert_a_missing_row() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        assert!(
+            !catalog
+                .update_review_notes(404, KIND, "report")
+                .expect("update"),
+            "a missing row must report as untouched",
+        );
+        assert!(catalog.review(404, KIND).expect("read").is_none());
     }
 
     #[test]

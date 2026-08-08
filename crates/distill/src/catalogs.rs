@@ -121,9 +121,6 @@ struct QualityFlagCatalogToml {
 struct FlagSpecToml {
     severity: String,
     description: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    sourced_from: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -341,9 +338,9 @@ impl Catalogs {
 
     // ----- per-book validation ------------------------------------------
 
-    /// Run every book-level rule against a parsed `book.toml`. The
-    /// rule numbering mirrors the eight listed in §3 phase 4 of the
-    /// v2 distill execution manual.
+    /// Run every book-level rule against a parsed `book.toml`. Eight
+    /// rules apply; each `// Rule N` comment below marks one, and the
+    /// numbering is stable across the checks' evaluation order.
     pub fn validate_book(&self, book: &BookToml) -> Result<(), ParseError> {
         // Rule 8: slug grammar. The slug is the authority segment of
         // refs:// URIs, whose parser splits at the first '#'; the closed
@@ -583,7 +580,7 @@ stages = [
     }
 
     #[test]
-    fn script_escape_hatch_raises_script_ref_forbidden_and_cites_section() {
+    fn script_escape_hatch_raises_script_ref_forbidden_and_states_the_reservation() {
         let cats = Catalogs::load_all().expect("load_all");
         let toml = VALID_BOOK_TOML.replace("\"split_pages\"", "\"@script::foo\"");
         let book = BookToml::parse_str(&toml).unwrap();
@@ -594,13 +591,13 @@ stages = [
         }
         let msg = err.to_string();
         assert!(
-            msg.contains("§1.4"),
-            "ScriptRefForbidden message must cite manual §1.4, got: {msg}"
+            msg.contains("reserved for a future embedded scripting engine"),
+            "ScriptRefForbidden message must say why the hatch is closed, got: {msg}"
         );
     }
 
     #[test]
-    fn llm_hook_reference_raises_llm_hook_not_implemented_and_cites_section() {
+    fn llm_hook_reference_raises_llm_hook_not_implemented_and_states_the_deferral() {
         let cats = Catalogs::load_all().expect("load_all");
         let toml = VALID_BOOK_TOML.replace("\"split_pages\"", "\"@llm::bar\"");
         let book = BookToml::parse_str(&toml).unwrap();
@@ -611,8 +608,8 @@ stages = [
         }
         let msg = err.to_string();
         assert!(
-            msg.contains("§8.1"),
-            "LlmHookNotImplemented message must cite mother doc §8.1, got: {msg}"
+            msg.contains("deferred past v1"),
+            "LlmHookNotImplemented message must say the hook is deferred, got: {msg}"
         );
     }
 

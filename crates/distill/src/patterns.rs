@@ -16,7 +16,18 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-static ANGLE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<([^>]*)>").expect("angle regex"));
+/// Opening and closing angle-bracket shapes, in matching order:
+/// ASCII, CJK (U+3008/3009), the deprecated CJK-compatibility pair
+/// that normalizes onto it (U+2329/232A), and the full-width
+/// less-than / greater-than signs. The double-width pair
+/// (U+300A/300B) is deliberately absent: it wraps work titles rather
+/// than tags.
+const ANGLE_OPEN: &str = "<\u{3008}\u{2329}\u{FF1C}";
+const ANGLE_CLOSE: &str = ">\u{3009}\u{232A}\u{FF1E}";
+
+static ANGLE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!("[{ANGLE_OPEN}]([^{ANGLE_CLOSE}]*)[{ANGLE_CLOSE}]")).expect("angle regex")
+});
 static SQUARE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[([^\]]*)\]").expect("square regex"));
 static PAREN_RE: LazyLock<Regex> =
@@ -25,6 +36,10 @@ static PAREN_RE: LazyLock<Regex> =
 /// The two bracket-shaped tag patterns books actually use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BracketKind {
+    /// Any of the angle-bracket shapes, ASCII or CJK. The opening and
+    /// closing shapes are matched as two character classes rather than
+    /// as fixed pairs, so a tag whose OCR recovered only one side in
+    /// its original width still matches.
     Angle,
     Square,
     Paren,
@@ -79,40 +94,61 @@ pub struct PatternMatch {
 ///
 /// [`ParseError::InvalidPattern`]: crate::error::ParseError::InvalidPattern
 pub fn match_pattern(pattern: &PatternRef, text: &str) -> Option<PatternMatch> {
+    match_pattern_skipping(pattern, text, &[])
+}
+
+/// [`match_pattern`], ignoring any match whose inner capture equals one
+/// of `skip_inner`.
+///
+/// A book can spell two kinds of tag with one bracket shape — a country
+/// marker and a name-type marker both in angle brackets. Naming the
+/// values that are not the wanted tag lets the leftmost-match rule walk
+/// past them; with every candidate skipped the result is `None`, the
+/// same as no match at all.
+pub fn match_pattern_skipping(
+    pattern: &PatternRef,
+    text: &str,
+    skip_inner: &[String],
+) -> Option<PatternMatch> {
+    let wanted = |cap: &regex::Captures<'_>, whole_on_empty: bool| -> Option<PatternMatch> {
+        let m = cap.get(0)?;
+        let inner = match cap.get(1) {
+            Some(g) => g.as_str().to_string(),
+            None if whole_on_empty => m.as_str().to_string(),
+            None => String::new(),
+        };
+        if skip_inner.contains(&inner) {
+            return None;
+        }
+        Some(PatternMatch {
+            start: m.start(),
+            end: m.end(),
+            inner,
+        })
+    };
+
     match pattern {
         PatternRef::BracketedTag { brackets } => {
             let mut best: Option<PatternMatch> = None;
             for kind in brackets {
-                let re = kind.regex();
-                if let Some(cap) = re.captures(text) {
-                    let m = cap.get(0)?;
-                    let candidate = PatternMatch {
-                        start: m.start(),
-                        end: m.end(),
-                        inner: cap
-                            .get(1)
-                            .map(|g| g.as_str().to_string())
-                            .unwrap_or_default(),
-                    };
-                    best = match best {
-                        Some(b) if b.start <= candidate.start => Some(b),
-                        _ => Some(candidate),
-                    };
-                }
+                // Each shape contributes its own leftmost non-skipped
+                // match; the leftmost across shapes wins, as it does
+                // without a skip list.
+                let Some(candidate) = kind
+                    .regex()
+                    .captures_iter(text)
+                    .find_map(|cap| wanted(&cap, false))
+                else {
+                    continue;
+                };
+                best = match best {
+                    Some(b) if b.start <= candidate.start => Some(b),
+                    _ => Some(candidate),
+                };
             }
             best
         }
-        PatternRef::Regex(re) => re.captures(text).and_then(|cap| {
-            let m = cap.get(0)?;
-            Some(PatternMatch {
-                start: m.start(),
-                end: m.end(),
-                inner: cap
-                    .get(1)
-                    .map(|g| g.as_str().to_string())
-                    .unwrap_or_else(|| m.as_str().to_string()),
-            })
-        }),
+        PatternRef::Regex(re) => re.captures_iter(text).find_map(|cap| wanted(&cap, true)),
     }
 }
 
@@ -140,6 +176,36 @@ mod tests {
         // order.
         let m = match_pattern(&pat, "<American> [extra]").unwrap();
         assert_eq!(m.inner, "American");
+    }
+
+    #[test]
+    fn angle_matches_the_cjk_and_full_width_bracket_shapes() {
+        let pat = PatternRef::BracketedTag {
+            brackets: vec![BracketKind::Angle],
+        };
+        // U+3008/3009, U+2329/232A and U+FF1C/FF1E all carry the same
+        // tag shape as the ASCII pair in OCR text.
+        for text in [
+            "\u{963F}\u{683C}\u{7279}\u{3008}\u{82F1}\u{3009}",
+            "\u{963F}\u{683C}\u{7279}\u{2329}\u{82F1}\u{232A}",
+            "\u{963F}\u{683C}\u{7279}\u{FF1C}\u{82F1}\u{FF1E}",
+        ] {
+            let m =
+                match_pattern(&pat, text).unwrap_or_else(|| panic!("no angle match in {text:?}"));
+            assert_eq!(m.inner, "\u{82F1}", "wrong capture in {text:?}");
+            assert_eq!(&text[m.start..m.end], &text[9..]);
+        }
+    }
+
+    #[test]
+    fn angle_leaves_double_angle_brackets_alone() {
+        // U+300A/300B wrap work titles, not tags. Folding them into the
+        // angle shape would write a book title into the tag's payload
+        // key and cut it out of the surrounding prose.
+        let pat = PatternRef::BracketedTag {
+            brackets: vec![BracketKind::Angle],
+        };
+        assert!(match_pattern(&pat, "\u{300A}\u{5723}\u{7ECF}\u{300B}").is_none());
     }
 
     #[test]

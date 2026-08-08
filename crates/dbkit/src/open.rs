@@ -100,6 +100,7 @@ impl OpenDecision {
 /// column or a new optional JSON field advances a store's schema
 /// version without touching the reader version, because old binaries
 /// can still interpret what they see and ignore what they do not.
+// setting: internal -- a compatibility stamp, bumped by docs/UPGRADE.md's runbook
 pub const READER_VERSION: u32 = 1;
 
 /// Reduce a possibly-missing on-disk `min_reader_version` stamp to one

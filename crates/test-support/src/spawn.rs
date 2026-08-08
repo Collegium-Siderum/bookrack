@@ -13,7 +13,9 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use bookrack_config::{DAEMON_STATE_DIR_ENV, DATA_DIR_ENV, OLLAMA_URL_ENV, REGISTRY_ENV};
+use bookrack_config::{
+    DAEMON_STATE_DIR_ENV, DATA_DIR_ENV, MCP_ADDR_ENV, OLLAMA_URL_ENV, REGISTRY_ENV,
+};
 use bookrack_session::RUNTIME_DIR_ENV;
 
 use crate::sandbox::Sandbox;
@@ -67,6 +69,7 @@ pub struct Spawn {
     daemon_state_dir: PathBuf,
     ollama_url: Option<String>,
     extra: Vec<(OsString, OsString)>,
+    removed: Vec<OsString>,
     stdin_pipe: bool,
 }
 
@@ -89,6 +92,7 @@ impl Spawn {
             daemon_state_dir: sandbox.daemon_state_dir(),
             ollama_url: None,
             extra: Vec::new(),
+            removed: Vec::new(),
             stdin_pipe: false,
         }
     }
@@ -149,6 +153,21 @@ impl Spawn {
         self
     }
 
+    /// Keep `key` out of the child's environment, whatever the parent
+    /// carries.
+    ///
+    /// The sweep covers the `BOOKRACK_*` names, because those are the
+    /// ones this project keeps adding. A test whose subject is what
+    /// happens when some *other* variable is absent — `CI`, a proxy —
+    /// cannot state that as a fixture otherwise: it would pass on a
+    /// developer's machine and prove nothing on a host that exports
+    /// the variable. Removal is applied after every value this builder
+    /// sets, so naming a key here and setting it too leaves it unset.
+    pub fn without_env(mut self, key: impl AsRef<OsStr>) -> Spawn {
+        self.removed.push(key.as_ref().to_os_string());
+        self
+    }
+
     /// Assemble the command.
     ///
     /// Three rules carry the isolation:
@@ -185,6 +204,14 @@ impl Spawn {
             ("XDG_CACHE_HOME".into(), self.cache_home.into()),
             (RUNTIME_DIR_ENV.into(), self.runtime_dir.into()),
             (DAEMON_STATE_DIR_ENV.into(), self.daemon_state_dir.into()),
+            // A child that serves MCP takes a kernel-assigned port.
+            // The built-in default is one fixed port on the host, and
+            // the daemon binds it during bring-up: two suites running
+            // at once, or an operator's own daemon, would otherwise
+            // decide whether a test that has nothing to do with MCP
+            // starts at all. A test about the address passes
+            // `--mcp-addr`, which outranks this.
+            (MCP_ADDR_ENV.into(), "127.0.0.1:0".into()),
         ];
         if let Some(path) = self.data_dir {
             vars.push((DATA_DIR_ENV.into(), path.into()));
@@ -209,6 +236,9 @@ impl Spawn {
         }
         for (key, value) in vars {
             cmd.env(key, value);
+        }
+        for key in self.removed {
+            cmd.env_remove(key);
         }
         cmd.current_dir(self.cwd);
         if self.stdin_pipe {
@@ -313,6 +343,36 @@ mod tests {
         }
     }
 
+    /// A named removal reaches a variable the sweep does not: no
+    /// prefix, and the parent carrying it is exactly the case the
+    /// method exists for.
+    #[test]
+    fn a_named_removal_takes_out_a_variable_the_sweep_leaves_alone() {
+        let sandbox = Sandbox::new();
+        let host =
+            hostile_host().chain(std::iter::once((OsString::from("CI"), OsString::from("1"))));
+        let envs = envs(&spawn(&sandbox).without_env("CI").build_from(host));
+        assert_eq!(
+            envs.get("CI"),
+            Some(&None),
+            "a named removal must reach the child as a removal",
+        );
+    }
+
+    /// Removal is the last word, so a test that removes a variable it
+    /// also set does not silently get the value back.
+    #[test]
+    fn a_named_removal_outranks_a_value_the_builder_set() {
+        let sandbox = Sandbox::new();
+        let envs = envs(
+            &spawn(&sandbox)
+                .extra_env("CI", "1")
+                .without_env("CI")
+                .build_from(hostile_host()),
+        );
+        assert_eq!(envs.get("CI"), Some(&None));
+    }
+
     /// The passthrough list is exactly the two PDFium names: they are
     /// not swept, so a child still finds the library CI exported.
     #[test]
@@ -328,23 +388,51 @@ mod tests {
         }
     }
 
+    /// The daemon binds its MCP address during bring-up, so a child
+    /// left on the built-in default would let one fixed host port
+    /// decide whether a test that has nothing to do with MCP starts.
+    #[test]
+    fn the_builder_pins_a_kernel_assigned_mcp_port() {
+        let sandbox = Sandbox::new();
+        let envs = envs(&spawn(&sandbox).build_from(hostile_host()));
+        assert_eq!(
+            envs.get(MCP_ADDR_ENV),
+            Some(&Some("127.0.0.1:0".to_string())),
+            "the child must ask for a kernel-assigned port",
+        );
+    }
+
     /// The invariant stated as an invariant rather than as a list, so
-    /// it holds for variables that do not exist yet: whatever the child
-    /// carries with a `BOOKRACK_` name points inside the sandbox.
+    /// it holds for variables that do not exist yet: every value the
+    /// child carries under a `BOOKRACK_` name is the builder's own and
+    /// never the parent's. A value naming a filesystem location lands
+    /// inside the sandbox; a value that names no location — the
+    /// listening address the builder pins — must at least not be one
+    /// the parent supplied.
     #[test]
     fn the_isolated_default_carries_no_bookrack_value_outside_the_sandbox() {
         let sandbox = Sandbox::new();
         let cmd = spawn(&sandbox).build_from(hostile_host());
         let root = sandbox.path().to_string_lossy().into_owned();
+        let from_parent: Vec<String> = hostile_host()
+            .map(|(_, value)| value.to_string_lossy().into_owned())
+            .collect();
         for (key, value) in envs(&cmd) {
             let Some(value) = value else { continue };
             if !key.starts_with(BOOKRACK_PREFIX) {
                 continue;
             }
-            assert!(
-                value.starts_with(&root),
-                "{key} = {value} escapes the sandbox at {root}",
-            );
+            if Path::new(&value).is_absolute() {
+                assert!(
+                    value.starts_with(&root),
+                    "{key} = {value} escapes the sandbox at {root}",
+                );
+            } else {
+                assert!(
+                    !from_parent.contains(&value),
+                    "{key} = {value} was inherited from the parent",
+                );
+            }
         }
     }
 

@@ -30,6 +30,7 @@ use serde::Deserialize;
 /// `<data_root>/audit-rules/`.
 pub const DATA_OVERLAY_FILE: &str = "audit_data.toml";
 /// Schema version the loader accepts.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const DATA_SCHEMA_VERSION: u32 = 1;
 
 /// In-repo default data source, embedded at build time.

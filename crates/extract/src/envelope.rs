@@ -25,6 +25,7 @@ use crate::Extraction;
 /// The current envelope schema version. v2 changed
 /// `extraction.provenance.extractor_version` from a per-adapter string
 /// to the integer `bookrack_extract::EXTRACTOR_VERSION`.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const ENVELOPE_SCHEMA_VERSION: u32 = 2;
 
 /// Default file extension. The v2 envelope picks a distinct extension

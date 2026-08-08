@@ -11,13 +11,19 @@
 //! databases, and the vector store — so book content, including real
 //! titles, never sits next to the source code.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
+use bookrack_core::knob::{
+    Candidate, DotenvSupply, KnobOrigin, KnobReach, Layer, ReadAt, env_layers, resolve_knob,
+};
 use fs2::FileExt;
 
 mod detect;
+mod knobs;
 pub mod llama_server_pin;
 mod manifest;
 mod profile_ref;
@@ -27,6 +33,10 @@ pub mod reranker_model_pin;
 pub use detect::{
     DetectError, DetectVerdict, ScanOutcome, Signal, detect_library, mounted_volumes,
     scan_for_libraries,
+};
+pub use knobs::{
+    NATIVE_DEPENDENCY_KNOBS, NativeDependencyKnob, NativeDependencyOrigin, knob_catalog,
+    knob_origins, native_dependency_origins,
 };
 pub use manifest::{
     LibraryManifest, MANIFEST_FILENAME, MANIFEST_FORMAT, MANIFEST_SCHEMA_VERSION, ManifestError,
@@ -39,6 +49,13 @@ pub use profile_ref::{
 };
 pub use registry::LibraryKind;
 use registry::{Registry, parse_registry};
+
+bookrack_core::fixed_settings! {
+    owner = "config";
+    "reranker.server_batch_size" = RERANKER_SERVER_BATCH_SIZE,
+        "tokens one physical batch of the supervised rerank server holds",
+        acts on "a rerank call, which fails outright on a pair larger than this";
+}
 
 /// Environment variable naming the data root (an absolute directory).
 pub const DATA_DIR_ENV: &str = "BOOKRACK_DATA_DIR";
@@ -80,6 +97,32 @@ pub const RERANKER_MODEL_ENV: &str = "BOOKRACK_RERANKER_MODEL";
 /// spawning a supervised llama-server to probing the named endpoint.
 pub const RERANKER_URL_ENV: &str = "BOOKRACK_RERANKER_URL";
 
+/// `-b`/`-ub` batch sizes the supervised rerank server is launched with.
+///
+/// Rerank (`--pooling rank`) requires each query+document pair to fit
+/// inside one physical batch, and the server rejects a pair larger than
+/// `-ub` outright, failing the whole query. Chunked passages are capped
+/// at 1000 characters (`ChunkParams::default` in the ingest crate),
+/// which tokenizes to ~1300 tokens in the CJK worst case; 2048 covers
+/// that with headroom to spare.
+// setting: reranker.server_batch_size
+pub const RERANKER_SERVER_BATCH_SIZE: u32 = 2048;
+
+/// `-c` context size for the supervised rerank server when
+/// `reranker.ctx` is unset.
+///
+/// Left unset, the server opens the model's full training context and
+/// sizes its KV cache to match — gigabytes for a workload that only
+/// ever holds one query+document pair per slot. The server defaults to
+/// four parallel slots, so four pairs at
+/// [`RERANKER_SERVER_BATCH_SIZE`] bound the whole working set.
+///
+/// Lives here rather than beside the supervisor because it is the
+/// backstop layer of the `reranker.ctx` knob: a row that reported no
+/// default would be describing a knob that has one.
+// setting: internal -- the Default rung of `reranker.ctx`, reported by `config knobs`
+pub const DEFAULT_RERANKER_CTX: u32 = 4 * RERANKER_SERVER_BATCH_SIZE;
+
 /// Environment variable naming the directory database backups are written
 /// to. When unset, a `backup/` directory under the data root is used.
 pub const BACKUP_DIR_ENV: &str = "BOOKRACK_BACKUP_DIR";
@@ -112,15 +155,265 @@ pub const NO_DOTENV_ENV: &str = "BOOKRACK_NO_DOTENV";
 /// of the caller's working directory is a decision only a program can
 /// make on its own behalf — a library that did it would hand its
 /// embedder a configuration source the embedder never asked for.
-pub fn load_dotenv() {
-    if should_load_dotenv(|key| std::env::var(key).ok()) {
-        dotenvy::dotenv().ok();
+/// Returns what the load did, so a later report can tell a value the
+/// file supplied from one the real environment carried. `None` when the
+/// file was suppressed, absent, or unreadable. The result is also
+/// recorded process-wide for [`dotenv_load`] to answer without the
+/// caller threading it through.
+pub fn load_dotenv() -> Option<DotenvLoad> {
+    if !should_load_dotenv(|key| std::env::var(key).ok()) {
+        return None;
+    }
+    let before: BTreeSet<String> = std::env::vars_os()
+        .filter_map(|(key, _)| key.into_string().ok())
+        .collect();
+    let path = find_dotenv(&std::env::current_dir().ok()?)?;
+    let entries: Vec<(String, String)> = dotenvy::from_path_iter(&path)
+        .ok()?
+        .filter_map(Result::ok)
+        .collect();
+
+    let mut supplied: BTreeSet<String> = BTreeSet::new();
+    let mut rejected: BTreeSet<String> = BTreeSet::new();
+    let mut eclipsed: Vec<(String, String)> = Vec::new();
+    for (key, value) in entries {
+        if !admits(&key) {
+            rejected.insert(key);
+            continue;
+        }
+        if before.contains(&key) {
+            eclipsed.push((key, value));
+            continue;
+        }
+        // A repeated key keeps its first line: by the time the second
+        // is seen the environment already holds the first, which is
+        // the same rule a gap-filling load follows anywhere else.
+        if supplied.insert(key.clone()) {
+            // SAFETY: this runs as the entry point's first statement,
+            // before the program spawns a thread or a task and before
+            // anything reads a variable. That placement is the whole
+            // contract of this function and is why it may not be
+            // called from a library.
+            unsafe { std::env::set_var(&key, &value) };
+        }
+    }
+    eclipsed.sort();
+    eclipsed.dedup_by(|a, b| a.0 == b.0);
+
+    let load = DotenvLoad {
+        path,
+        supplied: supplied.into_iter().collect(),
+        eclipsed,
+        rejected: rejected.into_iter().collect(),
+    };
+    let _ = DOTENV_LOAD.set(load.clone());
+    Some(load)
+}
+
+/// The nearest `.env` at or above `from`, as `dotenvy` would find it.
+///
+/// The search is here rather than in the library because admission
+/// happens per key: a loader that let `dotenvy` apply the file first
+/// would have to take variables back out of the environment, and a
+/// variable briefly set is one another thread can read.
+fn find_dotenv(from: &Path) -> Option<PathBuf> {
+    from.ancestors()
+        .map(|dir| dir.join(".env"))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Whether `key` may be written into the process environment.
+///
+/// [`ENV_PREFIX`] is this workspace's own surface, and
+/// [`ADMITTED_FOREIGN_ENV`] is the short list of variables that belong
+/// to somebody else and are still worth setting here. Everything else
+/// is read and dropped: `.env` is found by searching upward from the
+/// working directory, so admitting every name means any directory a
+/// command is run from can rewrite `HOME`, `TMPDIR`, or `CI` for the
+/// process — none of which anyone sets on purpose in a project's
+/// configuration file, and each of which changes an answer somewhere
+/// far from configuration.
+fn admits(key: &str) -> bool {
+    key.starts_with(ENV_PREFIX) || ADMITTED_FOREIGN_ENV.contains(&key)
+}
+
+/// What a dotenv load did: which file, and which keys it supplied
+/// because the real environment carried none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DotenvLoad {
+    /// The file that was read.
+    pub path: PathBuf,
+    /// The keys this load supplied, sorted and without repeats. A key
+    /// the real environment already carried is absent: `dotenvy` only
+    /// fills gaps.
+    pub supplied: Vec<String>,
+    /// The keys the file declares that the real environment already
+    /// carried, with the value the file would have given, sorted by
+    /// key.
+    ///
+    /// These were read and discarded. Without them a knob the operator
+    /// set in both places reports only the winner, and the file's line
+    /// looks like it was never written rather than like it lost.
+    pub eclipsed: Vec<(String, String)>,
+    /// The keys the file declares that [`admits`] refused, sorted and
+    /// without repeats.
+    ///
+    /// The value is not kept: it was never applied to anything, and a
+    /// refused line is as likely to be a mistyped variable name as a
+    /// deliberate one. What the operator needs is that the line had no
+    /// effect, which the name alone says.
+    pub rejected: Vec<String>,
+}
+
+/// The prefix every variable this workspace defines carries.
+///
+/// A key without it is one `.env` reaches but no knob row accounts
+/// for — see [`DotenvLoad::foreign`].
+pub const ENV_PREFIX: &str = "BOOKRACK_";
+
+/// The variables outside [`ENV_PREFIX`] that `.env` may still set.
+///
+/// Each is one this program's own behaviour depends on, and each has a
+/// surface where the shell is not available to set it: a desktop shell
+/// started from a file manager inherits no `export`, and `.env` is then
+/// the only place a proxy or a certificate bundle can be named at all.
+///
+/// The proxy and certificate names are read by the HTTP stack rather
+/// than by this workspace, and both spellings are listed because the
+/// matcher underneath `reqwest` reads both. `NO_COLOR` is read by the
+/// CLI's own renderer, and `RUST_BACKTRACE` by the panic hook the CLI
+/// installs — which prints its name as the remedy, so a file that
+/// dropped it would contradict the program's own advice.
+///
+/// The list is deliberately short and deliberately not open-ended:
+/// growing it is a decision, and the cost of leaving a name off it is
+/// a line in `config effective`, not a silent failure.
+pub const ADMITTED_FOREIGN_ENV: &[&str] = &[
+    "ALL_PROXY",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_COLOR",
+    "NO_PROXY",
+    "RUST_BACKTRACE",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "all_proxy",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+];
+
+/// What a dotenv load did to one variable outside [`ENV_PREFIX`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForeignStatus {
+    /// The load put it in the process environment.
+    Set,
+    /// The real environment already carried one, so the file's line was
+    /// read and discarded.
+    Eclipsed,
+    /// The name is not one `.env` may set, so the line was read and
+    /// dropped without ever reaching the environment.
+    Rejected,
+}
+
+impl ForeignStatus {
+    /// The token this status goes on the wire as.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ForeignStatus::Set => "set",
+            ForeignStatus::Eclipsed => "eclipsed",
+            ForeignStatus::Rejected => "rejected",
+        }
     }
 }
 
+/// Serialized as the token, so a front end cannot ship a spelling that
+/// disagrees with [`ForeignStatus::as_str`].
+impl serde::Serialize for ForeignStatus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// A variable a dotenv load names that lies outside [`ENV_PREFIX`].
+///
+/// The value is deliberately absent. A foreign variable is as likely to
+/// be a proxy URL carrying credentials as it is to be `NO_COLOR`, and a
+/// report that prints one is a report an operator cannot paste. The
+/// name is what answers the question the section exists for — which of
+/// this process's variables came out of a file rather than the shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForeignVar<'a> {
+    /// The variable's name.
+    pub key: &'a str,
+    /// What the load did with it.
+    pub status: ForeignStatus,
+}
+
+impl DotenvLoad {
+    /// Every variable this load names that lies outside [`ENV_PREFIX`],
+    /// sorted by name.
+    ///
+    /// `.env` names variables this workspace does not define — a proxy
+    /// it is allowed to set, a `HOME` it is not — and no knob row can
+    /// report one, because no knob owns the name. This is the list that
+    /// says what the file did with each.
+    pub fn foreign(&self) -> Vec<ForeignVar<'_>> {
+        let mut out: Vec<ForeignVar<'_>> = self
+            .supplied
+            .iter()
+            .map(|key| (key, ForeignStatus::Set))
+            .chain(
+                self.eclipsed
+                    .iter()
+                    .map(|(key, _)| (key, ForeignStatus::Eclipsed)),
+            )
+            .chain(
+                self.rejected
+                    .iter()
+                    .map(|key| (key, ForeignStatus::Rejected)),
+            )
+            .filter(|(key, _)| !key.starts_with(ENV_PREFIX))
+            .map(|(key, status)| ForeignVar {
+                key: key.as_str(),
+                status,
+            })
+            .collect();
+        out.sort_by_key(|var| var.key);
+        out
+    }
+
+    /// This load in the borrowed form a knob row consults.
+    pub fn supply(&self) -> bookrack_core::knob::DotenvSupply<'_> {
+        bookrack_core::knob::DotenvSupply {
+            path: self.path_str(),
+            supplied: &self.supplied,
+            eclipsed: &self.eclipsed,
+        }
+    }
+
+    /// The file's path as the row reports it.
+    fn path_str(&self) -> &str {
+        self.path.to_str().unwrap_or("<non-utf8 path>")
+    }
+}
+
+/// The dotenv load this process performed, if any.
+///
+/// Empty in a process that never called [`load_dotenv`] — a library
+/// embedding this crate rather than a binary entry point. That is
+/// reported as "no dotenv layer", which is not the same claim as "the
+/// file supplied nothing", and the knob rows keep them apart by
+/// offering no `Dotenv` candidate at all.
+pub fn dotenv_load() -> Option<&'static DotenvLoad> {
+    DOTENV_LOAD.get()
+}
+
+static DOTENV_LOAD: OnceLock<DotenvLoad> = OnceLock::new();
+
 /// The pure core of [`load_dotenv`]: whether the file should be read.
 fn should_load_dotenv(get: impl Fn(&str) -> Option<String>) -> bool {
-    match env_trimmed(get(NO_DOTENV_ENV)) {
+    match no_dotenv_knob(get(NO_DOTENV_ENV)).value {
         Some(value) => matches!(
             value.to_ascii_lowercase().as_str(),
             "0" | "false" | "no" | "off"
@@ -215,6 +508,47 @@ pub enum ResolutionSource {
     DefaultRegistryDefault,
     /// Constructed directly via [`Config::new`], bypassing resolution.
     Explicit,
+}
+
+impl ResolutionSource {
+    /// The ladder in descending priority, as `Config::resolve` walks
+    /// it.
+    ///
+    /// [`ResolutionSource::Explicit`] is deliberately absent: it is not
+    /// a rung that can win, it is the mark of a [`Config::new`] that
+    /// never climbed. A row for such a config reports that one source
+    /// alone, because no other could have applied.
+    pub(crate) const LADDER: [ResolutionSource; 6] = [
+        ResolutionSource::DataDirFlag,
+        ResolutionSource::LibraryFlag,
+        ResolutionSource::EnvVar,
+        ResolutionSource::PortableExeNeighbor,
+        ResolutionSource::RegistryDefault,
+        ResolutionSource::DefaultRegistryDefault,
+    ];
+
+    /// The knob layer this rung stands for, and the site within it.
+    ///
+    /// The two registry rungs share [`Layer::Registry`] and differ by
+    /// site: the layer answers which kind of source won, the site which
+    /// particular one — the same division every other knob's row uses.
+    pub(crate) fn as_layer(self) -> (Layer, &'static str) {
+        match self {
+            ResolutionSource::DataDirFlag => (Layer::Flag, "--data-dir"),
+            ResolutionSource::LibraryFlag => (Layer::Flag, "--library"),
+            ResolutionSource::EnvVar => (Layer::Environment, DATA_DIR_ENV),
+            ResolutionSource::PortableExeNeighbor => {
+                (Layer::Platform, "bookrack-data beside the executable")
+            }
+            ResolutionSource::RegistryDefault => {
+                (Layer::Registry, "the registry named by the environment")
+            }
+            ResolutionSource::DefaultRegistryDefault => {
+                (Layer::Registry, "the platform config-directory registry")
+            }
+            ResolutionSource::Explicit => (Layer::Flag, "constructed directly"),
+        }
+    }
 }
 
 /// How a resolved [`Config`]'s library name was determined — a second
@@ -581,9 +915,10 @@ impl Config {
 /// be tested without mutating process-global environment variables. The
 /// override wins when set and non-blank; otherwise `<data_dir>/backup`.
 fn backup_dir_from(data_dir: &Path, override_dir: Option<String>) -> PathBuf {
-    env_trimmed(override_dir)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| data_dir.join("backup"))
+    PathBuf::from(knob_value(
+        &backup_dir_knob(data_dir, override_dir, NO_DOTENV_RECORD),
+        String::new(),
+    ))
 }
 
 /// The reference-store database under `data_dir`. The single
@@ -612,11 +947,9 @@ pub fn daemon_state_dir() -> Result<PathBuf, ConfigError> {
 /// The pure layer of [`daemon_state_dir`], factored out so it can be
 /// tested without mutating process-global environment variables.
 fn daemon_state_dir_from(override_dir: Option<String>) -> Result<PathBuf, ConfigError> {
-    if let Some(dir) = env_trimmed(override_dir) {
-        return Ok(PathBuf::from(dir));
-    }
-    dirs::data_dir()
-        .map(|d| d.join("bookrack").join("daemon"))
+    daemon_state_dir_knob(override_dir, NO_DOTENV_RECORD)
+        .value
+        .map(PathBuf::from)
         .ok_or(ConfigError::DaemonStateDirUnavailable)
 }
 
@@ -777,8 +1110,8 @@ pub struct RootRerankerConfig {
     /// endpoint. Overridden by [`RERANKER_URL_ENV`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// `-c` context size for the supervised server; its own default
-    /// when unset.
+    /// `-c` context size for the supervised server; falls back to
+    /// [`DEFAULT_RERANKER_CTX`] when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ctx: Option<u32>,
     /// `--threads` for the supervised server; its own choice when
@@ -1147,6 +1480,7 @@ pub const EMBED_BATCH_MIN_CHAR_BUDGET_ENV: &str = "BOOKRACK_EMBED_BATCH_MIN_CHAR
 /// Default interval, in seconds, between EMBED-progress heartbeats on
 /// stderr. Calibrated to be visible on a tiny book («47 s» small EPUB)
 /// without spamming the log on a fast embedder.
+// setting: internal -- the Default rung of `embed.progress_interval_secs`, see `config knobs`
 pub const DEFAULT_EMBED_PROGRESS_INTERVAL_SECS: u64 = 5;
 
 /// Environment variable overriding the EMBED-progress heartbeat
@@ -1191,6 +1525,7 @@ pub const DEFAULT_LOG_CONSOLE: &str = "error";
 
 /// Number of nearest passages a query returns when [`SearchConfig`] is
 /// left at its default.
+// setting: internal -- the Default rung of `search.top_k`, reported by `config knobs`
 pub const DEFAULT_SEARCH_TOP_K: usize = 5;
 
 /// Environment variable overriding the search result count.
@@ -1200,6 +1535,7 @@ pub const SEARCH_TOP_K_ENV: &str = "BOOKRACK_SEARCH_TOP_K";
 /// weak match. Calibrated against the EMBED spike's real corpus: real
 /// monolingual matches sit around 0.25, cross-language matches around
 /// 0.45, and noise / prompt-only embeddings around 0.55 and above.
+// setting: internal -- the Default rung of `search.weak_threshold`, reported by `config knobs`
 pub const DEFAULT_SEARCH_WEAK_THRESHOLD: f32 = 0.5;
 
 /// Environment variable overriding the weak-hit distance threshold.
@@ -1212,6 +1548,52 @@ pub const DEFAULT_MCP_ADDR: &str = "127.0.0.1:8765";
 
 /// Environment variable overriding the MCP server listen address.
 pub const MCP_ADDR_ENV: &str = "BOOKRACK_MCP_ADDR";
+
+/// Name the MCP server publishes as `serverInfo.name` in its
+/// `initialize` result.
+///
+/// Part of the wire surface: it is what an agent client lists the
+/// server under, and what `bookrack doctor` matches to decide whether
+/// the configured address is answered by this daemon or by a
+/// stranger. It lives here, below both the server and the health
+/// check, so the published name and the expected name cannot drift
+/// apart.
+pub const MCP_SERVER_NAME: &str = "bookrack";
+
+/// The environment variables the five configuration resolvers read.
+///
+/// These are the knobs whose priority chain runs inside
+/// [`EmbedConfig`], [`SearchConfig`], [`RerankerConfig`], [`McpConfig`],
+/// and [`LogConfig`]; every one of them is a row in
+/// [`knob_origins`](crate::knob_origins). The crate's remaining
+/// variables are read at their own sites and reported separately.
+/// The environment variables read at their own sites, outside the five
+/// configuration resolvers.
+///
+/// Each is a row in [`knob_origins`](crate::knob_origins) too; they are
+/// listed apart because their priority chains live with the code that
+/// reads them rather than in a resolver.
+pub const SITE_ENV_CONSTANTS: &[&str] = &[
+    NO_DOTENV_ENV,
+    REGISTRY_ENV,
+    DATA_DIR_ENV,
+    OLLAMA_URL_ENV,
+    BACKUP_DIR_ENV,
+    DAEMON_STATE_DIR_ENV,
+];
+
+pub const RESOLVER_ENV_CONSTANTS: &[&str] = &[
+    EMBED_BATCH_CHAR_BUDGET_ENV,
+    EMBED_BATCH_MAX_CHUNKS_ENV,
+    EMBED_BATCH_MIN_CHAR_BUDGET_ENV,
+    EMBED_PROGRESS_INTERVAL_ENV,
+    SEARCH_TOP_K_ENV,
+    SEARCH_WEAK_THRESHOLD_ENV,
+    RERANKER_URL_ENV,
+    MCP_ADDR_ENV,
+    LOG_ENV,
+    LOG_CONSOLE_ENV,
+];
 
 /// Tunable parameters for the embedding subsystem.
 ///
@@ -1287,33 +1669,121 @@ impl EmbedConfig {
     }
 
     /// Pure resolution, factored out so it can be tested without mutating
-    /// process-global environment variables.
+    /// process-global environment variables. Takes no dotenv record: it
+    /// keeps the values and discards the rows, and the record moves only
+    /// the attribution (see [`NO_DOTENV_RECORD`]).
     fn resolve_from(
         get: impl Fn(&str) -> Option<String>,
         profile_model: Option<&str>,
     ) -> EmbedConfig {
+        EmbedConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD, profile_model).0
+    }
+
+    /// Pure resolution that also reports where each value came from.
+    /// The struct's fields are read off the rows, so the two cannot
+    /// disagree.
+    fn resolve_with_origins_from(
+        get: impl Fn(&str) -> Option<String>,
+        dotenv: Option<DotenvSupply<'_>>,
+        profile_model: Option<&str>,
+    ) -> (EmbedConfig, Vec<KnobOrigin>) {
         let d = EmbedConfig::default();
-        EmbedConfig {
-            model: profile_model
-                .map(str::to_string)
-                .filter(|m| !m.trim().is_empty())
-                .unwrap_or(d.model),
+
+        let model = resolve_knob(
+            "embed.model",
+            KnobReach::Library,
+            ReadAt::AfterResolution,
+            vec![
+                Candidate::of(
+                    Layer::Manifest,
+                    "index profile",
+                    profile_model
+                        .map(str::to_string)
+                        .filter(|m| !m.trim().is_empty()),
+                ),
+                Candidate::of(Layer::Default, BUILT_IN_SITE, Some(d.model.clone())),
+            ],
+        );
+        let batch_char_budget = embed_usize_knob(
+            "embed.batch_char_budget",
+            EMBED_BATCH_CHAR_BUDGET_ENV,
+            &get,
+            dotenv,
+            d.batch_char_budget,
+        );
+        let batch_max_chunks = embed_usize_knob(
+            "embed.batch_max_chunks",
+            EMBED_BATCH_MAX_CHUNKS_ENV,
+            &get,
+            dotenv,
+            d.batch_max_chunks,
+        );
+        let batch_min_char_budget = embed_usize_knob(
+            "embed.batch_min_char_budget",
+            EMBED_BATCH_MIN_CHAR_BUDGET_ENV,
+            &get,
+            dotenv,
+            d.batch_min_char_budget,
+        );
+        let progress_interval = embed_usize_knob(
+            "embed.progress_interval_secs",
+            EMBED_PROGRESS_INTERVAL_ENV,
+            &get,
+            dotenv,
+            DEFAULT_EMBED_PROGRESS_INTERVAL_SECS as usize,
+        );
+
+        let cfg = EmbedConfig {
+            model: knob_value(&model, d.model),
             request_timeout: d.request_timeout,
             max_retries: d.max_retries,
             backoff_base: d.backoff_base,
-            batch_char_budget: env_usize(get(EMBED_BATCH_CHAR_BUDGET_ENV), d.batch_char_budget),
-            batch_max_chunks: env_usize(get(EMBED_BATCH_MAX_CHUNKS_ENV), d.batch_max_chunks),
-            batch_min_char_budget: env_usize(
-                get(EMBED_BATCH_MIN_CHAR_BUDGET_ENV),
-                d.batch_min_char_budget,
-            ),
+            batch_char_budget: knob_value(&batch_char_budget, d.batch_char_budget),
+            batch_max_chunks: knob_value(&batch_max_chunks, d.batch_max_chunks),
+            batch_min_char_budget: knob_value(&batch_min_char_budget, d.batch_min_char_budget),
             channel_capacity: d.channel_capacity,
-            progress_interval: Duration::from_secs(env_usize(
-                get(EMBED_PROGRESS_INTERVAL_ENV),
+            progress_interval: Duration::from_secs(knob_value(
+                &progress_interval,
                 DEFAULT_EMBED_PROGRESS_INTERVAL_SECS as usize,
             ) as u64),
-        }
+        };
+        (
+            cfg,
+            vec![
+                model,
+                batch_char_budget,
+                batch_max_chunks,
+                batch_min_char_budget,
+                progress_interval,
+            ],
+        )
     }
+}
+
+/// One of the embed batching knobs: an environment override over a
+/// compiled-in default, with no file layer between them.
+fn embed_usize_knob(
+    key: &str,
+    env_name: &'static str,
+    get: impl Fn(&str) -> Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+    default: usize,
+) -> KnobOrigin {
+    resolve_knob(
+        key,
+        KnobReach::Process,
+        ReadAt::AfterResolution,
+        env_over(
+            dotenv,
+            env_name,
+            env_parsed::<usize>(get(env_name)).map(|v| v.to_string()),
+            vec![Candidate::of(
+                Layer::Default,
+                BUILT_IN_SITE,
+                Some(default.to_string()),
+            )],
+        ),
+    )
 }
 
 /// Retrieval knobs. Separate from [`EmbedConfig`] so the query side reads
@@ -1344,8 +1814,9 @@ impl Default for SearchConfig {
 /// and the `[reranker]` table. `url` decides the backend mode: `Some`
 /// means an operator-run server is probed, `None` means the daemon
 /// supervises its own. `ctx` and `threads` only apply to the
-/// supervised mode; unset, `ctx` falls to the supervisor's
-/// workload-sized default and `threads` to the server's own choice.
+/// supervised mode; `ctx` falls to [`DEFAULT_RERANKER_CTX`] when the
+/// file does not set it, and `threads` stays `None` so the server makes
+/// its own choice.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RerankerConfig {
     /// Operator-run rerank server URL, when one is configured.
@@ -1365,15 +1836,77 @@ impl RerankerConfig {
     }
 
     /// Pure resolution, factored out so it can be tested without mutating
-    /// process-global environment variables.
+    /// process-global environment variables. Takes no dotenv record, for
+    /// the reason [`EmbedConfig::resolve_from`] gives.
     fn resolve_from(get: impl Fn(&str) -> Option<String>, root: &RootConfig) -> RerankerConfig {
-        let file = root.reranker.clone().unwrap_or_default();
-        RerankerConfig {
-            url: env_trimmed(get(RERANKER_URL_ENV)).or_else(|| env_trimmed(file.url)),
-            ctx: file.ctx,
-            threads: file.threads,
-        }
+        RerankerConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD, root).0
     }
+
+    /// Pure resolution that also reports where each value came from.
+    /// The struct's fields are read off the rows, so the two cannot
+    /// disagree.
+    ///
+    /// `url` and `threads` have no compiled-in default: unset is a value
+    /// for them, meaning "supervise our own server" and "let the server
+    /// choose". `ctx` does have one — the supervisor sizes the context to
+    /// the rerank working set — so its row reports
+    /// [`DEFAULT_RERANKER_CTX`] rather than leaving three different
+    /// facts looking like one empty cell.
+    fn resolve_with_origins_from(
+        get: impl Fn(&str) -> Option<String>,
+        dotenv: Option<DotenvSupply<'_>>,
+        root: &RootConfig,
+    ) -> (RerankerConfig, Vec<KnobOrigin>) {
+        let file = root.reranker.clone().unwrap_or_default();
+
+        let url = resolve_knob(
+            "reranker.url",
+            KnobReach::Library,
+            ReadAt::AfterResolution,
+            env_over(
+                dotenv,
+                RERANKER_URL_ENV,
+                env_trimmed(get(RERANKER_URL_ENV)),
+                vec![Candidate::of(
+                    Layer::File,
+                    "reranker.url",
+                    env_trimmed(file.url),
+                )],
+            ),
+        );
+        let ctx = resolve_knob(
+            "reranker.ctx",
+            KnobReach::Library,
+            ReadAt::AfterResolution,
+            vec![
+                Candidate::of(Layer::File, "reranker.ctx", file.ctx.map(|v| v.to_string())),
+                Candidate::of(
+                    Layer::Default,
+                    BUILT_IN_SITE,
+                    Some(DEFAULT_RERANKER_CTX.to_string()),
+                ),
+            ],
+        );
+        let threads = reranker_file_knob("reranker.threads", file.threads);
+
+        let cfg = RerankerConfig {
+            url: url.value.clone(),
+            ctx: ctx.value.as_deref().and_then(|s| s.parse().ok()),
+            threads: threads.value.as_deref().and_then(|s| s.parse().ok()),
+        };
+        (cfg, vec![url, ctx, threads])
+    }
+}
+
+/// The reranker knob the `config.toml` table is the only source for: no
+/// environment variable and no compiled-in default.
+fn reranker_file_knob(key: &str, file: Option<u32>) -> KnobOrigin {
+    resolve_knob(
+        key,
+        KnobReach::Library,
+        ReadAt::AfterResolution,
+        vec![Candidate::of(Layer::File, key, file.map(|v| v.to_string()))],
+    )
 }
 
 impl SearchConfig {
@@ -1393,19 +1926,72 @@ impl SearchConfig {
     }
 
     /// Pure resolution, factored out so it can be tested without mutating
-    /// process-global environment variables.
+    /// process-global environment variables. Takes no dotenv record, for
+    /// the reason [`EmbedConfig::resolve_from`] gives.
     fn resolve_from(get: impl Fn(&str) -> Option<String>, root: &RootConfig) -> SearchConfig {
+        SearchConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD, root).0
+    }
+
+    /// Pure resolution that also reports where each value came from.
+    /// The struct's fields are read off the rows, so the two cannot
+    /// disagree.
+    fn resolve_with_origins_from(
+        get: impl Fn(&str) -> Option<String>,
+        dotenv: Option<DotenvSupply<'_>>,
+        root: &RootConfig,
+    ) -> (SearchConfig, Vec<KnobOrigin>) {
         let file = root.search.clone().unwrap_or_default();
-        SearchConfig {
-            top_k: env_usize(
-                get(SEARCH_TOP_K_ENV),
-                file.top_k.unwrap_or(DEFAULT_SEARCH_TOP_K),
+
+        let top_k = resolve_knob(
+            "search.top_k",
+            KnobReach::Library,
+            ReadAt::AfterResolution,
+            env_over(
+                dotenv,
+                SEARCH_TOP_K_ENV,
+                env_parsed::<usize>(get(SEARCH_TOP_K_ENV)).map(|v| v.to_string()),
+                vec![
+                    Candidate::of(
+                        Layer::File,
+                        "search.top_k",
+                        file.top_k.map(|v| v.to_string()),
+                    ),
+                    Candidate::of(
+                        Layer::Default,
+                        BUILT_IN_SITE,
+                        Some(DEFAULT_SEARCH_TOP_K.to_string()),
+                    ),
+                ],
             ),
-            weak_distance_threshold: env_f32(
-                get(SEARCH_WEAK_THRESHOLD_ENV),
-                file.weak_threshold.unwrap_or(DEFAULT_SEARCH_WEAK_THRESHOLD),
+        );
+        let weak_threshold = resolve_knob(
+            "search.weak_threshold",
+            KnobReach::Library,
+            ReadAt::AfterResolution,
+            env_over(
+                dotenv,
+                SEARCH_WEAK_THRESHOLD_ENV,
+                env_f32_parsed(get(SEARCH_WEAK_THRESHOLD_ENV)).map(|v| v.to_string()),
+                vec![
+                    Candidate::of(
+                        Layer::File,
+                        "search.weak_threshold",
+                        file.weak_threshold.map(|v| v.to_string()),
+                    ),
+                    Candidate::of(
+                        Layer::Default,
+                        BUILT_IN_SITE,
+                        Some(DEFAULT_SEARCH_WEAK_THRESHOLD.to_string()),
+                    ),
+                ],
             ),
-        }
+        );
+
+        let cfg = SearchConfig {
+            top_k: knob_value(&top_k, DEFAULT_SEARCH_TOP_K),
+            weak_distance_threshold: knob_value(&weak_threshold, DEFAULT_SEARCH_WEAK_THRESHOLD),
+        };
+        (cfg, vec![top_k, weak_threshold])
     }
 }
 
@@ -1433,11 +2019,50 @@ impl McpConfig {
     }
 
     /// Pure resolution, factored out so it can be tested without mutating
-    /// process-global environment variables.
+    /// process-global environment variables. Takes no dotenv record, for
+    /// the reason [`EmbedConfig::resolve_from`] gives.
     fn resolve_from(get: impl Fn(&str) -> Option<String>) -> McpConfig {
-        McpConfig {
-            addr: env_trimmed(get(MCP_ADDR_ENV)).unwrap_or_else(|| DEFAULT_MCP_ADDR.to_string()),
-        }
+        McpConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD).0
+    }
+
+    /// Pure resolution that also reports where the value came from. The
+    /// struct's field is read off the row, so the two cannot disagree.
+    ///
+    /// The flag rung offers nothing here and always will: `bookrack run`
+    /// applies `--mcp-addr` itself, over the value this returns, so no
+    /// resolution reachable from this function can see one. It is drawn
+    /// because the row's chain answers where the knob *can* be set, and
+    /// the flag outranks the variable.
+    fn resolve_with_origins_from(
+        get: impl Fn(&str) -> Option<String>,
+        dotenv: Option<DotenvSupply<'_>>,
+    ) -> (McpConfig, Vec<KnobOrigin>) {
+        let mut candidates = vec![Candidate::of(
+            Layer::Flag,
+            "run --mcp-addr (not this invocation)",
+            None,
+        )];
+        candidates.extend(env_over(
+            dotenv,
+            MCP_ADDR_ENV,
+            env_trimmed(get(MCP_ADDR_ENV)),
+            vec![Candidate::of(
+                Layer::Default,
+                BUILT_IN_SITE,
+                Some(DEFAULT_MCP_ADDR.to_string()),
+            )],
+        ));
+        let addr = resolve_knob(
+            "mcp.addr",
+            KnobReach::Process,
+            ReadAt::BeforeResolution,
+            candidates,
+        );
+
+        let cfg = McpConfig {
+            addr: knob_value(&addr, DEFAULT_MCP_ADDR.to_string()),
+        };
+        (cfg, vec![addr])
     }
 }
 
@@ -1482,13 +2107,38 @@ impl LogConfig {
     }
 
     /// Pure resolution, factored out so it can be tested without mutating
-    /// process-global environment variables.
+    /// process-global environment variables. Takes no dotenv record, for
+    /// the reason [`EmbedConfig::resolve_from`] gives.
     fn resolve_from(get: impl Fn(&str) -> Option<String>) -> LogConfig {
-        LogConfig {
-            directive: env_trimmed(get(LOG_ENV)).unwrap_or_else(|| DEFAULT_LOG.to_string()),
-            console_level: env_trimmed(get(LOG_CONSOLE_ENV))
-                .unwrap_or_else(|| DEFAULT_LOG_CONSOLE.to_string()),
-        }
+        LogConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD).0
+    }
+
+    /// Pure resolution that also reports where each value came from.
+    /// The struct's fields are read off the rows, so the two cannot
+    /// disagree.
+    ///
+    /// Reports the [`from_env`](Self::from_env) shape. The headless
+    /// variant defaults the console layer to the file directive rather
+    /// than to [`DEFAULT_LOG_CONSOLE`], which is a different layer
+    /// sequence and not what a `config effective` table describes.
+    fn resolve_with_origins_from(
+        get: impl Fn(&str) -> Option<String>,
+        dotenv: Option<DotenvSupply<'_>>,
+    ) -> (LogConfig, Vec<KnobOrigin>) {
+        let directive = log_knob("log.directive", LOG_ENV, &get, dotenv, DEFAULT_LOG);
+        let console_level = log_knob(
+            "log.console_level",
+            LOG_CONSOLE_ENV,
+            &get,
+            dotenv,
+            DEFAULT_LOG_CONSOLE,
+        );
+
+        let cfg = LogConfig {
+            directive: knob_value(&directive, DEFAULT_LOG.to_string()),
+            console_level: knob_value(&console_level, DEFAULT_LOG_CONSOLE.to_string()),
+        };
+        (cfg, vec![directive, console_level])
     }
 
     /// Resolve a [`LogConfig`] suitable for a headless daemon binary
@@ -1516,28 +2166,365 @@ impl LogConfig {
     }
 }
 
+/// The `site` a compiled-in default is held at.
+const BUILT_IN_SITE: &str = "built-in";
+
+/// The `site` the backup directory's default is held at.
+///
+/// Named once because the rooted and unrooted forms of the row must
+/// spell it identically: a reader comparing the two has no other way to
+/// tell they describe one knob.
+const BACKUP_DIR_DERIVED_SITE: &str = "beside the data root";
+
+/// This process's dotenv record, in the borrowed form a knob row
+/// consults. Owns no copy: the record lives in the process-wide slot
+/// [`load_dotenv`] filled.
+fn dotenv_supply() -> Option<bookrack_core::knob::DotenvSupply<'static>> {
+    dotenv_load().map(|load| load.supply())
+}
+
+/// The record a caller passes when it reads a knob for its value alone.
+///
+/// The record decides which layer is *credited* for a value, never what
+/// the value is. Both halves of a load hold to that. A key the file
+/// supplied was written into the environment, so it is already visible
+/// to the environment getter and only the attribution moves. A key the
+/// file names that the real environment already carried was thrown away
+/// by the loader, so it is offered as
+/// [`Standing::Discarded`](bookrack_core::knob::Standing::Discarded) and
+/// cannot be taken however unusable the text the environment carried
+/// turns out to be.
+///
+/// A caller that takes
+/// [`KnobOrigin::value`](bookrack_core::knob::KnobOrigin::value) and
+/// discards the row therefore cannot observe the difference, and naming
+/// that here is cheaper than threading a parameter no result depends on.
+/// `the_dotenv_record_never_changes_a_value_only_its_attribution` holds
+/// every knob this crate resolves to it.
+const NO_DOTENV_RECORD: Option<DotenvSupply<'static>> = None;
+
+/// An environment variable's layers followed by the layers below it,
+/// against the caller's dotenv record.
+fn env_over(
+    dotenv: Option<DotenvSupply<'_>>,
+    name: &str,
+    raw: Option<String>,
+    lower: Vec<Candidate>,
+) -> Vec<Candidate> {
+    bookrack_core::knob::env_over(dotenv, name, raw, lower)
+}
+
+/// The Ollama endpoint, by precedence `env var > config.toml > default`.
+///
+/// The only place that order is written down: [`finish`] reads the
+/// value off this row, and [`knob_origins`](crate::knob_origins)
+/// reports the same row.
+pub(crate) fn ollama_url_knob(
+    env: Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+    root_config: &RootConfig,
+) -> KnobOrigin {
+    resolve_knob(
+        "ollama_url",
+        KnobReach::Library,
+        ReadAt::DuringResolution,
+        env_over(
+            dotenv,
+            OLLAMA_URL_ENV,
+            env_trimmed(env),
+            vec![
+                Candidate::of(
+                    Layer::File,
+                    "ollama_url",
+                    env_trimmed(root_config.ollama_url.clone()),
+                ),
+                Candidate::of(
+                    Layer::Default,
+                    BUILT_IN_SITE,
+                    Some(DEFAULT_OLLAMA_URL.to_string()),
+                ),
+            ],
+        ),
+    )
+}
+
+/// The backup directory, by precedence `env var > beside the data root`.
+///
+/// `read_at` is [`ReadAt::PerCall`] because [`Config::backup_dir`]
+/// re-reads the variable on every call rather than snapshotting it at
+/// resolution, unlike every sibling accessor.
+pub(crate) fn backup_dir_knob(
+    data_dir: &Path,
+    env: Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> KnobOrigin {
+    resolve_knob(
+        "backup_dir",
+        KnobReach::Machine,
+        ReadAt::PerCall,
+        env_over(
+            dotenv,
+            BACKUP_DIR_ENV,
+            env_trimmed(env),
+            vec![Candidate::of(
+                Layer::Default,
+                BACKUP_DIR_DERIVED_SITE,
+                Some(data_dir.join("backup").display().to_string()),
+            )],
+        ),
+    )
+}
+
+/// The daemon state directory, by precedence
+/// `env var > platform data directory`.
+pub(crate) fn daemon_state_dir_knob(
+    env: Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> KnobOrigin {
+    resolve_knob(
+        "daemon_state_dir",
+        KnobReach::Machine,
+        ReadAt::BeforeResolution,
+        env_over(
+            dotenv,
+            DAEMON_STATE_DIR_ENV,
+            env_trimmed(env),
+            vec![Candidate::of(
+                Layer::Platform,
+                "platform data directory",
+                dirs::data_dir().map(|d| d.join("bookrack").join("daemon").display().to_string()),
+            )],
+        ),
+    )
+}
+
+/// Whether the dotenv file is read at all.
+///
+/// Has no [`Layer::Dotenv`] candidate and cannot acquire one: this is
+/// the knob that decides whether that layer exists, and it is read
+/// before the file is.
+pub(crate) fn no_dotenv_knob(env: Option<String>) -> KnobOrigin {
+    resolve_knob(
+        "no_dotenv",
+        KnobReach::Process,
+        ReadAt::BeforeResolution,
+        vec![
+            Candidate::of(Layer::Environment, NO_DOTENV_ENV, env_trimmed(env)),
+            Candidate::of(Layer::Default, BUILT_IN_SITE, Some("0".to_string())),
+        ],
+    )
+}
+
+/// The library registry file, by precedence
+/// `env var > platform config directory`.
+pub(crate) fn registry_knob(env: Option<String>, dotenv: Option<DotenvSupply<'_>>) -> KnobOrigin {
+    resolve_knob(
+        "registry",
+        KnobReach::Machine,
+        ReadAt::DuringResolution,
+        env_over(
+            dotenv,
+            REGISTRY_ENV,
+            env_trimmed(env),
+            vec![Candidate::of(
+                Layer::Platform,
+                "platform config directory",
+                default_registry_path().map(|p| p.display().to_string()),
+            )],
+        ),
+    )
+}
+
+/// The backup directory with no data root resolved: the lower layer is
+/// still named, but has no value to offer.
+///
+/// Only the value is derived from the root; where the knob falls back to
+/// is a fact about the resolver, and dropping the rung would report a
+/// knob that has a default as one that has none.
+pub(crate) fn unrooted_backup_dir_knob(
+    env: Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> KnobOrigin {
+    resolve_knob(
+        "backup_dir",
+        KnobReach::Machine,
+        ReadAt::PerCall,
+        env_over(
+            dotenv,
+            BACKUP_DIR_ENV,
+            env_trimmed(env),
+            vec![Candidate::of(Layer::Default, BACKUP_DIR_DERIVED_SITE, None)],
+        ),
+    )
+}
+
+/// The resolved data root, reported through the layer its existing
+/// [`ResolutionSource`] stands for.
+///
+/// Derived from the source the resolution already recorded rather than
+/// re-walking the ladder, so this row and `bookrack info` cannot
+/// disagree about which rung won.
+pub(crate) fn data_dir_knob(
+    data_dir: &Path,
+    source: ResolutionSource,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> KnobOrigin {
+    resolve_knob(
+        "data_dir",
+        KnobReach::Process,
+        ReadAt::DuringResolution,
+        data_dir_candidates(Some((data_dir, source)), None, dotenv),
+    )
+}
+
+/// The data root when resolution did not reach one.
+///
+/// The ladder is the same, and the environment rung still reports what
+/// it was pointed at: that value was read, and an operator debugging a
+/// failed resolution needs to see it. Whether the resolution succeeded
+/// is a separate question, answered by the error rather than by this
+/// row.
+pub(crate) fn unresolved_data_dir_knob(
+    env: Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> KnobOrigin {
+    resolve_knob(
+        "data_dir",
+        KnobReach::Process,
+        ReadAt::DuringResolution,
+        data_dir_candidates(None, env_trimmed(env), dotenv),
+    )
+}
+
+/// Every rung of the data-root ladder, with the resolved value on the
+/// one that won.
+///
+/// The whole ladder rather than just the winner, so the row names the
+/// places a root can be selected from even when one already was. The
+/// rungs below the winner offer nothing: resolution short-circuits, so
+/// what they would have produced was never computed and must not be
+/// guessed at here.
+///
+/// One rung of that ladder is an environment variable, and a variable
+/// the dotenv file supplied is the file's value wearing the
+/// environment's clothes — indistinguishable to whoever reads it. That
+/// rung therefore draws its layers through [`env_layers`], the same
+/// call every other variable's row goes through, so a root set in the
+/// file is credited to the file and a file line the real environment
+/// beat is reported as the losing layer it is. `env_read` carries what
+/// the variable held when resolution reached no root at all; with a
+/// root resolved the winning rung already carries it.
+///
+/// The layering applies only to a rung that speaks. A variable that
+/// lost to a flag offers nothing for the file to have supplied, and
+/// splitting silence into two silent layers would name a file that
+/// decided nothing.
+///
+/// A line the file wrote and the real environment eclipsed is the one
+/// exception. The loader recorded that discard when it read the file,
+/// and it holds whichever rung the ladder stopped at, so a silent rung
+/// still carries it — as a [`Candidate::discarded`], which is reported
+/// and can never be taken. What the file *supplied* has no such
+/// record: a load keeps the key, not the value, so a supplied root
+/// some rung above outranked stays unreported.
+fn data_dir_candidates(
+    resolved: Option<(&Path, ResolutionSource)>,
+    env_read: Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> Vec<Candidate> {
+    let winner = resolved.map(|(_, source)| source);
+    let value = resolved.map(|(dir, _)| dir.display().to_string());
+
+    if winner == Some(ResolutionSource::Explicit) {
+        let (layer, site) = ResolutionSource::Explicit.as_layer();
+        return vec![Candidate::of(layer, site, value)];
+    }
+
+    ResolutionSource::LADDER
+        .iter()
+        .flat_map(|source| {
+            let (layer, site) = source.as_layer();
+            let held = (Some(*source) == winner).then(|| value.clone()).flatten();
+            match source {
+                ResolutionSource::EnvVar => match held.or_else(|| env_read.clone()) {
+                    Some(read) => env_layers(dotenv, DATA_DIR_ENV, Some(read)),
+                    // The eclipsed rung goes below the environment and
+                    // above the platform rung that follows, which is
+                    // the order `Layer` already declares.
+                    None => {
+                        let mut rungs = vec![Candidate::of(layer, site, None)];
+                        if let Some(load) = dotenv
+                            && let Some(value) = load.eclipsed(DATA_DIR_ENV)
+                        {
+                            rungs.push(Candidate::discarded(Layer::Dotenv, load.path, value));
+                        }
+                        rungs
+                    }
+                },
+                _ => vec![Candidate::of(layer, site, held)],
+            }
+        })
+        .collect()
+}
+
+/// One of the two log filter directives: an environment override over a
+/// compiled-in default, read before any data root is known.
+fn log_knob(
+    key: &str,
+    env_name: &'static str,
+    get: impl Fn(&str) -> Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+    default: &str,
+) -> KnobOrigin {
+    resolve_knob(
+        key,
+        KnobReach::Process,
+        ReadAt::BeforeResolution,
+        env_over(
+            dotenv,
+            env_name,
+            env_trimmed(get(env_name)),
+            vec![Candidate::of(
+                Layer::Default,
+                BUILT_IN_SITE,
+                Some(default.to_string()),
+            )],
+        ),
+    )
+}
+
+/// Parse an environment value, treating blank and unparseable text as
+/// unset — the same judgement [`env_usize`] makes, expressed as the
+/// absence of an offer so the layer is not recorded as a losing one.
+fn env_parsed<T: std::str::FromStr>(value: Option<String>) -> Option<T> {
+    env_trimmed(value).and_then(|s| s.parse().ok())
+}
+
+/// [`env_parsed`] for `f32`, additionally rejecting non-finite values
+/// as [`env_f32`] does.
+fn env_f32_parsed(value: Option<String>) -> Option<f32> {
+    env_parsed::<f32>(value).filter(|n| n.is_finite())
+}
+
+/// The value a resolved row settled on, parsed back to the knob's own
+/// type.
+///
+/// `fallback` covers only the case of a row whose every layer abstained;
+/// a row that has a winner always round-trips, because each layer's
+/// offer was rendered from a value of this type.
+fn knob_value<T: std::str::FromStr>(origin: &KnobOrigin, fallback: T) -> T {
+    origin
+        .value
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(fallback)
+}
+
 /// Trim an environment value, treating whitespace-only as unset.
 fn env_trimmed(value: Option<String>) -> Option<String> {
     value
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-}
-
-/// Parse an environment value as `usize`, falling back to `default` when
-/// it is unset, blank, or unparseable.
-fn env_usize(value: Option<String>, default: usize) -> usize {
-    env_trimmed(value)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
-}
-
-/// Parse an environment value as `f32`, falling back to `default` when
-/// it is unset, blank, unparseable, or not a finite number.
-fn env_f32(value: Option<String>, default: f32) -> f32 {
-    env_trimmed(value)
-        .and_then(|s| s.parse::<f32>().ok())
-        .filter(|n| n.is_finite())
-        .unwrap_or(default)
 }
 
 /// Outcome of [`select_root`]: the chosen data root paired with the
@@ -1774,6 +2761,76 @@ fn identify_library(
     }
 }
 
+/// What a data root turns out to be, once matched against the library
+/// registry.
+///
+/// A path is not something a daemon serving several libraries can be
+/// asked for, so a client holding one has to turn it into a registry
+/// name before it can route. This is that translation, and its three
+/// outcomes are the three things the caller has to say differently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootIdentity {
+    /// The root is a registered library's, matched by manifest uuid or
+    /// by path, and the entry points at this same place.
+    Named {
+        name: String,
+        by: LibraryIdentification,
+    },
+    /// The root's manifest carries the uuid of a registered library
+    /// whose entry points somewhere else. Reported rather than
+    /// followed: the two are the same library by identity and
+    /// different places on disk, and acting on the registered one
+    /// would silently redirect a caller who named a path.
+    UuidElsewhere { name: String, entry_root: PathBuf },
+    /// No entry in any registry matches this root.
+    Unregistered,
+}
+
+/// Match `root` against the library registry the environment names.
+///
+/// Reads [`REGISTRY_ENV`] and the platform-default registry in the same
+/// precedence [`Config::resolve`] uses, so a caller translating a path
+/// selection reaches the same entries the resolver would. An
+/// unreadable registry answers [`RootIdentity::Unregistered`]: the
+/// question here is which entry claims this root, and no readable
+/// entries means none does.
+pub fn identify_root(root: &Path) -> RootIdentity {
+    let registries = load_registries(std::env::var(REGISTRY_ENV).ok(), load_default_registry);
+    let loaded: Vec<&Registry> = [
+        registries.env.as_ref(),
+        registries.platform_default.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    identify_root_in(&loaded, root)
+}
+
+/// [`identify_root`] against registries already in hand. Pure.
+fn identify_root_in(registries: &[&Registry], root: &Path) -> RootIdentity {
+    if let Ok(Some(manifest)) = load_manifest(root) {
+        for reg in registries {
+            if let Some(entry) = find_library_by_uuid(reg, &manifest.uuid) {
+                return if same_root(&entry.data_dir, root) {
+                    RootIdentity::Named {
+                        name: entry.name,
+                        by: LibraryIdentification::ManifestUuid,
+                    }
+                } else {
+                    RootIdentity::UuidElsewhere {
+                        name: entry.name,
+                        entry_root: entry.data_dir,
+                    }
+                };
+            }
+        }
+    }
+    match claim_root_by_path(registries, root) {
+        (Some(name), Some(by)) => RootIdentity::Named { name, by },
+        _ => RootIdentity::Unregistered,
+    }
+}
+
 /// Claim a registry name for `resolved_dir` by matching an entry's data
 /// root to it, registry before platform-default registry. Both sides are
 /// canonicalized best-effort before comparison — a failure to
@@ -1820,9 +2877,10 @@ fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, 
         return Err(ConfigError::DataDirNotFound(data_dir));
     }
     let root_config = load_root_config(&data_dir)?;
-    let ollama_url = env_trimmed(ollama_url_env)
-        .or_else(|| env_trimmed(root_config.ollama_url.clone()))
-        .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
+    let ollama_url = knob_value(
+        &ollama_url_knob(ollama_url_env, NO_DOTENV_RECORD, &root_config),
+        DEFAULT_OLLAMA_URL.to_string(),
+    );
     Ok(Config {
         data_dir,
         ollama_url,
@@ -2686,6 +3744,28 @@ fn portable_data_dir_from(exe_dir: Option<PathBuf>) -> Option<PathBuf> {
     candidate.is_dir().then_some(candidate)
 }
 
+/// Directory name the suggested data root carries under the platform
+/// data directory.
+pub const DEFAULT_LIBRARY_DIR: &str = "library";
+
+/// Data root to suggest when no portable layout exists: a `library`
+/// directory under the platform data directory, beside the daemon state
+/// and the managed PDFium copy.
+///
+/// This is a suggestion the wizard offers, not a resolution rung —
+/// [`Config::resolve`] never consults it, so an operator who declines
+/// the offer is not silently given it later. `None` when the platform
+/// data directory cannot be located.
+pub fn default_data_root() -> Option<PathBuf> {
+    default_data_root_from(dirs::data_dir())
+}
+
+/// Pure form of [`default_data_root`], factored out so the join shape
+/// can be tested without depending on the host's data directory.
+fn default_data_root_from(data_dir: Option<PathBuf>) -> Option<PathBuf> {
+    Some(data_dir?.join("bookrack").join(DEFAULT_LIBRARY_DIR))
+}
+
 /// Filename of the platform-default registry written by `bookrack init`.
 pub const DEFAULT_REGISTRY_NAME: &str = "registry.toml";
 
@@ -2764,7 +3844,13 @@ pub fn pdfium_library_filename() -> &'static str {
 /// pinned PDFium library; the last stop in the [`locate_pdfium`] search
 /// chain. `None` when the platform data directory cannot be located.
 pub fn pdfium_managed_dir() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("bookrack").join("pdfium"))
+    pdfium_managed_dir_from(dirs::data_dir())
+}
+
+/// Pure form of [`pdfium_managed_dir`], factored out so the join shape
+/// can be tested without depending on the host's data directory.
+fn pdfium_managed_dir_from(data_dir: Option<PathBuf>) -> Option<PathBuf> {
+    data_dir.map(|d| d.join("bookrack").join("pdfium"))
 }
 
 /// Outcome of the PDFium library search.
@@ -3342,6 +4428,79 @@ mod tests {
         assert_eq!(id, Some(LibraryIdentification::ManifestUuid));
     }
 
+    /// A root whose manifest uuid names a registered library that
+    /// lives somewhere else is reported, not followed. Following it
+    /// would answer for a different directory than the one the caller
+    /// typed — the same library by identity, another place on disk.
+    #[test]
+    fn a_uuid_registered_at_another_root_is_reported_rather_than_followed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("moved");
+        std::fs::create_dir_all(&root).expect("create the moved root");
+        std::fs::write(
+            root.join(MANIFEST_FILENAME),
+            "format = \"bookrack-library\"\nformat_version = 1\nuuid = \"uuid-a\"\nname = \"a\"\n",
+        )
+        .expect("write a manifest");
+        let registry =
+            parse_registry("[libraries.a]\ndata_dir = \"/roots/a\"\nuuid = \"uuid-a\"\n")
+                .expect("parse the registry");
+
+        let identity = identify_root_in(&[&registry], &root);
+        assert_eq!(
+            identity,
+            RootIdentity::UuidElsewhere {
+                name: "a".to_string(),
+                entry_root: PathBuf::from("/roots/a"),
+            }
+        );
+    }
+
+    /// The same uuid at the root the registry records is an ordinary
+    /// match. Without this the case above would pass for a matcher
+    /// that reported every uuid hit as a mismatch.
+    #[test]
+    fn a_uuid_at_its_registered_root_is_a_plain_match() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("home");
+        std::fs::create_dir_all(&root).expect("create the root");
+        std::fs::write(
+            root.join(MANIFEST_FILENAME),
+            "format = \"bookrack-library\"\nformat_version = 1\nuuid = \"uuid-a\"\nname = \"a\"\n",
+        )
+        .expect("write a manifest");
+        let registry = parse_registry(&format!(
+            "[libraries.a]\ndata_dir = \"{}\"\nuuid = \"uuid-a\"\n",
+            root.display()
+        ))
+        .expect("parse the registry");
+
+        assert_eq!(
+            identify_root_in(&[&registry], &root),
+            RootIdentity::Named {
+                name: "a".to_string(),
+                by: LibraryIdentification::ManifestUuid,
+            }
+        );
+    }
+
+    /// A root no entry claims stays unregistered — the caller has to
+    /// hear that rather than be handed a neighbour's name.
+    #[test]
+    fn a_root_no_entry_claims_is_unregistered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("stranger");
+        std::fs::create_dir_all(&root).expect("create the root");
+        let registry =
+            parse_registry("[libraries.a]\ndata_dir = \"/roots/a\"\nuuid = \"uuid-a\"\n")
+                .expect("parse the registry");
+
+        assert_eq!(
+            identify_root_in(&[&registry], &root),
+            RootIdentity::Unregistered
+        );
+    }
+
     #[test]
     fn find_library_by_uuid_matches_the_entry_carrying_the_uuid() {
         let registry = parse_registry(
@@ -3738,10 +4897,14 @@ mod tests {
 
     #[test]
     fn reranker_config_resolves_env_over_file_and_keeps_knobs_file_only() {
+        // The file's context deliberately differs from
+        // `DEFAULT_RERANKER_CTX`, or the file layer winning and the
+        // default layer winning would produce the same number.
+        let file_ctx = DEFAULT_RERANKER_CTX + 1024;
         let file = RootConfig {
             reranker: Some(RootRerankerConfig {
                 url: Some("http://file:1".to_string()),
-                ctx: Some(8192),
+                ctx: Some(file_ctx),
                 threads: Some(4),
             }),
             ..RootConfig::default()
@@ -3750,7 +4913,7 @@ mod tests {
         // No env: the [reranker] table supplies everything.
         let from_file = RerankerConfig::resolve_from(|_| None, &file);
         assert_eq!(from_file.url.as_deref(), Some("http://file:1"));
-        assert_eq!(from_file.ctx, Some(8192));
+        assert_eq!(from_file.ctx, Some(file_ctx));
         assert_eq!(from_file.threads, Some(4));
 
         // Env set: it wins over the file for the URL; the numeric
@@ -3763,7 +4926,7 @@ mod tests {
             &file,
         );
         assert_eq!(from_env.url.as_deref(), Some("http://env:2"));
-        assert_eq!(from_env.ctx, Some(8192));
+        assert_eq!(from_env.ctx, Some(file_ctx));
 
         // A blank env value falls through to the file layer.
         let blank_env = RerankerConfig::resolve_from(
@@ -3775,9 +4938,18 @@ mod tests {
         );
         assert_eq!(blank_env.url.as_deref(), Some("http://file:1"));
 
-        // Nothing set anywhere: no URL means the supervised mode.
+        // Nothing set anywhere: no URL means the supervised mode, no
+        // thread count means the server chooses, and the context falls
+        // to the compiled-in size of the rerank working set.
         let bare = RerankerConfig::resolve_from(|_| None, &RootConfig::default());
-        assert_eq!(bare, RerankerConfig::default());
+        assert_eq!(
+            bare,
+            RerankerConfig {
+                url: None,
+                ctx: Some(DEFAULT_RERANKER_CTX),
+                threads: None,
+            }
+        );
     }
 
     #[test]
@@ -4135,6 +5307,29 @@ mod tests {
         assert!(portable_data_dir_from(None).is_none());
     }
 
+    /// The suggested root sits beside the daemon state and the managed
+    /// PDFium copy, so the three share one `bookrack` directory rather
+    /// than inventing a third convention.
+    #[test]
+    fn default_data_root_joins_the_platform_data_directory() {
+        let base = PathBuf::from("/opt/state");
+        assert_eq!(
+            default_data_root_from(Some(base.clone())),
+            Some(base.join("bookrack").join("library"))
+        );
+        assert_eq!(
+            default_data_root_from(Some(base.clone()))
+                .expect("some")
+                .parent(),
+            pdfium_managed_dir_from(Some(base)).expect("some").parent(),
+        );
+    }
+
+    #[test]
+    fn default_data_root_returns_none_without_a_platform_data_directory() {
+        assert!(default_data_root_from(None).is_none());
+    }
+
     #[test]
     fn portable_data_dir_ignores_a_neighbouring_file() {
         // A file (not a directory) at the marker name must not be picked
@@ -4286,6 +5481,97 @@ mod tests {
             assert!(should_load_dotenv(|_| Some(value.to_string())));
         }
         assert!(should_load_dotenv(|_| None));
+    }
+
+    /// A load reports each of its three outcomes outside the
+    /// workspace's prefix, and only those: a key with the prefix has a
+    /// knob row of its own, and listing it twice would make the
+    /// section look like a second answer to the same question.
+    #[test]
+    fn foreign_lists_every_outcome_and_skips_the_prefix() {
+        let load = DotenvLoad {
+            path: PathBuf::from("/somewhere/.env"),
+            supplied: vec!["BOOKRACK_DATA_DIR".to_string(), "HTTP_PROXY".to_string()],
+            eclipsed: vec![
+                ("BOOKRACK_LOG".to_string(), "debug".to_string()),
+                ("NO_COLOR".to_string(), "1".to_string()),
+            ],
+            rejected: vec!["HOME".to_string(), "TMPDIR".to_string()],
+        };
+
+        let foreign = load.foreign();
+        assert_eq!(
+            foreign
+                .iter()
+                .map(|var| (var.key, var.status))
+                .collect::<Vec<_>>(),
+            vec![
+                ("HOME", ForeignStatus::Rejected),
+                ("HTTP_PROXY", ForeignStatus::Set),
+                ("NO_COLOR", ForeignStatus::Eclipsed),
+                ("TMPDIR", ForeignStatus::Rejected),
+            ],
+            "the section must be sorted, cover all three outcomes, and \
+             leave the prefixed keys to their own rows",
+        );
+    }
+
+    /// A prefix match is a prefix match, not a substring one: a key
+    /// that merely contains the prefix is somebody else's variable.
+    #[test]
+    fn foreign_matches_the_prefix_at_the_start_only() {
+        let load = DotenvLoad {
+            path: PathBuf::from("/somewhere/.env"),
+            supplied: Vec::new(),
+            eclipsed: Vec::new(),
+            rejected: vec!["OLD_BOOKRACK_DATA_DIR".to_string()],
+        };
+        assert_eq!(
+            load.foreign().iter().map(|var| var.key).collect::<Vec<_>>(),
+            vec!["OLD_BOOKRACK_DATA_DIR"],
+        );
+        assert!(
+            !admits("OLD_BOOKRACK_DATA_DIR"),
+            "the admission rule must read the prefix at the start too",
+        );
+    }
+
+    /// The workspace's own surface, and the short list of names that
+    /// belong to somebody else.
+    #[test]
+    fn admission_covers_the_prefix_and_the_named_exceptions() {
+        for key in [
+            "BOOKRACK_DATA_DIR",
+            "BOOKRACK_ANYTHING_NOT_DEFINED_YET",
+            "HTTP_PROXY",
+            "http_proxy",
+            "NO_PROXY",
+            "SSL_CERT_FILE",
+            "NO_COLOR",
+            "RUST_BACKTRACE",
+        ] {
+            assert!(admits(key), "{key} must be admitted");
+        }
+    }
+
+    /// The names the file has no business setting — every one of them
+    /// a variable that changes an answer far from configuration.
+    #[test]
+    fn admission_refuses_the_variables_that_reach_past_configuration() {
+        for key in [
+            "HOME",
+            "TMPDIR",
+            "CI",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "PATH",
+            // Case is not normalised: an admitted name is admitted as
+            // spelled, and these two spellings are nobody's convention.
+            "Http_Proxy",
+            "no_color",
+        ] {
+            assert!(!admits(key), "{key} must not be admitted");
+        }
     }
 
     #[test]

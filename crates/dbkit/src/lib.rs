@@ -32,3 +32,13 @@ pub use row::decode;
 pub use spec::{ColumnSpec, ForeignKey, IndexSpec, OnDelete, PkRole, SqlType, TableSpec};
 pub use timing::{DEFAULT_SLOW_QUERY_THRESHOLD, TimedConnection};
 pub use verify::{SchemaMismatch, VerifyError, verify_all, verify_table};
+
+bookrack_core::fixed_settings! {
+    owner = "dbkit";
+    "db.busy_timeout" = connection::BUSY_TIMEOUT,
+        "how long a statement waits on a lock another connection holds",
+        acts on "every read and write against a database another process is writing";
+    "db.slow_query_threshold" = timing::DEFAULT_SLOW_QUERY_THRESHOLD,
+        "how long one direct statement may run before it is logged as slow",
+        acts on "the WARN lines a slow-query hunt reads";
+}

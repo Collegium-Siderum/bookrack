@@ -5,9 +5,9 @@
 //! port when the session-wide shutdown broadcast fires.
 //!
 //! The library handle behind the registry is a `catalog_only` stub
-//! over paths that are never opened — `serve` binds the listener and
-//! constructs per-session MCP services lazily, so no store I/O happens
-//! unless a client calls a tool, which this test never does. The
+//! over paths that are never opened — `serve` constructs per-session
+//! MCP services lazily, so no store I/O happens unless a client calls
+//! a tool, which this test never does. The
 //! `tokio::signal::ctrl_c()` -> broadcast linkage in `main.rs` is one
 //! line of glue and is not exercised here.
 
@@ -15,6 +15,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use bookrack_config::Config;
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::LogStreamHandle;
@@ -25,29 +26,31 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio::time::timeout;
 
-/// Reserve an ephemeral port by binding and immediately releasing it,
-/// so the address can be handed to `serve` (which performs its own
-/// bind) and re-bound after shutdown to prove the release.
-async fn reserve_local_addr() -> SocketAddr {
+/// Take an ephemeral port the way the daemon does — bound during
+/// bring-up and handed to `serve` — and report the address alongside
+/// it, so the test can re-bind after shutdown to prove the release.
+async fn bound_local_listener() -> (TcpListener, SocketAddr) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
-    listener.local_addr().expect("local addr")
+    let addr = listener.local_addr().expect("local addr");
+    (listener, addr)
 }
 
 /// A registry over one catalog-only handle whose store paths point
 /// into the OS temp dir and are never created or opened.
 fn stub_registry() -> Arc<LibraryRegistry<OllamaEmbedClient>> {
     let root = std::env::temp_dir().join("bookrack-mcp-shutdown-stub");
+    let cfg = Arc::new(Config::new(root, "http://127.0.0.1:1".to_string()));
     let ops = Ops::<OllamaEmbedClient>::catalog_only(
-        root.join("corpus.db"),
-        root.join("catalog.db"),
-        &root.join("lancedb"),
-        root.join("books"),
-        root.join("backup"),
+        cfg.corpus_db(),
+        cfg.catalog_db(),
+        &cfg.lancedb_dir(),
+        cfg.books_dir(),
+        cfg.backup_dir(),
         Caller::mcp(),
     );
-    LibraryRegistry::single(LibraryHandle::new("shutdown-stub", ops))
+    LibraryRegistry::single(LibraryHandle::new("shutdown-stub", cfg, ops))
 }
 
 fn stub_info_context(mcp_addr: &SocketAddr) -> LibraryInfoContext {
@@ -65,7 +68,7 @@ fn stub_info_context(mcp_addr: &SocketAddr) -> LibraryInfoContext {
 
 #[tokio::test]
 async fn shutdown_broadcast_stops_serve_and_releases_the_listening_port() {
-    let addr = reserve_local_addr().await;
+    let (listener, addr) = bound_local_listener().await;
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(4);
 
     let registry = stub_registry();
@@ -79,7 +82,7 @@ async fn shutdown_broadcast_stops_serve_and_releases_the_listening_port() {
             LogStreamHandle::default(),
             Arc::new(Mutex::new(QueueState::default())),
             serve_tx,
-            &addr.to_string(),
+            listener,
             shutdown_rx,
         )
         .await

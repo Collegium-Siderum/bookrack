@@ -18,6 +18,9 @@ use std::path::Path;
 use std::time::Instant;
 
 use bookrack_catalog::Catalog;
+use bookrack_core::knob::{
+    Candidate, DotenvSupply, KnobOrigin, KnobReach, Layer, ReadAt, env_over, resolve_knob,
+};
 use bookrack_core::{ItemKind, NodeId, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, build_query_input};
@@ -198,18 +201,49 @@ pub async fn retrieve_with<E: Embedder>(
     overrides: SearchOptions,
     top_k: usize,
 ) -> Result<Vec<SearchHit>> {
+    let query_vector = embed_query(query, embedder).await?;
+    recall_with(&query_vector, store, lancedb_dir, overrides, top_k).await
+}
+
+/// Embed `query` for retrieval: wrap it in the model's query prompt and
+/// return the single vector the embedder answers with.
+///
+/// The embedding half of [`retrieve_with`], separated so a caller that
+/// queries several stores built under the same model pays one embed
+/// round trip instead of one per store. An empty or whitespace-only
+/// query is [`SearchError::EmptyQuery`]; an embedder that answers with
+/// no vector is [`SearchError::EmptyEmbedding`].
+pub async fn embed_query<E: Embedder>(query: &str, embedder: &E) -> Result<Vec<f32>> {
     if query.trim().is_empty() {
         return Err(SearchError::EmptyQuery);
     }
     let input = build_query_input(query);
     let embed_started = Instant::now();
-    let vectors = embedder.embed_batch(std::slice::from_ref(&input)).await?;
-    let query_vector = vectors.first().ok_or(SearchError::EmptyEmbedding)?;
+    let mut vectors = embedder.embed_batch(std::slice::from_ref(&input)).await?;
+    if vectors.is_empty() {
+        return Err(SearchError::EmptyEmbedding);
+    }
     tracing::debug!(
         elapsed_ms = embed_started.elapsed().as_secs_f64() * 1e3,
         "embedded query"
     );
+    Ok(vectors.swap_remove(0))
+}
 
+/// Recall the `top_k` nearest passages to an already-embedded query.
+///
+/// The recall half of [`retrieve_with`], with the same overrides /
+/// meta-default merge order. `query_vector` must come from an embedder
+/// serving the model this store was built under — the store checks the
+/// width, not the model, so a vector from a different model of equal
+/// width recalls silently wrong passages.
+pub async fn recall_with(
+    query_vector: &[f32],
+    store: &ChunkStore,
+    lancedb_dir: &Path,
+    overrides: SearchOptions,
+    top_k: usize,
+) -> Result<Vec<SearchHit>> {
     let base = options_from_meta(store, lancedb_dir)?;
     let opts = merge_options(overrides, base);
     let recall_started = Instant::now();
@@ -237,23 +271,12 @@ pub async fn retrieve_with_partition<E: Embedder>(
     top_k: usize,
     partition: PartitionIdx,
 ) -> Result<Vec<SearchHit>> {
-    if query.trim().is_empty() {
-        return Err(SearchError::EmptyQuery);
-    }
-    let input = build_query_input(query);
-    let embed_started = Instant::now();
-    let vectors = embedder.embed_batch(std::slice::from_ref(&input)).await?;
-    let query_vector = vectors.first().ok_or(SearchError::EmptyEmbedding)?;
-    tracing::debug!(
-        elapsed_ms = embed_started.elapsed().as_secs_f64() * 1e3,
-        "embedded query"
-    );
-
+    let query_vector = embed_query(query, embedder).await?;
     let base = options_from_meta(store, lancedb_dir)?;
     let opts = merge_options(overrides, base);
     let recall_started = Instant::now();
     let hits = store
-        .search_partition_with(query_vector, partition, top_k, opts)
+        .search_partition_with(&query_vector, partition, top_k, opts)
         .await?;
     tracing::debug!(
         hits = hits.len(),
@@ -284,17 +307,136 @@ pub fn env_overrides() -> SearchOptions {
 /// the injected `get`, so the parsing rules are testable without
 /// mutating the process environment.
 fn env_overrides_from(get: impl Fn(&str) -> Option<String>) -> SearchOptions {
-    let bypass_index = get("BOOKRACK_VECTORS_BYPASS_ANN")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false);
-    let nprobes = get("BOOKRACK_VECTORS_NPROBES").and_then(|v| v.trim().parse().ok());
-    let refine_factor = get("BOOKRACK_VECTORS_REFINE_FACTOR").and_then(|v| v.trim().parse().ok());
-    SearchOptions {
-        nprobes,
-        refine_factor,
-        bypass_index,
+    env_overrides_with_origins_from(get, None).0
+}
+
+/// Environment variable forcing brute-force search over the ANN index.
+pub const VECTORS_BYPASS_ANN_ENV: &str = "BOOKRACK_VECTORS_BYPASS_ANN";
+
+/// Environment variable overriding the ANN probe count.
+pub const VECTORS_NPROBES_ENV: &str = "BOOKRACK_VECTORS_NPROBES";
+
+/// Environment variable overriding the ANN refine factor.
+pub const VECTORS_REFINE_FACTOR_ENV: &str = "BOOKRACK_VECTORS_REFINE_FACTOR";
+
+/// The artifact deciding `nprobes` / `refine_factor` when no variable
+/// sets them: the ANN settings a build stamped beside the vector store,
+/// which [`options_from_meta`] reads per search.
+pub const ANN_META_SITE: &str = "built index ann settings (vectors_meta.json)";
+
+/// Every knob this crate reads, with where each value came from.
+///
+/// All three are re-read per call rather than snapshotted, so two
+/// searches in one process can legitimately differ.
+pub fn knob_origins(dotenv: Option<DotenvSupply<'_>>) -> Vec<KnobOrigin> {
+    env_overrides_with_origins_from(|name| std::env::var(name).ok(), dotenv).1
+}
+
+/// Every knob this crate reads, as it stands on a machine where nothing
+/// is configured.
+///
+/// The inventory form of [`knob_origins`]: the same rows from the same
+/// resolution, fed an empty environment and no dotenv record, so each
+/// row reports what it falls back to while its `chain` still names the
+/// variable that can move it.
+pub fn knob_catalog() -> Vec<KnobOrigin> {
+    env_overrides_with_origins_from(|_| None, None).1
+}
+
+/// Pure resolution that also reports where each value came from. The
+/// options are read off the rows, so the two cannot disagree.
+fn env_overrides_with_origins_from(
+    get: impl Fn(&str) -> Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> (SearchOptions, Vec<KnobOrigin>) {
+    let bypass = vectors_knob(
+        "vectors.bypass_ann",
+        VECTORS_BYPASS_ANN_ENV,
+        get(VECTORS_BYPASS_ANN_ENV).map(|v| {
+            matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes").to_string()
+        }),
+        dotenv,
+        "false",
+    );
+    let nprobes = vectors_opt_knob(
+        "vectors.nprobes",
+        VECTORS_NPROBES_ENV,
+        get(VECTORS_NPROBES_ENV),
+        dotenv,
+    );
+    let refine_factor = vectors_opt_knob(
+        "vectors.refine_factor",
+        VECTORS_REFINE_FACTOR_ENV,
+        get(VECTORS_REFINE_FACTOR_ENV),
+        dotenv,
+    );
+
+    let options = SearchOptions {
+        nprobes: nprobes.value.as_deref().and_then(|v| v.parse().ok()),
+        refine_factor: refine_factor.value.as_deref().and_then(|v| v.parse().ok()),
+        bypass_index: bypass.value.as_deref() == Some("true"),
         exclude_partitions: Vec::new(),
-    }
+    };
+    (options, vec![bypass, nprobes, refine_factor])
+}
+
+/// A vectors knob with a compiled-in default below the variable.
+///
+/// Unlike the numeric pair, an unparseable value here is not "unset":
+/// anything that is not a recognised truth word reads as `false`, which
+/// is what the layer offers.
+fn vectors_knob(
+    key: &str,
+    env_name: &'static str,
+    parsed: Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+    default: &str,
+) -> KnobOrigin {
+    resolve_knob(
+        key,
+        KnobReach::PerCall,
+        ReadAt::PerCall,
+        env_over(
+            dotenv,
+            env_name,
+            parsed,
+            vec![Candidate::of(
+                Layer::Default,
+                "built-in",
+                Some(default.to_string()),
+            )],
+        ),
+    )
+}
+
+/// A vectors knob with no compiled-in value beneath the variable:
+/// unset means the ANN settings the build stamped beside the vector
+/// store decide, and with no IVF index there nothing does.
+///
+/// The rung under the variable carries no value. Resolving one would
+/// mean opening a data root, which the inventory these rows feed does
+/// not do; what a reader is owed is the name of the artifact that
+/// decides, and that name is static.
+fn vectors_opt_knob(
+    key: &str,
+    env_name: &'static str,
+    raw: Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> KnobOrigin {
+    let parsed = raw
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|v| v.to_string());
+    resolve_knob(
+        key,
+        KnobReach::PerCall,
+        ReadAt::PerCall,
+        env_over(
+            dotenv,
+            env_name,
+            parsed,
+            vec![Candidate::of(Layer::Manifest, ANN_META_SITE, None)],
+        ),
+    )
 }
 
 /// Layer per-call overrides over the persisted meta defaults:
@@ -1145,6 +1287,131 @@ mod tests {
         assert!(merge_options(bypassing.clone(), plain.clone()).bypass_index);
         assert!(merge_options(plain.clone(), bypassing).bypass_index);
         assert!(!merge_options(plain.clone(), plain).bypass_index);
+    }
+
+    /// The catalog reports all three knobs with nothing set, and names
+    /// each one's variable. The two whose rung under the variable holds
+    /// no value report no value at all — unset means the built index's
+    /// own setting decides, and an inventory must not invent a default
+    /// this crate does not hold.
+    #[test]
+    fn the_catalog_names_every_variable_and_invents_no_default() {
+        let rows = knob_catalog();
+        let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "vectors.bypass_ann",
+                "vectors.nprobes",
+                "vectors.refine_factor"
+            ]
+        );
+
+        let sites: Vec<&str> = rows
+            .iter()
+            .flat_map(|r| r.chain.iter().map(|s| s.site.as_str()))
+            .collect();
+        for name in [
+            VECTORS_BYPASS_ANN_ENV,
+            VECTORS_NPROBES_ENV,
+            VECTORS_REFINE_FACTOR_ENV,
+        ] {
+            assert!(sites.contains(&name), "the catalog sites {sites:?}");
+        }
+
+        assert_eq!(rows[0].value.as_deref(), Some("false"));
+        assert_eq!(rows[1].value, None, "nprobes has no default to report");
+        assert_eq!(
+            rows[2].value, None,
+            "refine_factor has no default to report"
+        );
+    }
+
+    /// The two knobs with no compiled-in default still name what
+    /// decides when they are unset: the ANN settings stamped beside the
+    /// vector store when the index was built. A row backstopping at the
+    /// variable itself would say nothing is under it, and send a reader
+    /// hunting for a library default that does not exist.
+    #[test]
+    fn an_unset_ann_knob_names_the_built_index_as_its_backstop() {
+        let rows = knob_catalog();
+        for key in ["vectors.nprobes", "vectors.refine_factor"] {
+            let row = rows.iter().find(|r| r.key == key).unwrap();
+            assert_eq!(row.value, None, "{key} has no value to report");
+            assert_eq!(row.layer, Layer::Manifest, "{key} backstops elsewhere");
+            assert_eq!(row.site, ANN_META_SITE, "{key} names another artifact");
+        }
+    }
+
+    /// The rung names the file it stands for, so renaming the sidecar
+    /// cannot leave the inventory pointing at a path that is gone.
+    #[test]
+    fn the_ann_meta_rung_names_the_sidecar_it_stands_for() {
+        assert!(
+            ANN_META_SITE.contains(bookrack_vectors::META_FILENAME),
+            "{ANN_META_SITE:?}"
+        );
+    }
+
+    /// The rung sits under the variable, not over it: a set variable
+    /// still wins, and the built index is what it overrides.
+    #[test]
+    fn the_variable_outranks_the_built_index() {
+        let (_, rows) = env_overrides_with_origins_from(
+            |name| (name == VECTORS_NPROBES_ENV).then(|| "24".to_string()),
+            None,
+        );
+        let row = rows.iter().find(|r| r.key == "vectors.nprobes").unwrap();
+        assert_eq!(row.value.as_deref(), Some("24"));
+        assert_eq!(row.layer, Layer::Environment);
+        let layers: Vec<Layer> = row.chain.iter().map(|s| s.layer).collect();
+        assert_eq!(layers, vec![Layer::Environment, Layer::Manifest]);
+    }
+
+    /// The options the resolver returns and the rows it reports are
+    /// the same values, because the fields are read off the rows.
+    #[test]
+    fn the_rows_agree_with_the_options_they_explain() {
+        let (options, rows) = env_overrides_with_origins_from(
+            |name| match name {
+                VECTORS_BYPASS_ANN_ENV => Some(" TRUE ".to_string()),
+                VECTORS_NPROBES_ENV => Some(" 24 ".to_string()),
+                _ => None,
+            },
+            None,
+        );
+
+        let row = |key: &str| {
+            rows.iter()
+                .find(|r| r.key == key)
+                .unwrap_or_else(|| panic!("no row for {key}"))
+        };
+        assert_eq!(
+            row("vectors.bypass_ann").value.as_deref(),
+            Some(options.bypass_index.to_string()).as_deref()
+        );
+        assert_eq!(
+            row("vectors.nprobes").value.as_deref().map(str::to_string),
+            options.nprobes.map(|v| v.to_string())
+        );
+        assert_eq!(row("vectors.bypass_ann").layer, Layer::Environment);
+        assert_eq!(row("vectors.nprobes").site, VECTORS_NPROBES_ENV);
+    }
+
+    /// An unparseable numeric value leaves the knob unset rather than
+    /// reporting a value the search will not use, and does not appear
+    /// as a shadowed layer either.
+    #[test]
+    fn an_unparseable_number_offers_nothing() {
+        let (options, rows) = env_overrides_with_origins_from(
+            |name| (name == VECTORS_NPROBES_ENV).then(|| "many".to_string()),
+            None,
+        );
+
+        assert_eq!(options.nprobes, None);
+        let row = rows.iter().find(|r| r.key == "vectors.nprobes").unwrap();
+        assert_eq!(row.value, None);
+        assert!(row.shadowed.is_empty(), "{:?}", row.shadowed);
     }
 
     #[test]

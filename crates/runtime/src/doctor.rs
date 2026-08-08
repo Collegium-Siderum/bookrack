@@ -2,21 +2,31 @@
 
 //! `bookrack doctor`: one-screen health check of an install.
 //!
-//! Each environment expectation — a resolved data root, the on-disk
-//! presence of each database store, a loadable PDFium library, a
-//! sufficient file-descriptor limit, a reachable Ollama daemon
-//! carrying the configured embed model — becomes one row in a fixed
-//! three-column table. A row is `OK`,
+//! Each environment expectation — which vantage point is answering, a
+//! resolved data root, every store under it, free space to grow into, a
+//! loadable PDFium library, a sufficient file-descriptor limit, the
+//! daemon's own state directory and queue snapshot, the registry's
+//! internal consistency, each library's index profile against its built
+//! stamps, the reranker binary and model, the MCP endpoint, and a
+//! reachable Ollama daemon carrying the configured embed model —
+//! becomes one row in a fixed three-column table. A row is `OK`,
 //! `WARN`, or `FAIL`; any FAIL exits the process with status 1 so a
 //! script can branch on the result.
 //!
-//! The store-presence rows deliberately stop at `path.exists()`: a
-//! read-write open would apply pending migrations and contend for the
-//! daemon's exclusive write lock. The registry-coherence rows do open
-//! the corpus read-only to read its built stamps — a `query_only` WAL
-//! open takes no write lock and is safe alongside a running daemon —
-//! but no row opens a store read-write. Deeper introspection lives
-//! behind the REPL `status` command instead.
+//! **No row opens a store read-write.** A present store is opened
+//! through its read-only door, which is a `query_only` connection or a
+//! sidecar read: no write lock, no pending migration applied, no store
+//! materialised. That is safe alongside a running daemon, and it is
+//! what makes the schema check worth having here — the same verify each
+//! door already performs on the way in. A read-only open of an existing
+//! WAL database does create its `-shm`/`-wal` sidecars; what the rows
+//! must never do is bring a `.db` into being.
+//!
+//! Depth stops there. What a store *holds* — intake counts, missing
+//! files, stamp drift against a rebuild — is `bookrack verify`, and a
+//! running daemon reports it through `library.info`, which `bookrack
+//! status` renders. Both of those need a daemon; this command does not,
+//! which is why it stays the diagnosis of last resort.
 //!
 //! The command runs **before** `Config::resolve`, so an unconfigured
 //! install still produces a row stating that — rather than the resolver
@@ -31,12 +41,16 @@ use bookrack_config::{
     ResolutionSource, ShadowedDefault, default_registry_path, effective_profile_reference,
     list_libraries, load_manifest, locate_pdfium, pdfium_library_filename, profile_reference_drift,
 };
+use bookrack_core::bytes_human;
+use bookrack_corpus::IndexStamps;
 use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, pull_command};
-use bookrack_index_profile::{has_errors, resolve, validate};
+use bookrack_index_profile::{ProfileOrigin, has_errors, resolve, validate};
 use eyre::{Context, Result};
 use serde::Serialize;
 
 use crate::backend_probe::{EmbedBackendState, check_embed_backend};
+use crate::mcp_endpoint::McpEndpointState;
+use crate::wizard::enclosing_app_bundle;
 
 /// One row of the health report.
 #[derive(Debug, Clone, serde::Deserialize, Serialize)]
@@ -100,8 +114,12 @@ impl Report {
 /// expected "not ready" health outcome to a non-zero exit code
 /// without adding an extra error line on top of the table the
 /// renderer already wrote.
-pub async fn run(selection: &LibrarySelection, json: bool) -> Result<bool> {
-    let report = gather(selection).await;
+pub async fn run(
+    selection: &LibrarySelection,
+    json: bool,
+    runtime_dir: Option<&Path>,
+) -> Result<bool> {
+    let report = gather(selection, runtime_dir).await;
     if json {
         render_json(&report);
     } else {
@@ -125,30 +143,60 @@ pub fn render_value(value: &serde_json::Value, json: bool) -> Result<bool> {
     Ok(!report.has_failures())
 }
 
-/// Build a [`Report`] for the given selection. Pure over its inputs in
-/// the sense that every observation is fresh — there is no in-process
-/// cache to invalidate between successive calls.
-pub async fn gather(selection: &LibrarySelection) -> Report {
-    gather_with(selection, None).await
+/// Who is producing a report, and what that vantage point can see.
+///
+/// The two differ in shape, not only in detail: a daemon reports on the
+/// reranker backend it supervises and the MCP address it actually
+/// bound, where the in-process path can only ask about the configured
+/// one. The report says which one produced it, so two runs on one
+/// machine that disagree are readable rather than mysterious.
+pub enum Reporter<'a> {
+    /// The daemon serving the library answered `doctor.gather`.
+    Daemon {
+        /// The supervised reranker backend, when the profile enables one.
+        rerank_supervisor: Option<&'a crate::rerank_supervisor::RerankSupervisor>,
+        /// The MCP address this daemon bound.
+        mcp_addr: &'a str,
+        /// The control socket a client reached it on.
+        control_socket: Option<&'a Path>,
+    },
+    /// The binary gathered the report itself, no daemon answering.
+    InProcess {
+        /// Where to look for a session lock, so the row can tell "no
+        /// daemon" from "a daemon is up but did not answer".
+        runtime_dir: Option<&'a Path>,
+    },
 }
 
-/// [`gather`] with a live daemon's supervised reranker backend, so the
-/// backend row reports the supervisor state instead of `not running`.
-/// The daemon's `doctor.gather` handler passes its handle; the offline
-/// CLI path passes `None`.
-pub async fn gather_with(
-    selection: &LibrarySelection,
-    rerank_supervisor: Option<&crate::rerank_supervisor::RerankSupervisor>,
-) -> Report {
-    let mut rows = Vec::new();
+/// Build a [`Report`] for the given selection, gathered in-process.
+/// Pure over its inputs in the sense that every observation is fresh —
+/// there is no in-process cache to invalidate between successive calls.
+pub async fn gather(selection: &LibrarySelection, runtime_dir: Option<&Path>) -> Report {
+    gather_with(selection, Reporter::InProcess { runtime_dir }).await
+}
 
+/// [`gather`] from a named vantage point; see [`Reporter`].
+pub async fn gather_with(selection: &LibrarySelection, reporter: Reporter<'_>) -> Report {
+    let mut rows = Vec::new();
+    let (rerank_supervisor, served_mcp_addr) = match &reporter {
+        Reporter::Daemon {
+            rerank_supervisor,
+            mcp_addr,
+            ..
+        } => (*rerank_supervisor, Some(*mcp_addr)),
+        Reporter::InProcess { .. } => (None, None),
+    };
+
+    push_reporter_row(&mut rows, &reporter);
     let cfg = push_data_root_row(&mut rows, selection);
     push_pdfium_row(&mut rows);
     push_fd_limit_row(&mut rows);
     if let Some(cfg) = &cfg {
-        push_catalog_row(&mut rows, cfg);
-        push_corpus_row(&mut rows, cfg);
+        push_store_rows(&mut rows, cfg);
+        push_open_runs_row(&mut rows, cfg);
+        push_disk_free_row(&mut rows, cfg);
     }
+    push_daemon_state_rows(&mut rows);
     // One resolution feeds both registry-backed sections, so they can
     // never disagree about what the registry says.
     let registry = probe_registry(list_libraries());
@@ -158,6 +206,7 @@ pub async fn gather_with(
     let embed_model = embed_model_for_probe(cfg.as_ref());
     push_ollama_rows(&mut rows, &ollama_url, &embed_model).await;
     push_reranker_rows(&mut rows, cfg.as_ref(), rerank_supervisor).await;
+    push_mcp_endpoint_row(&mut rows, served_mcp_addr).await;
 
     Report { rows }
 }
@@ -506,7 +555,12 @@ fn push_data_root_row(rows: &mut Vec<Row>, selection: &LibrarySelection) -> Opti
                 .and_then(library_identification_label)
                 .zip(cfg.library())
                 .map(|(label, name)| format!("identified as '{name}' by {label}"));
-            let status = data_root_status(source, cfg.shadowed_default(), identified.as_deref());
+            let status = data_root_status(
+                source,
+                cfg.shadowed_default(),
+                identified.as_deref(),
+                enclosing_app_bundle(cfg.data_dir()).as_deref(),
+            );
             rows.push(Row {
                 label: "data root".to_string(),
                 value,
@@ -541,25 +595,47 @@ fn push_data_root_row(rows: &mut Vec<Row>, selection: &LibrarySelection) -> Opti
     }
 }
 
+/// Judge the resolved data root. `bundle` is the macOS application
+/// bundle the root sits inside, if any; the wizard refuses such a path,
+/// so this is the only surface that reaches a root established before
+/// the guard existed. It leads the note when both warnings hold: a
+/// shadowed default serves the wrong library, a bundled root loses the
+/// library outright on the next upgrade.
 fn data_root_status(
     source: &str,
     shadowed: Option<&ShadowedDefault>,
     identified: Option<&str>,
+    bundle: Option<&Path>,
 ) -> Status {
     let suffix = identified
         .map(|note| format!("; {note}"))
         .unwrap_or_default();
-    match shadowed {
-        Some(shadowed) => Status::Warn {
-            note: format!(
-                "registry default '{}' ({}) is shadowed by {source}; unset it or \
-                 pass --library {} to serve the registered library{suffix}",
-                shadowed.name,
-                shadowed.data_dir.display(),
-                shadowed.name,
-            ),
+    let shadow_note = shadowed.map(|shadowed| {
+        format!(
+            "registry default '{}' ({}) is shadowed by {source}; unset it or \
+             pass --library {} to serve the registered library",
+            shadowed.name,
+            shadowed.data_dir.display(),
+            shadowed.name,
+        )
+    });
+    let bundle_note = bundle.map(|bundle| {
+        format!(
+            "the data root sits inside the application bundle {}; upgrading \
+             replaces the whole bundle, and every book, index, and log under \
+             it goes with it -- move the root outside the bundle and rerun \
+             `bookrack init`, or point --data-dir at a root outside it",
+            bundle.display(),
+        )
+    });
+    match (bundle_note, shadow_note) {
+        (Some(bundle), Some(shadow)) => Status::Warn {
+            note: format!("{bundle}; {shadow}{suffix}"),
         },
-        None => Status::Ok {
+        (Some(note), None) | (None, Some(note)) => Status::Warn {
+            note: format!("{note}{suffix}"),
+        },
+        (None, None) => Status::Ok {
             note: Some(format!("resolved via {source}{suffix}")),
         },
     }
@@ -632,32 +708,476 @@ fn push_fd_limit_row(rows: &mut Vec<Row>) {
     }
 }
 
-fn push_catalog_row(rows: &mut Vec<Row>, cfg: &Config) {
-    push_store_row(rows, "catalog.db", &cfg.catalog_db());
+/// State which vantage point produced this report, and — from the
+/// in-process one — whether a daemon is nonetheless holding the session
+/// lock. That combination is the one an operator cannot otherwise see:
+/// a daemon that is up but did not answer produces a report of a
+/// different shape than the one that daemon would have written.
+fn push_reporter_row(rows: &mut Vec<Row>, reporter: &Reporter<'_>) {
+    let label = "report by".to_string();
+    let runtime_dir = match reporter {
+        Reporter::Daemon { control_socket, .. } => {
+            rows.push(Row {
+                label,
+                value: "the daemon serving this library".to_string(),
+                status: Status::Ok {
+                    note: control_socket.map(|s| format!("control socket {}", s.display())),
+                },
+            });
+            return;
+        }
+        Reporter::InProcess { runtime_dir } => *runtime_dir,
+    };
+    let (value, status) = match session_lock_holder(runtime_dir) {
+        Ok(Some(pid)) => (
+            "this process".to_string(),
+            Status::Warn {
+                note: format!(
+                    "a daemon holds the session lock (pid {pid}) but did not answer, so this \
+                     report covers the configured MCP address rather than the one that daemon \
+                     bound, and omits the reranker backend it supervises"
+                ),
+            },
+        ),
+        Ok(None) => (
+            "this process".to_string(),
+            Status::Ok {
+                note: Some("no daemon is running".to_string()),
+            },
+        ),
+        Err(reason) => (
+            "this process".to_string(),
+            Status::Ok {
+                note: Some(format!(
+                    "could not tell whether a daemon is running: {reason}"
+                )),
+            },
+        ),
+    };
+    rows.push(Row {
+        label,
+        value,
+        status,
+    });
 }
 
-fn push_corpus_row(rows: &mut Vec<Row>, cfg: &Config) {
-    push_store_row(rows, "corpus.db", &cfg.corpus_db());
+/// The pid recorded in a held session lock under `runtime_dir`, or
+/// `None` when no lock is held. A lock left behind by a crashed daemon
+/// is not held, so it reports as no daemon — the same reading
+/// `bookrack status` takes.
+fn session_lock_holder(runtime_dir: Option<&Path>) -> Result<Option<u32>, String> {
+    let dir = bookrack_session::resolve_runtime_dir(runtime_dir).map_err(|e| format!("{e}"))?;
+    let lock_path = dir.join(bookrack_session::tty_lock_name());
+    let info = bookrack_session::peek_lock(&lock_path).map_err(|e| format!("{e}"))?;
+    let held = bookrack_session::lock_is_held(&lock_path).map_err(|e| format!("{e}"))?;
+    Ok(info.filter(|_| held).map(|i| i.pid))
 }
 
-/// Report a database store by filesystem presence only. Opening a handle
-/// is deferred to the daemon so doctor never competes with a live
-/// session for the exclusive write lock.
-fn push_store_row(rows: &mut Vec<Row>, label: &str, path: &std::path::Path) {
+/// The daemon's own state directory and the queue snapshot inside it.
+/// Neither hangs off a data root — one daemon process owns one of each
+/// however many libraries it serves — so nothing in the per-library
+/// rows above covers them. A snapshot that cannot be parsed is a
+/// failure the daemon would otherwise report only at its next start,
+/// which is exactly when an operator is least equipped to read it.
+fn push_daemon_state_rows(rows: &mut Vec<Row>) {
+    let dir = match bookrack_config::daemon_state_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            rows.push(Row {
+                label: "daemon state".to_string(),
+                value: "(unresolved)".to_string(),
+                status: Status::Fail {
+                    note: format!(
+                        "{e}; the daemon writes its queue snapshot and logs there and \
+                         cannot start without it"
+                    ),
+                },
+            });
+            return;
+        }
+    };
+    let queue_path = dir.join("queue.json");
+    rows.push(Row {
+        label: "daemon state".to_string(),
+        value: dir.display().to_string(),
+        status: if dir.exists() {
+            Status::Ok { note: None }
+        } else {
+            Status::Ok {
+                note: Some("not created yet; the first `bookrack run` creates it".to_string()),
+            }
+        },
+    });
+    rows.push(queue_snapshot_row(
+        &queue_path,
+        crate::queue::load(&queue_path),
+    ));
+}
+
+/// Grade the queue snapshot from the same read the daemon performs at
+/// start-up. A missing file is the normal state of a library nothing
+/// has been queued on, and `load` reports it as an empty queue; an
+/// unparseable one is what the daemon refuses to start on.
+///
+/// A document from a newer binary fails with its own repair rather than
+/// the unparseable one's: the file is intact and the version that wrote
+/// it still reads every job in it, so removing it is a loss and running
+/// that version is not.
+fn queue_snapshot_row(
+    path: &std::path::Path,
+    loaded: Result<crate::queue::QueueState, crate::queue::QueueLoadError>,
+) -> Row {
+    let label = "queue snapshot".to_string();
+    match loaded {
+        Ok(_) if !path.exists() => Row {
+            label,
+            value: "(absent)".to_string(),
+            status: Status::Ok {
+                note: Some("nothing has been queued yet".to_string()),
+            },
+        },
+        Ok(state) => Row {
+            label,
+            value: format!("{} job(s)", state.jobs.len()),
+            status: Status::Ok { note: None },
+        },
+        Err(crate::queue::QueueLoadError::SchemaTooNew {
+            found, expected, ..
+        }) => Row {
+            label,
+            value: format!("schema version {found}"),
+            status: Status::Fail {
+                note: format!(
+                    "written by a newer version of bookrack; this binary reads version \
+                     {expected} and the daemon will not come up against it. Run the newer \
+                     version, or move the file aside to start with an empty queue"
+                ),
+            },
+        },
+        Err(reason) => Row {
+            label,
+            value: path.display().to_string(),
+            status: Status::Fail {
+                note: format!(
+                    "{reason}; the daemon reads this at start-up and will not come up until \
+                     the file is repaired or removed"
+                ),
+            },
+        },
+    }
+}
+
+/// Free space below which the row warns. Chosen against what an
+/// install still has ahead of it: the reranker artifacts alone are
+/// several hundred megabytes, and an index grows with every ingest.
+// setting: doctor.disk_free_floor
+pub const DISK_FREE_FLOOR: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Report free space on the filesystem holding the data root. A store
+/// row says a database is there; nothing else says whether the next
+/// ingest, index rebuild, or managed download has room to land.
+fn push_disk_free_row(rows: &mut Vec<Row>, cfg: &Config) {
+    let label = "disk free".to_string();
+    match fs2::available_space(cfg.data_dir()) {
+        Ok(free) if free >= DISK_FREE_FLOOR => rows.push(Row {
+            label,
+            value: bytes_human(free),
+            status: Status::Ok { note: None },
+        }),
+        Ok(free) => rows.push(Row {
+            label,
+            value: bytes_human(free),
+            status: Status::Warn {
+                note: format!(
+                    "below {} on the volume holding the data root; an ingest, an index \
+                     rebuild, or `bookrack doctor --install-reranker` may run out of room",
+                    bytes_human(DISK_FREE_FLOOR)
+                ),
+            },
+        }),
+        Err(e) => rows.push(Row {
+            label,
+            value: "(unknown)".to_string(),
+            status: Status::Warn {
+                note: format!("could not read free space on the data root: {e}"),
+            },
+        }),
+    }
+}
+
+/// Report the registry's open runs, separating the ones still owned by
+/// a live process from the ones whose owner died before the row could
+/// be closed. An abandoned row is not damage — no data is wrong and no
+/// command's exit code changed — but it reads in `bookrack runs list`
+/// exactly like a run in flight, and nothing else ever revisits it.
+fn push_open_runs_row(rows: &mut Vec<Row>, cfg: &Config) {
+    rows.push(open_runs_row(&crate::open_runs::survey(cfg)));
+}
+
+/// Word one survey as a row. Pure, so the wording of each case is
+/// tested without a data root behind it.
+fn open_runs_row(survey: &crate::open_runs::OpenRunSurvey) -> Row {
+    let label = "pipeline runs".to_string();
+    let abandoned = survey.abandoned().count();
+    let held = survey.held();
+    let unjudged = survey.unjudged();
+    let value = if survey.runs.is_empty() {
+        "none open".to_string()
+    } else {
+        format!(
+            "{} open ({held} running, {abandoned} abandoned)",
+            survey.runs.len()
+        )
+    };
+    let partial = (!survey.unreadable.is_empty()).then(|| {
+        let names: Vec<String> = survey
+            .unreadable
+            .iter()
+            .map(|(path, reason)| format!("{}: {reason}", path.display()))
+            .collect();
+        format!(
+            "The count is partial; one catalog could not be read ({}). See its own row above.",
+            names.join("; ")
+        )
+    });
+    let unjudged_note = (unjudged > 0).then(|| {
+        format!(
+            "{unjudged} open run(s) kept no liveness record, so neither verdict applies to them; \
+             runs opened before this version have none."
+        )
+    });
+    let mut notes: Vec<String> = Vec::new();
+    if abandoned > 0 {
+        notes.push(format!(
+            "{abandoned} run(s) are still marked running but no process owns them any more. \
+             Close them with `bookrack doctor --close-abandoned-runs`."
+        ));
+    }
+    notes.extend(unjudged_note);
+    notes.extend(partial);
+    let note = notes.join(" ");
+    Row {
+        label,
+        value,
+        status: if abandoned > 0 {
+            Status::Warn { note }
+        } else if note.is_empty() {
+            Status::Ok { note: None }
+        } else {
+            Status::Ok { note: Some(note) }
+        },
+    }
+}
+
+/// The read-only door a present store is checked through.
+///
+/// Every one of these is a `query_only` connection or a sidecar read:
+/// no write lock is taken, no migration is applied, and nothing is
+/// materialised, so the check is safe beside a running daemon. What it
+/// buys is the schema verification each door already performs on the
+/// way in — a store written by a newer binary, or corrupted, is
+/// reported here rather than at the next command that needs it.
+#[derive(Clone, Copy)]
+enum Door {
+    Catalog,
+    Corpus,
+    Refs,
+    /// The vector store's metadata sidecar. Opening LanceDB itself is
+    /// neither cheap nor synchronous; the sidecar is what carries the
+    /// build's ANN configuration and what a reader parses.
+    VectorsMeta,
+}
+
+impl Door {
+    /// Open the store at `path`, discarding the handle. `Err` carries
+    /// the flattened cause chain, which is what an operator needs to
+    /// tell a newer schema from a corrupt file.
+    fn open(self, path: &std::path::Path) -> Result<(), String> {
+        fn flatten(e: impl std::error::Error + 'static) -> String {
+            bookrack_core::error_chain(&e)
+        }
+        match self {
+            Door::Catalog => Catalog::open_read_only(path).map(drop).map_err(flatten),
+            Door::Corpus => bookrack_corpus::Corpus::open_read_only(path)
+                .map(drop)
+                .map_err(flatten),
+            Door::Refs => bookrack_refs::Refs::open_read_only(path)
+                .map(drop)
+                .map_err(flatten),
+            Door::VectorsMeta => bookrack_vectors::meta::load(path)
+                .map(drop)
+                .map_err(flatten),
+        }
+    }
+}
+
+/// What a missing store means for the library it belongs to.
+enum Absent {
+    /// The library is expected to carry it, so its absence is a
+    /// warning: something the operator meant to have is not there.
+    Expected(&'static str),
+    /// Normal for a library that does not use that pipeline. The row
+    /// still appears, saying the store was looked for and found
+    /// missing — "checked and legitimately absent" and "never checked"
+    /// are different answers.
+    Optional(&'static str),
+}
+
+/// Every store under the resolved data root, in a fixed order: present
+/// or not, and — when present — whether it opens through its read-only
+/// door. See [`Door`] for why opening one is safe beside a daemon.
+///
+/// A vector store is expected exactly when its pipeline's corpus is
+/// there: content that is ingested but not indexed is unsearchable,
+/// while both absent is a library that pipeline was never used for.
+fn push_store_rows(rows: &mut Vec<Row>, cfg: &Config) {
+    const BOOKS_ABSENT: &str = "no books ingested yet; the first `bookrack ingest` creates it";
+    const PAPERS_ABSENT: &str =
+        "no papers ingested yet; the first `bookrack papers ingest` creates it";
+
+    let books_index = if cfg.corpus_db().exists() {
+        Absent::Expected(
+            "books are ingested but no vector index is built; run `bookrack vectors rebuild`",
+        )
+    } else {
+        Absent::Optional("no vector index built yet; ingesting books builds one")
+    };
+    let papers_index = if cfg.papers_corpus_db().exists() {
+        Absent::Expected(
+            "papers are ingested but no vector index is built; run `bookrack papers vectors rebuild`",
+        )
+    } else {
+        Absent::Optional("no paper vector index built yet; ingesting papers builds one")
+    };
+
+    for (label, path, door, absent) in [
+        (
+            "catalog.db",
+            cfg.catalog_db(),
+            Door::Catalog,
+            Absent::Expected(BOOKS_ABSENT),
+        ),
+        (
+            "corpus.db",
+            cfg.corpus_db(),
+            Door::Corpus,
+            Absent::Expected(BOOKS_ABSENT),
+        ),
+        (
+            "lancedb/",
+            cfg.lancedb_dir(),
+            Door::VectorsMeta,
+            books_index,
+        ),
+        (
+            "papers_catalog.db",
+            cfg.papers_catalog_db(),
+            Door::Catalog,
+            Absent::Optional(PAPERS_ABSENT),
+        ),
+        (
+            "papers_corpus.db",
+            cfg.papers_corpus_db(),
+            Door::Corpus,
+            Absent::Optional(PAPERS_ABSENT),
+        ),
+        (
+            "lancedb_papers/",
+            cfg.papers_lancedb_dir(),
+            Door::VectorsMeta,
+            papers_index,
+        ),
+        (
+            "reference.db",
+            cfg.reference_db(),
+            Door::Refs,
+            Absent::Optional(
+                "no reference books distilled yet; `bookrack distill build` creates it",
+            ),
+        ),
+    ] {
+        rows.push(store_row(label, &path, door, absent));
+    }
+    rows.push(backup_dir_row(
+        &cfg.backup_dir(),
+        cfg.backup_dir() != cfg.data_dir().join("backup"),
+    ));
+}
+
+/// One store's row: its path and the outcome of opening it when
+/// present, and the reading of its absence when not.
+fn store_row(label: &str, path: &std::path::Path, door: Door, absent: Absent) -> Row {
     if path.exists() {
-        rows.push(Row {
+        return Row {
             label: label.to_string(),
             value: path.display().to_string(),
-            status: Status::Ok { note: None },
-        });
-    } else {
-        rows.push(Row {
+            status: match door.open(path) {
+                Ok(()) => Status::Ok { note: None },
+                Err(reason) => Status::Fail { note: reason },
+            },
+        };
+    }
+    match absent {
+        Absent::Expected(note) => Row {
             label: label.to_string(),
             value: "(not initialised)".to_string(),
             status: Status::Warn {
-                note: "no books ingested yet; the first `bookrack ingest` creates it".to_string(),
+                note: note.to_string(),
             },
-        });
+        },
+        Absent::Optional(note) => Row {
+            label: label.to_string(),
+            value: "(absent)".to_string(),
+            status: Status::Ok {
+                note: Some(note.to_string()),
+            },
+        },
+    }
+}
+
+/// The directory a schema migration snapshots databases into before it
+/// runs. It is created on demand, so its absence is not a fault — but a
+/// destination whose parent does not exist is: the backup fails at the
+/// moment a migration is about to rewrite a store, which is the worst
+/// moment to discover it. `overridden` says the location came from
+/// `BOOKRACK_BACKUP_DIR` rather than from the data root, the case that
+/// can point somewhere unrelated to the library.
+fn backup_dir_row(dir: &std::path::Path, overridden: bool) -> Row {
+    let label = "backup dir".to_string();
+    let source = if overridden {
+        " (set by BOOKRACK_BACKUP_DIR)"
+    } else {
+        ""
+    };
+    if dir.exists() {
+        return Row {
+            label,
+            value: dir.display().to_string(),
+            status: Status::Ok {
+                note: (!source.is_empty()).then(|| source.trim_start().to_string()),
+            },
+        };
+    }
+    match dir.parent() {
+        Some(parent) if !parent.exists() => Row {
+            label,
+            value: dir.display().to_string(),
+            status: Status::Warn {
+                note: format!(
+                    "neither the directory{source} nor its parent exists, so the backup taken \
+                     before a schema migration would fail"
+                ),
+            },
+        },
+        _ => Row {
+            label,
+            value: dir.display().to_string(),
+            status: Status::Ok {
+                note: Some(format!(
+                    "not created yet{source}; the backup before a schema migration creates it"
+                )),
+            },
+        },
     }
 }
 
@@ -858,28 +1378,17 @@ fn index_profile_dir() -> Option<std::path::PathBuf> {
     crate::profile::user_profile_dir()
 }
 
-/// The built embed-model/dimension stamp pair for the book pipeline;
-/// see [`crate::profile::built_stamps`] for the three-way contract
-/// (missing / unreadable / stamped) this passes through.
-fn built_stamps(data_dir: &Path) -> Result<Option<(String, u32)>, String> {
-    crate::profile::built_stamps(&crate::profile::Pipeline::Books.corpus_db(data_dir))
-        .map(|stamps| stamps.and_then(|b| b.embed_pair()))
-}
-
 /// Classify one entry's index-profile reference against its resolution
-/// outcome and the built stamps. Pure, so a test drives it without a
-/// filesystem. `resolved` is `Ok(Some(embed_model, dim, has_errors))`
-/// for a valid profile, `Ok(None)` when the name does not resolve, and
-/// `Err(reason)` when the file failed to load. `built` is
-/// `Ok(Some(pair))` for a stamped index, `Ok(None)` when no index has
-/// been built, and `Err(reason)` when the corpus database exists but
-/// cannot be opened — the latter is reported instead of being passed
-/// off as a clean skip.
-fn coherence_issue(
+/// outcome, without looking at any built index. Pure, so a test drives
+/// it without a filesystem. `resolved` is `Ok(Some(embed_model, dim,
+/// has_errors))` for a profile that resolved, `Ok(None)` when the name
+/// does not resolve, and `Err(reason)` when the file failed to load.
+/// `None` means the reference itself is sound and the stamp comparison
+/// can proceed.
+fn reference_issue(
     entry_name: &str,
     profile_name: &str,
-    resolved: Result<Option<(String, u32, bool)>, String>,
-    built: Result<Option<(String, u32)>, String>,
+    resolved: &Result<Option<(String, u32, bool, ProfileOrigin)>, String>,
 ) -> Option<String> {
     match resolved {
         Err(reason) => Some(format!(
@@ -888,24 +1397,87 @@ fn coherence_issue(
         Ok(None) => Some(format!(
             "'{entry_name}' references index profile '{profile_name}', which is not defined"
         )),
-        Ok(Some((_, _, true))) => Some(format!(
-            "'{entry_name}' references index profile '{profile_name}', which has validation errors \
-             (run `bookrack index-profile validate {profile_name}`)"
+        Ok(Some((_, _, true, origin))) => Some(format!(
+            "'{entry_name}' references index profile {}, which has validation errors \
+             (run `bookrack index-profile validate {profile_name}`)",
+            profile_label(profile_name, *origin)
         )),
-        Ok(Some((model, dim, false))) => match built {
-            Err(reason) => Some(format!(
-                "corpus database for '{entry_name}' cannot be opened ({reason}); coherence with \
-                 index profile '{profile_name}' was not checked"
-            )),
-            Ok(built) => built.and_then(|(built_model, built_dim)| {
-                (built_model != model || built_dim != dim).then(|| {
-                    format!(
-                        "index profile '{profile_name}' for '{entry_name}' declares {model}/{dim} but \
-                         the built index is {built_model}/{built_dim}; the daemon will refuse to start"
-                    )
-                })
-            }),
-        },
+        Ok(Some((_, _, false, _))) => None,
+    }
+}
+
+/// The profile as a row names it: the reference, qualified by the
+/// definition that answered it. A user file and the built-in it shadows
+/// carry the same name, and the remedy differs by which one is in force.
+fn profile_label(name: &str, origin: ProfileOrigin) -> String {
+    match origin {
+        ProfileOrigin::User => format!("'{name}' (user file)"),
+        ProfileOrigin::BuiltIn => format!("'{name}' (built-in)"),
+    }
+}
+
+/// Compare one pipeline's built stamps against what a clean build under
+/// `target` would record. Pure, so a test drives it without a
+/// filesystem. `built` is `Ok(Some(stamps))` for a corpus that opened,
+/// `Ok(None)` when no index has been built, and `Err(reason)` when the
+/// corpus database exists but cannot be opened — the latter is reported
+/// instead of being passed off as a clean skip. An unstamped corpus is
+/// treated as unbuilt: there is nothing to compare against.
+///
+/// `vectors_built` gates the bring-up sentence. The daemon verifies the
+/// stamps only when the pipeline's vector store holds rows, so a
+/// divergence beside an absent store does not stop it from starting.
+fn stamp_issue(
+    entry_name: &str,
+    profile_label: &str,
+    pipeline: crate::profile::Pipeline,
+    target: &IndexStamps,
+    built: Result<Option<crate::profile::BuiltStamps>, String>,
+    vectors_built: bool,
+) -> Option<String> {
+    let pipeline = pipeline.as_str();
+    match built {
+        Err(reason) => Some(format!(
+            "the {pipeline} corpus of '{entry_name}' cannot be opened ({reason}); coherence with \
+             index profile {profile_label} was not checked"
+        )),
+        Ok(None) => None,
+        Ok(Some(built)) if built.is_unstamped() => None,
+        Ok(Some(built)) => {
+            let findings = crate::profile::profile_stamp_findings(target, &built);
+            if findings.is_empty() {
+                return None;
+            }
+            let consequence = if vectors_built {
+                "; the daemon will refuse to start until the index is rebuilt"
+            } else {
+                ""
+            };
+            Some(format!(
+                "the {pipeline} index of '{entry_name}' disagrees with index profile \
+                 {profile_label}: {}{consequence} (`bookrack index-profile current` compares \
+                 every stamp)",
+                summarise_findings(&findings)
+            ))
+        }
+    }
+}
+
+/// Join stamp findings into one note-sized clause, keeping the first two
+/// and counting the rest so a four-way divergence does not push the row
+/// off the table.
+fn summarise_findings(findings: &[String]) -> String {
+    // setting: internal -- how much of a note one table row can carry
+    const SHOWN: usize = 2;
+    let head = findings
+        .iter()
+        .take(SHOWN)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("; ");
+    match findings.len().saturating_sub(SHOWN) {
+        0 => head,
+        rest => format!("{head} (+{rest} more)"),
     }
 }
 
@@ -1004,24 +1576,49 @@ fn push_index_profile_coherence_rows_in(
         let profile_name = profile_name.as_str();
         let resolved = match profile_dir {
             Some(dir) => match resolve(Some(dir), profile_name) {
-                Ok(Some((profile, _source))) => Ok(Some((
+                Ok(Some((profile, source))) => Ok(Some((
                     profile.embed.model.clone(),
                     profile.embed.dim,
                     has_errors(&validate(&profile, false)),
+                    source,
                 ))),
                 Ok(None) => Ok(None),
                 Err(e) => Err(e.to_string()),
             },
             None => Ok(None),
         };
-        let built = built_stamps(&entry.data_dir);
-        if let Some(note) = coherence_issue(&entry.name, profile_name, resolved, built) {
+        if let Some(note) = reference_issue(&entry.name, profile_name, &resolved) {
             clean = false;
             rows.push(Row {
                 label: "index-profile".to_string(),
                 value: entry.name.clone(),
                 status: Status::Warn { note },
             });
+        }
+        // Only a profile that resolved cleanly has stamps to compare
+        // against; the arms above already reported the rest. One profile
+        // governs both pipelines, and each keeps its own corpus and
+        // stamp record, so each is compared on its own.
+        if let Ok(Some((model, dim, false, source))) = &resolved {
+            let label = profile_label(profile_name, *source);
+            for pipeline in crate::profile::Pipeline::ALL {
+                let note = stamp_issue(
+                    &entry.name,
+                    &label,
+                    pipeline,
+                    &pipeline.target_stamps(model, *dim),
+                    crate::profile::built_stamps(&pipeline.corpus_db(&entry.data_dir)),
+                    pipeline.lancedb_dir(&entry.data_dir).exists(),
+                );
+                if let Some(note) = note {
+                    clean = false;
+                    rows.push(Row {
+                        label: "index-profile".to_string(),
+                        value: entry.name.clone(),
+                        status: Status::Warn { note },
+                    });
+                }
+            }
         }
         if let Some(note) = drift_issue(&entry.name, profile_name, &drift) {
             clean = false;
@@ -1139,7 +1736,16 @@ fn reranker_model_row(model_tag: &str, path: Option<std::path::PathBuf>) -> Row 
             label: "reranker model".to_string(),
             value: format!("{model_tag} missing"),
             status: Status::Fail {
-                note: "install with `bookrack doctor --install-reranker`".to_string(),
+                // The size comes from the pin the installer downloads,
+                // so an operator on a metered link or a full volume
+                // learns what the command costs before running it.
+                note: match bookrack_config::reranker_model_pin::reranker_model_pin(model_tag) {
+                    Some(pin) => format!(
+                        "install with `bookrack doctor --install-reranker` ({} download)",
+                        bytes_human(pin.bytes)
+                    ),
+                    None => "install with `bookrack doctor --install-reranker`".to_string(),
+                },
             },
         },
     }
@@ -1205,6 +1811,72 @@ fn url_backend_row(url: &str, health: &bookrack_rerank::ServerHealth) -> Row {
     Row {
         label: "reranker backend".to_string(),
         value: url.to_string(),
+        status,
+    }
+}
+
+/// Probe the MCP address and lay the answer out as one row.
+///
+/// `served` is the address the calling daemon bound, present only when
+/// the report is gathered inside a running daemon. Absent, the row
+/// reports on the *configured* address instead: with no daemon up, the
+/// operator's question is whether the address a daemon would take is
+/// free, and the answer is worth having before the start rather than
+/// after it.
+async fn push_mcp_endpoint_row(rows: &mut Vec<Row>, served: Option<&str>) {
+    let (addr, serving) = match served {
+        Some(addr) => (addr.to_string(), true),
+        None => (bookrack_config::McpConfig::from_env().addr, false),
+    };
+    // A session running without the surface has no address to probe,
+    // and no failure to report either: `--no-mcp` asked for this.
+    if addr == "disabled" {
+        rows.push(Row {
+            label: "MCP endpoint".to_string(),
+            value: "disabled".to_string(),
+            status: Status::Ok {
+                note: Some("session started with --no-mcp".to_string()),
+            },
+        });
+        return;
+    }
+    let state =
+        crate::mcp_endpoint::probe_endpoint(&addr, crate::mcp_endpoint::PROBE_TIMEOUT).await;
+    rows.push(mcp_endpoint_row(&addr, serving, state));
+}
+
+/// The pure layout half of [`push_mcp_endpoint_row`], separated so
+/// every combination can be pinned without a server.
+///
+/// `serving` says whether a daemon claims to hold this address. It
+/// decides the severity, not the facts: silence at an address nobody
+/// serves is the ordinary state of a stopped daemon, while silence at
+/// the address this daemon reports holding is a broken product
+/// surface. A stranger answering is a failure either way — that is
+/// the state in which a client following the documented URL reaches
+/// somebody else.
+fn mcp_endpoint_row(addr: &str, serving: bool, state: McpEndpointState) -> Row {
+    let status = match (&state, serving) {
+        (McpEndpointState::Serving { version }, _) => Status::Ok {
+            note: Some(format!("bookrack {version}")),
+        },
+        (McpEndpointState::Foreign { .. }, _) => Status::Fail {
+            note: "answered by another service -- an agent client here reaches it, not bookrack"
+                .to_string(),
+        },
+        (McpEndpointState::Unreachable, true) => Status::Fail {
+            note: format!(
+                "no answer within {}s from the address this daemon reports serving",
+                crate::mcp_endpoint::PROBE_TIMEOUT.as_secs()
+            ),
+        },
+        (McpEndpointState::Unreachable, false) => Status::Ok {
+            note: Some("free -- no daemon is serving it".to_string()),
+        },
+    };
+    Row {
+        label: "MCP endpoint".to_string(),
+        value: addr.to_string(),
         status,
     }
 }
@@ -1430,6 +2102,60 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    /// Silence means opposite things on the two sides of the
+    /// `serving` flag, and a stranger answering means the same thing
+    /// on both. Every combination is pinned, because the whole point
+    /// of the row is that it does not report a healthy endpoint when
+    /// the endpoint is somebody else's.
+    #[test]
+    fn the_mcp_endpoint_row_grades_each_state_by_whether_a_daemon_claims_the_address() {
+        let serving_ok = mcp_endpoint_row(
+            "127.0.0.1:8765",
+            true,
+            McpEndpointState::Serving {
+                version: "0.11.0-dev".to_string(),
+            },
+        );
+        assert!(
+            matches!(serving_ok.status, Status::Ok { .. }),
+            "a served endpoint answering as bookrack is the healthy row: {:?}",
+            serving_ok.status
+        );
+        assert_eq!(serving_ok.value, "127.0.0.1:8765");
+
+        for serving in [true, false] {
+            let foreign = mcp_endpoint_row(
+                "127.0.0.1:8765",
+                serving,
+                McpEndpointState::Foreign {
+                    evidence: "HTTP 200, body \"nope\"".to_string(),
+                },
+            );
+            assert!(
+                matches!(foreign.status, Status::Fail { .. }),
+                "a stranger on the address is a failure whether or not a daemon claims it \
+                 (serving={serving}): {:?}",
+                foreign.status
+            );
+        }
+
+        let silent_while_serving =
+            mcp_endpoint_row("127.0.0.1:8765", true, McpEndpointState::Unreachable);
+        assert!(
+            matches!(silent_while_serving.status, Status::Fail { .. }),
+            "an address this daemon reports serving must answer: {:?}",
+            silent_while_serving.status
+        );
+
+        let silent_with_no_daemon =
+            mcp_endpoint_row("127.0.0.1:8765", false, McpEndpointState::Unreachable);
+        assert!(
+            matches!(silent_with_no_daemon.status, Status::Ok { .. }),
+            "a free address with no daemon running is not a fault: {:?}",
+            silent_with_no_daemon.status
+        );
     }
 
     /// The table cell and the bring-up hint share the repair command,
@@ -1672,6 +2398,594 @@ mod tests {
     }
 
     #[test]
+    fn every_store_under_the_data_root_gets_a_row() {
+        // A store with no row is indistinguishable from a store that
+        // was checked and found healthy. The set is the config's path
+        // accessors; nothing under the root may be silently skipped.
+        let root = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:11434".to_string(),
+        );
+        let mut rows = Vec::new();
+        push_store_rows(&mut rows, &cfg);
+
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "catalog.db",
+                "corpus.db",
+                "lancedb/",
+                "papers_catalog.db",
+                "papers_corpus.db",
+                "lancedb_papers/",
+                "reference.db",
+                "backup dir",
+            ],
+            "{rows:?}"
+        );
+    }
+
+    /// Build a survey without a data root behind it, so each wording
+    /// case is exercised on its own.
+    fn survey_of(livenesses: &[bookrack_catalog::RunLiveness]) -> crate::open_runs::OpenRunSurvey {
+        crate::open_runs::OpenRunSurvey {
+            runs: livenesses
+                .iter()
+                .enumerate()
+                .map(|(i, liveness)| crate::open_runs::OpenRun {
+                    pipeline_run_id: format!("ingest-2026-06-28T10:00:0{i}Z-deadbeef"),
+                    command: "ingest".to_string(),
+                    started_at: format!("2026-06-28T10:00:0{i}Z"),
+                    liveness: liveness.clone(),
+                    catalog_db: std::path::PathBuf::from("/data/library/catalog.db"),
+                })
+                .collect(),
+            unreadable: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_library_with_no_open_runs_passes_without_a_note() {
+        let row = open_runs_row(&survey_of(&[]));
+        assert_eq!(row.value, "none open");
+        assert!(matches!(row.status, Status::Ok { note: None }), "{row:?}");
+    }
+
+    #[test]
+    fn a_run_in_flight_is_not_reported_as_a_problem() {
+        use bookrack_catalog::RunLiveness;
+        let row = open_runs_row(&survey_of(&[RunLiveness::Held, RunLiveness::Held]));
+        assert_eq!(row.value, "2 open (2 running, 0 abandoned)");
+        assert!(matches!(row.status, Status::Ok { note: None }), "{row:?}");
+    }
+
+    #[test]
+    fn an_abandoned_run_warns_and_names_the_repair() {
+        use bookrack_catalog::RunLiveness;
+        let row = open_runs_row(&survey_of(&[RunLiveness::Held, RunLiveness::Abandoned]));
+        assert_eq!(row.value, "2 open (1 running, 1 abandoned)");
+        let Status::Warn { note } = &row.status else {
+            panic!("an abandoned run must warn, got {row:?}");
+        };
+        assert!(
+            note.contains("--close-abandoned-runs"),
+            "the note must name the repair, got {note:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_without_a_record_is_reported_but_not_warned_about() {
+        use bookrack_catalog::RunLiveness;
+        // Nothing proves such a run died, so claiming it did would send
+        // an operator to close a row that may be doing work.
+        let row = open_runs_row(&survey_of(&[RunLiveness::NoRecord]));
+        assert_eq!(row.value, "1 open (0 running, 0 abandoned)");
+        let Status::Ok { note: Some(note) } = &row.status else {
+            panic!("an unjudged run is reported, not warned about: {row:?}");
+        };
+        assert!(note.contains("no liveness record"), "{note:?}");
+        assert!(
+            !note.contains("--close-abandoned-runs"),
+            "an unjudged run is not something the repair can act on: {note:?}"
+        );
+    }
+
+    #[test]
+    fn a_catalog_that_would_not_open_makes_the_count_partial() {
+        let mut survey = survey_of(&[bookrack_catalog::RunLiveness::Held]);
+        survey.unreadable.push((
+            std::path::PathBuf::from("/data/library/papers_catalog.db"),
+            "catalog database error: disk image is malformed".to_string(),
+        ));
+        let row = open_runs_row(&survey);
+        let Status::Ok { note: Some(note) } = &row.status else {
+            panic!("expected a note about the partial count, got {row:?}");
+        };
+        assert!(note.contains("partial"), "{note:?}");
+        assert!(note.contains("papers_catalog.db"), "{note:?}");
+    }
+
+    #[test]
+    fn an_unused_pipeline_is_reported_absent_rather_than_warned_about() {
+        // A book-only library legitimately has no paper stores and no
+        // reference store. Warning about them trains the operator to
+        // ignore the section; omitting them loses the distinction
+        // between "checked, absent" and "not checked".
+        let root = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:11434".to_string(),
+        );
+        let mut rows = Vec::new();
+        push_store_rows(&mut rows, &cfg);
+
+        for label in [
+            "papers_catalog.db",
+            "papers_corpus.db",
+            "lancedb_papers/",
+            "reference.db",
+        ] {
+            let row = rows.iter().find(|r| r.label == label).expect("row present");
+            let Status::Ok { note } = &row.status else {
+                panic!("an unused pipeline's store is not a warning: {row:?}");
+            };
+            assert!(note.is_some(), "{row:?}");
+            assert_eq!(row.value, "(absent)", "{row:?}");
+        }
+    }
+
+    #[test]
+    fn the_store_rows_materialise_nothing() {
+        // The rows open what is there; they must never bring a store
+        // into being. Sidecars of an existing WAL database are exempt
+        // by the same reasoning `verify`'s pinning test records, so the
+        // contract is about `.db` files.
+        let root = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:11434".to_string(),
+        );
+        let mut rows = Vec::new();
+        push_store_rows(&mut rows, &cfg);
+
+        let created: Vec<String> = std::fs::read_dir(root.path())
+            .expect("read data dir")
+            .map(|e| e.expect("dir entry").file_name().display().to_string())
+            .filter(|name| name.ends_with(".db"))
+            .collect();
+        assert!(created.is_empty(), "{created:?}");
+    }
+
+    #[test]
+    fn a_store_this_binary_cannot_open_fails_instead_of_passing_on_presence() {
+        // Presence was the whole check, so a corpus this binary cannot
+        // open -- the state that stops the daemon coming up -- drew a
+        // plain OK row naming its path.
+        let root = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:11434".to_string(),
+        );
+        std::fs::write(cfg.corpus_db(), b"this is not a database").expect("write a broken store");
+
+        let mut rows = Vec::new();
+        push_store_rows(&mut rows, &cfg);
+
+        let row = rows
+            .iter()
+            .find(|r| r.label == "corpus.db")
+            .expect("row present");
+        let Status::Fail { note } = &row.status else {
+            panic!("a store that cannot be opened is a failure: {row:?}");
+        };
+        assert!(!note.is_empty(), "{row:?}");
+    }
+
+    #[test]
+    fn an_ingested_pipeline_without_its_vector_index_is_a_warning() {
+        // Content that is ingested but not indexed answers no search,
+        // and nothing else in the report says so.
+        let root = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:11434".to_string(),
+        );
+        drop(bookrack_corpus::Corpus::open(&cfg.corpus_db()).expect("create the book corpus"));
+        let mut rows = Vec::new();
+        push_store_rows(&mut rows, &cfg);
+
+        let books = rows
+            .iter()
+            .find(|r| r.label == "lancedb/")
+            .expect("row present");
+        assert!(
+            matches!(books.status, Status::Warn { .. }),
+            "an unindexed corpus is a warning: {books:?}"
+        );
+        // The paper side is untouched, so it stays a quiet absence.
+        let papers = rows
+            .iter()
+            .find(|r| r.label == "lancedb_papers/")
+            .expect("row present");
+        assert!(matches!(papers.status, Status::Ok { .. }), "{papers:?}");
+    }
+
+    #[test]
+    fn the_report_names_the_vantage_point_that_produced_it() {
+        // Two runs on one machine produce reports of different shapes
+        // depending on whether a daemon answered. Without this row an
+        // operator comparing them has nothing to explain the difference.
+        let socket = std::path::PathBuf::from("/run/bookrack/control.sock");
+        let mut rows = Vec::new();
+        push_reporter_row(
+            &mut rows,
+            &Reporter::Daemon {
+                rerank_supervisor: None,
+                mcp_addr: "127.0.0.1:8391",
+                control_socket: Some(&socket),
+            },
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].label, "report by");
+        let Status::Ok { note } = &rows[0].status else {
+            panic!("a daemon-served report is not a fault: {rows:?}");
+        };
+        assert!(
+            note.as_deref().is_some_and(|n| n.contains("control.sock")),
+            "{rows:?}"
+        );
+
+        // An empty runtime directory holds no lock, so the in-process
+        // row reports the plain "no daemon" reading.
+        let runtime = tempfile::tempdir().expect("tempdir");
+        let mut rows = Vec::new();
+        push_reporter_row(
+            &mut rows,
+            &Reporter::InProcess {
+                runtime_dir: Some(runtime.path()),
+            },
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].value, "this process");
+        let Status::Ok { note } = &rows[0].status else {
+            panic!("no daemon running is an answer, not a fault: {rows:?}");
+        };
+        assert_eq!(note.as_deref(), Some("no daemon is running"));
+    }
+
+    #[test]
+    fn a_daemon_that_holds_the_lock_but_did_not_answer_is_flagged() {
+        // The case the row exists for: a daemon is up, the client fell
+        // back to gathering in-process, and the report that comes out
+        // covers the configured MCP address rather than the bound one.
+        let runtime = tempfile::tempdir().expect("tempdir");
+        let lock_path = runtime.path().join(bookrack_session::tty_lock_name());
+        let _held = bookrack_session::TtyLock::acquire(&lock_path, 4242, "127.0.0.1:8391", None)
+            .expect("hold the session lock");
+
+        let mut rows = Vec::new();
+        push_reporter_row(
+            &mut rows,
+            &Reporter::InProcess {
+                runtime_dir: Some(runtime.path()),
+            },
+        );
+
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let Status::Warn { note } = &rows[0].status else {
+            panic!("a daemon that did not answer is a warning: {rows:?}");
+        };
+        assert!(note.contains("4242"), "{note}");
+    }
+
+    #[test]
+    fn a_corrupt_queue_snapshot_is_a_failure_and_an_absent_one_is_not() {
+        // The daemon reads this file at start-up and refuses to come up
+        // on a parse error. Until doctor read it too, the first symptom
+        // was a daemon that would not start and a report that was all
+        // green.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("queue.json");
+
+        let absent = queue_snapshot_row(&path, Ok(crate::queue::QueueState::default()));
+        assert!(matches!(absent.status, Status::Ok { .. }), "{absent:?}");
+        assert_eq!(absent.value, "(absent)");
+
+        std::fs::write(&path, b"{ not json").expect("write a corrupt snapshot");
+        let loaded = crate::queue::load(&path);
+        assert!(loaded.is_err(), "the corrupt document must not parse");
+        let row = queue_snapshot_row(&path, loaded);
+        let Status::Fail { note } = &row.status else {
+            panic!("an unparseable queue snapshot blocks start-up: {row:?}");
+        };
+        assert!(note.contains("will not come up"), "{note}");
+    }
+
+    #[test]
+    fn a_queue_snapshot_from_a_newer_binary_fails_with_its_own_repair() {
+        // Doctor is what an operator runs after a downgrade, so this is
+        // the row that has to tell them what they are looking at. The
+        // repair for a corrupt document — remove it — destroys a
+        // newer-version document's jobs, which are still readable by
+        // the version that wrote them.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("queue.json");
+        let doc = format!(
+            "{{\"schema_version\": {}, \"paused\": false, \"jobs\": []}}",
+            crate::queue::QUEUE_SCHEMA_VERSION + 1
+        );
+        std::fs::write(&path, doc.as_bytes()).expect("write a newer snapshot");
+
+        let row = queue_snapshot_row(&path, crate::queue::load(&path));
+        let Status::Fail { note } = &row.status else {
+            panic!("a queue document this binary refuses blocks start-up: {row:?}");
+        };
+        assert!(
+            row.value
+                .contains(&(crate::queue::QUEUE_SCHEMA_VERSION + 1).to_string()),
+            "the value column reports the version on disk: {}",
+            row.value
+        );
+        assert!(
+            note.contains(&crate::queue::QUEUE_SCHEMA_VERSION.to_string()),
+            "the note reports the version this binary reads: {note}"
+        );
+        assert!(
+            !note.contains("removed"),
+            "removing this document destroys jobs the newer version still reads: {note}"
+        );
+    }
+
+    #[test]
+    fn the_disk_row_reads_the_volume_holding_the_data_root() {
+        // Nothing else in the report answers "is there room for the
+        // next ingest": the store rows say a database is there, not
+        // that it can grow.
+        let root = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:11434".to_string(),
+        );
+        let mut rows = Vec::new();
+        push_disk_free_row(&mut rows, &cfg);
+
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].label, "disk free");
+        // A test host with no room left is a real state, and the row is
+        // then a warning; what must never happen is a silent pass with
+        // no reading taken.
+        assert_ne!(rows[0].value, "(unknown)", "{rows:?}");
+        assert!(
+            !matches!(rows[0].status, Status::Fail { .. }),
+            "free space is a warning, not a hard failure: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn the_reranker_model_hint_names_what_the_install_downloads() {
+        // The install is several hundred megabytes; a hint that does not
+        // say so is one an operator on a metered link or a nearly full
+        // volume cannot act on.
+        let pin = &bookrack_config::reranker_model_pin::RERANKER_MODEL_PINS[0];
+        let row = reranker_model_row(pin.tag, None);
+        let Status::Fail { note } = &row.status else {
+            panic!("a missing model is a failure: {row:?}");
+        };
+        assert!(note.contains(&bytes_human(pin.bytes)), "{note}");
+    }
+
+    #[test]
+    fn a_backup_directory_whose_parent_is_missing_is_a_warning() {
+        // The directory is created on demand, so its absence is not a
+        // fault -- but a destination that cannot be created fails at the
+        // moment a migration is about to rewrite a store.
+        let root = tempfile::tempdir().expect("tempdir");
+        let ok = backup_dir_row(&root.path().join("backup"), false);
+        assert!(matches!(ok.status, Status::Ok { .. }), "{ok:?}");
+
+        let unreachable = backup_dir_row(&root.path().join("gone/backup"), true);
+        let Status::Warn { note } = &unreachable.status else {
+            panic!("an uncreatable backup destination is a warning: {unreachable:?}");
+        };
+        assert!(note.contains("BOOKRACK_BACKUP_DIR"), "{note}");
+    }
+
+    /// Seed a data root that declares the built-in profile in its
+    /// manifest and carries `pipeline`'s corpus database stamped by
+    /// `stamp`, and return the registry entry pointing at it. The
+    /// built-in resolves without a profile file, so the caller can hand
+    /// the coherence pass an empty profile directory.
+    fn root_with_built_stamps(
+        root: &Path,
+        pipeline: crate::profile::Pipeline,
+        stamp: impl FnOnce(&bookrack_corpus::Corpus, &bookrack_index_profile::IndexProfile),
+    ) -> LibraryEntry {
+        bookrack_config::set_manifest_index_profile(
+            root,
+            Some(bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT),
+            bookrack_config::ManifestIdentitySeed {
+                name: "stamped",
+                kind: bookrack_config::LibraryKind::Test,
+                description: None,
+            },
+        )
+        .expect("seed a manifest declaring a profile");
+        let (profile, _) = resolve(None, bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT)
+            .expect("resolve the built-in profile")
+            .expect("the built-in profile is defined");
+        let corpus =
+            bookrack_corpus::Corpus::open(&pipeline.corpus_db(root)).expect("create corpus");
+        stamp(&corpus, &profile);
+        drop(corpus);
+
+        let mut entry = entry("stamped", None);
+        entry.data_dir = root.to_path_buf();
+        entry
+    }
+
+    /// Record `stamps` in `corpus` the way a completed build would.
+    fn write_stamps(corpus: &bookrack_corpus::Corpus, stamps: &IndexStamps) {
+        for (key, value) in [
+            (bookrack_corpus::EMBED_MODEL_KEY, stamps.embed_model.clone()),
+            (
+                bookrack_corpus::VECTOR_DIM_KEY,
+                stamps.vector_dim.to_string(),
+            ),
+            (
+                bookrack_corpus::CHUNK_VERSION_KEY,
+                stamps.chunk_version.to_string(),
+            ),
+            (
+                bookrack_corpus::NORMALIZE_VERSION_KEY,
+                stamps.normalize_version.to_string(),
+            ),
+        ] {
+            corpus.meta_set(key, &value).expect("stamp the corpus");
+        }
+    }
+
+    #[test]
+    fn coherence_compares_every_stamp_not_only_the_embed_pair() {
+        // The OK summary promises the referenced profiles are "coherent
+        // with their built indexes". A corpus whose embed pair agrees but
+        // whose chunk version does not is exactly what the daemon refuses
+        // to bring up, so it must not land on that summary.
+        let root = tempfile::tempdir().expect("tempdir");
+        let pipeline = crate::profile::Pipeline::Books;
+        let entry = root_with_built_stamps(root.path(), pipeline, |corpus, profile| {
+            let mut built = pipeline.target_stamps(&profile.embed.model, profile.embed.dim);
+            built.chunk_version += 1;
+            write_stamps(corpus, &built);
+        });
+        let profiles = tempfile::tempdir().expect("tempdir");
+
+        let mut rows = Vec::new();
+        push_index_profile_coherence_rows_in(
+            &mut rows,
+            &RegistryProbe::Entries(vec![entry]),
+            Some(profiles.path()),
+        );
+
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let Status::Warn { note } = &rows[0].status else {
+            panic!("a stamp divergence is a warning, not a pass: {rows:?}");
+        };
+        assert!(note.contains("chunk_version"), "{note}");
+    }
+
+    #[test]
+    fn a_coherence_row_names_the_definition_that_answered() {
+        // A user file and the built-in it shadows carry the same name,
+        // so a row naming the name alone leaves the operator without the
+        // one thing they need to act: which of the two definitions the
+        // library actually runs under.
+        let root = tempfile::tempdir().expect("tempdir");
+        let pipeline = crate::profile::Pipeline::Books;
+        let entry = root_with_built_stamps(root.path(), pipeline, |corpus, profile| {
+            let mut built = pipeline.target_stamps(&profile.embed.model, profile.embed.dim);
+            built.chunk_version += 1;
+            write_stamps(corpus, &built);
+        });
+        let profiles = tempfile::tempdir().expect("tempdir");
+        let name = bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT;
+        std::fs::write(
+            bookrack_index_profile::user_profile_path(profiles.path(), name),
+            bookrack_index_profile::builtin_toml(name).expect("the built-in source"),
+        )
+        .expect("shadow the built-in with a user profile");
+
+        let mut rows = Vec::new();
+        push_index_profile_coherence_rows_in(
+            &mut rows,
+            &RegistryProbe::Entries(vec![entry]),
+            Some(profiles.path()),
+        );
+
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let Status::Warn { note } = &rows[0].status else {
+            panic!("a stamp divergence is a warning, not a pass: {rows:?}");
+        };
+        assert!(note.contains("user"), "{note}");
+    }
+
+    #[test]
+    fn coherence_covers_the_paper_pipeline() {
+        // One profile governs both pipelines and papers carry their own
+        // chunking constant, so a paper index built under a different one
+        // is the same bring-up failure as a book index -- checking the
+        // book corpus alone reports a library the daemon will refuse as
+        // coherent.
+        let root = tempfile::tempdir().expect("tempdir");
+        let pipeline = crate::profile::Pipeline::Papers;
+        let entry = root_with_built_stamps(root.path(), pipeline, |corpus, profile| {
+            let mut built = pipeline.target_stamps(&profile.embed.model, profile.embed.dim);
+            built.chunk_version += 1;
+            write_stamps(corpus, &built);
+        });
+        assert!(
+            !crate::profile::Pipeline::Books
+                .corpus_db(root.path())
+                .exists(),
+            "the scenario is a library indexed on the paper side only",
+        );
+        let profiles = tempfile::tempdir().expect("tempdir");
+
+        let mut rows = Vec::new();
+        push_index_profile_coherence_rows_in(
+            &mut rows,
+            &RegistryProbe::Entries(vec![entry]),
+            Some(profiles.path()),
+        );
+
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let Status::Warn { note } = &rows[0].status else {
+            panic!("a stamp divergence is a warning, not a pass: {rows:?}");
+        };
+        assert!(note.contains("papers"), "{note}");
+        assert!(note.contains("chunk_version"), "{note}");
+    }
+
+    #[test]
+    fn coherence_does_not_promise_a_refused_start_without_a_vector_store() {
+        // The daemon only verifies stamps when the vector store holds
+        // rows, so a divergence under an unbuilt vector store does not
+        // stop it from starting. Saying it does sends the operator after
+        // a failure they will not see.
+        let root = tempfile::tempdir().expect("tempdir");
+        let pipeline = crate::profile::Pipeline::Books;
+        let entry = root_with_built_stamps(root.path(), pipeline, |corpus, profile| {
+            let mut built = pipeline.target_stamps(&profile.embed.model, profile.embed.dim);
+            built.embed_model = "some-other-model".to_string();
+            write_stamps(corpus, &built);
+        });
+        assert!(
+            !crate::profile::Pipeline::Books
+                .lancedb_dir(root.path())
+                .exists(),
+            "the scenario is a corpus stamped without a vector store",
+        );
+        let profiles = tempfile::tempdir().expect("tempdir");
+
+        let mut rows = Vec::new();
+        push_index_profile_coherence_rows_in(
+            &mut rows,
+            &RegistryProbe::Entries(vec![entry]),
+            Some(profiles.path()),
+        );
+
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let Status::Warn { note } = &rows[0].status else {
+            panic!("a stamp divergence is a warning, not a pass: {rows:?}");
+        };
+        assert!(
+            !note.contains("refuse to start"),
+            "no vector store was built, so bring-up is not blocked: {note}"
+        );
+    }
+
+    #[test]
     fn a_registry_that_is_absent_or_uncreated_leaves_both_sections_silent() {
         // `Ok(None)` is "no registry is configured"; a `NotFound` read
         // failure is a configured path the write verbs have not created
@@ -1698,55 +3012,175 @@ mod tests {
         }
     }
 
+    /// Target stamps standing in for a clean build, and the record a
+    /// matching build would leave behind.
+    fn target_and_matching_built() -> (IndexStamps, crate::profile::BuiltStamps) {
+        let target = crate::profile::Pipeline::Books.target_stamps("m", 8);
+        let built = crate::profile::BuiltStamps {
+            embed_model: Some(target.embed_model.clone()),
+            vector_dim: Some(target.vector_dim),
+            chunk_version: Some(target.chunk_version),
+            normalize_version: Some(target.normalize_version),
+        };
+        (target, built)
+    }
+
     #[test]
-    fn coherence_unresolved_and_invalid_and_mismatch_are_flagged() {
+    fn an_unresolved_or_invalid_reference_is_flagged() {
         // Unresolved profile.
-        assert!(coherence_issue("lib", "p", Ok(None), Ok(None)).is_some());
+        assert!(reference_issue("lib", "p", &Ok(None)).is_some());
         // Failed to load.
-        assert!(coherence_issue("lib", "p", Err("boom".to_string()), Ok(None)).is_some());
-        // Has validation errors.
+        assert!(reference_issue("lib", "p", &Err("boom".to_string())).is_some());
+        // Has validation errors, and the row says which definition to
+        // go and fix.
+        let note = reference_issue(
+            "lib",
+            "p",
+            &Ok(Some(("m".to_string(), 8, true, ProfileOrigin::User))),
+        )
+        .expect("validation errors flagged");
+        assert!(note.contains("user file"), "{note}");
+        // A profile that resolved cleanly leaves the stamp comparison to
+        // run; the reference itself is not a problem.
         assert!(
-            coherence_issue("lib", "p", Ok(Some(("m".to_string(), 8, true))), Ok(None)).is_some()
-        );
-        // Valid and coherent with the built stamps.
-        assert!(
-            coherence_issue(
+            reference_issue(
                 "lib",
                 "p",
-                Ok(Some(("m".to_string(), 8, false))),
-                Ok(Some(("m".to_string(), 8))),
+                &Ok(Some(("m".to_string(), 8, false, ProfileOrigin::BuiltIn)))
             )
             .is_none()
         );
-        // Valid but disagrees with the built stamps.
-        let note = coherence_issue(
-            "lib",
-            "p",
-            Ok(Some(("m".to_string(), 8, false))),
-            Ok(Some(("other".to_string(), 8))),
-        )
-        .expect("mismatch flagged");
-        assert!(note.contains("refuse to start"), "{note}");
     }
 
     #[test]
-    fn coherence_skips_the_stamp_check_when_the_index_is_unbuilt() {
-        // No built stamps (corpus missing, so no index built yet) and a
-        // valid profile is not a problem — the check cannot compare.
+    fn every_stamp_divergence_is_flagged_and_a_matching_index_is_not() {
+        let (target, built) = target_and_matching_built();
         assert!(
-            coherence_issue("lib", "p", Ok(Some(("m".to_string(), 8, false))), Ok(None)).is_none()
+            stamp_issue(
+                "lib",
+                "p",
+                crate::profile::Pipeline::Books,
+                &target,
+                Ok(Some(built.clone())),
+                true,
+            )
+            .is_none()
+        );
+
+        // One case per stamp: each of the four must be able to raise the
+        // row on its own, which the embed-pair comparison this replaced
+        // could not do for the latter two.
+        let cases: [(&str, crate::profile::BuiltStamps); 4] = [
+            (
+                "embed.model",
+                crate::profile::BuiltStamps {
+                    embed_model: Some("other".to_string()),
+                    ..built.clone()
+                },
+            ),
+            (
+                "embed.dim",
+                crate::profile::BuiltStamps {
+                    vector_dim: Some(target.vector_dim + 1),
+                    ..built.clone()
+                },
+            ),
+            (
+                "chunk_version",
+                crate::profile::BuiltStamps {
+                    chunk_version: Some(target.chunk_version + 1),
+                    ..built.clone()
+                },
+            ),
+            (
+                "normalize_version",
+                crate::profile::BuiltStamps {
+                    normalize_version: Some(target.normalize_version + 1),
+                    ..built.clone()
+                },
+            ),
+        ];
+        for (field, drifted) in cases {
+            let note = stamp_issue(
+                "lib",
+                "p",
+                crate::profile::Pipeline::Books,
+                &target,
+                Ok(Some(drifted)),
+                true,
+            )
+            .unwrap_or_else(|| panic!("a divergent {field} must be flagged"));
+            assert!(note.contains(field), "{field}: {note}");
+            assert!(note.contains("refuse to start"), "{field}: {note}");
+        }
+    }
+
+    #[test]
+    fn a_note_keeps_two_findings_and_counts_the_rest() {
+        // Four simultaneous divergences must not run the row off the
+        // table; the count stands in for what is elided.
+        let (target, _) = target_and_matching_built();
+        let note = stamp_issue(
+            "lib",
+            "p",
+            crate::profile::Pipeline::Books,
+            &target,
+            Ok(Some(crate::profile::BuiltStamps {
+                embed_model: Some("other".to_string()),
+                vector_dim: Some(target.vector_dim + 1),
+                chunk_version: Some(target.chunk_version + 1),
+                normalize_version: Some(target.normalize_version + 1),
+            })),
+            true,
+        )
+        .expect("four divergences flagged");
+        assert!(note.contains("(+2 more)"), "{note}");
+        assert!(!note.contains("normalize_version"), "{note}");
+    }
+
+    #[test]
+    fn the_stamp_check_is_skipped_when_the_index_is_unbuilt_or_unstamped() {
+        let (target, _) = target_and_matching_built();
+        // Corpus missing, so no index has been built yet.
+        assert!(
+            stamp_issue(
+                "lib",
+                "p",
+                crate::profile::Pipeline::Books,
+                &target,
+                Ok(None),
+                false
+            )
+            .is_none()
+        );
+        // A corpus that opened but carries no stamps has nothing to
+        // compare either; reporting four missing stamps on a library
+        // that was never indexed is noise, not a finding.
+        assert!(
+            stamp_issue(
+                "lib",
+                "p",
+                crate::profile::Pipeline::Books,
+                &target,
+                Ok(Some(crate::profile::BuiltStamps::default())),
+                false,
+            )
+            .is_none()
         );
     }
 
     #[test]
-    fn coherence_flags_an_unreadable_corpus_instead_of_skipping() {
+    fn an_unreadable_corpus_is_flagged_instead_of_skipped() {
         // An existing corpus that cannot be opened is a distinct state
         // from "unbuilt": the check must surface it, not report clean.
-        let note = coherence_issue(
+        let (target, _) = target_and_matching_built();
+        let note = stamp_issue(
             "lib",
             "p",
-            Ok(Some(("m".to_string(), 8, false))),
+            crate::profile::Pipeline::Books,
+            &target,
             Err("schema version 99 is newer than this binary".to_string()),
+            false,
         )
         .expect("unreadable corpus flagged");
         assert!(note.contains("cannot be opened"), "{note}");
@@ -1822,7 +3256,7 @@ mod tests {
 
     #[test]
     fn data_root_status_is_ok_when_nothing_is_shadowed() {
-        let status = data_root_status("--data-dir flag", None, None);
+        let status = data_root_status("--data-dir flag", None, None, None);
         match status {
             Status::Ok { note } => {
                 assert_eq!(note.as_deref(), Some("resolved via --data-dir flag"));
@@ -1837,6 +3271,7 @@ mod tests {
             "BOOKRACK_DATA_DIR env",
             None,
             Some("identified as 'hammer' by manifest uuid"),
+            None,
         );
         match status {
             Status::Ok { note } => {
@@ -1861,6 +3296,7 @@ mod tests {
             "BOOKRACK_DATA_DIR env",
             Some(&shadowed),
             Some("identified as 'hammer' by path"),
+            None,
         );
         match status {
             Status::Warn { note } => {
@@ -1875,6 +3311,55 @@ mod tests {
             }
             other => panic!("expected Warn, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn data_root_status_warns_when_the_root_is_inside_a_bundle() {
+        let bundle = std::path::PathBuf::from("/Applications/Bookrack.app");
+        let status = data_root_status("--data-dir flag", None, None, Some(&bundle));
+        let Status::Warn { note } = status else {
+            panic!("a root inside a bundle must warn");
+        };
+        assert!(
+            note.contains("/Applications/Bookrack.app"),
+            "missing the bundle: {note}"
+        );
+        assert!(
+            note.contains("bookrack init"),
+            "missing the way out: {note}"
+        );
+    }
+
+    /// The two warnings are independent, and the bundle one leads: a
+    /// shadowed default serves the wrong library, a bundled root loses
+    /// the library on the next upgrade.
+    #[test]
+    fn data_root_status_leads_with_the_bundle_when_both_warnings_hold() {
+        let shadowed = ShadowedDefault {
+            name: "eval-data".to_string(),
+            data_dir: std::path::PathBuf::from("/roots/eval-data"),
+        };
+        let bundle = std::path::PathBuf::from("/Applications/Bookrack.app");
+        let status = data_root_status(
+            "BOOKRACK_DATA_DIR env",
+            Some(&shadowed),
+            Some("identified as 'hammer' by path"),
+            Some(&bundle),
+        );
+        let Status::Warn { note } = status else {
+            panic!("expected Warn");
+        };
+        let bundle_at = note
+            .find("/Applications/Bookrack.app")
+            .expect("missing the bundle");
+        let shadow_at = note
+            .find("registry default 'eval-data'")
+            .expect("missing the shadow");
+        assert!(bundle_at < shadow_at, "bundle must lead: {note}");
+        assert!(
+            note.ends_with("identified as 'hammer' by path"),
+            "missing identification: {note}"
+        );
     }
 
     #[test]
@@ -1899,7 +3384,7 @@ mod tests {
             name: "eval-data".to_string(),
             data_dir: std::path::PathBuf::from("/roots/eval-data"),
         };
-        let status = data_root_status("BOOKRACK_DATA_DIR env", Some(&shadowed), None);
+        let status = data_root_status("BOOKRACK_DATA_DIR env", Some(&shadowed), None, None);
         match status {
             Status::Warn { note } => {
                 assert!(

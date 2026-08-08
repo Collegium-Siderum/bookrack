@@ -15,6 +15,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 /// Number of hex characters kept from the SHA-256 digest.
+// setting: internal -- a recorded fingerprint's width; changing it invalidates every stored one
 const FINGERPRINT_HEX_LEN: usize = 16;
 
 /// Reasons a fingerprint or toggle-summary computation can fail.

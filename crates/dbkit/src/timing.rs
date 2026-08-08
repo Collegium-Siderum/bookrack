@@ -13,6 +13,7 @@ use rusqlite::{Connection, Params, Row};
 /// sizes the pipeline produces; a query crossing this bound signals
 /// pathology — a missing index, an unexpected full scan — worth a `WARN`,
 /// not routine load.
+// setting: db.slow_query_threshold
 pub const DEFAULT_SLOW_QUERY_THRESHOLD: Duration = Duration::from_millis(100);
 
 /// A SQLite [`Connection`] that times the one-shot statements run directly
@@ -111,6 +112,7 @@ impl DerefMut for TimedConnection {
 /// a slow-query event names the statement without dumping a multi-line
 /// query into the log.
 fn sql_summary(sql: &str) -> String {
+    // setting: internal -- how far one slow-query log line is truncated
     const MAX: usize = 120;
     let flat = sql.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut out: String = flat.chars().take(MAX).collect();

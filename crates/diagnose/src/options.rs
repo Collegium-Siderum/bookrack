@@ -39,4 +39,5 @@ impl Default for Options {
 }
 
 /// Default time window: seven days of logs and audit rows.
+// setting: diagnose.days_default
 pub const DEFAULT_DAYS: u32 = 7;

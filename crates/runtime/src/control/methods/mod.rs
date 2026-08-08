@@ -18,7 +18,9 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-use bookrack_config::{Config, LibrarySelection};
+#[cfg(test)]
+use bookrack_config::Config;
+use bookrack_config::LibrarySelection;
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::stream::LogStreamHandle;
@@ -27,9 +29,50 @@ use bookrack_ops::registry::LibraryRegistry;
 use serde_json::Value;
 use tokio::sync::{Mutex as TokioMutex, Notify, OwnedMutexGuard, broadcast};
 
+use super::error_map::rpc_from_problem;
 use super::events::{Event, EventStreamHandle};
-use super::jsonrpc::{BUSY, CONFIRMATION_REQUIRED, METHOD_NOT_FOUND, Request, RpcError};
+use super::jsonrpc::{
+    BUSY, CONFIRMATION_REQUIRED, INVALID_PARAMS, METHOD_NOT_FOUND, Request, RpcError,
+};
 use super::plan_registry::PlanRegistry;
+use crate::cmd::input_error::CmdInputError;
+
+/// A params type that carries a library selection.
+///
+/// The implementation is what makes a `routed` row in [`methods!`]
+/// checkable: the row names the params type, the impl names the key
+/// and reads the field behind it, so a method filed as routed whose
+/// params have no such field fails to compile. Without it the axis
+/// would be a hand-kept assertion about code somewhere else, and the
+/// failure mode of a wrong row is silent — a selection the caller
+/// spelled out reaches a handler that never looks for it.
+pub trait RoutedParams {
+    /// The params key that names the library. `"library"` for every
+    /// method but `library.info`, whose own `name` parameter predates
+    /// the shared spelling.
+    const LIBRARY_KEY: &'static str;
+
+    /// The selection this call carries, `None` when the caller left
+    /// the key out and the registry's default applies.
+    fn library(&self) -> Option<&str>;
+}
+
+/// Implement [`RoutedParams`] for params types that spell the key
+/// `library`. Invoked in the module that owns the type, so the field
+/// need not be public.
+macro_rules! routed_params {
+    ($( $t:ty ),+ $(,)?) => {
+        $(
+            impl $crate::control::methods::RoutedParams for $t {
+                const LIBRARY_KEY: &'static str = "library";
+
+                fn library(&self) -> Option<&str> {
+                    self.library.as_deref()
+                }
+            }
+        )+
+    };
+}
 
 pub mod corpus;
 pub mod diagnose;
@@ -59,11 +102,27 @@ pub mod verify;
 pub use reads::SNAPSHOT_CHANNELS;
 pub use reads::snapshot_for;
 
+/// Render a [`CmdInputError`] straight onto the wire envelope.
+///
+/// A handler that owns its own error mapping never hands an
+/// `eyre::Report` to `write_err`, so the cause-chain downcast there
+/// does not reach it. What the shared type still buys such a handler
+/// is the wording and the code the book side already produces for the
+/// same refusal — which is what keeps the two sides from drifting
+/// apart one `format!` at a time.
+///
+/// [`CmdInputError::TargetDrifted`] carries its own code and does not
+/// belong on this path; no handler that maps its own errors mints a
+/// plan.
+pub(super) fn input_err(e: CmdInputError) -> RpcError {
+    use bookrack_core::Explain;
+    rpc_from_problem(INVALID_PARAMS, e.explain())
+}
+
 /// Read-mostly handles the dispatcher reaches into. The runtime owns
 /// the originals; the dispatcher only clones cheap shared handles.
 #[derive(Clone)]
 pub struct MethodContext {
-    pub cfg: Arc<Config>,
     pub registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     pub info_context: LibraryInfoContext,
     pub queue_state: Arc<Mutex<QueueState>>,
@@ -74,9 +133,12 @@ pub struct MethodContext {
     pub started_at_rfc3339: String,
     pub selection: LibrarySelection,
     /// Name of the primary (bring-up-selected) library. A single-value
-    /// snapshot consumed by the `library.changed` event and the queue
-    /// worker's no-name fallback; per-library status surfaces are a
-    /// later milestone.
+    /// snapshot consumed by the queue worker's no-name fallback, the
+    /// `status` card, and the `library.changed` snapshot a subscriber
+    /// receives on connect; per-library status surfaces are a later
+    /// milestone. A `library.changed` published *by a write* names the
+    /// library that write touched instead — [`run_write`] takes it
+    /// from the handler's own handle.
     pub library_name: String,
     /// Cached MCP tool list, populated by the daemon at startup from
     /// `bookrack_mcp::list_tools()`. Empty in entry points that do
@@ -96,6 +158,10 @@ pub struct MethodContext {
     /// a reranker and no operator URL overrides the backend. `doctor.
     /// gather` reads its state for the backend row.
     pub rerank_supervisor: Option<Arc<crate::rerank_supervisor::RerankSupervisor>>,
+    /// The control socket this daemon is answering on. `doctor.gather`
+    /// names it so a report says which daemon produced it. `None` in
+    /// entry points that dispatch without a bound socket.
+    pub control_socket: Option<PathBuf>,
     /// Worker-loop pause flag. The `queue.pause` / `queue.resume`
     /// handlers flip this atomic; the worker loop reads it before
     /// pulling the next pending job. Mirrored onto
@@ -110,6 +176,14 @@ pub struct MethodContext {
     /// RPCs. Constructed once at daemon bring-up; see
     /// [`super::plan_registry`] for the semantics.
     pub plan_registry: Arc<PlanRegistry>,
+    /// The capability to change the mounted set, carrying what a mount
+    /// needs and this context does not: the reranker stage a new handle
+    /// clones, the caller attribution its writes take, and the ability
+    /// to lock a data root. `None` in an entry point that dispatches
+    /// without a daemon bring-up behind it, where `library.mount` and
+    /// `library.unmount` answer [`NOT_READY`] — the same shape a
+    /// queue-bound method takes when no worker was spawned.
+    pub mounter: Option<Arc<crate::mount::Mounter>>,
 }
 
 /// One of two terminal outcomes a method handler can produce: an
@@ -120,9 +194,47 @@ pub enum DispatchOutcome {
     Shutdown(Value),
 }
 
+// Params types the table below names. Importing them keeps each row
+// on one line; the module each belongs to is the module that owns the
+// handler beside it.
+use corpus::CorpusRebuildParams;
+use dryrun::DryrunParams;
+use glean::GleanSubmitParams;
+use ingest::IngestSubmitParams;
+use intake::IntakeOcrParams;
+use libraries::LibraryForkParams;
+use metadata::{
+    MetadataAckParams, MetadataAdvanceParams, MetadataApproveParams, MetadataClearParams,
+    MetadataContributorAddParams, MetadataContributorRemoveParams, MetadataReauditParams,
+    MetadataRejectParams, MetadataSetParams, MetadataVoidParams,
+};
+use papers_corpus::PapersCorpusRebuildParams;
+use papers_dryrun::PapersDryrunParams;
+use papers_metadata::{
+    PapersContributorAddParams, PapersContributorRemoveParams, PapersJustifiedReviewParams,
+    PapersMetadataClearParams, PapersMetadataReauditParams, PapersMetadataSetParams,
+    PapersMetadataVoidParams, PapersReviewParams,
+};
+use papers_remove::PapersRemoveParams;
+use papers_stamps::ReconcileParams as PaperStampsReconcileParams;
+use papers_vectors::{
+    PapersVectorsDropParams, PapersVectorsRebuildParams, PapersVectorsReembedParams,
+    PapersVectorsResetParams,
+};
+use reads::LibraryInfoParams;
+use reads_library::{
+    BookIdParams, FindBooksParams, FindPapersParams, LibraryOnlyParams, ListMetadataParams,
+    PageParams, PaperAuditReadParams, ReadContextParams, ReadSpanParams, SearchInBookParams,
+    SearchInPaperParams, SearchParams, ShowTocParams,
+};
+use remove::RemoveParams;
+use stamps::ReconcileParams as BookStampsReconcileParams;
+use vectors::{VectorsDropParams, VectorsRebuildParams, VectorsReembedParams, VectorsResetParams};
+use verify::VerifyParams;
+
 /// Single source of truth for every control-plane method.
 ///
-/// Each row declares four facts about one method:
+/// Each row declares five facts about one method:
 ///
 /// 1. `kind` — `read`, `write`, or `stream`; reflected in
 ///    `daemon.methods` so clients can pick the right call surface.
@@ -134,19 +246,34 @@ pub enum DispatchOutcome {
 ///    `async` for `async fn(_, _) -> Result`, `sidebar` for methods
 ///    intercepted before `dispatch_normal` (the handler is left to a
 ///    hand-written arm in `dispatch`).
-/// 4. The method `name` and `=> handler` path (omitted for `sidebar`
+/// 4. `selection` — how an explicit library selection reaches the
+///    method:
+///    * `routed(<Params>)` — the method takes one, under the key the
+///      params type's [`RoutedParams`] impl declares. Naming the type
+///      is what makes the claim checkable rather than asserted.
+///    * `process` — the method describes the process, not a library:
+///      `daemon.*`, the queue verbs (whose job ids address one
+///      daemon-wide queue), `logs.tail`, `tray.focus`, `diagnose.run`.
+///      A selection is meaningless but harmless, so clients pass it
+///      through unchanged.
+///    * `unrouted` — the method answers about the daemon or about
+///      every library at once, so a selection naming one library
+///      cannot be honoured and must be refused rather than dropped.
+/// 5. The method `name` and `=> handler` path (omitted for `sidebar`
 ///    entries).
 ///
 /// The macro emits both the public `REGISTRY` const consumed by
 /// `daemon.methods` / `daemon.mcp_tools` and the `dispatch_normal`
 /// match table from this list, so the two tables cannot drift.
-/// `is_queue_bound_method` queries `REGISTRY` directly for the same
-/// reason. Sidebar rows still appear in `REGISTRY` but emit no arm in
+/// `is_queue_bound_method`, [`library_key_for`], and
+/// [`refuses_library`] query `REGISTRY` directly for the same reason.
+/// Sidebar rows still appear in `REGISTRY` but emit no arm in
 /// `dispatch_normal`; their wire behaviour is implemented in
 /// `dispatch` itself.
 macro_rules! methods {
     (
-        $( $kind:ident $queue:ident $shape:ident $name:literal $( => $handler:path )? ),* $(,)?
+        $( $kind:ident $queue:ident $shape:ident $selection:ident $( ( $params:path ) )?
+           $name:literal $( => $handler:path )? ),* $(,)?
     ) => {
         pub const REGISTRY: &[meta::MethodSignature] = &[
             $(
@@ -154,6 +281,8 @@ macro_rules! methods {
                     name: $name,
                     kind: methods!(@kind $kind),
                     queue_bound: methods!(@queue $queue),
+                    selection: methods!(@selection $selection),
+                    library_key: methods!(@key $selection $( ( $params ) )?),
                 },
             )*
         ];
@@ -177,6 +306,16 @@ macro_rules! methods {
     (@queue queue)    => { true };
     (@queue no_queue) => { false };
 
+    (@selection routed)   => { "routed" };
+    (@selection process)  => { "process" };
+    (@selection unrouted) => { "unrouted" };
+
+    (@key routed ( $params:path )) => {
+        Some(<$params as RoutedParams>::LIBRARY_KEY)
+    };
+    (@key process)  => { None };
+    (@key unrouted) => { None };
+
     (@stmt sync $name:literal => $handler:path; $m:expr, $p:expr, $c:expr) => {
         if $m == $name {
             return Some($handler($p, $c));
@@ -195,114 +334,166 @@ macro_rules! methods {
 
 methods! {
     // daemon
-    read   no_queue sync    "daemon.version"     => reads::daemon_version_rpc,
-    write  no_queue sidebar "daemon.shutdown",
-    read   no_queue sync    "status"             => reads::status_rpc,
-    read   no_queue async   "doctor.gather"      => reads::doctor_gather_rpc,
-    read   no_queue sync    "daemon.methods"     => meta::methods_rpc,
-    read   no_queue sync    "daemon.mcp_tools"   => meta::mcp_tools_rpc,
+    read  no_queue sync    process                    "daemon.version" => reads::daemon_version_rpc,
+    write no_queue sidebar process                    "daemon.shutdown",
+    read  no_queue sync    unrouted                   "status" => reads::status_rpc,
+    read  no_queue sync    unrouted                   "daemon.status" => reads::status_rpc,
+    read  no_queue async   unrouted                   "doctor.gather" => reads::doctor_gather_rpc,
+    read  no_queue sync    process                    "daemon.methods" => meta::methods_rpc,
+    read  no_queue sync    process                    "daemon.mcp_tools" => meta::mcp_tools_rpc,
 
     // queue
-    read   no_queue sync    "queue.list"         => reads::queue_list,
-    write  no_queue async   "queue.pause"        => queue_writes::pause,
-    write  no_queue async   "queue.resume"       => queue_writes::resume,
-    write  no_queue async   "queue.clear"        => queue_writes::clear,
+    read  no_queue sync    process                    "queue.list" => reads::queue_list,
+    write no_queue async   process                    "queue.pause" => queue_writes::pause,
+    write no_queue async   process                    "queue.resume" => queue_writes::resume,
+    write no_queue async   process                    "queue.clear" => queue_writes::clear,
 
     // library admin
-    read   no_queue sync    "library.list"          => reads::library_list_rpc,
-    read   no_queue async   "library.info"          => reads::library_info,
-    write  no_queue async   "library.fork"          => libraries::fork,
-    write  no_queue async   "library.set_default"   => libraries::set_default,
+    read  no_queue sync    unrouted                   "library.list" => reads::library_list_rpc,
+    read  no_queue async   routed(LibraryInfoParams)  "library.info" => reads::library_info,
+    write no_queue async   routed(LibraryForkParams)  "library.fork" => libraries::fork,
+    write no_queue async   unrouted
+        "library.set_default" => libraries::set_default,
+    write no_queue async   unrouted                   "library.mount" => libraries::mount,
+    write no_queue async   unrouted                   "library.unmount" => libraries::unmount,
 
     // library reads (sync, parametrised)
-    read   no_queue sync    "library.stats"                 => reads_library::stats,
-    read   no_queue sync    "library.list_books"            => reads_library::list_books,
-    read   no_queue sync    "library.list_ocr_pending"      => reads_library::list_ocr_pending,
-    read   no_queue sync    "library.find_books"            => reads_library::find_books,
-    read   no_queue sync    "library.show_book"             => reads_library::show_book,
-    read   no_queue sync    "library.show_toc"              => reads_library::show_toc,
-    read   no_queue sync    "library.read_context"          => reads_library::read_context,
-    read   no_queue sync    "library.read_span"             => reads_library::read_span,
-    read   no_queue sync    "library.show_metadata_audit"   => reads_library::show_metadata_audit,
-    read   no_queue sync    "library.show_metadata_report"  => reads_library::show_metadata_report,
-    read   no_queue sync    "library.list_metadata"         => reads_library::list_metadata,
-    read   no_queue sync    "library.list_pending_reviews"  => reads_library::list_pending_reviews,
-    read   no_queue sync    "library.show_audit_trail"      => reads_library::show_audit_trail,
-    read   no_queue sync    "library.show_pipeline_trail"   => reads_library::show_pipeline_trail,
-    read   no_queue sync    "library.list_papers"           => reads_library::list_papers,
-    read   no_queue sync    "library.find_papers"           => reads_library::find_papers,
-    read   no_queue sync    "library.show_paper"            => reads_library::show_paper,
-    read   no_queue sync    "library.show_paper_toc"        => reads_library::show_paper_toc,
-    read   no_queue sync    "papers.export_csl"             => reads_library::papers_export_csl,
-    read   no_queue sync    "papers.fetch_source"           => reads_library::papers_fetch_source,
+    read  no_queue sync    routed(LibraryOnlyParams)  "library.stats" => reads_library::stats,
+    read  no_queue sync    routed(PageParams)
+        "library.list_books" => reads_library::list_books,
+    read  no_queue sync    routed(PageParams)
+        "library.list_ocr_pending" => reads_library::list_ocr_pending,
+    read  no_queue sync    routed(FindBooksParams)
+        "library.find_books" => reads_library::find_books,
+    read  no_queue sync    routed(BookIdParams)
+        "library.show_book" => reads_library::show_book,
+    read  no_queue sync    routed(ShowTocParams)      "library.show_toc" => reads_library::show_toc,
+    read  no_queue sync    routed(ReadContextParams)
+        "library.read_context" => reads_library::read_context,
+    read  no_queue sync    routed(ReadSpanParams)
+        "library.read_span" => reads_library::read_span,
+    read  no_queue sync    routed(BookIdParams)
+        "library.show_metadata_audit" => reads_library::show_metadata_audit,
+    read  no_queue sync    routed(BookIdParams)
+        "library.show_metadata_report" => reads_library::show_metadata_report,
+    read  no_queue sync    routed(ListMetadataParams)
+        "library.list_metadata" => reads_library::list_metadata,
+    read  no_queue sync    routed(PageParams)
+        "library.list_pending_reviews" => reads_library::list_pending_reviews,
+    read  no_queue sync    routed(BookIdParams)
+        "library.show_audit_trail" => reads_library::show_audit_trail,
+    read  no_queue sync    routed(BookIdParams)
+        "library.show_pipeline_trail" => reads_library::show_pipeline_trail,
+    read  no_queue sync    routed(PageParams)
+        "library.list_papers" => reads_library::list_papers,
+    read  no_queue sync    routed(FindPapersParams)
+        "library.find_papers" => reads_library::find_papers,
+    read  no_queue sync    routed(BookIdParams)
+        "library.show_paper" => reads_library::show_paper,
+    read  no_queue sync    routed(ShowTocParams)
+        "library.show_paper_toc" => reads_library::show_paper_toc,
+    read  no_queue sync    routed(PaperAuditReadParams)
+        "library.show_paper_metadata_report" => reads_library::show_paper_metadata_report,
+    read  no_queue sync    routed(BookIdParams)
+        "library.show_paper_audit_trail" => reads_library::show_paper_audit_trail,
+    read  no_queue sync    routed(ListMetadataParams)
+        "library.list_paper_metadata" => reads_library::list_paper_metadata,
+    read  no_queue sync    routed(PageParams)
+        "library.list_paper_pending_reviews" => reads_library::list_paper_pending_reviews,
+    read  no_queue sync    routed(BookIdParams)
+        "papers.export_csl" => reads_library::papers_export_csl,
+    read  no_queue sync    routed(BookIdParams)
+        "papers.fetch_source" => reads_library::papers_fetch_source,
 
     // library reads (async)
-    read   no_queue async   "library.search"          => reads_library::search,
-    read   no_queue async   "library.search_in_book"  => reads_library::search_in_book,
-    read   no_queue async   "library.search_in_paper" => reads_library::search_in_paper,
-    read   no_queue async   "library.vectors_status"  => reads_library::vectors_status,
+    read  no_queue async   routed(SearchParams)       "library.search" => reads_library::search,
+    read  no_queue async   routed(SearchInBookParams)
+        "library.search_in_book" => reads_library::search_in_book,
+    read  no_queue async   routed(SearchInPaperParams)
+        "library.search_in_paper" => reads_library::search_in_paper,
+    read  no_queue async   routed(LibraryOnlyParams)
+        "library.vectors_status" => reads_library::vectors_status,
 
     // events
-    stream no_queue sidebar "events.subscribe",
-    read   no_queue sync    "events.snapshot"     => reads::events_snapshot,
+    stream no_queue sidebar process                    "events.subscribe",
+    read  no_queue sync    unrouted                   "events.snapshot" => reads::events_snapshot,
 
     // ingest / glean / intake
-    write  queue    async   "ingest.submit"       => ingest::submit,
-    write  queue    async   "ingest.cancel"       => ingest::cancel,
-    write  queue    async   "glean.submit"        => glean::submit,
-    write  queue    async   "intake.ocr"          => intake::submit,
+    write queue    async   routed(IngestSubmitParams) "ingest.submit" => ingest::submit,
+    write queue    async   process                    "ingest.cancel" => ingest::cancel,
+    write queue    async   routed(GleanSubmitParams)  "glean.submit" => glean::submit,
+    write queue    async   routed(IntakeOcrParams)    "intake.ocr" => intake::submit,
 
     // book metadata curation
-    write  no_queue async   "metadata.set"                => metadata::set,
-    write  no_queue async   "metadata.clear"              => metadata::clear,
-    write  no_queue async   "metadata.void"               => metadata::void,
-    write  no_queue async   "metadata.reaudit"            => metadata::reaudit,
-    write  no_queue async   "metadata.contributor_add"    => metadata::contributor_add,
-    write  no_queue async   "metadata.contributor_remove" => metadata::contributor_remove,
-    write  no_queue async   "metadata.ack"                => metadata::ack,
-    write  no_queue async   "metadata.approve"            => metadata::approve,
-    write  no_queue async   "metadata.reject"             => metadata::reject,
-    write  queue    async   "metadata.advance"            => metadata::advance,
+    write no_queue async   routed(MetadataSetParams)  "metadata.set" => metadata::set,
+    write no_queue async   routed(MetadataClearParams) "metadata.clear" => metadata::clear,
+    write no_queue async   routed(MetadataVoidParams) "metadata.void" => metadata::void,
+    write no_queue async   routed(MetadataReauditParams) "metadata.reaudit" => metadata::reaudit,
+    write no_queue async   routed(MetadataContributorAddParams)
+        "metadata.contributor_add" => metadata::contributor_add,
+    write no_queue async   routed(MetadataContributorRemoveParams)
+        "metadata.contributor_remove" => metadata::contributor_remove,
+    write no_queue async   routed(MetadataAckParams)  "metadata.ack" => metadata::ack,
+    write no_queue async   routed(MetadataApproveParams) "metadata.approve" => metadata::approve,
+    write no_queue async   routed(MetadataRejectParams) "metadata.reject" => metadata::reject,
+    write queue    async   routed(MetadataAdvanceParams) "metadata.advance" => metadata::advance,
 
     // book vectors / corpus / stamps
-    write  queue    async   "vectors.rebuild"     => vectors::rebuild,
-    write  queue    async   "vectors.reembed"     => vectors::reembed,
-    write  queue    async   "vectors.reset"       => vectors::reset,
-    write  queue    async   "vectors.drop"        => vectors::drop_index,
-    write  queue    async   "corpus.rebuild"      => corpus::rebuild,
-    write  queue    async   "stamps.reconcile"    => stamps::reconcile,
+    write queue    async   routed(VectorsRebuildParams) "vectors.rebuild" => vectors::rebuild,
+    write queue    async   routed(VectorsReembedParams) "vectors.reembed" => vectors::reembed,
+    write queue    async   routed(VectorsResetParams) "vectors.reset" => vectors::reset,
+    write queue    async   routed(VectorsDropParams)  "vectors.drop" => vectors::drop_index,
+    write queue    async   routed(CorpusRebuildParams) "corpus.rebuild" => corpus::rebuild,
+    write queue    async   routed(BookStampsReconcileParams)
+        "stamps.reconcile" => stamps::reconcile,
 
     // remove / dryrun (books)
-    write  queue    async   "remove"              => remove::run,
-    write  queue    async   "dryrun"              => dryrun::run,
+    write queue    async   routed(RemoveParams)       "remove" => remove::run,
+    write queue    async   routed(DryrunParams)       "dryrun" => dryrun::run,
 
     // paper maintenance triplet
-    write  queue    async   "papers.remove"             => papers_remove::run,
-    write  queue    async   "papers.corpus_rebuild"     => papers_corpus::rebuild,
-    write  queue    async   "papers.vectors_rebuild"    => papers_vectors::rebuild,
-    write  queue    async   "papers.vectors_reembed"    => papers_vectors::reembed,
-    write  queue    async   "papers.vectors_reset"      => papers_vectors::reset,
-    write  queue    async   "papers.vectors_drop"       => papers_vectors::drop_index,
-    write  queue    async   "papers.stamps_reconcile"   => papers_stamps::reconcile,
-    write  queue    async   "papers.dryrun"             => papers_dryrun::run,
+    write queue    async   routed(PapersRemoveParams) "papers.remove" => papers_remove::run,
+    write queue    async   routed(PapersCorpusRebuildParams)
+        "papers.corpus_rebuild" => papers_corpus::rebuild,
+    write queue    async   routed(PapersVectorsRebuildParams)
+        "papers.vectors_rebuild" => papers_vectors::rebuild,
+    write queue    async   routed(PapersVectorsReembedParams)
+        "papers.vectors_reembed" => papers_vectors::reembed,
+    write queue    async   routed(PapersVectorsResetParams)
+        "papers.vectors_reset" => papers_vectors::reset,
+    write queue    async   routed(PapersVectorsDropParams)
+        "papers.vectors_drop" => papers_vectors::drop_index,
+    write queue    async   routed(PaperStampsReconcileParams)
+        "papers.stamps_reconcile" => papers_stamps::reconcile,
+    write queue    async   routed(PapersDryrunParams) "papers.dryrun" => papers_dryrun::run,
 
     // paper metadata curation
-    write  queue    async   "papers.metadata.reaudit"            => papers_metadata::reaudit,
-    write  queue    async   "papers.metadata.set"                => papers_metadata::set,
-    write  queue    async   "papers.metadata.clear"              => papers_metadata::clear,
-    write  queue    async   "papers.metadata.void"               => papers_metadata::void,
-    write  queue    async   "papers.metadata.ack"                => papers_metadata::ack,
-    write  queue    async   "papers.metadata.approve"            => papers_metadata::approve,
-    write  queue    async   "papers.metadata.reject"             => papers_metadata::reject,
-    write  queue    async   "papers.metadata.reopen"             => papers_metadata::reopen,
-    write  queue    async   "papers.metadata.contributor_add"    => papers_metadata::contributor_add,
-    write  queue    async   "papers.metadata.contributor_remove" => papers_metadata::contributor_remove,
+    write no_queue async   routed(PapersMetadataReauditParams)
+        "papers.metadata.reaudit" => papers_metadata::reaudit,
+    write no_queue async   routed(PapersMetadataSetParams)
+        "papers.metadata.set" => papers_metadata::set,
+    write no_queue async   routed(PapersMetadataClearParams)
+        "papers.metadata.clear" => papers_metadata::clear,
+    write no_queue async   routed(PapersMetadataVoidParams)
+        "papers.metadata.void" => papers_metadata::void,
+    write no_queue async   routed(PapersJustifiedReviewParams)
+        "papers.metadata.ack" => papers_metadata::ack,
+    write no_queue async   routed(PapersReviewParams)
+        "papers.metadata.approve" => papers_metadata::approve,
+    write no_queue async   routed(PapersJustifiedReviewParams)
+        "papers.metadata.reject" => papers_metadata::reject,
+    write no_queue async   routed(PapersReviewParams)
+        "papers.metadata.reopen" => papers_metadata::reopen,
+    write no_queue async   routed(PapersContributorAddParams)
+        "papers.metadata.contributor_add" => papers_metadata::contributor_add,
+    write no_queue async   routed(PapersContributorRemoveParams)
+        "papers.metadata.contributor_remove" => papers_metadata::contributor_remove,
 
     // verify / diagnose / tray / logs
-    read   no_queue async   "verify.run"     => verify::run_rpc,
-    read   no_queue async   "diagnose.run"   => diagnose::run,
-    write  no_queue sync    "tray.focus"     => tray::focus_rpc,
-    read   no_queue sync    "logs.tail"      => logs::tail,
+    read  no_queue async   routed(VerifyParams)       "verify.run" => verify::run_rpc,
+    read  no_queue async   process                    "diagnose.run" => diagnose::run,
+    write no_queue sync    process                    "tray.focus" => tray::focus_rpc,
+    read  no_queue sync    process                    "logs.tail" => logs::tail,
 }
 
 /// Method router. Method names are matched verbatim against the table
@@ -368,6 +559,7 @@ fn unknown_method_message(method: &str, mcp_tools: &[meta::McpToolInfo]) -> Stri
 /// Stable: callers (`bookrack-mcp` clients, the CLI) match on it to
 /// distinguish a misconfigured headless entry from a transient busy
 /// state.
+// setting: internal -- a JSON-RPC application code callers match on, not a value to tune
 pub const QUEUE_WORKER_DISABLED: i32 = -32002;
 
 /// Returns `true` when the method routes work through the persistent
@@ -378,6 +570,35 @@ fn is_queue_bound_method(method: &str) -> bool {
     REGISTRY
         .iter()
         .any(|sig| sig.name == method && sig.queue_bound)
+}
+
+/// The params key under which `method` takes a library selection, or
+/// `None` when it takes none.
+///
+/// The client side of the control plane injects the operator's
+/// selection by this key rather than by a table of its own: the fact
+/// belongs to the handler that reads it, and a second copy is a second
+/// thing to keep true. An unknown method answers `None` — `rpc call`
+/// forwards any name the caller types, and inventing a parameter for a
+/// method this build does not have would put words in the caller's
+/// mouth.
+pub fn library_key_for(method: &str) -> Option<&'static str> {
+    REGISTRY
+        .iter()
+        .find(|sig| sig.name == method)
+        .and_then(|sig| sig.library_key)
+}
+
+/// Whether `method` cannot honour a library selection at all, so a
+/// client holding an explicit one must refuse the call rather than
+/// send it and let the selection evaporate.
+///
+/// False for a method this build does not know, for the same reason
+/// [`library_key_for`] answers `None`.
+pub fn refuses_library(method: &str) -> bool {
+    REGISTRY
+        .iter()
+        .any(|sig| sig.name == method && sig.selection == "unrouted")
 }
 
 /// RAII bundle owning the write mutex guard and the broadcast handle
@@ -423,7 +644,11 @@ impl Drop for WriteSession {
 /// cannot leave the daemon stranded with the write source raised and
 /// MCP paused, or allow a second writer to enter while the blocking
 /// work is still running.
-pub(crate) async fn run_write<F, Fut>(ctx: &MethodContext, op: F) -> Result<Value, RpcError>
+pub(crate) async fn run_write<F, Fut>(
+    ctx: &MethodContext,
+    library: &str,
+    op: F,
+) -> Result<Value, RpcError>
 where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<Value, RpcError>>,
@@ -441,7 +666,7 @@ where
         _guard: guard,
     };
     let event_stream = ctx.event_stream.clone();
-    let library_name = ctx.library_name.clone();
+    let library_name = library.to_string();
     let join = tokio::task::spawn_blocking(move || {
         let handle = tokio::runtime::Handle::current();
         let result = handle.block_on(op());
@@ -489,6 +714,67 @@ pub(crate) fn require_yes(method: &str, yes: bool, exempt: bool) -> Result<(), R
              client side, then resend with `yes = true`."
         ),
     ))
+}
+
+/// Build a [`MethodContext`] over a catalog-only ops handle rooted at
+/// `dir`, so no embedder probe runs. `library_name` is the registry name
+/// of the served library, `None` for a path-selected root. Shared by the
+/// handler test modules so they all drive the same shape of context.
+#[cfg(test)]
+pub(crate) fn test_method_context(
+    dir: &std::path::Path,
+    library_name: Option<&str>,
+) -> MethodContext {
+    use bookrack_ops::registry::LibraryHandle;
+    use bookrack_ops::{Caller, Ops};
+
+    use crate::control::events::{DaemonState, DaemonStateFlag};
+
+    let ops = Ops::<OllamaEmbedClient>::catalog_only(
+        dir.join("corpus.db"),
+        dir.join("catalog.db"),
+        &dir.join("lancedb"),
+        dir.join("books"),
+        dir.join("backup"),
+        Caller::cli(),
+    );
+    let cfg = Arc::new(Config::new(
+        dir.to_path_buf(),
+        "http://127.0.0.1:11434".to_string(),
+    ));
+    let handle = LibraryHandle::new(library_name.unwrap_or("default"), Arc::clone(&cfg), ops);
+    let state = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
+    let (shutdown_tx, _) = broadcast::channel(8);
+    MethodContext {
+        registry: LibraryRegistry::single(handle),
+        info_context: LibraryInfoContext {
+            data_dir: dir.display().to_string(),
+            library_name: library_name.map(str::to_string),
+            resolution_source: "explicit".to_string(),
+            shadowed_default: None,
+            library_identification: None,
+            ollama_url: "http://127.0.0.1:11434".to_string(),
+            embed_model_configured: "test-model".to_string(),
+            mcp_addr: String::new(),
+        },
+        queue_state: Arc::new(Mutex::new(QueueState::default())),
+        queue_state_path: dir.join("queue.json"),
+        event_stream: EventStreamHandle::new(8, state),
+        write_guard: Arc::new(TokioMutex::new(())),
+        shutdown_tx,
+        started_at_rfc3339: "2026-01-01T00:00:00Z".to_string(),
+        selection: LibrarySelection::default(),
+        library_name: library_name.unwrap_or("default").to_string(),
+        mcp_tools: Arc::new(Vec::new()),
+        queue_worker_enabled: false,
+        tray_focus_signal: Arc::new(Notify::new()),
+        rerank_supervisor: None,
+        control_socket: None,
+        queue_paused: Arc::new(AtomicBool::new(false)),
+        log_stream: LogStreamHandle::new(8, 8),
+        plan_registry: Arc::new(PlanRegistry::new()),
+        mounter: None,
+    }
 }
 
 #[cfg(test)]
@@ -583,6 +869,20 @@ mod tests {
             "metadata.ack",
             "metadata.approve",
             "metadata.reject",
+            // The paper-side peers of the five above. Named here
+            // because no list named them before, which is how they
+            // drifted into the queue-bound column nothing on their
+            // path ever used.
+            "papers.metadata.reaudit",
+            "papers.metadata.set",
+            "papers.metadata.clear",
+            "papers.metadata.void",
+            "papers.metadata.ack",
+            "papers.metadata.approve",
+            "papers.metadata.reject",
+            "papers.metadata.reopen",
+            "papers.metadata.contributor_add",
+            "papers.metadata.contributor_remove",
             "verify.run",
             "diagnose.run",
             "tray.focus",

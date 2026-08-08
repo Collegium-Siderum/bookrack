@@ -40,6 +40,7 @@ earlier ones already happened.
 | `catalog.db` / `papers_catalog.db` schema bump | catalog `user_version` | none — migrated forward in place (one exception: the v14 OCR-derivation edge, see below) | open the library (migration is automatic); after upgrading a library that predates v14, run `bookrack doctor --backfill-ocr-derivation` once |
 | `corpus.db` schema bump | corpus `schema_version` | corpus tree | `bookrack corpus rebuild` |
 | `papers_corpus.db` schema bump | papers corpus `schema_version` | papers corpus tree | `bookrack papers corpus rebuild` |
+| A `bookrack-distill` stage's behaviour, or a book's `parser.stages` | that book's `parser_version` (declared in its `book.toml`, bumped by hand) | the book's distilled entries in `reference.db` | `bookrack distill verify <path>` to see the diff, then `bookrack distill build <path>` |
 | `rusqlite`, `lancedb` | engine-level | normally none — upstream guarantees backward compatibility for reads | open the library |
 | Workspace `READER_VERSION` (manual bump) | per-store `min_reader_version` on next write | none on its own — a guard against older binaries | open the library |
 
@@ -50,6 +51,18 @@ refresh command from the stamp comparison, prints the plan, and runs it
 after one confirmation. The commands named in the matrix remain the
 low-level escape hatch.
 
+The distill row is the one stamp nothing advances for you.
+`parser_version` lives in the operator's `book.toml`, and a stage whose
+behaviour changed produces different entries from the same source and
+the same recipe. Nothing refuses to serve the old entries, so a build
+that is never re-run leaves `reference.db` holding what the previous
+binary derived. Bump the book's `parser_version` in the same change that
+adopts the new behaviour, so the row in `reference.db` records which
+pipeline produced its entries. `bookrack distill verify <path>` re-runs
+the pipeline in memory and diffs it against the live database, which is
+the cheap way to see what a stage change did to a book before rebuilding
+it.
+
 ### Stamps that advance without a refresh command
 
 Some version dimensions move without invalidating anything on disk, so
@@ -57,8 +70,11 @@ they carry no runbook step:
 
 - **Queue document schema** (`QUEUE_SCHEMA_VERSION`, now `6`) — the
   persistent ingest queue is versioned on its own track. An older
-  document loads unchanged in a newer binary; the bump is one-way, so
-  an older binary will not read a queue document a newer one wrote.
+  document loads unchanged in a newer binary. The bump is one-way: a
+  binary reading a document above its own version refuses it and starts
+  nothing, naming both versions. The document is left exactly as it was
+  found, so the version that wrote it still reads every job in it. See
+  *Downgrading* below for what that means in practice.
 - **Corpus fingerprint** — a 16-hex digest of the five corpus stamps
   (`embed_model` / `vector_dim` / `chunk_version` / `normalize_version`
   / ANN kind) recorded per search in `retrieval_calls`. It is a
@@ -154,6 +170,31 @@ changes `CHUNK_VERSION` or
 `NORMALIZE_VERSION` re-uses the existing chunk text but still costs
 one embedding pass per book.
 
+## Downgrading
+
+The matrix above describes moving forward. Going back is not a
+supported operation: a store whose schema was rolled forward in place
+refuses an older binary, and this document has no command that reverses
+a migration. Treat the snapshot a migration takes as the way back.
+
+The queue document is the one piece of state that outlives a data root
+swap — it spans libraries, so it lives in the daemon state directory
+rather than under any one root, and it is not covered by a snapshot of a
+library. `bookrack doctor` reports the directory and the document's
+state in its `daemon state` and `queue snapshot` rows.
+
+Two versions of a downgrade:
+
+- **To a binary that gates the queue document** (this version onward) —
+  the older binary refuses the document, names both versions, and starts
+  nothing. Nothing is lost: run the newer binary again, or move
+  `queue.json` aside to start with an empty queue. Queued jobs are file
+  paths, so they can be submitted again.
+- **To a binary older than that gate** — the older binary loads what it
+  understands, drops what it does not, and persists the truncated
+  document on its first write. Copy `queue.json` aside before running
+  it, and drain the queue first if the jobs matter.
+
 ## Declaring the embed model through an index profile
 
 `BOOKRACK_EMBED_MODEL` and the `embed_model` field in a root's
@@ -196,9 +237,9 @@ running daemon:
    that exports it; it does nothing now, but a variable that does
    nothing is a trap for the next reader.
 2. **See what the library's vectors were written with.** `bookrack
-   index-profile current --library <name>` prints the `stamps:` line.
-   That is the model the built index carries, and the one your profile
-   must declare.
+   index-profile current --library <name>` prints a `stamps (<pipeline>):`
+   line per pipeline. That is the model the built index carries, and the
+   one your profile must declare.
 3. **Pick a profile that declares that same model** and declare it:
    `bookrack libraries config <name> index_profile=<profile>`.
    `bookrack index-profile list` shows the built-ins and what each
@@ -208,10 +249,13 @@ running daemon:
 4. **Confirm the profile matches the vectors you already have.** Re-run
    `index-profile current` and read its `stamps:` line:
 
-   - `stamps: consistent with the built index (…)` — the profile
-     declares the model your vectors were written with. Done.
-   - `stamp mismatch: embed.model: profile declares 'X' but the built
-     index is stamped 'Y'` — **stop**. The library now resolves to `X`,
+   - `stamps (books): consistent with the built index (…)` — the profile
+     declares the model your vectors were written with. Done. There is
+     one line per pipeline: `(papers)` answers the same question for a
+     library that carries papers, and reads `no built index to compare
+     against` for one that does not.
+   - `stamp mismatch (books): embed.model: profile declares 'X' but the
+     built index is stamped 'Y'` — **stop**. The library now resolves to `X`,
      and every query and embed will fail against vectors written by `Y`.
      Go back to step 3 and pick a profile declaring `Y`, or change the
      library deliberately with `index-profile apply` (below).

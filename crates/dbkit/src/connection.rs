@@ -37,7 +37,8 @@ use rusqlite::{Connection, OpenFlags};
 /// windows the ingest worker produces in practice. A reader that
 /// blocks for longer is almost certainly waiting on a stuck writer,
 /// not on a normal commit.
-const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+// setting: db.busy_timeout
+pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Open a read-write SQLite connection at `path` and apply the
 /// production PRAGMA set.

@@ -35,7 +35,7 @@ placeholder_check = true
 purely_numeric = true
 # R-09 split into four named sub-rules. Each gates one detection path
 # against the trimmed title; the current implementation routes all four
-# through one combined detector pending the B1 §3.2 split.
+# through one combined detector pending a per-rule detector split.
 series_paren = true
 marketing_block = true
 aggregator_marker = true

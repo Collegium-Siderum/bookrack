@@ -63,22 +63,27 @@ use crate::pdf::{EXTRACTION_LOCK, pdfium};
 /// Maximum bytes of the head scanned for an anchor in the first pass.
 /// Five kilobytes covers a typical title page and first-page abstract;
 /// failing the head pass triggers a full-document second scan.
+// setting: internal -- how far the first anchor pass reads before the full scan takes over
 const HEAD_BYTES: usize = 5_000;
 
 /// Maximum characters returned as the abstract body. Captures even
 /// long PLoS-style summary panels while bounding worst-case output.
-const MAX_BODY_CHARS: usize = 3_000;
+// setting: extract.paper_abstract_chars_max
+pub(crate) const MAX_BODY_CHARS: usize = 3_000;
 
 /// Maximum characters returned by the no-anchor fallback. Two pages of
 /// dense Chinese text fit comfortably under this cap.
-const MAX_FALLBACK_CHARS: usize = 2_000;
+// setting: extract.paper_fallback_chars_max
+pub(crate) const MAX_FALLBACK_CHARS: usize = 2_000;
 
 /// Number of leading pages the fallback returns when no anchor matches.
+// setting: internal -- how much of the front matter the no-anchor fallback returns
 const FALLBACK_PAGES: usize = 2;
 
 /// Minimum character count an anchored body must reach to be accepted.
 /// A short result usually means the anchor matched a stray occurrence
 /// of the word in mid-text rather than a real heading.
+// setting: internal -- part of the anchor heuristic; moving it needs recalibration
 const MIN_ANCHOR_BODY_CHARS: usize = 80;
 
 /// Section names that close the abstract. Used both for `STOP` (a
@@ -230,7 +235,8 @@ static REFS_HEADING_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Maximum characters returned by [`extract_paper_metadata_text`]. The
 /// cap caps the DOI / venue scan against very long front matter on
 /// monograph-style PDFs and bounds worst-case allocation.
-const MAX_METADATA_CHARS: usize = 30_000;
+// setting: extract.paper_metadata_chars_max
+pub(crate) const MAX_METADATA_CHARS: usize = 30_000;
 
 /// Take raw page text from a paper PDF, suitable for DOI / venue /
 /// ISSN scans.

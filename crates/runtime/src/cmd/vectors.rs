@@ -2,15 +2,39 @@
 
 //! REPL-side vector-store writes: ANN rebuild, brute-force drop, and
 //! re-embed against the active model. Status reads live at
-//! `bookrack exec library.vectors_status`.
+//! `bookrack rpc call library.vectors_status`.
 
 use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_config::Config;
 use bookrack_corpus::{Corpus, EMBED_MODEL_KEY, VECTOR_DIM_KEY};
-use bookrack_vectors::ChunkStore;
+use bookrack_vectors::{AnnKind, ChunkStore};
 use eyre::{Context, Result};
 
+use crate::cmd::input_error::CmdInputError;
 use crate::embed_helpers::embedder;
+use crate::pipeline_run_helpers::{close_run, open_run};
+
+/// Parse a `--kind` value, reporting an unsupported one against the
+/// accepted set.
+///
+/// The set is read off [`AnnKind::ALL`] rather than transcribed, so a
+/// new kind reaches this message without anyone remembering to add it.
+/// The parse's own error is dropped: its wording describes a
+/// `vectors_meta.json` this caller never named.
+pub(crate) fn parse_ann_kind(s: &str) -> Result<AnnKind> {
+    s.parse().map_err(|_| {
+        CmdInputError::BadArgument {
+            arg: "kind",
+            value: s.to_string(),
+            expected: AnnKind::ALL
+                .iter()
+                .map(|k| k.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+        .into()
+    })
+}
 
 /// Render `bookrack vectors rebuild` — build or rebuild the ANN index
 /// from CLI flags, falling back to the persisted meta or the C1
@@ -30,8 +54,9 @@ pub async fn rebuild(
     let dim = corpus
         .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
         .context("read vector_dim stamp")?
-        .ok_or_else(|| {
-            eyre::eyre!("library has no ingested chunks yet; ingest a book before rebuild")
+        .ok_or(CmdInputError::NotIngested {
+            what: "ingested chunks",
+            hint: "Ingest a book before rebuilding the index.",
         })?
         .parse::<usize>()
         .context("parse vector_dim stamp")?;
@@ -40,9 +65,7 @@ pub async fn rebuild(
         .context("open vector store")?;
     // Pick the baseline: explicit kind > existing meta > default IvfFlat.
     let mut base = if let Some(s) = kind_str {
-        let kind: bookrack_vectors::AnnKind =
-            s.parse().with_context(|| format!("parse --kind {s:?}"))?;
-        bookrack_vectors::AnnConfig::default_for(kind)
+        bookrack_vectors::AnnConfig::default_for(parse_ann_kind(s)?)
     } else if let Some(c) = store
         .current_ann_cfg(&lancedb_dir)
         .context("read ann config")?
@@ -108,7 +131,13 @@ pub async fn execute_reembed_from_plan(
     let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
     let embed_cfg = crate::profile::effective_embed_config(cfg)?;
     let embedder_client = embedder(cfg, &embed_cfg)?;
-    bookrack_ingest::reembed::reembed_all(
+    let run = open_run(
+        &catalog,
+        &cfg.catalog_db(),
+        "reembed",
+        cfg.data_dir().to_str(),
+    );
+    let result = bookrack_ingest::reembed::reembed_all(
         &catalog,
         &corpus,
         &lancedb_dir,
@@ -119,7 +148,9 @@ pub async fn execute_reembed_from_plan(
         false,
     )
     .await
-    .context("reembed_all")
+    .context("reembed_all");
+    close_run(&catalog, run, result.is_ok());
+    result
 }
 
 /// Render `bookrack vectors drop` — drop any ANN index and stamp the
@@ -130,7 +161,10 @@ pub async fn drop(cfg: &Config) -> Result<()> {
     let dim = corpus
         .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
         .context("read vector_dim stamp")?
-        .ok_or_else(|| eyre::eyre!("library has no ingested chunks yet; nothing to drop"))?
+        .ok_or(CmdInputError::NotIngested {
+            what: "ingested chunks",
+            hint: "There is no index to drop until a book has been ingested.",
+        })?
         .parse::<usize>()
         .context("parse vector_dim stamp")?;
     let store = ChunkStore::open(&lancedb_dir, dim)
@@ -227,7 +261,15 @@ where
         }
     }
 
-    let report = match bookrack_ingest::reset::reset_and_rechunk(
+    // Registered past the confirmation prompt: a declined reset is not
+    // a pass and leaves no row behind.
+    let run = open_run(
+        &catalog,
+        &cfg.catalog_db(),
+        "reset",
+        cfg.data_dir().to_str(),
+    );
+    let outcome = bookrack_ingest::reset::reset_and_rechunk(
         &catalog,
         &corpus,
         &lancedb_dir,
@@ -235,8 +277,10 @@ where
         &embed_cfg,
         resume,
     )
-    .await
-    {
+    .await;
+    close_run(&catalog, run, outcome.is_ok());
+
+    let report = match outcome {
         Ok(report) => report,
         Err(e) => {
             // A mid-build failure leaves finished intakes at Embedded
@@ -259,4 +303,88 @@ where
     }
     println!("restart the daemon so the new model takes effect.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookrack_catalog::Catalog;
+
+    fn temp_cfg() -> (tempfile::TempDir, Config) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(
+            dir.path().to_path_buf(),
+            "http://localhost:11434".to_string(),
+        );
+        // `drop` names this module's command function, so the seed
+        // handles are released by falling out of the statement.
+        Catalog::open(&cfg.catalog_db()).expect("seed catalog");
+        Corpus::open(&cfg.corpus_db()).expect("seed corpus");
+        (dir, cfg)
+    }
+
+    fn runs(cfg: &Config) -> Vec<(String, Option<String>)> {
+        let catalog = Catalog::open_read_only(&cfg.catalog_db()).expect("open read-only");
+        catalog
+            .list_pipeline_runs(None, None)
+            .expect("list pipeline_runs")
+            .into_iter()
+            .map(|run| (run.command, run.status))
+            .collect()
+    }
+
+    /// A whole-library pass registers one run row and closes it with a
+    /// terminal status, so `bookrack runs list` shows that the pass
+    /// happened. An empty library still counts as a pass: the run is
+    /// about the invocation, not about how many items it touched.
+    #[tokio::test]
+    async fn reset_registers_and_closes_one_run() {
+        let (_tmp, cfg) = temp_cfg();
+
+        reset(&cfg, true, false, |_| Ok(true))
+            .await
+            .expect("reset succeeds on an empty library");
+
+        assert_eq!(
+            runs(&cfg),
+            vec![("reset".to_string(), Some("ok".to_string()))]
+        );
+    }
+
+    /// Declining the confirmation prompt is not a pass. Registering
+    /// before the prompt would leave a run row for something that
+    /// never ran.
+    #[tokio::test]
+    async fn a_declined_reset_registers_nothing() {
+        let (_tmp, cfg) = temp_cfg();
+
+        reset(&cfg, false, false, |_| Ok(false))
+            .await
+            .expect("declining is not an error");
+
+        assert!(
+            runs(&cfg).is_empty(),
+            "no run row for a pass that never ran"
+        );
+    }
+
+    /// The reembed pass registers on its execute leg. The plan leg is
+    /// a dry run and must stay out of the registry.
+    #[tokio::test]
+    async fn reembed_registers_on_the_execute_leg_only() {
+        let (_tmp, cfg) = temp_cfg();
+
+        let plan = plan_reembed(&cfg, None, false).await.expect("plan");
+        assert!(plan.is_empty(), "an empty library plans no work");
+        assert!(runs(&cfg).is_empty(), "the plan leg registers nothing");
+
+        execute_reembed_from_plan(&cfg, Vec::new())
+            .await
+            .expect("execute");
+
+        assert_eq!(
+            runs(&cfg),
+            vec![("reembed".to_string(), Some("ok".to_string()))]
+        );
+    }
 }

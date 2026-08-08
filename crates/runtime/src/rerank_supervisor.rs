@@ -31,8 +31,11 @@ use std::time::Duration;
 
 use bookrack_config::llama_server_pin::locate_llama_server;
 use bookrack_config::reranker_model_pin::locate_reranker_model;
-use bookrack_config::{Config, RerankerConfig};
-use bookrack_index_profile::RerankerKind;
+use bookrack_config::{Config, DEFAULT_RERANKER_CTX, RERANKER_SERVER_BATCH_SIZE, RerankerConfig};
+use bookrack_core::Problem;
+use bookrack_index_profile::{RerankerKind, RerankerSpec};
+
+use crate::backend_probe::PreflightRefusal;
 use bookrack_rerank::ServerHealth;
 use eyre::{Context, bail, eyre};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -114,35 +117,19 @@ pub struct RerankSupervisorConfig {
 }
 
 /// Longest delay between restart attempts.
-const RESTART_BACKOFF_CAP: Duration = Duration::from_secs(30);
-
-/// `-b`/`-ub` batch sizes for the spawned server. Rerank
-/// (`--pooling rank`) requires each query+document pair to fit inside
-/// one physical batch, and the server rejects a pair larger than `-ub`
-/// outright, failing the whole query. Chunked passages are capped at
-/// 1000 characters (`ChunkParams::default` in the ingest crate), which
-/// tokenizes to ~1300 tokens in the CJK worst case; 2048 covers that
-/// with headroom to spare.
-const SERVER_BATCH_SIZE: u32 = 2048;
-
-/// Default `-c` context size for the spawned server, overridable
-/// through `reranker.ctx`. Left unset, the server opens the model's
-/// full training context and sizes its KV cache to match — gigabytes
-/// for a workload that only ever holds one query+document pair per
-/// slot. The server defaults to four parallel slots, so four pairs at
-/// the batch cap bound the whole working set.
-const DEFAULT_SERVER_CTX: u32 = 4 * SERVER_BATCH_SIZE;
+// setting: reranker.restart_backoff_cap
+pub(crate) const RESTART_BACKOFF_CAP: Duration = Duration::from_secs(30);
 
 impl RerankSupervisorConfig {
     /// Defaults: a 60 s readiness deadline polled every 250 ms (the
     /// 0.6B model loads in seconds; the headroom is for slow disks),
     /// a 5 s TERM grace, restarts backing off from 1 s, and a context
-    /// sized to the rerank working set ([`DEFAULT_SERVER_CTX`]).
+    /// sized to the rerank working set ([`DEFAULT_RERANKER_CTX`]).
     pub fn new(server_bin: impl Into<PathBuf>, model_path: impl Into<PathBuf>) -> Self {
         RerankSupervisorConfig {
             server_bin: server_bin.into(),
             model_path: model_path.into(),
-            ctx: Some(DEFAULT_SERVER_CTX),
+            ctx: Some(DEFAULT_RERANKER_CTX),
             threads: None,
             pid_file: None,
             port: None,
@@ -291,25 +278,101 @@ pub struct RerankerRuntime {
 /// Per-request timeout for query-time rerank calls: generous enough
 /// for a full `top_k_in` window on a cold cache, far below a hung
 /// server.
-const RERANK_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+// setting: reranker.request_timeout
+pub(crate) const RERANK_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Transport retries for one rerank call. Two quick retries ride out
 /// a connection blip without stalling an interactive query through a
 /// whole supervisor restart window — that window surfaces as the
 /// query error the profile's atomicity demands.
-const RERANK_MAX_RETRIES: u32 = 2;
+// setting: reranker.request_retries_max
+pub(crate) const RERANK_MAX_RETRIES: u32 = 2;
 
 /// First retry backoff for a rerank call.
-const RERANK_BACKOFF_BASE: Duration = Duration::from_millis(250);
+// setting: reranker.request_backoff_base
+pub(crate) const RERANK_BACKOFF_BASE: Duration = Duration::from_millis(250);
 
 /// Candidate-window fallbacks when a profile omits the bounds. The
-/// validator requires both fields on a cross-encoder profile, so
-/// these only guard a spec that bypassed validation.
+/// validator requires both fields on a cross-encoder profile, so these
+/// only guard a spec that bypassed validation; the window a running
+/// library actually applies is the profile's, which
+/// `bookrack index-profile current` reports.
+// setting: internal -- guards a spec the profile validator rejects
 const DEFAULT_TOP_K_IN: usize = 50;
+// setting: internal -- the other half of the same guard
 const DEFAULT_TOP_K_OUT: usize = 10;
 
-/// Bring up the reranker backend a library's effective profile
-/// demands, during daemon bring-up and before the daemon serves.
+/// Render a reranker section as the clause the refusal below reads it
+/// out with.
+fn render_reranker(spec: &RerankerSpec) -> String {
+    match spec.kind {
+        RerankerKind::None => "no reranker stage".to_string(),
+        RerankerKind::CrossEncoder => match spec.model.as_deref() {
+            Some(model) => format!("a cross-encoder stage on {model:?}"),
+            None => "a cross-encoder stage".to_string(),
+        },
+    }
+}
+
+/// The configuration bring-up serves the mounted set's reranker stage
+/// under, or the refusal naming the two libraries that disagree.
+///
+/// One supervised backend serves every mounted library, so agreement is
+/// a precondition rather than a preference. Taking the stage from the
+/// bring-up-selected library alone leaves a library that declares a
+/// cross-encoder served with no reranker at all, and nothing downstream
+/// re-reads that library's profile — the silent half of the promise
+/// [`bring_up_reranker`] documents.
+///
+/// The configuration handed back is the first agreeing mount's, not the
+/// primary's: once the set agrees every member resolves the same stage,
+/// and sourcing it from the set keeps the primary from being a special
+/// case here. `None` when no mount resolves a profile at all.
+///
+/// A library that references no profile counts as declaring no reranker
+/// — that is what it is served as — while a profile that fails to
+/// resolve is not this check's business: the step that owns resolution
+/// reports it with its own wording.
+pub fn agreed_reranker_config(
+    mounts: &[(String, Arc<Config>)],
+) -> Result<Option<&Config>, PreflightRefusal> {
+    let mut agreed: Option<(&str, RerankerSpec, &Config)> = None;
+    for (name, cfg) in mounts {
+        let spec = match crate::profile::effective_index_profile(cfg) {
+            Ok(Some(effective)) => effective.profile.reranker,
+            Ok(None) => RerankerSpec::default(),
+            Err(_) => continue,
+        };
+        match &agreed {
+            None => agreed = Some((name, spec, cfg)),
+            Some((first, first_spec, _)) if *first_spec != spec => {
+                return Err(PreflightRefusal {
+                    library: name.clone(),
+                    problem: Problem::new(
+                        "cannot serve libraries whose index profiles disagree on the reranker stage",
+                    )
+                    .detail(format!(
+                        "Library {first:?} resolves to {}; library {name:?} resolves to {}.",
+                        render_reranker(first_spec),
+                        render_reranker(&spec),
+                    ))
+                    .hint(
+                        "One reranker backend serves every mounted library, so the mounted set \
+                         has to agree on it. Point the libraries at the same index profile, or \
+                         serve them from separate daemons. Run `bookrack index-profile current` \
+                         against each library to see what it resolves to.",
+                    ),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(agreed.map(|(_, _, cfg)| cfg))
+}
+
+/// Bring up the reranker backend the mounted set's agreed profile
+/// section demands, during daemon bring-up and before the daemon
+/// serves.
 ///
 /// Dispatch on the deployment mode: no backend at all when the
 /// profile enables no reranker stage; a single hard `/health` probe
@@ -319,6 +382,10 @@ const DEFAULT_TOP_K_OUT: usize = 10;
 /// supervised llama-server is spawned and held to readiness. Either
 /// verified mode upholds the profile's promise at startup; every
 /// failure refuses bring-up with the repair spelled out.
+///
+/// The caller passes the configuration
+/// [`agreed_reranker_config`] hands back, so the stage serving every
+/// mounted library is one the whole set resolves to.
 pub async fn bring_up_reranker(
     cfg: &Config,
     runtime_dir: &Path,
@@ -449,7 +516,7 @@ fn pick_loopback_port() -> std::io::Result<u16> {
 ///
 /// `--embedding --pooling rank` is what the rerank endpoint requires
 /// of the server and is deliberately not configurable. The batch
-/// sizes ([`SERVER_BATCH_SIZE`]) guarantee any query+document pair
+/// sizes ([`RERANKER_SERVER_BATCH_SIZE`]) guarantee any query+document pair
 /// fits one physical batch. `-ngl 99` offloads every layer to the GPU
 /// when the build has one and falls back to CPU cleanly when not.
 /// Slot reuse by prompt similarity is disabled: rerank prompts share
@@ -467,9 +534,9 @@ fn server_args(config: &RerankSupervisorConfig, port: u16) -> Vec<OsString> {
         "--port".into(),
         port.to_string().into(),
         "-ub".into(),
-        SERVER_BATCH_SIZE.to_string().into(),
+        RERANKER_SERVER_BATCH_SIZE.to_string().into(),
         "-b".into(),
-        SERVER_BATCH_SIZE.to_string().into(),
+        RERANKER_SERVER_BATCH_SIZE.to_string().into(),
         "-ngl".into(),
         "99".into(),
         "--slot-prompt-similarity".into(),

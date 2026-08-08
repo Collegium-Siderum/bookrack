@@ -16,6 +16,7 @@
 //! `index-profile current` to surface and for `index-profile apply` or
 //! `libraries scan` to repair.
 
+use bookrack_core::knob::{Candidate, KnobReach, Layer, ReadAt, resolve_knob};
 use serde::Serialize;
 
 use crate::LibraryEntry;
@@ -41,6 +42,24 @@ impl ProfileRefOrigin {
             ProfileRefOrigin::Registry => "registry",
         }
     }
+
+    /// The knob layer this source resolves at.
+    fn layer(self) -> Layer {
+        match self {
+            ProfileRefOrigin::Manifest => Layer::Manifest,
+            ProfileRefOrigin::Registry => Layer::Registry,
+        }
+    }
+
+    /// The source a knob layer stands for, or `None` for a layer this
+    /// knob never draws on.
+    fn from_layer(layer: Layer) -> Option<ProfileRefOrigin> {
+        match layer {
+            Layer::Manifest => Some(ProfileRefOrigin::Manifest),
+            Layer::Registry => Some(ProfileRefOrigin::Registry),
+            _ => None,
+        }
+    }
 }
 
 /// A lower-priority source naming a profile other than the effective
@@ -64,12 +83,37 @@ pub fn effective_profile_reference(
     manifest_ref: Option<&str>,
     registry_ref: Option<&str>,
 ) -> Option<(String, ProfileRefOrigin)> {
+    let origin = resolve_profile_ref(manifest_ref, registry_ref);
+    let value = origin.value?;
+    ProfileRefOrigin::from_layer(origin.layer).map(|source| (value, source))
+}
+
+/// The two sources in descending priority. The **only** place this
+/// module writes that order down: both public answers are read off the
+/// one row it produces, so they cannot disagree about which source won.
+fn profile_candidates(manifest_ref: Option<&str>, registry_ref: Option<&str>) -> Vec<Candidate> {
     [
-        (manifest_ref, ProfileRefOrigin::Manifest),
-        (registry_ref, ProfileRefOrigin::Registry),
+        (ProfileRefOrigin::Manifest, manifest_ref),
+        (ProfileRefOrigin::Registry, registry_ref),
     ]
     .into_iter()
-    .find_map(|(value, origin)| value.map(|v| (v.to_string(), origin)))
+    .map(|(source, value)| {
+        Candidate::of(source.layer(), source.as_str(), value.map(str::to_string))
+    })
+    .collect()
+}
+
+/// The resolved row behind both public answers.
+fn resolve_profile_ref(
+    manifest_ref: Option<&str>,
+    registry_ref: Option<&str>,
+) -> bookrack_core::knob::KnobOrigin {
+    resolve_knob(
+        "index_profile",
+        KnobReach::Library,
+        ReadAt::AfterResolution,
+        profile_candidates(manifest_ref, registry_ref),
+    )
 }
 
 /// Report every source that names a profile other than the effective
@@ -82,21 +126,21 @@ pub fn profile_reference_drift(
     manifest_ref: Option<&str>,
     registry_ref: Option<&str>,
 ) -> Vec<ProfileRefDrift> {
-    let Some((effective, _)) = effective_profile_reference(manifest_ref, registry_ref) else {
+    let origin = resolve_profile_ref(manifest_ref, registry_ref);
+    let Some(effective) = origin.value else {
         return Vec::new();
     };
-    [
-        (manifest_ref, ProfileRefOrigin::Manifest),
-        (registry_ref, ProfileRefOrigin::Registry),
-    ]
-    .into_iter()
-    .filter_map(|(value, source)| {
-        value.filter(|v| *v != effective).map(|v| ProfileRefDrift {
-            source,
-            stale_value: v.to_string(),
+    origin
+        .shadowed
+        .into_iter()
+        .filter(|s| s.value != effective)
+        .filter_map(|s| {
+            ProfileRefOrigin::from_layer(s.layer).map(|source| ProfileRefDrift {
+                source,
+                stale_value: s.value,
+            })
         })
-    })
-    .collect()
+        .collect()
 }
 
 /// The `index_profile` a registry entry list records for a library:
@@ -189,6 +233,66 @@ mod tests {
                 stale_value: "b".to_string(),
             }]
         );
+    }
+
+    /// Both answers come off one resolved row, so the source that won
+    /// can never also be reported as stale, and every lower source
+    /// naming something else must be. Swept over all nine combinations
+    /// of the two sources rather than the five spot cases above.
+    ///
+    /// This pins the relationship between the two answers, not the
+    /// number of priority lists behind them: with only two sources
+    /// there is at most one loser, so the order a second list would
+    /// impose is unobservable from the outside. What rules a second
+    /// list out is structural — `profile_candidates` is the only place
+    /// the order is written down.
+    ///
+    /// The two assertions differ in what they can catch. The first
+    /// holds by construction, since drift is filtered on the winning
+    /// value itself, and stands as a guard against an implementation
+    /// that stops filtering that way. The discriminating one is the
+    /// second: it recomputes the expected sources straight from the
+    /// inputs rather than from anything the module derives, so a
+    /// dropped, extra, or mislabelled source fails it.
+    #[test]
+    fn the_winning_source_is_never_also_reported_as_stale() {
+        let sources = [None, Some("a"), Some("b")];
+        for manifest in sources {
+            for registry in sources {
+                let effective = effective_profile_reference(manifest, registry);
+                let drift = profile_reference_drift(manifest, registry);
+                let context = format!("manifest={manifest:?} registry={registry:?}");
+
+                let Some((winning_value, winner)) = effective else {
+                    assert!(
+                        drift.is_empty(),
+                        "no effective reference, yet drift reported: {context}"
+                    );
+                    continue;
+                };
+
+                assert!(
+                    !drift.iter().any(|d| d.source == winner),
+                    "the winning source {winner:?} is also reported as stale: {context}"
+                );
+
+                let expected: Vec<ProfileRefOrigin> = [
+                    (ProfileRefOrigin::Manifest, manifest),
+                    (ProfileRefOrigin::Registry, registry),
+                ]
+                .into_iter()
+                .filter(|&(source, value)| {
+                    source != winner && value.is_some_and(|v| v != winning_value)
+                })
+                .map(|(source, _)| source)
+                .collect();
+                assert_eq!(
+                    drift.iter().map(|d| d.source).collect::<Vec<_>>(),
+                    expected,
+                    "{context}"
+                );
+            }
+        }
     }
 
     fn entry(name: &str, data_dir: &str, profile: Option<&str>) -> LibraryEntry {

@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 # Fail if tracked files leak local or private information.
 #
-# Rules 1-2 are generic patterns (they carry no private data) and run
-# everywhere, including CI. Rule 3 reads patterns from an optional,
+# Rules 1-2 and 8 are generic patterns (they carry no private data) and
+# run everywhere, including CI. Rule 3 reads patterns from an optional,
 # gitignored denylist file, so private literals never enter the
 # repository; it is skipped when that file is absent (e.g. a fresh CI
 # checkout).
@@ -96,6 +96,35 @@ for file in $(git grep -lE "$env_readers" -- 'crates/*/tests/*'); do
     fail=1
   fi
 done
+
+# 8. Section-mark citations. A section mark in committed text is always
+#    a pointer into some other document, and the documents this
+#    repository is allowed to name are its own — which are addressed by
+#    path and heading, never by section number. So the mark itself is
+#    the signal: wherever it appears, the target is a document the
+#    reader cannot open. The rule reaches doc comments, error strings,
+#    and catalog descriptions alike, because the harm grows with how far
+#    the text travels and the outermost of them serialize into an MCP
+#    tool schema.
+#
+#    Two legitimate needs keep an outlet. A parser matching a literal
+#    section mark in book text escapes it — `\u{a7}` in Rust, `\u00A7`
+#    in a TOML basic string — the same discipline rule 2 leaves for CJK,
+#    which keeps the byte out of the source while the program still sees
+#    the character. Prose citing a public specification writes the word
+#    ("RFC 3986 section 3.2"), which costs nothing and reads better.
+#
+#    This catches the shape, not the vocabulary: a comment naming a
+#    working note without citing a section still passes. The names
+#    themselves are private, so they belong in the rule 3 denylist.
+if git grep -nP '\x{a7}' -- \
+  '*.rs' '*.toml' '*.md' '*.ts' '*.svelte' '*.json' '*.html' '*.css' '*.js' \
+  ':!*/tests/fixtures/*'; then
+  echo "LEAK: a section mark cites a document by number; name an in-tree"
+  echo "      path, write \"section N\" for a public spec, or escape a"
+  echo "      literal as \\u{a7} (Rust) / \\u00A7 (TOML)"
+  fail=1
+fi
 
 if [ "$fail" -eq 0 ]; then
   echo "leak-check: clean"
