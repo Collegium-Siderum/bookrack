@@ -9,7 +9,7 @@
 //!    (the macOS / Linux / Windows user-root forms, plus
 //!    `/Volumes/<seg>/`) → `<USER>/` or `<VOL>/`.
 //!    Matched case-insensitively per ASCII so macOS `realpath`
-//!    capitalisation (e.g. `zhitai` vs `ZHITAI` for the same volume)
+//!    capitalisation (e.g. `disk` vs `DISK` for the same volume)
 //!    collapses to one form.
 //! 2. Literal `data_dir` path → `<DATA_DIR>` (kept as a more specific
 //!    fallback when the configured path was not normalised through
@@ -149,7 +149,7 @@ pub const USER_PLACEHOLDER: &str = "<USER>";
 /// Linux user-root prefixes, and the Windows user-root prefix. `<seg>`
 /// is the first path component after the prefix; both the prefix and
 /// the segment are matched case-insensitively per ASCII so macOS
-/// `realpath` capitalisation (e.g. `zhitai` vs `ZHITAI` for the same
+/// `realpath` capitalisation (e.g. `disk` vs `DISK` for the same
 /// volume) collapses to one form.
 fn scrub_os_prefixes(input: &str) -> String {
     let bytes = input.as_bytes();
@@ -478,8 +478,8 @@ mod tests {
         // Synthetic /Volumes/<seg>/ paths. Both cases collapse to
         // the same placeholder + remainder, regardless of how macOS
         // realpath chose to canonicalise the volume name.
-        let lower = s.scrub_string("/Volumes/zhitai/projects/foo.txt");
-        let upper = s.scrub_string("/Volumes/ZHITAI/projects/foo.txt");
+        let lower = s.scrub_string("/Volumes/disk/projects/foo.txt");
+        let upper = s.scrub_string("/Volumes/DISK/projects/foo.txt");
         assert_eq!(lower, "<VOL>/projects/foo.txt");
         assert_eq!(upper, "<VOL>/projects/foo.txt");
     }

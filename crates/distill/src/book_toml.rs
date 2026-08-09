@@ -212,7 +212,7 @@ field = "year_span.birth"
         // and a square tag holding the country. The angle tag is
         // leftmost, so only the skip list yields the country.
         let source = "<!-- page 1 (sheet 1) -->\n\
-             Chiura \u{5343}\u{6D66}\u{3008}\u{59D3}\u{3009}[\u{65E5}]\n";
+             Sample \u{7532}\u{4E59}\u{3008}\u{59D3}\u{3009}[\u{65E5}]\n";
         let (drafts, _) = pipeline.run(source.to_string()).expect("run");
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].payload.get("country").unwrap(), "\u{65E5}");

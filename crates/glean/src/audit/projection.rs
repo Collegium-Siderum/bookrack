@@ -226,7 +226,7 @@ mod tests {
         attrs.title = Some("Synthetic Findings in Test Spaces".to_string());
         attrs.year = Some("2019".to_string());
         attrs.publisher = Some("Journal of Synthetic Results Press".to_string());
-        attrs.doi = Some("10.18653/v1/n19-1423".to_string());
+        attrs.doi = Some("10.5555/synthetic.0001".to_string());
         attrs.arxiv_id = Some("2401.12345".to_string());
         attrs.issn = Some("0378-5955".to_string());
         attrs.container_title = Some("Journal of Synthetic Results".to_string());
