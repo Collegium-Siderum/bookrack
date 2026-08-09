@@ -240,6 +240,9 @@ fn find_marker(text: &str, from: usize) -> Option<usize> {
 
 /// Walk the body after frontmatter removal, splitting it into one
 /// `Page` per line-anchored `<!-- page <label> (sheet <n>) -->` marker.
+/// All three marker parts must sit on one line: a marker missing the
+/// infix or the suffix is rejected as a malformed package, never
+/// completed from a marker further down the text.
 fn scan_pages(text: &str) -> Result<Vec<Page>, ExtractError> {
     let Some(first) = find_marker(text, 0) else {
         return Err(ExtractError::MalformedPackage {
@@ -258,15 +261,23 @@ fn scan_pages(text: &str) -> Result<Vec<Page>, ExtractError> {
     let mut cursor = first;
     while let Some(abs_prefix) = find_marker(text, cursor) {
         let after_prefix = abs_prefix + MARKER_PREFIX.len();
-        let Some(infix_off) = text[after_prefix..].find(MARKER_INFIX) else {
+        // A marker occupies one line, the same assumption `find_marker`
+        // anchors on. Both remaining parts are searched inside that line
+        // only, so a marker missing one of them cannot take it from a
+        // later marker — or from one quoted in the body it heads.
+        let line_end = text[after_prefix..]
+            .find('\n')
+            .map_or(text.len(), |rel| after_prefix + rel);
+        let marker_line = text[abs_prefix..line_end].trim_end();
+        let Some(infix_off) = text[after_prefix..line_end].find(MARKER_INFIX) else {
             return Err(ExtractError::MalformedPackage {
-                detail: "marker missing `(sheet ` infix".into(),
+                detail: format!("marker missing `(sheet ` infix: {marker_line:?}"),
             });
         };
         let after_infix = after_prefix + infix_off + MARKER_INFIX.len();
-        let Some(suffix_off) = text[after_infix..].find(MARKER_SUFFIX) else {
+        let Some(suffix_off) = text[after_infix..line_end].find(MARKER_SUFFIX) else {
             return Err(ExtractError::MalformedPackage {
-                detail: "marker missing `) -->` suffix".into(),
+                detail: format!("marker missing `) -->` suffix: {marker_line:?}"),
             });
         };
         let sheet_str = text[after_infix..after_infix + suffix_off].trim();
@@ -460,6 +471,102 @@ second page body
         assert_eq!(pages[1].sheet, 2);
         assert!(pages[0].body.contains("first"));
         assert!(pages[1].body.contains("second"));
+    }
+
+    #[test]
+    fn scan_pages_rejects_a_marker_missing_its_sheet_infix() {
+        let text = "\
+<!-- page 1 (sheet 1) -->
+
+first page body
+
+<!-- page 2 -->
+
+second page body
+
+<!-- page 3 (sheet 3) -->
+
+third page body
+";
+        let outcome = scan_pages(text);
+        assert!(
+            matches!(&outcome, Err(ExtractError::MalformedPackage { .. })),
+            "a marker missing its `(sheet ` infix must be rejected, not swallow \
+             the page body it heads: {outcome:?}",
+        );
+    }
+
+    #[test]
+    fn scan_pages_rejects_a_malformed_marker_ahead_of_a_quoted_one() {
+        let text = "\
+<!-- page 1 (sheet 1) -->
+
+first page body
+
+<!-- page 2 -->
+
+The token <!-- page 9 (sheet 9) --> is written inline here.
+
+<!-- page 3 (sheet 3) -->
+
+third page body
+";
+        let outcome = scan_pages(text);
+        assert!(
+            matches!(&outcome, Err(ExtractError::MalformedPackage { .. })),
+            "a malformed marker must not take its sheet number from a marker \
+             quoted inside the body it heads, which pairs a fabricated page \
+             number with another page's text: {outcome:?}",
+        );
+    }
+
+    #[test]
+    fn scan_pages_rejects_a_marker_missing_its_suffix() {
+        let text = "\
+<!-- page 1 (sheet 1) -->
+
+first page body
+
+<!-- page 2 (sheet 2
+
+second page body
+
+<!-- page 3 (sheet 3) -->
+
+third page body
+";
+        let err = scan_pages(text).expect_err("must reject a marker missing its suffix");
+        let ExtractError::MalformedPackage { detail } = err else {
+            panic!("expected MalformedPackage, got {err:?}");
+        };
+        assert!(
+            detail.contains("suffix"),
+            "the diagnostic must name the missing `) -->` suffix rather than \
+             blame the sheet number it read across the following lines: {detail}",
+        );
+    }
+
+    #[test]
+    fn scan_pages_keeps_each_page_body_with_its_own_sheet() {
+        let text = "\
+<!-- page 1 (sheet 1) -->
+
+alpha
+
+<!-- page ii (sheet 2) -->
+
+beta
+
+<!-- page 3 (sheet 3) -->
+
+gamma
+";
+        let pages = scan_pages(text).expect("scan");
+        let pairs: Vec<(u32, &str)> = pages
+            .iter()
+            .map(|page| (page.sheet, page.body.trim()))
+            .collect();
+        assert_eq!(pairs, vec![(1, "alpha"), (2, "beta"), (3, "gamma")]);
     }
 
     #[test]

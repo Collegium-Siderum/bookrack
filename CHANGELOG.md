@@ -8,6 +8,26 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A malformed OCR page marker is rejected instead of quietly costing a
+  page.** The marker scan looked for the `(sheet ` and `) -->` parts of
+  `<!-- page <label> (sheet <n>) -->` anywhere after the marker's
+  opening, not just on the marker's own line. A marker missing one of
+  them therefore borrowed the part from a marker further down the text:
+  the page it headed vanished from the extraction, and if its body
+  happened to quote a marker inline, that quoted marker's sheet number
+  was paired with text belonging to the page before it — a citation
+  pointing at the wrong page. Both searches are now bounded to the
+  marker's line, which is the assumption the scan already made when it
+  refused to recognise a marker quoted mid-line, and the error names the
+  offending line.
+
+  Ingest's coverage check caught the plain missing-page case as `OCR
+  product is missing pages`, so the usual symptom was a re-OCR that
+  changed nothing; with `--allow-partial`, or an explicit expected page
+  count, nothing caught it.
+
 ## [0.11.0] - 2026-08-08
 
 ### Added
