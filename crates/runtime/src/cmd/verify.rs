@@ -1,21 +1,41 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `bookrack verify` — per-store schema and on-disk file checks.
+//! `bookrack verify` — per-store schema and on-disk file checks. The
+//! report is built here and serialised by the `verify.run` control-plane
+//! method; nothing in this module prints.
 
 use bookrack_catalog::{Catalog, IntakeFilter};
 use bookrack_config::Config;
 use bookrack_corpus::Corpus;
 use eyre::{Context, Result};
 
-use crate::render;
-
-pub fn run(cfg: &Config) -> Result<()> {
-    let report = build_verify_report(cfg);
-    render::verify(&report);
-    if report.catalog_schema_error.is_some() || report.corpus_schema_error.is_some() {
-        eyre::bail!("one or more stores failed verification");
-    }
-    Ok(())
+/// Per-store findings the `verify.run` control-plane method returns.
+/// Every field is optional: an unverifiable store leaves its schema flag
+/// false and its error populated, and the rest skip the counts that
+/// depend on it.
+#[derive(Default, serde::Serialize)]
+pub struct VerifyReport {
+    /// Set when the data directory has neither `catalog.db` nor
+    /// `corpus.db` — verify short-circuits in that case and reports
+    /// nothing else.
+    pub not_initialised: bool,
+    /// Set when `catalog.db` is absent while `corpus.db` exists; the
+    /// store is reported missing rather than opened into existence.
+    pub catalog_missing: bool,
+    /// Set when `corpus.db` is absent while `catalog.db` exists.
+    pub corpus_missing: bool,
+    pub catalog_schema_ok: bool,
+    pub catalog_schema_error: Option<String>,
+    pub corpus_schema_ok: bool,
+    pub corpus_schema_error: Option<String>,
+    pub intake_count: Option<u64>,
+    pub missing_intake_files: Option<Vec<i64>>,
+    pub vectors_built_at_chunk_count: Option<u64>,
+    pub vectors_churn: Option<u64>,
+    /// Why `vectors_meta.json` could not be read, flattened to its full
+    /// source chain. Distinct from all three counts being absent, which
+    /// is a library that never built an ANN index.
+    pub vectors_meta_error: Option<String>,
 }
 
 /// Collect verifiable findings for every store under `cfg`. Each
@@ -25,8 +45,8 @@ pub fn run(cfg: &Config) -> Result<()> {
 /// directory with neither `catalog.db` nor `corpus.db` is reported as
 /// `not_initialised`; one store present without the other reports the
 /// absent one as missing instead of inventing it.
-pub fn build_verify_report(cfg: &Config) -> render::VerifyReport {
-    let mut report = render::VerifyReport {
+pub fn build_verify_report(cfg: &Config) -> VerifyReport {
+    let mut report = VerifyReport {
         catalog_missing: !cfg.catalog_db().exists(),
         corpus_missing: !cfg.corpus_db().exists(),
         ..Default::default()
