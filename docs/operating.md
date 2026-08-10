@@ -463,6 +463,15 @@ the process, a `.env` above the working directory included. Fix either
 by correcting `HOME` and running again, or read the bundle before
 attaching it.
 
+A file the bundle could not copy verbatim is reported the same way.
+One damaged log or crash report costs that file, not the run, and the
+section it belongs to gains a `read-notes.json` listing what happened
+to it: `lossy-utf8` means the file is in the bundle but held bytes
+that are not valid UTF-8, which read back as `U+FFFD`; `unreadable`
+and `unwritable` mean it is not in the bundle at all. A section with
+nothing to report writes no such file, so the bundle only carries the
+notes when there is something to know.
+
 ## Observability
 
 `bookrack logs` reads the daemon's log stream: `--follow` (the default

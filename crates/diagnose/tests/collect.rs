@@ -162,6 +162,13 @@ fn collect_writes_a_bundle_with_every_collector_present() {
         !names.iter().any(|n| n.starts_with("vectors/")),
         "an absent sidecar must not produce a vectors/ entry; got: {names:?}"
     );
+
+    // Every seeded file is intact, so no section reports a degraded
+    // copy: the notes file exists only when there is something to note.
+    assert!(
+        !names.iter().any(|n| n.ends_with("read-notes.json")),
+        "a clean run must not write a read-notes file; got: {names:?}"
+    );
 }
 
 #[test]
@@ -307,6 +314,132 @@ fn scrub_replaces_private_paths_and_titles_inside_the_bundle() {
     assert!(
         !body.contains(cjk_title),
         "a CJK run leaked into the bundle: {body}"
+    );
+}
+
+/// Two CJK characters (U+7532 U+4E59) written as escapes so no CJK
+/// bytes sit in this source file. Used as a stand-in title.
+const CJK_PAIR: &str = "\u{7532}\u{4E59}";
+
+/// Bytes of a log file whose tail was truncated mid-write: one intact
+/// JSON record, then a plain line carrying [`CJK_PAIR`] with an
+/// invalid byte wedged between its two characters.
+fn truncated_log_bytes() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"{\"level\":\"info\",\"msg\":\"kept\"}\n");
+    bytes.extend_from_slice("\u{7532}".as_bytes());
+    bytes.push(0xff);
+    bytes.extend_from_slice("\u{4E59}".as_bytes());
+    bytes.push(b'\n');
+    bytes
+}
+
+/// Read `<section>/read-notes.json` from the archive and return the
+/// state recorded for `file`, or `None` when the file has no note.
+fn read_note_state(bundle: &Path, section: &str, file: &str) -> Option<String> {
+    let bytes = read_archive_file(bundle, &format!("{section}/read-notes.json"));
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    doc["files"]
+        .as_array()
+        .expect("read-notes.json carries a files array")
+        .iter()
+        .find(|e| e["file"] == file)
+        .map(|e| e["state"].as_str().expect("a state string").to_string())
+}
+
+#[test]
+fn a_non_utf8_log_file_does_not_destroy_the_bundle() {
+    isolate_daemon_state_dir();
+    let fx = Fixture::build();
+    let logs = fx.cfg.data_dir().join("logs");
+    // Alongside the fixture's intact 2024-06-05 file, a second one
+    // inside the same window whose tail is not valid UTF-8.
+    std::fs::write(logs.join("bookrack.log.2024-06-04"), truncated_log_bytes()).unwrap();
+
+    let opts = Options {
+        now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
+        ..Options::default()
+    };
+    let report = collect(&fx.cfg, &opts).expect("one unreadable log must not fail the bundle");
+
+    // The intact file is unaffected by its neighbour.
+    let good = read_archive_file(&report.out_path, "logs/bookrack.log.2024-06-05");
+    assert!(!good.is_empty(), "the intact log must still be collected");
+
+    // The damaged file rides through with its readable content kept.
+    let body = String::from_utf8(read_archive_file(
+        &report.out_path,
+        "logs/bookrack.log.2024-06-04",
+    ))
+    .unwrap();
+    assert!(
+        body.contains("kept"),
+        "the records before the damage must survive; got: {body}"
+    );
+    // The damage must not hand the scrubber two single characters
+    // where it had one hashable run: rule 5 leaves a lone CJK
+    // character alone, so a split run would put the title in the
+    // bundle verbatim.
+    assert!(
+        !body.contains('\u{7532}') && !body.contains('\u{4E59}'),
+        "a CJK run split by the damaged byte leaked into the bundle: {body}"
+    );
+    assert!(
+        body.contains("<cjk:"),
+        "expected the run to hash as one token; got: {body}"
+    );
+
+    // Degrading silently would hide an incomplete bundle from the very
+    // reader the bundle exists for.
+    assert_eq!(
+        read_note_state(&report.out_path, "logs", "bookrack.log.2024-06-04"),
+        Some("lossy-utf8".to_string()),
+        "the damaged file must be recorded as degraded"
+    );
+    assert_eq!(
+        read_note_state(&report.out_path, "logs", "bookrack.log.2024-06-05"),
+        None,
+        "an intact file must not be recorded as degraded"
+    );
+}
+
+#[test]
+fn a_non_utf8_crash_report_does_not_destroy_the_bundle() {
+    isolate_daemon_state_dir();
+    let fx = Fixture::build();
+    let logs = fx.cfg.data_dir().join("logs");
+    // A crash report is exactly the artifact a kill signal truncates.
+    std::fs::write(logs.join("crash-1717573100000.txt"), truncated_log_bytes()).unwrap();
+
+    let opts = Options {
+        now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
+        ..Options::default()
+    };
+    let report = collect(&fx.cfg, &opts).expect("one unreadable crash must not fail the bundle");
+
+    let intact = read_archive_file(&report.out_path, "crashes/crash-1717573000000.txt");
+    assert!(
+        !intact.is_empty(),
+        "the intact report must still be collected"
+    );
+
+    let body = String::from_utf8(read_archive_file(
+        &report.out_path,
+        "crashes/crash-1717573100000.txt",
+    ))
+    .unwrap();
+    assert!(
+        body.contains("kept"),
+        "the readable part of the report must survive; got: {body}"
+    );
+    assert!(
+        !body.contains(CJK_PAIR) && !body.contains('\u{7532}'),
+        "a CJK run split by the damaged byte leaked into the bundle: {body}"
+    );
+    assert_eq!(
+        read_note_state(&report.out_path, "crashes", "crash-1717573100000.txt"),
+        Some("lossy-utf8".to_string()),
+        "the damaged report must be recorded as degraded"
     );
 }
 

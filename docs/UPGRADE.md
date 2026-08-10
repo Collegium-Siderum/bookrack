@@ -346,6 +346,35 @@ The knobs themselves are unchanged. Declare the listen address with
 Nothing about the resolved values changes — only where they may be
 written.
 
+## Diagnose bundle schema 4
+
+`manifest.json` inside a `bookrack diagnose` bundle carries a
+`schema_version`. It moved from 3 to 4 because the scrubbing contract
+changed: rule 5, which replaces runs of two or more CJK characters
+with a `<cjk:…>` hash token, no longer treats U+FFFD as the end of a
+run. A log file whose bytes were damaged decodes with U+FFFD wherever
+the damage was, and a damaged run used to break into pieces too short
+for the rule to redact.
+
+Nothing on disk goes stale and there is no refresh command — a bundle
+is a product, not a store, and this binary neither reads nor rewrites
+one it produced earlier. The version matters to whoever *reads* a
+bundle:
+
+- A bundle stamped 3 or lower may carry CJK text the current rule
+  would have redacted, in the files listed under `logs/` and
+  `crashes/`. Treat an old bundle as less redacted than its
+  `scrubbed: true` claims.
+- A run of CJK characters and the same run with damaged bytes inside
+  it now hash to the same token, so two bundles from one library stay
+  comparable across the damage.
+
+Bundles from schema 4 also carry `<section>/read-notes.json` in any
+section that could not copy a file verbatim. A file listed there as
+`lossy-utf8` is present but decoded with substitutions; one listed as
+`unreadable` or `unwritable` is absent from the bundle entirely. A
+section with nothing to report writes no such file.
+
 ## What never refreshes automatically
 
 bookrack never decides, on its own, that derived content is stale and

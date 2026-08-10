@@ -10,6 +10,34 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **One damaged log file no longer costs the whole diagnose bundle.**
+  `bookrack diagnose` read each log file and crash report as UTF-8 and
+  propagated a decode failure out of the collector, so a single file
+  holding invalid bytes ended the run with `stream did not contain
+  valid UTF-8` and produced no bundle at all. This landed on the worst
+  possible class of file: a process killed mid-write leaves a
+  half-written record at the tail of exactly the log or crash report
+  the bundle is being assembled to explain. Both collectors now decode
+  lossily and treat a per-file failure the way an unreadable source
+  directory was already treated — the file is skipped, the rest of the
+  bundle is written.
+
+  Nothing degrades silently. A section that could not copy a file
+  verbatim writes `<section>/read-notes.json` naming each one and its
+  state: `lossy-utf8` (in the bundle, decoded with substitutions),
+  `unreadable`, or `unwritable` (absent from the bundle). A section
+  with nothing to report writes no such file.
+
+  The scrubber changed with it, which moves the bundle's
+  `schema_version` from 3 to 4. Rule 5 hashes runs of two or more CJK
+  characters, so the U+FFFD a lossy decode leaves behind would have
+  split a redacted run into single characters the rule passes
+  through — the damaged file would have carried a book title into the
+  bundle in the clear. A U+FFFD inside a run now continues it, and is
+  excluded from the hashed span so a damaged run and a clean one
+  produce the same token. See `docs/UPGRADE.md` for what the bump
+  means to a reader of an older bundle.
+
 - **A malformed OCR page marker is rejected instead of quietly costing a
   page.** The marker scan looked for the `(sheet ` and `) -->` parts of
   `<!-- page <label> (sheet <n>) -->` anywhere after the marker's

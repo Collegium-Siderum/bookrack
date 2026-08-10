@@ -20,6 +20,9 @@
 //!    `<file:sha8>.<ext>` token, so latin-script titles cannot leak
 //!    through path strings.
 //! 5. Runs of two-or-more CJK characters → 12-hex-char sha256 prefix.
+//!    A U+FFFD inside a run continues it rather than ending it, so a
+//!    lossily decoded source cannot split a hashed run into
+//!    single characters the rule leaves alone.
 //!
 //! Integer ids, sha256 hashes, stamp constants, and ASCII paths under
 //! the (already-redacted) `<VOL>` / `<USER>` / `<DATA_DIR>` ride
@@ -348,19 +351,43 @@ fn match_book_basename(
 /// Replace each run of two or more CJK characters with the 12-hex-char
 /// prefix of its sha256, wrapped in `<cjk:…>` so a reader can spot a
 /// redaction.
+///
+/// U+FFFD does not end a run. A file decoded lossily carries one
+/// wherever a byte sequence was damaged, and treating it as a boundary
+/// would cut a run into pieces short enough to fall under the
+/// two-character threshold — the redaction would drop out exactly
+/// where the text is least trustworthy. It is also excluded from the
+/// hashed span, so a damaged run and a clean one produce the same
+/// token. A U+FFFD with no run open is ordinary text and rides through
+/// in place.
 fn hash_cjk_runs(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut run = String::new();
+    let mut held = 0usize;
     for c in input.chars() {
         if is_cjk(c) {
             run.push(c);
+            held = 0;
+        } else if c == char::REPLACEMENT_CHARACTER && !run.is_empty() {
+            held += 1;
         } else {
             flush_run(&mut out, &mut run);
+            push_held(&mut out, &mut held);
             out.push(c);
         }
     }
     flush_run(&mut out, &mut run);
+    push_held(&mut out, &mut held);
     out
+}
+
+/// Emit the replacement characters held back inside a run that turned
+/// out to end at them.
+fn push_held(out: &mut String, held: &mut usize) {
+    for _ in 0..*held {
+        out.push(char::REPLACEMENT_CHARACTER);
+    }
+    *held = 0;
 }
 
 fn flush_run(out: &mut String, run: &mut String) {
@@ -455,6 +482,42 @@ mod tests {
         assert_eq!(a, b, "scrubber must be deterministic");
         assert!(a.contains("<cjk:"), "got: {a}");
         assert!(!a.contains(CJK_RUN));
+    }
+
+    /// A lossy decode replaces damaged bytes with U+FFFD, which can
+    /// land in the middle of a run. Treated as a run boundary it would
+    /// leave two single characters, and rule 5 hashes neither — the
+    /// title would reach the bundle in full.
+    #[test]
+    fn a_replacement_character_does_not_split_a_cjk_run() {
+        let s = scrubber();
+        // The leaking shape: a two-character run split in half leaves
+        // two runs of one, and rule 5 hashes neither.
+        let pair = "\u{7532}\u{4E59}";
+        let out = s.scrub_string("\u{7532}\u{FFFD}\u{4E59}");
+        assert!(
+            !out.chars().any(is_cjk),
+            "a CJK character rode through unhashed: {out}"
+        );
+        assert!(out.contains("<cjk:"), "got: {out}");
+        // The token identifies the title, not the damage: the same run
+        // read cleanly hashes to the same value, so two bundles of the
+        // same library stay comparable.
+        assert_eq!(out, s.scrub_string(pair));
+        let split_run = s.scrub_string("\u{7532}\u{4E59}\u{FFFD}\u{4E19}\u{4E01}");
+        assert_eq!(split_run, s.scrub_string(CJK_RUN));
+    }
+
+    /// A replacement character with no run to continue is ordinary
+    /// text and stays where it was.
+    #[test]
+    fn a_replacement_character_outside_a_run_rides_through() {
+        let s = scrubber();
+        assert_eq!(s.scrub_string("a\u{FFFD}b"), "a\u{FFFD}b");
+        let trailing = format!("{CJK_RUN}\u{FFFD}");
+        let out = s.scrub_string(&trailing);
+        assert!(out.starts_with("<cjk:"), "got: {out}");
+        assert!(out.ends_with('\u{FFFD}'), "got: {out}");
     }
 
     #[test]
