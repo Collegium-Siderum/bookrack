@@ -10,6 +10,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **`bookrack verify` now says why a catalog it could open could not be
+  read.** The intake count and the missing-file scan were both taken
+  with `.ok()`, so a store whose schema verified but whose rows could
+  not be read dropped the two counts and the reason for them together:
+  the report showed a pair of absent fields and nothing else, which a
+  reader cannot tell from a check that was never run. The report now
+  carries `intake_scan_error` — the cause chain, flattened — whenever
+  either read fails, and the counts it feeds stay absent. A catalog
+  that reads back is unchanged.
+
 - **One damaged log file no longer costs the whole diagnose bundle.**
   `bookrack diagnose` read each log file and crash report as UTF-8 and
   propagated a decode failure out of the collector, so a single file

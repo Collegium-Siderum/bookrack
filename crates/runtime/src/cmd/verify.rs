@@ -30,6 +30,12 @@ pub struct VerifyReport {
     pub corpus_schema_error: Option<String>,
     pub intake_count: Option<u64>,
     pub missing_intake_files: Option<Vec<i64>>,
+    /// Why the intake rows could not be read, flattened to its full
+    /// source chain. Set when `catalog.db` opened and its schema
+    /// verified but a read of the table failed, which leaves the two
+    /// counts above absent. Distinct from `intake_count` being
+    /// `Some(0)`, which is a readable catalog holding no intakes.
+    pub intake_scan_error: Option<String>,
     pub vectors_built_at_chunk_count: Option<u64>,
     pub vectors_churn: Option<u64>,
     /// Why `vectors_meta.json` could not be read, flattened to its full
@@ -62,8 +68,22 @@ pub fn build_verify_report(cfg: &Config) -> VerifyReport {
         match Catalog::open_read_only(&cfg.catalog_db()) {
             Ok(catalog) => {
                 report.catalog_schema_ok = true;
-                report.intake_count = catalog.count_intakes().ok();
-                report.missing_intake_files = scan_intake_files(cfg, &catalog).ok();
+                // A store whose schema verifies can still fail to be
+                // read. Both probes go through the same connection, so
+                // the first reason is kept and the second is dropped
+                // rather than overwriting it.
+                match catalog.count_intakes() {
+                    Ok(count) => report.intake_count = Some(count),
+                    // The variants are wrappers, so the chain is
+                    // flattened before it crosses the RPC boundary.
+                    Err(e) => report.intake_scan_error = Some(bookrack_core::error_chain(&e)),
+                }
+                match scan_intake_files(cfg, &catalog) {
+                    Ok(missing) => report.missing_intake_files = Some(missing),
+                    Err(e) => {
+                        report.intake_scan_error.get_or_insert(format!("{e:#}"));
+                    }
+                }
             }
             Err(e) => {
                 report.catalog_schema_error = Some(format!("{e:#}"));
@@ -222,6 +242,74 @@ mod tests {
         );
     }
 
+    /// Zero the b-tree root page of the `intake` table and of every
+    /// index over it, leaving the schema itself untouched. Schema
+    /// verification reads `sqlite_master` and the `PRAGMA` tables, so
+    /// the store still opens and verifies; every access path to the
+    /// rows lands on a page whose type byte is not a b-tree.
+    fn detach_intake_rows(cfg: &Config) {
+        let db = cfg.catalog_db();
+        let conn =
+            bookrack_dbkit::open_production_strict_read_only(&db).expect("open for page lookup");
+        let page_size: i64 = conn
+            .pragma_query_value(None, "page_size", |row| row.get(0))
+            .expect("read page size");
+        let mut stmt = conn
+            .prepare(
+                "SELECT rootpage FROM sqlite_master WHERE tbl_name = 'intake' AND rootpage > 0",
+            )
+            .expect("prepare root page query");
+        let roots: Vec<i64> = stmt
+            .query_map([], |row| row.get(0))
+            .expect("query root pages")
+            .map(|row| row.expect("root page"))
+            .collect();
+        assert!(!roots.is_empty(), "the intake table has no b-tree to zero");
+        drop(stmt);
+        drop(conn);
+
+        let mut bytes = std::fs::read(&db).expect("read the catalog file");
+        for root in roots {
+            let start = ((root - 1) * page_size) as usize;
+            bytes[start..start + page_size as usize].fill(0);
+        }
+        std::fs::write(&db, bytes).expect("write the catalog file");
+    }
+
+    #[test]
+    fn an_unreadable_intake_table_carries_its_reason_rather_than_absent_counts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = catalog_only_root(dir.path());
+        detach_intake_rows(&cfg);
+
+        let report = build_verify_report(&cfg);
+
+        // The store opened and its schema verified: the failure is a
+        // read, not a mismatch, and the report has to say so.
+        assert!(
+            report.catalog_schema_ok,
+            "the schema did not verify, so this is not the state under test: {:?}",
+            report.catalog_schema_error
+        );
+        let reason = report
+            .intake_scan_error
+            .as_deref()
+            .expect("an unreadable intake table carries its reason");
+        // `CatalogError::Sqlite`'s own Display is the wrapper `catalog
+        // database error`; the sqlite message is what names the defect,
+        // and it only survives if the chain was flattened.
+        assert!(
+            reason.starts_with("catalog database error: "),
+            "the reason did not carry the sqlite cause: {reason}"
+        );
+        assert!(
+            report.intake_count.is_none() && report.missing_intake_files.is_none(),
+            "counts that could not be read were reported anyway: {:?} / {:?}",
+            report.intake_count,
+            report.missing_intake_files
+        );
+    }
+
     #[test]
     fn a_catalog_only_root_reports_the_corpus_missing_without_creating_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -235,6 +323,15 @@ mod tests {
         assert!(report.corpus_missing);
         assert!(!report.corpus_schema_ok);
         assert!(report.corpus_schema_error.is_none());
+        // The negative half of the read-failure contract: a catalog
+        // that reads back carries counts and no reason.
+        assert_eq!(report.intake_count, Some(0));
+        assert_eq!(report.missing_intake_files.as_deref(), Some(&[][..]));
+        assert!(
+            report.intake_scan_error.is_none(),
+            "a readable catalog reported a read failure: {:?}",
+            report.intake_scan_error
+        );
         assert_eq!(
             db_files(dir.path()),
             before,
