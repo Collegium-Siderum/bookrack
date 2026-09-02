@@ -47,6 +47,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A node whose parent lies in another book is rejected at the write
+  boundary.** The corpus checked that a node's own id sat in its book's
+  partition but never looked at its `parent_id`, so a parent edge into
+  another book was accepted. That column cascades on delete: removing
+  the other book would have taken this book's subtree with it, silently.
+  No shipped ingest path builds such an edge; the check closes the gap
+  for the ones that follow, with the same `InvalidNode` error the
+  partition rule already raises.
+
 - **`bookrack verify` now says which table and column a schema
   mismatch is in.** `catalog_schema_error` and `corpus_schema_error`
   carried only the outer message, `catalog schema verification failed`,

@@ -402,6 +402,14 @@ impl NewNode {
         if self.node_id.partition() != self.book_root_id.partition() {
             return Err(reject("node id lies outside its book's partition"));
         }
+        // The parent edge never leaves the partition either: `parent_id`
+        // cascades on delete, so an edge into another book would let that
+        // book's removal take this node's subtree with it.
+        if let Some(parent) = self.parent_id
+            && parent.partition() != self.book_root_id.partition()
+        {
+            return Err(reject("parent lies outside the node's book partition"));
+        }
         // The depth-0 root is the one and only parentless node.
         if self.parent_id.is_none() != (self.depth == 0) {
             return Err(reject("only the depth-0 root may be parentless"));
@@ -971,6 +979,26 @@ mod tests {
             corpus.insert_node(&bad),
             Err(CorpusError::InvalidNode { .. })
         ));
+    }
+
+    #[test]
+    fn a_parent_from_another_book_is_rejected_on_insert() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (idx, root) = seed_book(&mut corpus, 1);
+        let (_, other_root) = seed_book(&mut corpus, 2);
+        // The node sits in its own book's partition; only its parent
+        // edge crosses into the other book.
+        let id = corpus.allocate_node_ids(idx, 1).expect("ids")[0];
+        let bad = NewNode::child(id, other_root, root, 0, 1, NodeType::Chapter);
+        match corpus.insert_node(&bad) {
+            Err(CorpusError::InvalidNode { reason, .. }) => {
+                assert!(
+                    reason.contains("parent"),
+                    "reason names the parent edge: {reason}"
+                );
+            }
+            other => panic!("a cross-book parent edge must be rejected, got {other:?}"),
+        }
     }
 
     #[test]
