@@ -303,11 +303,14 @@ fn split_issued(issued: Option<&CslDate>) -> (Option<String>, Option<String>) {
         };
         return (year, publication_date);
     }
+    // `get` returns `None` when byte 4 is not a char boundary, so a
+    // raw date that opens with multi-byte characters is rejected here
+    // instead of panicking in the slice.
     if let Some(raw) = date.raw.as_deref()
-        && raw.len() >= 4
-        && raw[..4].chars().all(|c| c.is_ascii_digit())
+        && let Some(head) = raw.get(..4)
+        && head.chars().all(|c| c.is_ascii_digit())
     {
-        return (Some(raw[..4].to_string()), None);
+        return (Some(head.to_string()), None);
     }
     (None, None)
 }
@@ -457,5 +460,25 @@ mod tests {
         };
         let back = round_trip(&item, 1);
         assert_eq!(back, item);
+    }
+
+    #[test]
+    fn split_into_catalog_survives_a_non_ascii_raw_issued_date() {
+        let item = CslItem {
+            id: "intake-1".to_string(),
+            item_type: Some("book".into()),
+            title: Some("A Synthetic Treatise".into()),
+            issued: Some(CslDate {
+                raw: Some("\u{4E8C}\u{96F6}\u{4E8C}\u{56DB}".into()),
+                ..CslDate::default()
+            }),
+            ..CslItem::default()
+        };
+        let (attrs, _) = split_into_catalog(&item, 1, ItemKind::Book);
+        assert_eq!(
+            attrs.year, None,
+            "a raw date without an ASCII year yields no year"
+        );
+        assert_eq!(attrs.publication_date, None);
     }
 }
