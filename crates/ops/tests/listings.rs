@@ -12,8 +12,9 @@ use std::path::PathBuf;
 use bookrack_catalog::{Catalog, NewCategory, NewIntake, NewOverride, NewPublicationAttrs};
 use bookrack_core::ItemKind;
 use bookrack_embed::OllamaEmbedClient;
+use bookrack_ops::dto::categories::CategoryBooks;
 use bookrack_ops::dto::{BookFilter, MAX_LIST_LIMIT, MetadataFilter};
-use bookrack_ops::reads::books::find_books;
+use bookrack_ops::reads::books::{category_counts, find_books};
 use bookrack_ops::reads::metadata::{list_metadata, list_pending_reviews};
 use bookrack_ops::{Caller, Ops};
 use tempfile::TempDir;
@@ -447,4 +448,54 @@ fn find_books_filters_on_language() {
         vec![german],
         "the latin book ({latin}) must not answer a german filter"
     );
+}
+
+/// The distribution is the browse entry to the `categories` filter: a
+/// tag it lists is one `find_books` can match, and the uncategorised
+/// row is the part of the library no tag reaches.
+#[test]
+fn category_counts_list_the_tags_find_books_can_match_and_the_rest_as_uncategorised() {
+    let fx = Fixture::build();
+    let a = fx.seed_book("sha-a", "Alpha");
+    let b = fx.seed_book("sha-b", "Beta");
+    let _c = fx.seed_book("sha-c", "Gamma");
+    fx.tag(a, "philosophy");
+    fx.tag(a, "history");
+    fx.tag(b, "philosophy");
+
+    let counts = category_counts(&fx.ops).expect("category counts");
+    assert_eq!(
+        counts.categories,
+        [
+            CategoryBooks {
+                category: "philosophy".into(),
+                books: 2,
+            },
+            CategoryBooks {
+                category: "history".into(),
+                books: 1,
+            },
+        ]
+    );
+    assert_eq!(counts.uncategorised, 1, "the untagged book is the rest");
+    assert_eq!(counts.total, 3);
+
+    // What the distribution lists is what the filter matches.
+    for line in &counts.categories {
+        let page = find_books(
+            &fx.ops,
+            BookFilter {
+                categories: vec![line.category.clone()],
+                ..BookFilter::default()
+            },
+            0,
+            0,
+        )
+        .expect("find by category");
+        assert_eq!(
+            page.total, line.books,
+            "the count under {:?} must be what the filter finds",
+            line.category
+        );
+    }
 }

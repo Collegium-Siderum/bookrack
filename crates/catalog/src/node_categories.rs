@@ -5,6 +5,12 @@
 //! One row per (node, category). A node may carry several categories,
 //! at most a few of them flagged primary; `source` records whether the
 //! tag was user-set, suggested by an LLM, or inferred.
+//!
+//! Two reads answer for the whole library rather than one node:
+//! [`Catalog::category_counts`] is the distribution a browser scans
+//! before it knows what to filter on, and
+//! [`Catalog::count_intakes_without_category`] is the row that says how
+//! much of the library that distribution leaves out.
 
 use bookrack_core::ItemKind;
 use bookrack_dbkit::{ColumnSpec, IndexSpec, TableSpec};
@@ -92,6 +98,16 @@ impl NodeCategory {
     }
 }
 
+/// One line of the library-wide category distribution: a category and
+/// the number of items of one kind carrying it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CategoryCount {
+    /// The category.
+    pub category: String,
+    /// Items of the queried kind carrying it.
+    pub items: u64,
+}
+
 /// A category tag about to be written.
 #[derive(Debug, Clone)]
 pub struct NewCategory {
@@ -176,6 +192,41 @@ impl Catalog {
         Ok(rows)
     }
 
+    /// Every category carried by at least one item of `kind`, with the
+    /// number of items carrying it, most-used first and by name within
+    /// a count. Tags under another kind's scope do not count. Served by
+    /// `idx_cat_cat`.
+    pub fn category_counts(&self, kind: ItemKind) -> Result<Vec<CategoryCount>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT category, COUNT(*) FROM node_categories              WHERE scope = :scope              GROUP BY category              ORDER BY COUNT(*) DESC, category",
+        )?;
+        let rows = stmt
+            .query_map(named_params! { ":scope": kind.as_scope_str() }, |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<(String, i64)>>>()?;
+        rows.into_iter()
+            .map(|(category, n)| {
+                Ok(CategoryCount {
+                    category,
+                    items: crate::count_as_u64(n)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Number of intake rows carrying no category under `kind`'s scope.
+    /// With [`Self::category_counts`] this is the whole library: every
+    /// intake is either counted under at least one category or here.
+    pub fn count_intakes_without_category(&self, kind: ItemKind) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM intake i              WHERE NOT EXISTS (SELECT 1 FROM node_categories nc                                WHERE nc.intake_id = i.intake_id AND nc.scope = :scope)",
+            named_params! { ":scope": kind.as_scope_str() },
+            |row| row.get(0),
+        )?;
+        crate::count_as_u64(n)
+    }
+
     /// Remove a category tag. Returns whether a row existed.
     pub fn remove_category(&self, intake_id: i64, kind: ItemKind, category: &str) -> Result<bool> {
         let affected = self.conn.execute(
@@ -253,5 +304,77 @@ mod tests {
             1
         );
         assert!(!catalog.remove_category(1, KIND, "history").expect("miss"));
+    }
+
+    /// Three registered intakes: the first tagged twice, the second
+    /// once, the third only under the paper scope — which for a book
+    /// query is the same as not at all.
+    fn distribution_fixture() -> Catalog {
+        let mut catalog = Catalog::open_in_memory().expect("open");
+        for sha in ["sha-1", "sha-2", "sha-3"] {
+            catalog
+                .register_intake(KIND, &crate::NewIntake::new(sha))
+                .expect("register");
+        }
+        for (intake_id, kind, category) in [
+            (1, KIND, "philosophy"),
+            (1, KIND, "history"),
+            (2, KIND, "philosophy"),
+            (3, ItemKind::Paper, "philosophy"),
+        ] {
+            catalog
+                .add_category(&NewCategory::new(
+                    intake_id, kind, category, "user", "human",
+                ))
+                .expect("tag");
+        }
+        catalog
+    }
+
+    #[test]
+    fn category_counts_count_items_per_category_within_the_kind_most_used_first() {
+        let catalog = distribution_fixture();
+        let counts = catalog.category_counts(KIND).expect("count");
+        assert_eq!(
+            counts,
+            [
+                CategoryCount {
+                    category: "philosophy".into(),
+                    items: 2,
+                },
+                CategoryCount {
+                    category: "history".into(),
+                    items: 1,
+                },
+            ],
+            "the paper-scope tag must not count, and the order is by count"
+        );
+    }
+
+    #[test]
+    fn the_uncategorised_count_covers_every_intake_the_distribution_misses() {
+        let catalog = distribution_fixture();
+        // Intake 3 carries a tag, but not under the book scope.
+        assert_eq!(
+            catalog.count_intakes_without_category(KIND).expect("count"),
+            1
+        );
+        // The two reads partition the library: a doubly tagged intake
+        // is not counted twice against the total.
+        let categorised: u64 = 2;
+        assert_eq!(
+            categorised + catalog.count_intakes_without_category(KIND).expect("count"),
+            catalog.count_intakes().expect("total")
+        );
+    }
+
+    #[test]
+    fn an_empty_catalog_has_no_categories_and_nothing_uncategorised() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        assert!(catalog.category_counts(KIND).expect("count").is_empty());
+        assert_eq!(
+            catalog.count_intakes_without_category(KIND).expect("count"),
+            0
+        );
     }
 }

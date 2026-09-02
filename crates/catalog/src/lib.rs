@@ -67,7 +67,7 @@ pub use item_pipeline_audit::{ItemPipelineAudit, NewItemPipelineAudit};
 pub use item_state::{ItemState, NewItemState};
 pub use mcp_tool_calls::{McpToolCall, NewMcpToolCall};
 pub use metadata_audit::{MetadataAudit, NewMetadataAudit};
-pub use node_categories::{NewCategory, NodeCategory};
+pub use node_categories::{CategoryCount, NewCategory, NodeCategory};
 pub use node_contributors::{CONTRIBUTOR_ROLES, NewContributor, NodeContributor};
 pub use node_overrides::{NewOverride, NodeOverride};
 pub use node_paper_audit::{FLAG_COLUMNS, GRADE_COLUMNS, NewNodePaperAudit, NodePaperAudit};
