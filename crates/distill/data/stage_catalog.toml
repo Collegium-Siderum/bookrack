@@ -68,7 +68,8 @@ params = [
 [split_at_first_cjk]
 input = "raws"
 output = "splits"
-description = "Cut each raw entry at the first CJK character; the head becomes the headword, the tail becomes the body."
+description = "Cut each raw entry at the first CJK character; the head becomes the headword, the tail becomes the body. An anchor with no latin head is kept whole as the headword and flagged."
+emits_flags = ["anchor_without_latin_head"]
 
 [split_headline_only]
 input = "raws"

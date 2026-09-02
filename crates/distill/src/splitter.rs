@@ -10,7 +10,11 @@
 //!   character; the latin prefix becomes the headword, the CJK
 //!   suffix folds back into the body. Used by the name-translation
 //!   books, whose anchors are bare latin headwords but whose bodies
-//!   start mid-line with a CJK reading.
+//!   start mid-line with a CJK reading. An anchor with nothing ahead
+//!   of its first CJK character is not cut: the whole anchor stays the
+//!   headword and the entry is stamped
+//!   [`ANCHOR_WITHOUT_LATIN_HEAD_FLAG`], so the key it derives is
+//!   non-empty and distinct from every other such entry in the book.
 //! * [`split_headline_only`] — promote the anchor whole as the
 //!   headword and join the body lines unchanged. The
 //!   no-special-handling splitter used by bilingual entries that the
@@ -21,6 +25,11 @@ use serde_json::Map;
 use crate::core::{Ctx, RawEntry, SplitEntry, StageData};
 use crate::error::ParseError;
 use crate::pipeline::Stage;
+
+/// Quality flag stamped by [`split_at_first_cjk`] on an entry whose
+/// anchor has no latin text ahead of its first CJK character. Declared
+/// in `crates/distill/data/quality_flags.toml`.
+pub const ANCHOR_WITHOUT_LATIN_HEAD_FLAG: &str = "anchor_without_latin_head";
 
 /// Construct a [`split_at_first_cjk`] stage.
 pub fn split_at_first_cjk() -> Box<dyn Stage> {
@@ -64,14 +73,23 @@ impl Stage for SplitHeadlineOnly {
 fn raw_to_split_at_first_cjk(raw: RawEntry) -> SplitEntry {
     let mut anchor = raw.anchor.clone();
     let mut body_lines = raw.body.clone();
+    let mut quality_flags = raw.quality_flags;
 
     if let Some(idx) = first_cjk_byte_index(&anchor) {
         let head = anchor[..idx].trim().to_string();
         let tail = anchor[idx..].trim().to_string();
-        if !tail.is_empty() {
-            body_lines.insert(0, tail);
+        if head.is_empty() {
+            // No latin head to cut off: keep the anchor whole rather
+            // than emit an empty headword that would collide with
+            // every other headless entry on `(book_slug, entry_key)`.
+            anchor = tail;
+            quality_flags.push(ANCHOR_WITHOUT_LATIN_HEAD_FLAG.to_string());
+        } else {
+            if !tail.is_empty() {
+                body_lines.insert(0, tail);
+            }
+            anchor = head;
         }
-        anchor = head;
     }
 
     SplitEntry {
@@ -81,7 +99,7 @@ fn raw_to_split_at_first_cjk(raw: RawEntry) -> SplitEntry {
         body: join_body(&body_lines),
         lang: raw.lang,
         payload: Map::new(),
-        quality_flags: raw.quality_flags,
+        quality_flags,
     }
 }
 
@@ -174,6 +192,25 @@ mod tests {
             out[0].body.contains("American baseball player"),
             "original body line must persist: {:?}",
             out[0].body
+        );
+    }
+
+    #[test]
+    fn split_at_first_cjk_keeps_an_anchor_that_opens_with_cjk_as_the_headword() {
+        let inputs = vec![raw(" \u{53F2}\u{5BC6}\u{65AF}", vec!["some body"])];
+        let out = run(split_at_first_cjk(), inputs);
+        assert_eq!(
+            out[0].headword, "\u{53F2}\u{5BC6}\u{65AF}",
+            "an anchor with no latin head keeps its whole text as the headword",
+        );
+        assert_eq!(out[0].body, "some body", "nothing moves into the body");
+        assert!(
+            out[0]
+                .quality_flags
+                .iter()
+                .any(|f| f == ANCHOR_WITHOUT_LATIN_HEAD_FLAG),
+            "the entry must carry the flag: {:?}",
+            out[0].quality_flags
         );
     }
 

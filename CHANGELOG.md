@@ -10,6 +10,22 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A distilled entry whose anchor opens with a CJK character no longer
+  overwrites its neighbours.** The `split_at_first_cjk` stage cut the
+  anchor at its first CJK character and kept the part in front as the
+  headword, so an anchor with nothing in front — a pure-CJK entry in a
+  latin-headword book, or one whose latin head the OCR lost — produced
+  an empty headword and an empty `entry_key`. Every such entry in a
+  book then landed on the same `(book_slug, entry_key)` row, each write
+  replacing the last, while the run reported the full split count. The
+  stage now keeps the whole anchor as the headword and stamps the new
+  `anchor_without_latin_head` quality flag (severity `warn`), so the
+  entry survives with a key of its own and `reference_lookup` can
+  filter it by severity. As a floor under every stage, `reference.db`
+  refuses an entry with an empty key outright instead of letting it
+  into the conflict clause; a `distill build` that produces one now
+  fails with the book and headword named.
+
 - **`bookrack verify` now says why a catalog it could open could not be
   read.** The intake count and the missing-file scan were both taken
   with `.ok()`, so a store whose schema verified but whose rows could

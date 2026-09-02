@@ -66,6 +66,13 @@ pub enum RefsError {
     #[error("invalid identifier: {0}")]
     InvalidIdentifier(String),
 
+    /// An entry arrived at [`Refs::upsert_entry`] with an empty
+    /// `entry_key`. The key is half of the table's unique constraint,
+    /// so every such entry in a book would collapse onto one row; the
+    /// write is refused before it reaches the conflict clause.
+    #[error("entry key is empty for headword {headword:?} in book {book_slug:?}")]
+    EmptyEntryKey { book_slug: String, headword: String },
+
     /// The same `IndexSpec::field` appeared twice in the spec list
     /// passed to `register_book` / `indexes::apply`. The previous
     /// implementation silently dropped one of the two; this is now
@@ -182,8 +189,15 @@ impl Refs {
     /// Insert one distilled entry or update the existing row in place,
     /// returning the stable internal `entry_id`. The FTS5 sidecar is
     /// kept in sync by the AI / AU triggers, so callers do not write
-    /// to `reference_entries_fts` directly.
+    /// to `reference_entries_fts` directly. An empty `entry_key` is
+    /// refused with [`RefsError::EmptyEntryKey`] before any write.
     pub fn upsert_entry(&self, entry: &NewEntry) -> RefsResult<i64> {
+        if entry.entry_key.is_empty() {
+            return Err(RefsError::EmptyEntryKey {
+                book_slug: entry.book_slug.clone(),
+                headword: entry.headword.clone(),
+            });
+        }
         let aliases_json = serialize_string_array(&entry.aliases)?;
         let quality_flags = serialize_string_array(&entry.quality_flags)?;
         let payload_json = serde_json::to_string(&entry.payload)?;
@@ -1183,6 +1197,26 @@ mod refs_tests {
             assert_eq!(result.entry_key, query);
             assert!(result.hits.is_empty(), "query {query:?} must stay empty");
         }
+    }
+
+    #[test]
+    fn upsert_entry_rejects_an_empty_entry_key() {
+        let refs = fresh_refs();
+        refs.upsert_book(&sample_book("book_a", 10, "2026-06-25T00:00:00Z"))
+            .expect("upsert book_a");
+        let err = refs
+            .upsert_entry(&sample_entry("book_a", "", "Nameless", json!({})))
+            .expect_err("an empty entry_key must not reach the table");
+        assert!(
+            matches!(&err, RefsError::EmptyEntryKey { book_slug, headword }
+                if book_slug == "book_a" && headword == "Nameless"),
+            "unexpected error: {err:?}"
+        );
+        let rows: i64 = refs
+            .connection()
+            .query_row("SELECT COUNT(*) FROM reference_entries", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(rows, 0, "the rejected entry leaves no row behind");
     }
 
     #[test]
