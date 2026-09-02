@@ -12,8 +12,10 @@ use eyre::{Context, Result};
 /// Per-store findings the `verify.run` control-plane method returns.
 /// Every field is optional: an unverifiable store leaves its schema flag
 /// false and its error populated, and the rest skip the counts that
-/// depend on it.
-#[derive(Default, serde::Serialize)]
+/// depend on it. Every `*_error` field holds the failure's full source
+/// chain, flattened, so the report names the defect and not only the
+/// layer that noticed it.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct VerifyReport {
     /// Set when the data directory has neither `catalog.db` nor
     /// `corpus.db` — verify short-circuits in that case and reports
@@ -85,8 +87,10 @@ pub fn build_verify_report(cfg: &Config) -> VerifyReport {
                     }
                 }
             }
+            // `Verify` is a wrapper variant whose Display names the
+            // store alone; the per-table differences are its source.
             Err(e) => {
-                report.catalog_schema_error = Some(format!("{e:#}"));
+                report.catalog_schema_error = Some(bookrack_core::error_chain(&e));
             }
         }
     }
@@ -96,7 +100,7 @@ pub fn build_verify_report(cfg: &Config) -> VerifyReport {
                 report.corpus_schema_ok = true;
             }
             Err(e) => {
-                report.corpus_schema_error = Some(format!("{e:#}"));
+                report.corpus_schema_error = Some(bookrack_core::error_chain(&e));
             }
         }
     }
@@ -307,6 +311,42 @@ mod tests {
             "counts that could not be read were reported anyway: {:?} / {:?}",
             report.intake_count,
             report.missing_intake_files
+        );
+    }
+
+    /// Rename a column of the `intake` table so the live schema no
+    /// longer matches its `TableSpec`; the store still opens as a
+    /// database, and it is verification that refuses it.
+    fn rename_intake_column(cfg: &Config) {
+        let conn = bookrack_dbkit::open_production(&cfg.catalog_db()).expect("open for the rename");
+        conn.execute_batch("ALTER TABLE intake RENAME COLUMN stored_path TO stored_path_x")
+            .expect("rename the column");
+    }
+
+    #[test]
+    fn a_schema_mismatch_carries_the_column_differences() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = catalog_only_root(dir.path());
+        rename_intake_column(&cfg);
+
+        let report = build_verify_report(&cfg);
+
+        assert!(!report.catalog_schema_ok);
+        let reason = report
+            .catalog_schema_error
+            .as_deref()
+            .expect("a schema that does not verify carries its reason");
+        // `CatalogError::Verify`'s own Display is the wrapper `catalog
+        // schema verification failed`; the per-table differences are
+        // what name the defect, and they only survive if the chain was
+        // flattened.
+        assert!(
+            reason.starts_with("catalog schema verification failed: "),
+            "the reason did not carry the verifier's own report: {reason}"
+        );
+        assert!(
+            reason.contains("table `intake`"),
+            "the reason did not name the table that failed: {reason}"
         );
     }
 

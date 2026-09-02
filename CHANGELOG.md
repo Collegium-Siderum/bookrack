@@ -10,6 +10,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **`bookrack verify` now says which table and column a schema
+  mismatch is in.** `catalog_schema_error` and `corpus_schema_error`
+  carried only the outer message, `catalog schema verification failed`,
+  while the verifier's per-table report — the table, each column or
+  index that differs, and what the build expected — was the error's
+  source and was dropped. Both fields now carry the flattened chain,
+  the same way `intake_scan_error` and `vectors_meta_error` already
+  did.
+
 - **An OCR product that opens with a UTF-8 byte-order mark is no longer
   rejected as having content before its first page marker.** The
   marker scan only recognised a marker at offset 0 or right after a
