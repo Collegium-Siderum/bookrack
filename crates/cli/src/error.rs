@@ -73,6 +73,15 @@ pub enum BookrackCliError {
     #[error("doctor: at least one check failed; see the table above")]
     DoctorUnhealthy,
 
+    /// `bookrack verify` judged at least one finding in the report as
+    /// damage: a store that could not be read or verified, one of the
+    /// two stores missing while the other is there, or an intake whose
+    /// file is gone. The verify renderer already drew the report before
+    /// the binary returned; the reporter only needs to set a non-zero
+    /// exit code.
+    #[error("verify: at least one store or file check failed; see the report above")]
+    VerifyUnhealthy,
+
     /// Daemon rejected the call as a user-input failure: bad params,
     /// unknown library, unknown job/plan id, missing confirmation
     /// token, or an unknown RPC method (typo or unsupported by this
@@ -230,7 +239,7 @@ impl BookrackCliError {
             Self::DaemonNotRunning | Self::DaemonUnreachable { .. } => 2,
             Self::StaleSessionLock { .. } => 3,
             Self::SessionLockUnreadable { .. } => 1,
-            Self::DoctorUnhealthy => 1,
+            Self::DoctorUnhealthy | Self::VerifyUnhealthy => 1,
             Self::RpcUserError { .. } => 2,
             Self::RpcBusy { .. } | Self::RpcBackendUnavailable { .. } => 4,
             Self::RpcInternal { .. } => 1,
@@ -253,7 +262,10 @@ impl BookrackCliError {
     pub fn is_self_reported(&self) -> bool {
         matches!(
             self,
-            Self::DoctorUnhealthy | Self::IngestPartialFailure { .. } | Self::DetectNegative(_)
+            Self::DoctorUnhealthy
+                | Self::VerifyUnhealthy
+                | Self::IngestPartialFailure { .. }
+                | Self::DetectNegative(_)
         )
     }
 
@@ -530,6 +542,19 @@ mod tests {
     fn doctor_unhealthy_is_self_reported() {
         assert!(BookrackCliError::DoctorUnhealthy.is_self_reported());
         assert!(!BookrackCliError::DaemonNotRunning.is_self_reported());
+    }
+
+    /// The verify renderer draws the whole report before this variant
+    /// is raised, so the reporter printing its one-line form would put
+    /// a `bookrack: …` line under a report that already said it.
+    #[test]
+    fn verify_unhealthy_exits_one_and_is_self_reported() {
+        let err = BookrackCliError::VerifyUnhealthy;
+        assert_eq!(err.exit_code(), 1);
+        assert!(
+            err.is_self_reported(),
+            "the report is the failure surface; the reporter must stay quiet"
+        );
     }
 
     #[test]

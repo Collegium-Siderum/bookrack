@@ -8,6 +8,27 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **`bookrack verify` now judges its report, and prints it for a
+  reader.** Since 0.4.0 the command fetched the report over the control
+  plane, printed it as JSON, and exited 0 whatever it said — a catalog
+  whose schema failed verification and a healthy one returned the same
+  code, so the exit-code table gave scripts nothing to branch on, and
+  the renderer that used to draw the report for a person was never
+  called. The command now renders the report as text (the raw result
+  stays available under `--json`) and exits `1` when a finding says the
+  library is damaged: a store that does not verify or cannot be read
+  (`catalog_schema_error`, `corpus_schema_error`, `intake_scan_error`),
+  an unreadable vector sidecar (`vectors_meta_error`), one store missing
+  while the other is present, or an intake row whose file is gone
+  (`missing_intake_files`). An uninitialised root, a library that never
+  built its vector index, and any amount of churn exit `0`: not built
+  is not broken. The report is drawn before the exit code is set, so
+  the exit code adds no line of its own. Scripts that parsed the
+  default output as JSON pass `--json`. The exit-code table in
+  `docs/control-plane.md` gains the source.
+
 ### Fixed
 
 - **`bookrack verify` now says which table and column a schema

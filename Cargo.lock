@@ -871,6 +871,7 @@ dependencies = [
  "bookrack-config",
  "bookrack-control-client",
  "bookrack-core",
+ "bookrack-corpus",
  "bookrack-dbkit",
  "bookrack-diagnose",
  "bookrack-distill",

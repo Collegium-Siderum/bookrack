@@ -164,6 +164,9 @@ enum Command {
     },
     /// Verify schemas and cross-store counts against the live data root.
     ///
+    /// Exits 1 when a store does not verify, cannot be read, is missing
+    /// beside the other, or an intake's file is gone.
+    ///
     /// Compare the catalog and corpus schemas against the binary's
     /// TableSpecs and tally the cross-store counts: catalog intakes,
     /// vectors-meta chunk count, and intake-file existence on disk.

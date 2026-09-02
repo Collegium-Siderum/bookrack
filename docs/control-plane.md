@@ -304,7 +304,7 @@ the kind of failure without parsing stderr.
 | exit | meaning | sources |
 | --- | --- | --- |
 | `0` | success | — |
-| `1` | internal / unexpected error | color-eyre fallback for unclassified errors; `-32700 parse error`, `-32600 invalid request`, `-32603 internal error`, and unknown JSON-RPC codes; `SessionLockUnreadable`; `doctor` reported a FAIL row; `libraries detect` returned a not-a-library or unreadable-manifest verdict |
+| `1` | internal / unexpected error | color-eyre fallback for unclassified errors; `-32700 parse error`, `-32600 invalid request`, `-32603 internal error`, and unknown JSON-RPC codes; `SessionLockUnreadable`; `doctor` reported a FAIL row; `verify` judged a finding as damage (see `verify.run` below for the table); `libraries detect` returned a not-a-library or unreadable-manifest verdict |
 | `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32016` plan-id mismatches and plan-target drift; a locally-resolved command rejected operator input (`libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate, `config effective` given a data root that does not resolve — the report is still printed, with the failure at its head, because a configuration report that fails when the configuration is broken is useless exactly when it is needed); a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0`; `bookrack run` refused to start because an external backend it needs is unusable (the embed model is not pulled, or the Ollama endpoint does not answer) — the check runs before any library is opened, so nothing was half-started. The same judgement on a live write RPC splits: an unpulled model stays `-32602` and exit `2`, while an unreachable or overloaded backend is `-32017` and exit `4`, because a call that failed mid-session may succeed on the next attempt; `bookrack rpc call` was handed params that are not valid JSON (`RpcParamsInvalid`) or a method name carrying no namespace (`RpcMethodNotNamespaced`), both judged locally before the call is sent |
 | `3` | needs operator cleanup | a stale session lock points at a daemon that no longer answers; the operator must remove the lock file before retrying |
 | `4` | busy / not ready (retryable) | `-32001 busy`, `-32002 not ready` and `queue worker disabled`; `-32017 backend unavailable` (the Ollama daemon did not answer, or reported itself overloaded); a scripted caller can sleep and retry |
@@ -468,10 +468,20 @@ the exit-code bucket does not distinguish the two.
   write lock, so the report answers alongside a write in flight rather
   than queueing behind the write mutex. Each store reports for itself:
   one that cannot be read carries its reason in its own `*_error` field
-  and leaves the others untouched. An absent store and an absent vector
-  sidecar are how a fresh library looks and are not errors —
-  `vectors_meta_error` is populated only when the sidecar is there and
-  unreadable.
+  and leaves the others untouched. A root with neither store
+  (`not_initialised`) and an absent vector sidecar are how a fresh
+  library looks and are not errors — `vectors_meta_error` is populated
+  only when the sidecar is there and unreadable. The method returns
+  findings, not a verdict; `bookrack verify` judges them on the client
+  side and exits `1` when any of these holds: `catalog_schema_error`,
+  `corpus_schema_error`, `intake_scan_error`, or `vectors_meta_error` is
+  set; exactly one of `catalog_missing` / `corpus_missing` is true (half
+  a library is a damaged one, not an uninitialised one); or
+  `missing_intake_files` is non-empty. `not_initialised`, an absent
+  vector sidecar, and any `vectors_churn` value exit `0` — not built is
+  not broken, and a rebuild is `bookrack vectors rebuild`'s to decide.
+  The report is printed as text, or as the raw result under `--json`,
+  before the exit code is set, so a script has both.
 - `diagnose.run` — `{ out?, days?, no_scrub? }` → `{ out_path, files,
   scrubbed, scrub_gaps }`. Bundles crash reports, recent logs, and a
   catalog snapshot for a bug attachment. Scrubbed of local paths and
