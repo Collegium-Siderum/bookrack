@@ -198,7 +198,9 @@ pub struct FindBooksArgs {
     #[serde(default)]
     pub statuses: Option<Vec<String>>,
     /// Match books carrying at least one of these category tags. An
-    /// empty list, like an absent one, imposes no category filter.
+    /// empty list, like an absent one, imposes no category filter. The
+    /// tags a library carries are listed by `library.categories`; a tag
+    /// not listed there matches nothing.
     #[serde(default)]
     pub categories: Option<Vec<String>>,
     /// Match books whose reported language is one of these, compared
@@ -479,8 +481,8 @@ pub struct MetadataPageArgs {
     pub library: Option<String>,
 }
 
-/// Arguments for `library.stats`. Carries only the library selector;
-/// the tool itself accepts no other inputs.
+/// Arguments for `library.stats` and `library.categories`. Carries only
+/// the library selector; the tools themselves accept no other inputs.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct LibraryOnlyArgs {
     /// Library short name from the registry. Omit to target the
@@ -920,6 +922,24 @@ impl BookrackServer {
         respond_with(&stats)
     }
 
+    /// The library-wide category distribution.
+    #[tool(
+        name = "library.categories",
+        description = "Count the books under each category tag, most-used first, plus \
+                       the books carrying no tag. Read this before passing \
+                       `categories` to library.find_books: it is where this \
+                       library's tag vocabulary can be seen, and a library nobody \
+                       has tagged reports every book as uncategorised."
+    )]
+    async fn library_categories(
+        &self,
+        Parameters(args): Parameters<LibraryOnlyArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let counts = reads::books::category_counts(handle.ops()).map_err(ops_error_to_internal)?;
+        respond_with(&counts)
+    }
+
     /// List books in the library, paginated.
     #[tool(
         name = "library.list_books",
@@ -953,7 +973,8 @@ impl BookrackServer {
         name = "library.find_books",
         description = "Search the book registry by title substring (fuzzy), contributor \
                        name (exact), file format, or category tags. The `categories` \
-                       filter matches books carrying at least one of the listed tags."
+                       filter matches books carrying at least one of the listed tags; \
+                       library.categories lists the tags this library carries."
     )]
     async fn library_find_books(
         &self,

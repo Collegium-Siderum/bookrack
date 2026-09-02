@@ -8,6 +8,22 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`library.categories`: the library-wide category distribution.** A
+  new control-plane method and MCP tool return every category tag with
+  the number of books carrying it, most-used first, plus the books no
+  tag reaches and the registry total. It is the browse entry the
+  `categories` filter of `library.find_books` lacked: that filter asked
+  the caller to name a tag without any way to see which tags the
+  library carries, and a library nobody has tagged answered every such
+  call with an empty page that read like "no such books". The
+  distribution shows the vocabulary before the filter is used, and an
+  untagged library reports itself as one — every book under
+  `uncategorised`. Reachable from the CLI as `bookrack rpc call
+  library.categories`; `find_books`'s tool description now points at
+  it.
+
 ### Changed
 
 - **`bookrack verify` now judges its report, and prints it for a

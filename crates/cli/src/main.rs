@@ -918,6 +918,7 @@ fn natural_name_hint(typed: &str) -> Option<String> {
         "find" => &["`bookrack find`"],
         "show" => &["`bookrack show book:<id>`"],
         "stats" => &["`bookrack rpc call library.stats`"],
+        "categories" | "tags" => &["`bookrack rpc call library.categories`"],
         "search" => &["`bookrack search`"],
         // The paper side has a namespace, the book side does not: a
         // book is the unprefixed subject, and the verbs that narrow to
@@ -2167,9 +2168,11 @@ mod tests {
             ("ls", "`bookrack list`"),
             ("find", "`bookrack find`"),
             ("show", "`bookrack show book:<id>`"),
-            // The one read with no verb of its own, so the one line
-            // that still points at the proxy.
+            // The reads with no verb of their own, so the lines that
+            // still point at the proxy.
             ("stats", "`bookrack rpc call library.stats`"),
+            ("categories", "`bookrack rpc call library.categories`"),
+            ("tags", "`bookrack rpc call library.categories`"),
             ("search", "`bookrack search`"),
             // The namespace the book side deliberately does not have.
             (

@@ -132,6 +132,7 @@ mod tests {
     fn library_read_proxy_methods_are_registered() {
         for name in [
             "library.stats",
+            "library.categories",
             "library.list_books",
             "library.find_books",
             "library.show_book",

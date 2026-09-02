@@ -729,6 +729,16 @@ library. A name the registry does not carry is reported as
 for the same parameter.
 
 - `library.stats` — aggregate counts over the library.
+- `library.categories` — `{ library? }` → `{ categories: [{ category,
+  books }], uncategorised, total }`; the library-wide category
+  distribution, most-used first and by name within a count, plus the
+  books no category reaches. A book carrying several categories is
+  counted under each, so the category counts do not sum to `total`;
+  `uncategorised` and the categorised books together do. This is the
+  browse entry to the `categories` filter below: a tag it lists is one
+  `find_books` can match, and a library nobody has tagged reports every
+  book under `uncategorised` rather than promising a filter that
+  matches nothing.
 - `library.list_books` / `library.find_books` — paginated registry
   browse and filter. `library.find_books` accepts a `categories`
   list that matches books tagged with at least one of the listed

@@ -324,6 +324,13 @@ pub fn stats(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcEr
     to_value(&stats)
 }
 
+pub fn categories(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let p: LibraryOnlyParams = parse(params, "library.categories")?;
+    let handle = resolve(ctx, p.library.as_deref())?;
+    let counts = reads::books::category_counts(handle.ops()).map_err(ops_internal)?;
+    to_value(&counts)
+}
+
 pub fn list_books(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: PageParams = parse(params, "library.list_books")?;
     let handle = resolve(ctx, p.library.as_deref())?;

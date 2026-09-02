@@ -359,6 +359,8 @@ methods! {
 
     // library reads (sync, parametrised)
     read  no_queue sync    routed(LibraryOnlyParams)  "library.stats" => reads_library::stats,
+    read  no_queue sync    routed(LibraryOnlyParams)
+        "library.categories" => reads_library::categories,
     read  no_queue sync    routed(PageParams)
         "library.list_books" => reads_library::list_books,
     read  no_queue sync    routed(PageParams)
