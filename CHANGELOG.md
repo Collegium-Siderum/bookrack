@@ -10,6 +10,23 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **An OCR product that opens with a UTF-8 byte-order mark is no longer
+  rejected as having content before its first page marker.** The
+  marker scan only recognised a marker at offset 0 or right after a
+  newline, so the three BOM bytes many Windows text tools and OCR
+  post-processing scripts prepend pushed the first marker off its
+  anchor. The scan then took the next marker as the first and reported
+  the whole first page — a well-formed marker line included — as
+  `content before the first page marker`. In a `page_*.md` directory a
+  BOM at the head of a later file was worse: that page's marker went
+  unrecognised and its text folded into the previous page, which the
+  page-count check then reported as a missing page. A leading BOM is
+  now dropped ahead of the frontmatter fence, a marker preceded only by
+  byte-order marks on its line is anchored, and the mark itself lands
+  in no page's body. The canonical text the intake's `source_sha256`
+  is computed over is unchanged, so an already registered product
+  keeps its identity.
+
 - **A distilled entry whose anchor opens with a CJK character no longer
   overwrites its neighbours.** The `split_at_first_cjk` stage cut the
   anchor at its first CJK character and kept the part in front as the
