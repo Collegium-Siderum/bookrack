@@ -493,10 +493,16 @@ bookrack runs show <run-id>       # verdict / flag / coverage histograms
 ```
 
 The registered command names are `ingest`, `dryrun`, `papers_dryrun`,
-`distill_build`, `glean`, and the whole-library maintenance passes
-`reembed`, `reset`, `papers_reembed`, and `papers_reset`; any of them
-is a valid `--command` filter. The passes write no audit rows, so
-`runs show` renders them without the histograms.
+`distill_build`, `distill_dryrun`, `glean`, and the whole-library
+maintenance passes `reembed`, `reset`, `papers_reembed`, and
+`papers_reset`; any of them is a valid `--command` filter. The passes
+write no audit rows, so `runs show` renders them without the
+histograms. Each pipeline's preview registers under its own name, but
+the three differ in what they leave behind: `dryrun` and
+`papers_dryrun` write their report to disk and register header-only,
+while `distill_dryrun` writes the same `book_distill_audit` rows a
+build would, so its `runs show` carries the histograms of a build that
+never touched `reference.db`.
 
 A run still reading `running` whose owning process is gone prints its
 status as `abandoned?` — the question mark marks the column as this

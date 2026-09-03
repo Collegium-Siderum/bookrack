@@ -5,8 +5,8 @@
 //! liveness record, close it with a terminal status, compute no rollup.
 //!
 //! The registry covers commands that drive a pipeline over a set of
-//! items — `ingest`, `dryrun`, `distill_build`, `glean`, and the
-//! `reembed` / `reset` passes on either side. Per-item maintenance
+//! items — `ingest`, `dryrun`, `distill_build`, `distill_dryrun`,
+//! `glean`, and the `reembed` / `reset` passes on either side. Per-item maintenance
 //! verbs stay out of it: `metadata reaudit` recomputes one rollup for
 //! one intake and would turn `bookrack runs list` into a log of
 //! single-row edits. Their audit trail is the `<op>-<nanos>` run id on

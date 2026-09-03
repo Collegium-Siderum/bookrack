@@ -366,8 +366,8 @@ pub enum RunsAction {
         /// Cap the result to the most recent N runs. Default is no cap.
         #[arg(long, value_name = "N")]
         last: Option<usize>,
-        /// Filter to one command name (e.g. `distill_build`, `ingest`,
-        /// `dryrun`).
+        /// Filter to one command name (e.g. `distill_build`,
+        /// `distill_dryrun`, `ingest`, `dryrun`).
         #[arg(long, value_name = "NAME")]
         command: Option<String>,
     },

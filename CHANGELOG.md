@@ -26,6 +26,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **`bookrack distill build --dry-run` registers its run as
+  `distill_dryrun`.** A preview used to open a `pipeline_runs` row under
+  `distill_build`, so `bookrack runs list` showed a rehearsal and a
+  build that wrote `reference.db` as the same command, and a
+  `--command distill_build` filter counted both. The preview now
+  carries its own name, matching `dryrun` and `papers_dryrun`; it still
+  writes its `book_distill_audit` rows, and `runs show` still renders
+  them. Existing rows keep the name they were written under.
+
 - **`bookrack verify` now judges its report, and prints it for a
   reader.** Since 0.4.0 the command fetched the report over the control
   plane, printed it as JSON, and exited 0 whatever it said — a catalog
