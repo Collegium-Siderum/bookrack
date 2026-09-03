@@ -10,6 +10,22 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **`bookrack diagnose` bundles now cover the paper stores, the
+  reference store, and the queue document.** A bundle carried the book
+  pipeline's three stores and nothing else, so a fault in the paper
+  catalog, a `reference.db` from another schema, or a queue document
+  the daemon refuses to start on left no trace in it. The paper
+  catalog, corpus, and vector sidecar now land under `papers/` in the
+  same shapes as their book-side sections; `refs/summary.json` records
+  each distilled book's build provenance — schema, parser, build time,
+  intake, entry and warning counts — and the entry and overlay totals,
+  without any bibliographic column; `queue/queue.json` is the daemon's
+  queue document re-serialised through the scrubber, so job paths are
+  redacted like every other path. A store that is missing or cannot be
+  opened records that in `open-error.json`, as the book sections
+  already did; a queue document from a newer binary is reported as
+  refused, with both versions named, rather than as malformed.
+
 - **`library.categories`: the library-wide category distribution.** A
   new control-plane method and MCP tool return every category tag with
   the number of books carrying it, most-used first, plus the books no

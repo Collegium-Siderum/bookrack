@@ -18,6 +18,9 @@ pub mod corpus;
 pub mod crashes;
 pub mod env;
 pub mod logs;
+pub mod papers;
+pub mod queue;
+pub mod refs;
 pub mod vectors;
 
 use std::path::{Path, PathBuf};

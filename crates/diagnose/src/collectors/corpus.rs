@@ -13,24 +13,31 @@ use bookrack_corpus::{
 
 use crate::Result;
 
-/// Write `<bundle>/corpus/index-meta.json`. The corpus is opened
-/// through the read-only door, so collecting neither materialises a
-/// missing corpus.db nor takes the write lock. A corpus.db that is
-/// missing or fails to open writes `open-error.json` in place of the
-/// payload, keeping the two states distinguishable in the bundle.
+/// Write `<bundle>/corpus/index-meta.json` from the book corpus. See
+/// [`collect_into`] for what a missing or unopenable store writes
+/// instead.
 pub fn collect(cfg: &Config, bundle_dir: &Path) -> Result<()> {
-    let dst = bundle_dir.join("corpus");
-    std::fs::create_dir_all(&dst)?;
+    collect_into(&cfg.corpus_db(), &bundle_dir.join("corpus"))
+}
 
-    let corpus_db = cfg.corpus_db();
+/// Read the stamps of the corpus at `corpus_db` into
+/// `<dst>/index-meta.json`. The corpus is opened through the read-only
+/// door, so collecting neither materialises a missing corpus.db nor
+/// takes the write lock. A corpus.db that is missing or fails to open
+/// writes `open-error.json` in place of the payload, keeping the two
+/// states distinguishable in the bundle. The book and paper corpora
+/// share one schema, so both sides route through here.
+pub(crate) fn collect_into(corpus_db: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+
     if !corpus_db.exists() {
-        return super::write_open_error(&dst, &corpus_db, None);
+        return super::write_open_error(dst, corpus_db, None);
     }
-    let corpus = match Corpus::open_read_only(&corpus_db) {
+    let corpus = match Corpus::open_read_only(corpus_db) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "diagnose: could not open corpus read-only");
-            return super::write_open_error(&dst, &corpus_db, Some(&e.to_string()));
+            return super::write_open_error(dst, corpus_db, Some(&e.to_string()));
         }
     };
     let payload = serde_json::json!({

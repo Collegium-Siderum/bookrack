@@ -450,8 +450,9 @@ The last two write the catalog directly, so both are refused while a
 daemon is serving the library — stop it with `bookrack quit` first.
 
 When something is broken, `bookrack diagnose` bundles crash reports,
-recent logs, and a scrubbed catalog snapshot into a `.tar.gz` for
-issue attachments. The scrubber removes local paths and book titles;
+recent logs, scrubbed snapshots of the book and paper stores, a
+summary of the reference store, and the daemon's queue document into
+a `.tar.gz` for issue attachments. The scrubber removes local paths and book titles;
 `--no-scrub` keeps them verbatim for a bundle kept locally.
 
 A redaction whose input the host does not expose is reported rather
