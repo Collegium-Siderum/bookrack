@@ -26,6 +26,23 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **`bookrack runs show` reads its `profiles:` section from the run's
+  rollup instead of re-counting the audit tables.** The rollup row a
+  run materialises at close (`n_books`, `n_papers`, the histograms)
+  never moved, but the profile buckets beside it were counted live on
+  every `show`. Both audit tables hold one projection row per item,
+  rewritten by whichever run judges the item last, so after a
+  `glean --force` or a per-item re-audit the buckets of the earlier run
+  lost rows while its `n_papers` did not, and the two disagreed on the
+  same screen. `compute_run_summary` now stores the buckets as a JSON
+  column on `pipeline_run_summary`, and `runs show` renders that
+  snapshot. Rollups materialised before this build carry no snapshot;
+  for those the command still counts live and labels the section
+  `profiles (counted now, not at run close)` with a note that the
+  numbers need not add up. `pipeline_run_id` on an audit row is
+  documented as the pointer to the pass that judged the item last, not
+  as run membership. Catalog schema advances to `user_version` 17.
+
 - **`bookrack distill build --dry-run` registers its run as
   `distill_dryrun`.** A preview used to open a `pipeline_runs` row under
   `distill_build`, so `bookrack runs list` showed a rehearsal and a

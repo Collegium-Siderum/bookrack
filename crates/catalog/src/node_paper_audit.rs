@@ -213,8 +213,11 @@ pub struct NewNodePaperAudit {
     /// `flag_*` values, indexed by [`FLAG_COLUMNS`] position. `1` if
     /// the flag was emitted by the audit, `0` otherwise.
     pub flags: [u8; FLAG_COLUMNS.len()],
-    /// The `pipeline_runs.pipeline_run_id` that grouped this audit, or
-    /// `None` when the writer is not running inside an opened run.
+    /// The `pipeline_runs.pipeline_run_id` of the pass that judged this
+    /// item last, or `None` when the writer is not running inside an
+    /// opened run. A pointer, not membership: the row is rewritten by
+    /// every pass, so which items a run judged is read from the
+    /// `pipeline_run_summary` snapshot taken at its close.
     pub pipeline_run_id: Option<String>,
     /// Stable fingerprint of the effective audit profile, or `None`
     /// when the writer could not compute one.

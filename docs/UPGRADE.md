@@ -158,6 +158,14 @@ refused while a daemon is serving the library, and `--dry-run` opens
 the catalog read-only so a plan never migrates or writes. Libraries
 created at or after v14 never need it.
 
+Catalog v17 adds `pipeline_run_summary.profile_buckets`, the profile
+histogram a run materialises at close. Rollups written before v17 keep
+the column NULL, and nothing backfills it: the rows a closed run judged
+may since have been re-judged by another, so the count at close cannot
+be recovered. `bookrack runs show` counts such a run live and labels
+the section `profiles (counted now, not at run close)`; runs closed by
+a v17 binary carry the snapshot.
+
 ## Recommended window
 
 A refresh that touches `extractor_version` or the embedding model is

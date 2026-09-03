@@ -489,8 +489,18 @@ with the audit rows it wrote:
 
 ```
 bookrack runs list [--last N] [--command <name>]
-bookrack runs show <run-id>       # verdict / flag / coverage histograms
+bookrack runs show <run-id>       # profiles, verdict / flag / coverage histograms
 ```
+
+Everything `runs show` prints below the header is the rollup the run
+materialised when it closed, the `profiles:` section included. The
+audit tables themselves hold one row per item, rewritten by whichever
+run judges the item last, so a live count would drift after a
+`glean --force` or a per-item re-audit; the snapshot does not. A run
+closed by a binary older than catalog v17 has no profile snapshot, and
+for it the section is counted live and headed
+`profiles (counted now, not at run close)` with a note that the
+numbers need not add up to `n_books` / `n_papers`.
 
 The registered command names are `ingest`, `dryrun`, `papers_dryrun`,
 `distill_build`, `distill_dryrun`, `glean`, and the whole-library

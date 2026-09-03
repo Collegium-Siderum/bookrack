@@ -20,7 +20,7 @@
 use rusqlite_migration::{M, Migrations};
 
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
-pub(crate) const TARGET_VERSION: i64 = 16;
+pub(crate) const TARGET_VERSION: i64 = 17;
 
 /// `M[0]` — the frozen baseline schema (the former `schema_version` 3),
 /// captured from the rendered specs. Immutable: never edit this text; add a
@@ -734,6 +734,17 @@ CREATE INDEX idx_retrieval_call_hits_passage
   ON retrieval_call_hits(passage_id);
 "#;
 
+// `M[16]` — materialise the profile buckets on the run rollup.
+// `pipeline_run_summary` gains one nullable JSON column holding the
+// `(kind, profile identity) -> count` buckets as they stood when the
+// run closed, so the `profiles:` section of `runs show` reads the same
+// snapshot as `n_books` / `n_papers` instead of re-counting projection
+// rows that a later run may have re-judged. Rows materialised before
+// M[16] read back NULL and the reader counts live. Additive: no
+// existing column shape changes.
+const RUN_SUMMARY_PROFILE_BUCKETS_M16_DDL: &str =
+    "ALTER TABLE pipeline_run_summary ADD COLUMN profile_buckets TEXT;";
+
 /// The migration sequence applied to `catalog.db` on open. Forward-only: a
 /// desktop downgrade restores a backup rather than running a `down` step.
 pub(crate) fn migrations() -> Migrations<'static> {
@@ -754,6 +765,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(INTAKE_DERIVED_FROM_DDL),
         M::up(AUDIT_PROFILE_FINGERPRINT_M14_DDL),
         M::up(RETRIEVAL_PAIR_M15_DDL),
+        M::up(RUN_SUMMARY_PROFILE_BUCKETS_M16_DDL),
     ])
 }
 
@@ -1426,6 +1438,44 @@ mod tests {
             column_type(&conn, "book_distill_audit", "profile_toggle_summary"),
             "TEXT"
         );
+    }
+
+    #[test]
+    fn migration_m16_adds_profile_buckets_to_pipeline_run_summary() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        migrations()
+            .to_version(&mut conn, 16)
+            .expect("apply M[0..15]");
+        let cols_pre = columns_of(&conn, "pipeline_run_summary");
+        assert!(!cols_pre.iter().any(|c| c == "profile_buckets"));
+
+        migrations().to_latest(&mut conn).expect("apply M[16]");
+
+        let cols = columns_of(&conn, "pipeline_run_summary");
+        assert!(
+            cols.iter().any(|c| c == "profile_buckets"),
+            "expected profile_buckets on pipeline_run_summary, got {cols:?}"
+        );
+        assert_eq!(
+            column_type(&conn, "pipeline_run_summary", "profile_buckets"),
+            "TEXT"
+        );
+        // Rows materialised before the column existed read back NULL.
+        conn.execute_batch(
+            "INSERT INTO pipeline_runs (pipeline_run_id, command, started_at) \
+             VALUES ('r', 'glean', '2026-06-28T10:00:00Z'); \
+             INSERT INTO pipeline_run_summary (pipeline_run_id, computed_at) \
+             VALUES ('r', '2026-06-28T10:00:01Z');",
+        )
+        .expect("seed a pre-M[16]-shaped row");
+        let snapshot: Option<String> = conn
+            .query_row(
+                "SELECT profile_buckets FROM pipeline_run_summary WHERE pipeline_run_id = 'r'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read");
+        assert_eq!(snapshot, None);
     }
 
     #[test]

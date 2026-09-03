@@ -10,7 +10,7 @@
 //! `ON DELETE CASCADE`, so dropping a run drops its rollup in the same
 //! statement.
 //!
-//! The four JSON columns hold dimension-keyed counters:
+//! Three JSON columns hold dimension-keyed counters:
 //!
 //!   * `verdict_counts` — `{ "clean": N, "needs_work": M, ... }`
 //!   * `flag_counts` — `{ "flag_doi_invalid_format": K, ... }`
@@ -18,14 +18,27 @@
 //!     (`{ "retention_avg": 0.95, "pair_mismatch_total": 3, ... }`)
 //!
 //! All three default to `'{}'` so an upsert that has nothing to report
-//! still stores a parseable JSON object. [`Catalog::compute_run_summary`]
-//! reads `book_distill_audit` and `node_paper_audit` for one run and
-//! upserts the assembled row; the four aggregates use an explicit
-//! `WHERE pipeline_run_id = :pipeline_run_id` so historical rows with
-//! NULL `pipeline_run_id` stay out of any single run's rollup.
+//! still stores a parseable JSON object. A fourth, `profile_buckets`,
+//! holds the [`RunProfileBucket`] list as a JSON array and is nullable:
+//! it is NULL on rollups materialised before the column existed, and
+//! only then does a reader fall back to counting live.
+//!
+//! [`Catalog::compute_run_summary`] reads `book_distill_audit` and
+//! `node_paper_audit` for one run and upserts the assembled row; every
+//! aggregate uses an explicit `WHERE pipeline_run_id = :pipeline_run_id`
+//! so historical rows with NULL `pipeline_run_id` stay out of any single
+//! run's rollup.
+//!
+//! The row is a snapshot of the run's judgement at close. Both audit
+//! tables hold one projection row per item, rewritten by whichever run
+//! judges the item last, so a live count over them drifts as soon as a
+//! `glean --force` or a per-item re-audit lands; the snapshot does not.
+//! Run membership therefore lives here, and `pipeline_run_id` on a
+//! projection row is only the pointer to the pass that judged it last.
 
 use bookrack_dbkit::{ColumnSpec, ForeignKey, IndexSpec, OnDelete, TableSpec};
 use rusqlite::{OptionalExtension, Row, named_params};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{Catalog, FLAG_COLUMNS, Result};
@@ -66,6 +79,9 @@ pub(crate) const SPEC: TableSpec = TableSpec {
             .default("'{}'")
             .comment("JSON: coverage metric name -> scalar"),
         ColumnSpec::int("wall_clock_ms").comment("end-to-end run duration in milliseconds"),
+        ColumnSpec::text("profile_buckets").comment(
+            "JSON array of {kind, profile_fingerprint, profile_name, n} as of run close; NULL when materialised before the column existed",
+        ),
         ColumnSpec::text("computed_at")
             .not_null()
             .comment("ISO-8601 UTC"),
@@ -80,9 +96,9 @@ pub(crate) const SPEC: TableSpec = TableSpec {
 /// same `pipeline_run_id`.
 const UPSERT_SQL: &str = "INSERT INTO pipeline_run_summary \
      (pipeline_run_id, n_books, n_papers, verdict_counts, flag_counts, \
-      coverage_summary, wall_clock_ms, computed_at) \
+      coverage_summary, wall_clock_ms, profile_buckets, computed_at) \
      VALUES (:pipeline_run_id, :n_books, :n_papers, :verdict_counts, :flag_counts, \
-             :coverage_summary, :wall_clock_ms, :computed_at) \
+             :coverage_summary, :wall_clock_ms, :profile_buckets, :computed_at) \
      ON CONFLICT(pipeline_run_id) DO UPDATE SET \
        n_books = excluded.n_books, \
        n_papers = excluded.n_papers, \
@@ -90,6 +106,7 @@ const UPSERT_SQL: &str = "INSERT INTO pipeline_run_summary \
        flag_counts = excluded.flag_counts, \
        coverage_summary = excluded.coverage_summary, \
        wall_clock_ms = excluded.wall_clock_ms, \
+       profile_buckets = excluded.profile_buckets, \
        computed_at = excluded.computed_at";
 
 /// A `SELECT` of every column with `tail` appended; column list from [`SPEC`].
@@ -117,6 +134,9 @@ pub struct NewPipelineRunSummary {
     pub coverage_summary: String,
     /// End-to-end run duration in milliseconds.
     pub wall_clock_ms: Option<i64>,
+    /// JSON array of [`RunProfileBucket`] as of run close, or `None` on
+    /// a rollup materialised before the column existed.
+    pub profile_buckets: Option<String>,
     /// When the summary was computed, ISO-8601 UTC.
     pub computed_at: String,
 }
@@ -138,11 +158,25 @@ pub struct PipelineRunSummary {
     pub coverage_summary: String,
     /// See [`NewPipelineRunSummary::wall_clock_ms`].
     pub wall_clock_ms: Option<i64>,
+    /// See [`NewPipelineRunSummary::profile_buckets`].
+    pub profile_buckets: Option<String>,
     /// See [`NewPipelineRunSummary::computed_at`].
     pub computed_at: String,
 }
 
 impl PipelineRunSummary {
+    /// Decode the profile buckets materialised at run close. `None`
+    /// when the rollup predates the column, in which case the caller
+    /// may count live with [`Catalog::run_profile_buckets`] and should
+    /// say so. Fails only on a column that does not parse as the
+    /// bucket array this crate writes.
+    pub fn profile_buckets(&self) -> serde_json::Result<Option<Vec<RunProfileBucket>>> {
+        self.profile_buckets
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+    }
+
     fn from_row(row: &Row<'_>) -> rusqlite::Result<PipelineRunSummary> {
         Ok(PipelineRunSummary {
             pipeline_run_id: row.get("pipeline_run_id")?,
@@ -152,14 +186,16 @@ impl PipelineRunSummary {
             flag_counts: row.get("flag_counts")?,
             coverage_summary: row.get("coverage_summary")?,
             wall_clock_ms: row.get("wall_clock_ms")?,
+            profile_buckets: row.get("profile_buckets")?,
             computed_at: row.get("computed_at")?,
         })
     }
 }
 
 /// One `(kind, profile identity)` bucket of a run's audit rows, as
-/// returned by [`Catalog::run_profile_buckets`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// returned by [`Catalog::run_profile_buckets`] and materialised on
+/// `pipeline_run_summary.profile_buckets` at run close.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunProfileBucket {
     /// `paper` or `book`, naming the audit table the bucket came from.
     pub kind: String,
@@ -188,6 +224,7 @@ impl Catalog {
                 ":flag_counts": row.flag_counts,
                 ":coverage_summary": row.coverage_summary,
                 ":wall_clock_ms": row.wall_clock_ms,
+                ":profile_buckets": row.profile_buckets,
                 ":computed_at": row.computed_at,
             },
         )?;
@@ -224,8 +261,11 @@ impl Catalog {
     /// a row belongs to whichever run last judged that item: after a
     /// `glean --force` or a per-item re-audit, rows this run wrote are
     /// attributed elsewhere, or carry no run at all. The buckets can
-    /// therefore disagree with `n_papers` / `n_books` on the same run,
-    /// which were materialised once at close and do not move.
+    /// therefore disagree with `n_papers` / `n_books` on the same run.
+    /// [`Catalog::compute_run_summary`] materialises this result onto
+    /// the rollup at close; a reader of a closed run takes the snapshot
+    /// from [`PipelineRunSummary::profile_buckets`] and only comes here
+    /// when that column is NULL.
     pub fn run_profile_buckets(&self, pipeline_run_id: &str) -> Result<Vec<RunProfileBucket>> {
         let mut buckets = Vec::new();
         let mut papers = self.conn.prepare(
@@ -266,11 +306,12 @@ impl Catalog {
     }
 
     /// Materialize the rollup for one run by aggregating its audit rows
-    /// and upserting the result. The four SELECTs all key on
+    /// and upserting the result. Every SELECT keys on
     /// `pipeline_run_id = :pipeline_run_id` so historical rows with NULL
     /// `pipeline_run_id` stay outside every single-run rollup. The
-    /// returned row is the same one now persisted on
-    /// `pipeline_run_summary`.
+    /// profile buckets are counted here too and stored as JSON, so the
+    /// whole row is one snapshot of the run at close. The returned row
+    /// is the same one now persisted on `pipeline_run_summary`.
     pub fn compute_run_summary(&self, pipeline_run_id: &str) -> Result<PipelineRunSummary> {
         let n_books: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM book_distill_audit \
@@ -368,6 +409,11 @@ impl Catalog {
             .optional()?
             .flatten();
 
+        let profile_buckets = Some(
+            serde_json::to_string(&self.run_profile_buckets(pipeline_run_id)?)
+                .expect("a bucket list of strings and integers serialises"),
+        );
+
         let computed_at: String =
             self.conn
                 .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |row| {
@@ -382,6 +428,7 @@ impl Catalog {
             flag_counts,
             coverage_summary,
             wall_clock_ms,
+            profile_buckets,
             computed_at,
         };
         self.upsert_pipeline_run_summary(&row)?;
@@ -393,6 +440,7 @@ impl Catalog {
             flag_counts: row.flag_counts,
             coverage_summary: row.coverage_summary,
             wall_clock_ms: row.wall_clock_ms,
+            profile_buckets: row.profile_buckets,
             computed_at: row.computed_at,
         })
     }
@@ -428,6 +476,7 @@ mod tests {
             flag_counts: r#"{"flag_doi_invalid_format":2}"#.to_string(),
             coverage_summary: r#"{"retention_avg":0.95}"#.to_string(),
             wall_clock_ms: Some(12_500),
+            profile_buckets: None,
             computed_at: "2026-06-28T10:00:05Z".to_string(),
         }
     }
@@ -581,14 +630,22 @@ mod tests {
             1,
             "the re-judged row must have left the first run's buckets: {buckets:?}",
         );
+        let rollup = catalog
+            .pipeline_run_summary(first)
+            .expect("read rollup")
+            .expect("the rollup was materialised");
         assert_eq!(
-            catalog
-                .pipeline_run_summary(first)
-                .expect("read rollup")
-                .expect("the rollup was materialised")
-                .n_papers,
-            2,
+            rollup.n_papers, 2,
             "the materialised rollup must not move when a row is re-judged",
+        );
+        let snapshot = rollup
+            .profile_buckets()
+            .expect("decode the snapshot")
+            .expect("a run closed by this build carries its buckets");
+        assert_eq!(
+            snapshot.iter().map(|b| b.n).sum::<i64>(),
+            2,
+            "the buckets materialised at close must not move either: {snapshot:?}",
         );
     }
 
