@@ -73,6 +73,13 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **`library.info` now says why `vectors_meta.json` could not be read.**
+  The `vectors_error` field of the book and paper sections carried
+  only the outer message, `vectors_meta parse error` or `vectors_meta
+  IO error`, while the parser's or the filesystem's own reason was the
+  error's source and was dropped. Both now carry the flattened chain,
+  the same way `bookrack verify`'s `vectors_meta_error` already did.
+
 - **A node whose parent lies in another book is rejected at the write
   boundary.** The corpus checked that a node's own id sat in its book's
   partition but never looked at its `parent_id`, so a parent edge into

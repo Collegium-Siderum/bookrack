@@ -113,3 +113,30 @@ async fn library_info_reports_unreadable_stores_instead_of_posing_as_missing() {
     // The count-class fields stay absent rather than failing the call.
     assert!(info.intake_count.is_none());
 }
+
+#[tokio::test]
+async fn library_info_carries_the_parse_reason_of_an_unreadable_vectors_meta() {
+    let fx = Fixture::empty_root();
+    let lancedb = fx.root().join("lancedb");
+    std::fs::create_dir_all(&lancedb).expect("lancedb dir");
+    std::fs::write(lancedb.join("vectors_meta.json"), b"not json").expect("meta garbage");
+
+    let info = show_library_info(&fx.ops, fx.info_ctx())
+        .await
+        .expect("info stays informational on a broken sidecar");
+    let reason = info
+        .vectors_error
+        .as_deref()
+        .expect("an unparseable sidecar carries its reason");
+    // `VectorsError::MetaParse` is a wrapper variant whose Display is
+    // the bare `vectors_meta parse error`; serde's own message is its
+    // source and only survives if the chain was flattened.
+    assert!(
+        reason.starts_with("vectors_meta parse error: "),
+        "the reason did not carry the parser's own message: {reason}"
+    );
+    assert!(
+        reason.contains("at line 1 column "),
+        "the reason did not carry the parser's position: {reason}"
+    );
+}
