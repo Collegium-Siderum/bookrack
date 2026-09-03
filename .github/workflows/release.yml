@@ -3,6 +3,11 @@ on:
   push:
     tags: ['v*']
 
+# Read-only by default; the release job widens this to `contents: write`
+# for `gh release create`.
+permissions:
+  contents: read
+
 # Builds three platform tarballs (macOS arm64 / Linux x86_64 / Windows
 # x86_64) and creates a GitHub Release whose body is the section of
 # CHANGELOG.md matching the tag's semver. The tag must be `vX.Y.Z` (or

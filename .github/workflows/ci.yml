@@ -1,6 +1,10 @@
 name: ci
 on: [push, pull_request]
 
+# The token can only read the repository; no job writes back to it.
+permissions:
+  contents: read
+
 # A second push to the same branch cancels the still-running CI for the
 # previous push. Saves runner minutes on rapid-fire pushes; the final
 # push always gets a clean, current result.
