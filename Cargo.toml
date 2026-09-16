@@ -107,7 +107,7 @@ tracing-appender = "0.2"
 # crate's own transport-level tests, which drive the server through a real
 # client session. No auth features. The `server` feature pulls schemars
 # (re-exported, used for tool input schemas) and chrono transitively.
-rmcp = { version = "1.7", default-features = false, features = [
+rmcp = { version = "2.0", default-features = false, features = [
     "server",
     "macros",
     "transport-streamable-http-server",
