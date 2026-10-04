@@ -104,6 +104,19 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **Registry entries record absolute data roots.** `libraries add`,
+  `libraries register`, `libraries scan --register`, and
+  `index-profile apply` wrote the path they were given, so a root
+  typed as `./lib` was recorded as `./lib` and resolved against
+  whatever directory the next invocation happened to run from. A
+  relative path is now joined to the working directory once, where
+  the data root is resolved, and the registry writer refuses a
+  relative root outright; `libraries fork` resolves a relative
+  `--data-dir` against the operator's working directory before
+  sending it to the daemon, where it was rejected. The lock file,
+  `daemon.status.data_dir`, and every reported path carry the same
+  absolute form.
+
 - **MCP tools classify their failures the way the control plane
   does.** Every tool mapped an ops error to `-32603` unless a hand-
   written arm picked it out, so a write against an unknown intake, a

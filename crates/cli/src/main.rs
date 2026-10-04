@@ -666,8 +666,10 @@ pub(crate) enum LibrariesAction {
     Fork {
         /// Short name to register in the library registry.
         new_name: String,
-        /// Absolute path where the new data root lives. Must not
-        /// already contain a library.
+        /// Path where the new data root lives.
+        ///
+        /// A relative path is resolved against the working directory.
+        /// Must not already contain a library.
         #[arg(long)]
         data_dir: std::path::PathBuf,
         /// How the envelope store is shared. `hardlink` (default)

@@ -643,6 +643,20 @@ pub enum ConfigError {
     /// not understand; the operator fixes it (or removes it) by hand.
     #[error("the registry at {} cannot be merged: {reason}", .path.display())]
     RegistryShape { path: PathBuf, reason: String },
+    /// A writer handed the registry a data root that is not absolute.
+    /// Entries record absolute roots, so the entry is refused before
+    /// anything is written; a caller resolves an operator-typed path
+    /// against the working directory first.
+    #[error(
+        "cannot record library {name:?}: the data root {} is not an absolute path",
+        .data_dir.display()
+    )]
+    RelativeDataRoot {
+        /// The registry key the entry would have been written under.
+        name: String,
+        /// The relative path the writer was given.
+        data_dir: PathBuf,
+    },
     /// `<data_root>/config.toml` exists but could not be read.
     #[error("cannot read the root config at {}", .path.display())]
     RootConfigUnreadable {
@@ -2856,16 +2870,26 @@ fn same_root(a: &Path, b: &Path) -> bool {
 }
 
 /// Validate the chosen root and build a [`Config`]. The root must be an
-/// existing directory. The Ollama endpoint is resolved by precedence
-/// `env var > <data_root>/config.toml > hardcoded default`, so a
-/// per-library override in the TOML still loses to an explicit
-/// environment variable.
+/// existing directory; a relative one is joined to the working
+/// directory first, so the lock file, the registry, and every reported
+/// path carry the same absolute form. The Ollama endpoint is resolved
+/// by precedence `env var > <data_root>/config.toml > hardcoded
+/// default`, so a per-library override in the TOML still loses to an
+/// explicit environment variable.
 fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, ConfigError> {
     let Resolved {
         data_dir,
         source,
         library,
     } = resolved;
+    // `absolute` keeps the operator's spelling where `canonicalize`
+    // would rewrite a symlink; comparisons canonicalize at their own
+    // call sites. It fails only on an empty path or an unreadable
+    // working directory, neither of which names a directory.
+    let data_dir = match std::path::absolute(&data_dir) {
+        Ok(path) => path,
+        Err(_) => return Err(ConfigError::DataDirNotFound(data_dir)),
+    };
     if !data_dir.is_dir() {
         return Err(ConfigError::DataDirNotFound(data_dir));
     }
@@ -2920,11 +2944,22 @@ pub fn remove_library_from_registry(path: &Path, name: &str) -> Result<(), Confi
 /// only when none is recorded yet — an operator who has already chosen
 /// a default is never silently overridden. This is the write-side
 /// counterpart of the read-side entry table.
+///
+/// Entries record absolute roots: a relative `data_dir` is refused
+/// with [`ConfigError::RelativeDataRoot`] before the file is touched.
+/// Resolving an operator-typed path against the working directory is
+/// the caller's job, done once where the path enters.
 pub fn upsert_library_entry(
     path: &Path,
     name: &str,
     entry: &LibraryEntryFields,
 ) -> Result<(), ConfigError> {
+    if !entry.data_dir.is_absolute() {
+        return Err(ConfigError::RelativeDataRoot {
+            name: name.to_string(),
+            data_dir: entry.data_dir.clone(),
+        });
+    }
     update_registry_table(path, |doc| {
         let libraries = doc
             .get_mut("libraries")
@@ -3093,6 +3128,10 @@ pub struct AddReport {
 /// manifest write that fails because the root is read-only degrades to a
 /// uuid-less registration rather than an error, so a snapshot or optical
 /// volume can still be registered.
+///
+/// A relative `data_dir` is joined to the working directory before
+/// anything is detected, compared, or written, so the entry records the
+/// absolute root and the key collision check compares like with like.
 pub fn add_library<C>(
     registry_path: &Path,
     key: Option<&str>,
@@ -3105,6 +3144,10 @@ pub fn add_library<C>(
 where
     C: FnOnce(&LibraryManifest) -> std::io::Result<bool>,
 {
+    let data_dir = std::path::absolute(data_dir).map_err(|e| {
+        LibraryOpError::BadTarget(format!("cannot resolve {}: {e}", data_dir.display()))
+    })?;
+    let data_dir = data_dir.as_path();
     let verdict = detect_library(data_dir).map_err(|e| LibraryOpError::BadTarget(e.to_string()))?;
     let existing = match verdict {
         DetectVerdict::Confirmed(manifest) => Some(manifest),
@@ -3932,6 +3975,26 @@ mod tests {
              test = \"/roots/test\"\n",
         )
         .expect("sample registry parses")
+    }
+
+    #[test]
+    fn a_relative_data_root_resolves_against_the_working_directory() {
+        // `.` is the one relative path guaranteed to exist from any
+        // working directory, and it exercises the same join as `./lib`.
+        let selection = LibrarySelection {
+            data_dir: Some(PathBuf::from(".")),
+            library: None,
+        };
+        let root = select_root(&selection, None, None, None, None).expect("selects");
+        let cfg = finish(root, None).expect("resolves");
+        let cwd = std::env::current_dir().expect("cwd");
+        assert!(
+            cfg.data_dir().is_absolute(),
+            "data root should be absolute, got {}",
+            cfg.data_dir().display()
+        );
+        assert_eq!(cfg.data_dir(), cwd.as_path());
+        assert_eq!(cfg.source(), ResolutionSource::DataDirFlag);
     }
 
     #[test]
@@ -6174,6 +6237,41 @@ mod tests {
             registry.libraries.get("default").map(|e| e.data_dir()),
             Some(new_root.as_path())
         );
+    }
+
+    #[test]
+    fn upsert_library_entry_refuses_a_relative_data_root_and_leaves_the_file_alone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(
+            &path,
+            "default = \"alpha\"\n\
+             [libraries]\n\
+             alpha = \"/roots/alpha\"\n",
+        )
+        .expect("seed");
+        let before = std::fs::read_to_string(&path).expect("read seed");
+        let err = upsert_library_entry(&path, "beta", &entry_fields(Path::new("./beta")))
+            .expect_err("a relative data root must be refused");
+        assert!(
+            matches!(
+                &err,
+                ConfigError::RelativeDataRoot { name, data_dir }
+                    if name == "beta" && data_dir == Path::new("./beta")
+            ),
+            "got {err:?}"
+        );
+        let after = std::fs::read_to_string(&path).expect("read after");
+        assert_eq!(after, before, "a refused write must not touch the file");
+    }
+
+    #[test]
+    fn upsert_library_entry_refuses_a_relative_data_root_before_creating_the_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        upsert_library_entry(&path, "beta", &entry_fields(Path::new("beta")))
+            .expect_err("a relative data root must be refused");
+        assert!(!path.exists(), "a refused write must not create the file");
     }
 
     #[test]

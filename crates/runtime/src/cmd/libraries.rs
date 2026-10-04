@@ -185,6 +185,9 @@ fn validate_inputs(
     if new_name.trim().is_empty() {
         return Err(refused("new library name must not be empty", None));
     }
+    // The target arrives over the control socket, where a relative path
+    // has no working directory to resolve against; the client resolves
+    // it before sending.
     if !target.is_absolute() {
         return Err(refused(
             format!("--data-dir must be an absolute path: {}", target.display()),

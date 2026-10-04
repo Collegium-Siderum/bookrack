@@ -18,7 +18,7 @@ use bookrack_config::{
     set_root_config_values, upsert_library_entry,
 };
 use bookrack_session::{RootLock, is_root_lock_conflict};
-use eyre::{Report, Result};
+use eyre::{Context, Report, Result};
 use serde::Serialize;
 
 use crate::error::BookrackCliError;
@@ -91,10 +91,12 @@ pub fn scan(
         (mounted_volumes(), VOLUMES_SCAN_DEPTH)
     } else {
         // clap's ArgGroup guarantees a parent when `--volumes` is off.
-        (
-            vec![parent.expect("clap requires a parent without --volumes")],
-            PARENT_SCAN_DEPTH,
-        )
+        // The parent is made absolute once so every root found under
+        // it, and so every entry `--register` writes, is absolute too.
+        let parent = parent.expect("clap requires a parent without --volumes");
+        let parent = std::path::absolute(&parent)
+            .with_context(|| format!("resolve {}", parent.display()))?;
+        (vec![parent], PARENT_SCAN_DEPTH)
     };
     let outcome = scan_for_libraries(&roots, depth);
 

@@ -76,7 +76,10 @@ The registry maps short names to data roots and records the machine's
 `default`. Its entries are metadata-bearing tables — `data_dir`,
 `kind`, `description`, `index_profile`, `uuid`, `created_at` — and the
 legacy bare-path form (`name = "/path"`) stays permanently readable; a
-write rewrites the file into the table form atomically. Every data root
+write rewrites the file into the table form atomically. Entries record
+absolute roots: a relative path given to a registry verb, or to
+`--data-dir`, is resolved against the working directory at the time it
+is written, never when it is read back. Every data root
 also carries a self-describing `bookrack-library.toml` manifest naming
 its stable identity and the index profile it runs under, so the registry
 is a regenerable cache over the manifests rather than the sole record of
