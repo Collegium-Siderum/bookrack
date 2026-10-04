@@ -10,6 +10,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **`-32018 STATE_UNUSABLE`: a store this build cannot serve has its
+  own error code.** A catalog or corpus written by a newer schema or
+  demanding a newer reader, an index without build stamps or with
+  stamps that disagree with this build, and a vector sidecar naming an
+  unknown ANN kind or a mismatched dimension all answered `-32603`,
+  which tells a client to report a bug, and the CLI exited 1 on them —
+  while every one of them has a next step that is the operator's to
+  take. Those nine conditions now answer `-32018`, bare or through any
+  pipeline wrapper, with the step in `error.data.hint`: run a newer
+  build, `bookrack corpus rebuild`, `bookrack vectors reset`,
+  `bookrack vectors rebuild`, or `bookrack stamps reconcile`. The CLI
+  exits 2 on the code, as it does for caller input, through a variant
+  of its own that keeps the hint. `docs/control-plane.md` adds the
+  code to the list, the write-class mapping, and the exit-code table.
+
 - **`bookrack diagnose` bundles now cover the paper stores, the
   reference store, and the queue document.** A bundle carried the book
   pipeline's three stores and nothing else, so a fault in the paper

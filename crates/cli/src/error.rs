@@ -20,7 +20,7 @@ use bookrack_core::{Problem, ProblemData};
 use bookrack_runtime::control::jsonrpc::{
     BACKEND_UNAVAILABLE, BUSY, CONFIRMATION_REQUIRED, INTERNAL_ERROR, INVALID_LIBRARY,
     INVALID_PARAMS, INVALID_REQUEST, JOB_NOT_FOUND, METHOD_NOT_FOUND, NOT_READY, PARSE_ERROR,
-    PLAN_KIND_MISMATCH, PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND, PLAN_TARGET_DRIFTED,
+    PLAN_KIND_MISMATCH, PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND, PLAN_TARGET_DRIFTED, STATE_UNUSABLE,
 };
 use serde_json::Value;
 
@@ -108,6 +108,20 @@ pub enum BookrackCliError {
     /// `data`, and would drop the hint that names the repair.
     #[error("rpc error {code}: {message}")]
     RpcBackendUnavailable {
+        code: i32,
+        message: String,
+        /// See [`BookrackCliError::RpcUserError`].
+        data: Option<Value>,
+    },
+
+    /// A store the call depends on is in a state this build cannot
+    /// serve — a schema or reader stamp from another build, missing or
+    /// drifted index stamps, a vector sidecar it cannot read. Exits 2
+    /// like caller input, because the call will not succeed resent and
+    /// the operator has a step to take, but stays its own variant:
+    /// `RpcUserError` says the request was wrong, and here it was not.
+    #[error("rpc error {code}: {message}")]
+    RpcStateUnusable {
         code: i32,
         message: String,
         /// See [`BookrackCliError::RpcUserError`].
@@ -240,7 +254,7 @@ impl BookrackCliError {
             Self::StaleSessionLock { .. } => 3,
             Self::SessionLockUnreadable { .. } => 1,
             Self::DoctorUnhealthy | Self::VerifyUnhealthy => 1,
-            Self::RpcUserError { .. } => 2,
+            Self::RpcUserError { .. } | Self::RpcStateUnusable { .. } => 2,
             Self::RpcBusy { .. } | Self::RpcBackendUnavailable { .. } => 4,
             Self::RpcInternal { .. } => 1,
             Self::IngestPartialFailure { .. } => 5,
@@ -296,6 +310,11 @@ impl BookrackCliError {
                 message,
                 data,
             },
+            STATE_UNUSABLE => Self::RpcStateUnusable {
+                code,
+                message,
+                data,
+            },
             PARSE_ERROR | INVALID_REQUEST | INTERNAL_ERROR => Self::RpcInternal {
                 code,
                 message,
@@ -320,7 +339,8 @@ impl BookrackCliError {
         let data = match self {
             Self::RpcUserError { data, .. }
             | Self::RpcInternal { data, .. }
-            | Self::RpcBackendUnavailable { data, .. } => data.as_ref()?,
+            | Self::RpcBackendUnavailable { data, .. }
+            | Self::RpcStateUnusable { data, .. } => data.as_ref()?,
             Self::LibraryNotRoutable { problem }
             | Self::RootNotRoutable { problem }
             | Self::PreflightRefused { problem }
@@ -672,6 +692,35 @@ mod tests {
             assert!(matches!(err, BookrackCliError::RpcBusy { .. }));
             assert_eq!(err.exit_code(), 4, "code {code}");
         }
+    }
+
+    /// An unusable store exits 2 like caller input — the operator has a
+    /// step to take and the call will not succeed resent — but through
+    /// its own variant: `RpcUserError` says the request was wrong, and
+    /// here it was not. The `data` slot has to survive, since the hint
+    /// is the whole difference between this and "internal error".
+    #[test]
+    fn from_rpc_classifies_an_unusable_state_as_exit_two_and_keeps_its_data() {
+        let err = BookrackCliError::from_rpc(
+            STATE_UNUSABLE,
+            "catalog schema is newer than this build".into(),
+            Some(serde_json::json!({
+                "hint": "Run a newer bookrack build.",
+                "retryable": false,
+            })),
+        );
+        assert!(
+            matches!(err, BookrackCliError::RpcStateUnusable { .. }),
+            "{err:?}"
+        );
+        assert_eq!(err.exit_code(), 2);
+        let data = err
+            .problem_data()
+            .expect("the hint must survive classification");
+        assert!(
+            data.hint
+                .is_some_and(|h| h.contains("newer bookrack build"))
+        );
     }
 
     /// An unusable external backend exits 4 like a busy daemon, but

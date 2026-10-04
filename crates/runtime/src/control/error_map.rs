@@ -69,7 +69,7 @@ use eyre::Report;
 
 use super::jsonrpc::{
     BACKEND_UNAVAILABLE, INTERNAL_ERROR, INVALID_LIBRARY, INVALID_PARAMS, PLAN_KIND_MISMATCH,
-    PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND, PLAN_TARGET_DRIFTED, RpcError,
+    PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND, PLAN_TARGET_DRIFTED, RpcError, STATE_UNUSABLE,
 };
 use super::plan_registry::PlanLookupError;
 use crate::cmd::input_error::CmdInputError;
@@ -350,15 +350,37 @@ fn from_query(e: &QueryError) -> RpcError {
 /// Map a leaf `VectorsError` onto its wire code.
 ///
 /// The type has no `Explain` impl, so the summary is the flattened
-/// chain. Only the variants whose next step is "change what you
-/// passed" are caller input, and each carries that step as its hint;
-/// store state that needs a rebuild or a newer binary stays on
-/// [`INTERNAL_ERROR`] — calling it invalid params would be a lie of
-/// the same shape this line rejected for `-32013` and `-32001`.
+/// chain. The variants whose next step is "change what you passed"
+/// are caller input; those whose next step is the operator's — a newer
+/// build, a rebuild, a reset — take [`STATE_UNUSABLE`], since calling
+/// them invalid params would be a lie of the same shape this line
+/// rejected for `-32013` and `-32001`, and calling them internal would
+/// hide a step that exists. Both kinds carry that step as the hint.
+/// Everything else is a fault and stays on [`INTERNAL_ERROR`].
 fn from_vectors(e: &VectorsError) -> RpcError {
     use VectorsError::*;
     let problem = Problem::from_error_chain(e);
     match e {
+        UnknownAnnKind(_) => rpc_from_problem(
+            STATE_UNUSABLE,
+            problem.hint(
+                "Run a bookrack build that knows this ANN kind, or run `bookrack vectors \
+                 rebuild` to rewrite the index and its `vectors_meta.json` sidecar.",
+            ),
+        ),
+        DimensionMismatch { expected, .. } => rpc_from_problem(
+            STATE_UNUSABLE,
+            problem.hint(format!(
+                "Run `bookrack vectors reset` to re-embed every chunk at the configured \
+                 model's dimension; the store was built at {expected}."
+            )),
+        ),
+        ReaderTooOld { required, .. } => rpc_from_problem(
+            STATE_UNUSABLE,
+            problem.hint(format!(
+                "Run a bookrack build at reader version v{required} or newer."
+            )),
+        ),
         BuildOnBruteForceKind => rpc_from_problem(
             INVALID_PARAMS,
             problem.hint(
@@ -393,6 +415,19 @@ fn from_vectors(e: &VectorsError) -> RpcError {
 fn from_catalog(e: &CatalogError) -> RpcError {
     let problem = Problem::from_error_chain(e);
     match e {
+        CatalogError::SchemaTooNew { expected, .. } => rpc_from_problem(
+            STATE_UNUSABLE,
+            problem.hint(format!(
+                "Run a newer bookrack build (this one reads catalog schemas up to \
+                 v{expected}), or restore the catalog from a backup this build wrote."
+            )),
+        ),
+        CatalogError::ReaderTooOld { required, .. } => rpc_from_problem(
+            STATE_UNUSABLE,
+            problem.hint(format!(
+                "Run a bookrack build at reader version v{required} or newer."
+            )),
+        ),
         CatalogError::DerivedFromConflict { .. } => rpc_from_problem(
             INVALID_PARAMS,
             problem.hint(
@@ -410,6 +445,26 @@ fn from_catalog(e: &CatalogError) -> RpcError {
 fn from_corpus(e: &CorpusError) -> RpcError {
     let problem = Problem::from_error_chain(e);
     match e {
+        CorpusError::SchemaMismatch { .. } | CorpusError::IndexNotStamped => rpc_from_problem(
+            STATE_UNUSABLE,
+            problem.hint(
+                "Run `bookrack corpus rebuild` to rewrite the corpus at this build's schema \
+                 and stamps.",
+            ),
+        ),
+        CorpusError::IndexStampMismatch { key, .. } => rpc_from_problem(
+            STATE_UNUSABLE,
+            problem.hint(format!(
+                "Run `bookrack stamps reconcile` to see what the `{key}` stamp invalidates, \
+                 then the refresh command it names."
+            )),
+        ),
+        CorpusError::ReaderTooOld { required, .. } => rpc_from_problem(
+            STATE_UNUSABLE,
+            problem.hint(format!(
+                "Run a bookrack build at reader version v{required} or newer."
+            )),
+        ),
         CorpusError::InvalidIntakeId(_) => rpc_from_problem(
             INVALID_PARAMS,
             problem.hint("Pass a positive intake id; `bookrack list` prints them."),
@@ -935,6 +990,97 @@ mod tests {
             "{}",
             rpc.message
         );
+    }
+
+    /// Every store variant whose next step is the operator's — a newer
+    /// build, a rebuild, a reset — takes the state code, bare or
+    /// wrapped, and names that step. Written out rather than derived
+    /// from the `from_*` functions, which are what is under test.
+    #[test]
+    fn every_unusable_state_variant_takes_the_state_code_with_a_next_step() {
+        use bookrack_catalog::CatalogError;
+        use bookrack_corpus::CorpusError;
+        use bookrack_vectors::VectorsError;
+        let cases: Vec<(&str, Report)> = vec![
+            (
+                "catalog SchemaTooNew (bare)",
+                CatalogError::SchemaTooNew {
+                    found: 99,
+                    expected: 17,
+                }
+                .into(),
+            ),
+            (
+                "catalog ReaderTooOld (ops)",
+                OpsError::Catalog(CatalogError::ReaderTooOld {
+                    required: 9,
+                    current: 3,
+                })
+                .into(),
+            ),
+            (
+                "corpus SchemaMismatch (ingest)",
+                IngestError::Corpus(CorpusError::SchemaMismatch {
+                    found: "v0".into(),
+                    expected: 4,
+                })
+                .into(),
+            ),
+            (
+                "corpus ReaderTooOld (glean)",
+                GleanError::Corpus(CorpusError::ReaderTooOld {
+                    required: 9,
+                    current: 3,
+                })
+                .into(),
+            ),
+            (
+                "corpus IndexNotStamped (bare)",
+                CorpusError::IndexNotStamped.into(),
+            ),
+            (
+                "corpus IndexStampMismatch (ops > query)",
+                OpsError::Query(bookrack_query::QueryError::Corpus(
+                    CorpusError::IndexStampMismatch {
+                        key: "embed_model",
+                        found: "a".into(),
+                        expected: "b".into(),
+                    },
+                ))
+                .into(),
+            ),
+            (
+                "vectors UnknownAnnKind (ops)",
+                OpsError::Vectors(VectorsError::UnknownAnnKind("hyperspace".into())).into(),
+            ),
+            (
+                "vectors DimensionMismatch (ingest)",
+                IngestError::Vectors(VectorsError::DimensionMismatch {
+                    got: 768,
+                    expected: 1024,
+                })
+                .into(),
+            ),
+            (
+                "vectors ReaderTooOld (bare)",
+                VectorsError::ReaderTooOld {
+                    required: 9,
+                    current: 3,
+                }
+                .into(),
+            ),
+        ];
+        for (label, err) in cases {
+            let rpc = write_err("vectors.rebuild", err);
+            assert_eq!(rpc.code, STATE_UNUSABLE, "{label}: {}", rpc.message);
+            let data: bookrack_core::ProblemData =
+                serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
+            assert!(
+                !data.hint.unwrap_or_default().trim().is_empty(),
+                "{label}: a state code without the operator's next step"
+            );
+            assert!(!data.retryable, "{label}");
+        }
     }
 
     #[test]

@@ -138,6 +138,18 @@ systems. bookrack is a local-first system and does not probe for it.
   rather than the exit `2` the same condition produces at bring-up.
   A model that is simply not pulled is `-32602` instead: no amount of
   waiting fixes it, and the repair is `ollama pull`.
+- `-32018` state unusable (bookrack-specific; a store the call depends
+  on is in a state this build cannot serve — a catalog or corpus
+  written by a newer schema or demanding a newer reader, an index whose
+  build stamps are missing or disagree with this build, a vector
+  sidecar naming an ANN kind this build does not know or a dimension
+  the store was not built at). Distinct from `-32602`, which says the
+  request was wrong: here the request was fine and the library is not
+  in a state to take it. Distinct from `-32603`, which says there is
+  nothing for the caller to do but report: here there is a step, and
+  it is the operator's — run a newer build, rebuild the layer, reset
+  the vectors — named in `error.data.hint`. Not retryable as sent;
+  exit `2`.
 
 #### Error data
 
@@ -260,14 +272,26 @@ onto.
   recursive, so the code is the same whether the command raised the
   store error bare or a pipeline wrapper carried it
   (`OpsError::Query(QueryError::Vectors(..))` included).
+- **A store this build cannot serve** (`-32018`): a catalog or corpus
+  from a newer schema or demanding a newer reader
+  (`CatalogError::{SchemaTooNew, ReaderTooOld}`,
+  `CorpusError::{SchemaMismatch, ReaderTooOld}`), an index without
+  build stamps or with stamps that disagree with this build
+  (`CorpusError::{IndexNotStamped, IndexStampMismatch}`), and a vector
+  store whose sidecar names an unknown ANN kind, whose dimension does
+  not match, or whose reader stamp is too new
+  (`VectorsError::{UnknownAnnKind, DimensionMismatch, ReaderTooOld}`).
+  Each carries the operator's next step in `error.data.hint`, through
+  the same wrappers as the `-32602` leaves above.
 - **Everything else** (`-32603`): the handler tried and a downstream
   subsystem — catalog DB, vector store, file IO — failed. A request
   the embed client itself malformed (`EmbedError::{BadRequest,
   MalformedResponse}`) belongs here too: the operator did not write it.
 
 Clients distinguish "fix the request and retry" (`-32602` / `-32010` /
-`-32016`) from "report or escalate" (`-32603`) by the code, not by
-parsing the human-readable `error.message`.
+`-32016`), "the library needs an operator" (`-32018`), and "report or
+escalate" (`-32603`) by the code, not by parsing the human-readable
+`error.message`.
 
 The residual bucket is not a promise that nothing caller-shaped can
 land in it. The split is drawn by the type the failing step raised, so
@@ -315,7 +339,7 @@ the kind of failure without parsing stderr.
 | --- | --- | --- |
 | `0` | success | — |
 | `1` | internal / unexpected error | color-eyre fallback for unclassified errors; `-32700 parse error`, `-32600 invalid request`, `-32603 internal error`, and unknown JSON-RPC codes; `SessionLockUnreadable`; `doctor` reported a FAIL row; `verify` judged a finding as damage (see `verify.run` below for the table); `libraries detect` returned a not-a-library or unreadable-manifest verdict |
-| `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32016` plan-id mismatches and plan-target drift; a locally-resolved command rejected operator input (`libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate, `config effective` given a data root that does not resolve — the report is still printed, with the failure at its head, because a configuration report that fails when the configuration is broken is useless exactly when it is needed); a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0`; `bookrack run` refused to start because an external backend it needs is unusable (the embed model is not pulled, or the Ollama endpoint does not answer) — the check runs before any library is opened, so nothing was half-started. The same judgement on a live write RPC splits: an unpulled model stays `-32602` and exit `2`, while an unreachable or overloaded backend is `-32017` and exit `4`, because a call that failed mid-session may succeed on the next attempt; `bookrack rpc call` was handed params that are not valid JSON (`RpcParamsInvalid`) or a method name carrying no namespace (`RpcMethodNotNamespaced`), both judged locally before the call is sent |
+| `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32016` plan-id mismatches and plan-target drift, `-32018 state unusable` (a store from another build or with drifted stamps; the hint names the rebuild or the build to run); a locally-resolved command rejected operator input (`libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate, `config effective` given a data root that does not resolve — the report is still printed, with the failure at its head, because a configuration report that fails when the configuration is broken is useless exactly when it is needed); a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0`; `bookrack run` refused to start because an external backend it needs is unusable (the embed model is not pulled, or the Ollama endpoint does not answer) — the check runs before any library is opened, so nothing was half-started. The same judgement on a live write RPC splits: an unpulled model stays `-32602` and exit `2`, while an unreachable or overloaded backend is `-32017` and exit `4`, because a call that failed mid-session may succeed on the next attempt; `bookrack rpc call` was handed params that are not valid JSON (`RpcParamsInvalid`) or a method name carrying no namespace (`RpcMethodNotNamespaced`), both judged locally before the call is sent |
 | `3` | needs operator cleanup | a stale session lock points at a daemon that no longer answers; the operator must remove the lock file before retrying |
 | `4` | busy / not ready (retryable) | `-32001 busy`, `-32002 not ready` and `queue worker disabled`; `-32017 backend unavailable` (the Ollama daemon did not answer, or reported itself overloaded); a scripted caller can sleep and retry |
 | `5` | async job batch had failures | `bookrack ingest`, `bookrack papers ingest`, and `bookrack intake ocr` return this when at least one queued job ended in `Failed` or `Cancelled`. `Done`, `SkippedDuplicate`, and `NeedsOcr` are terminal successes and do not trigger it — a batch of scan sources that all end in `needs_ocr` returns `0` and points at `bookrack intake list-ocr-pending`. The per-job summary on stdout names the offenders; `--no-wait` returns `0` because the batch is not awaited |
