@@ -3,8 +3,10 @@
 //! Terminal implementation of [`WizardDriver`].
 //!
 //! Reads stdin for prompts, writes progress to stdout, errors to
-//! stderr. Owns every operator-facing string of the wizard; the
-//! runner hands over structured reports only.
+//! stderr. Owns every operator-facing string of the wizard except the
+//! first-run sequence on the closing screen, which
+//! [`bookrack_cli_grammar::first_step_lines`] renders for every surface
+//! that offers it; the runner hands over structured reports only.
 //!
 //! Every one of those strings goes through [`Console`], so what the
 //! operator reads is what a test reads. Writing to the process streams
@@ -13,6 +15,7 @@
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
+use bookrack_cli_grammar::first_step_lines;
 use bookrack_embed::ProbeReport as EmbedProbeReport;
 use eyre::{Context, ContextCompat, Result};
 
@@ -332,10 +335,10 @@ fn print_success(console: &dyn Console, data_root: &Path) {
     console.line("");
     console.line(&format!("Data root: {}", data_root.display()));
     console.line("");
-    console.line("Try:");
-    console.line("  bookrack ingest /path/to/book.epub");
-    console.line("  bookrack query \"your question\"");
-    console.line("  bookrack-mcp          # start the MCP server on 127.0.0.1:8765");
+    console.line("Next:");
+    for line in first_step_lines() {
+        console.line(&line);
+    }
 }
 
 fn report_has_model(probe: &EmbedProbeReport, name: &str) -> bool {
@@ -617,6 +620,81 @@ mod tests {
             0,
             "a refused root must not be echoed as chosen: {:?}",
             script.captured()
+        );
+    }
+
+    /// A finalize summary with nothing kept and a registry written: the
+    /// shape of a clean first run.
+    fn finalize_summary() -> FinalizeSummary {
+        let root = PathBuf::from("/data/library");
+        FinalizeSummary {
+            config_path: root.join("config.toml"),
+            config_kept: false,
+            manifest_path: root.join("bookrack.toml"),
+            manifest_kept: false,
+            registry: Some(PathBuf::from("/data/registry.toml")),
+            data_root: root,
+        }
+    }
+
+    /// The commands the closing screen offers, in order, with the
+    /// `# note` column stripped: everything after the ready line that
+    /// starts with the binary name.
+    fn offered_commands(captured: &[String]) -> Vec<String> {
+        let ready = captured
+            .iter()
+            .position(|line| line == "bookrack is ready.")
+            .expect("the closing screen announces readiness");
+        captured[ready + 1..]
+            .iter()
+            .map(|line| line.trim())
+            .filter(|line| line.starts_with("bookrack"))
+            .map(|line| {
+                line.split("    #")
+                    .next()
+                    .unwrap_or(line)
+                    .trim()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The closing screen is the first-run sequence and nothing else.
+    /// A suggestion outside it is one the operator cannot follow from
+    /// here: a verb the binary lacks, or a server that conflicts with
+    /// the daemon the sequence starts.
+    #[tokio::test]
+    async fn the_closing_screen_offers_exactly_the_first_steps() {
+        let script = Script::with_answers([]);
+        let driver = scripted_driver(&script);
+
+        driver
+            .step_finalize(&finalize_summary())
+            .await
+            .expect("finalize only reports");
+
+        let captured = script.captured();
+        assert_eq!(
+            offered_commands(&captured),
+            [
+                "bookrack run",
+                "bookrack ingest /path/to/book.epub",
+                "bookrack search \"your question\"",
+            ],
+            "closing screen: {captured:?}"
+        );
+        assert!(
+            captured.iter().any(|line| line == "Next:"),
+            "the list is introduced as the next steps: {captured:?}"
+        );
+        let rendered: Vec<&String> = captured
+            .iter()
+            .filter(|line| line.starts_with("  bookrack "))
+            .collect();
+        assert_eq!(
+            rendered,
+            first_step_lines().iter().collect::<Vec<_>>(),
+            "the screen renders the shared list, not a copy"
         );
     }
 }

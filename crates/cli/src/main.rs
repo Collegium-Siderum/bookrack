@@ -2795,4 +2795,27 @@ mod tests {
              exist: {rejected:?}"
         );
     }
+
+    /// The first-run sequence is offered on the wizard's closing screen
+    /// and in the root help trailer, so a step naming a verb the binary
+    /// lacks is the first thing a new operator fails at. The same parse
+    /// the examples get: legal today, not proven to succeed.
+    #[test]
+    fn every_first_step_is_a_command_the_binary_accepts() {
+        let mut rejected: Vec<String> = Vec::new();
+        for step in bookrack_cli_grammar::FIRST_STEPS {
+            let Ok(tokens) = help_gate::split_example(step.invocation) else {
+                rejected.push(format!("{} (unbalanced quotes)", step.invocation));
+                continue;
+            };
+            let argv = std::iter::once("bookrack".to_string()).chain(tokens);
+            if let Err(err) = Cli::try_parse_from(argv) {
+                rejected.push(format!("{} ({})", step.invocation, err.kind()));
+            }
+        }
+        assert!(
+            rejected.is_empty(),
+            "these first steps do not parse: {rejected:?}"
+        );
+    }
 }

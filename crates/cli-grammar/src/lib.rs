@@ -7,8 +7,11 @@ use std::path::PathBuf;
 
 use bookrack_core::{ItemKind, TypedIdParseError, TypedItemId};
 
+pub mod first_steps;
 #[doc(hidden)]
 pub mod help_gate;
+
+pub use first_steps::{FIRST_STEPS, FirstStep, first_step_lines};
 
 /// Renders a leaf's `Examples:` block for `#[command(after_long_help = ...)]`.
 ///

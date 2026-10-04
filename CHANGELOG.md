@@ -125,6 +125,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **The setup wizard's closing screen offers commands that can be
+  followed.** `bookrack init` closed on three suggestions of which none
+  worked as written: `bookrack query`, a verb the binary does not
+  carry; `bookrack ingest`, with no word that it needs a running
+  daemon; and `bookrack-mcp`, which cannot run beside the `bookrack
+  run` the README asks for. The screen now ends on the first-run
+  sequence in the order it has to run: `bookrack run` in one terminal,
+  `bookrack ingest` in another, then `bookrack search`. The sequence is
+  one list in the grammar crate, and a test parses every step against
+  the binary, so a step naming a verb the surface has dropped fails the
+  build rather than the operator.
+
 - **A data root carrying a registered library's identity at another
   path is refused, not followed.** Resolving `--data-dir` or
   `BOOKRACK_DATA_DIR` matched the root's manifest uuid against the
