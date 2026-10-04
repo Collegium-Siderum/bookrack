@@ -938,7 +938,7 @@ fn natural_name_hint(typed: &str) -> Option<String> {
         "show" => &["`bookrack show book:<id>`"],
         "stats" => &["`bookrack rpc call library.stats`"],
         "categories" | "tags" => &["`bookrack rpc call library.categories`"],
-        "search" => &["`bookrack search`"],
+        "search" | "query" => &["`bookrack search`"],
         // The paper side has a namespace, the book side does not: a
         // book is the unprefixed subject, and the verbs that narrow to
         // it take `--scope book`.
@@ -2193,6 +2193,7 @@ mod tests {
             ("categories", "`bookrack rpc call library.categories`"),
             ("tags", "`bookrack rpc call library.categories`"),
             ("search", "`bookrack search`"),
+            ("query", "`bookrack search`"),
             // The namespace the book side deliberately does not have.
             (
                 "books",

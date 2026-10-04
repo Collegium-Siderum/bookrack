@@ -10,8 +10,9 @@
 //! Two constructors:
 //!
 //! - [`Ops::with_library`] holds a warm [`bookrack_query::Library`], so
-//!   search ops are available. The MCP daemon and CLI subcommands that
-//!   need vector recall (`bookrack query`) use this path.
+//!   search ops are available. The daemon's session and the setup
+//!   wizard's smoke probe build one; a `bookrack search` reaches it
+//!   through the daemon.
 //! - [`Ops::catalog_only`] omits the embedder and vector store, so a
 //!   short-lived CLI process that only browses the catalog does not pay
 //!   the Ollama probe cost. Search ops on this variant fail with

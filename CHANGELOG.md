@@ -144,6 +144,11 @@ release workflow extracts the matching section verbatim from this file.
   the binary, so a step naming a verb the surface has dropped fails the
   build rather than the operator.
 
+- **`bookrack query` is answered with `bookrack search`.** The typed
+  name fell through to clap's similarity tip, which offered `verify`
+  and `queue`; it now points at the verb that does what the word asks,
+  as the other common read names already do.
+
 - **A data root carrying a registered library's identity at another
   path is refused, not followed.** Resolving `--data-dir` or
   `BOOKRACK_DATA_DIR` matched the root's manifest uuid against the
