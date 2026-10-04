@@ -31,21 +31,35 @@ use bookrack_runtime::cmd::libraries::CopyMode;
 use eyre::{Context, Result};
 
 /// Trailing block shown by `bookrack --help`. Names the environment
-/// variables that select the library and the embed backend, points at
-/// the session as the way to reach library reads, names the one read
-/// that has a verb of its own, and hands the runtime prerequisite check
-/// to `doctor` rather than restating it.
+/// variables that select the library and the embed backend, opens with
+/// `bookrack init` and the first-run sequence that follows it, points
+/// at the session as the way to reach library reads, and hands the
+/// runtime prerequisite check to `doctor` rather than restating it.
 ///
-/// The read verbs are not enumerated here: `natural_name_hint` already
-/// holds that table, and a second copy is one that goes stale on its
-/// own schedule.
-const TOP_AFTER_HELP: &str = "\
+/// The first-run sequence is rendered from
+/// [`bookrack_cli_grammar::FIRST_STEPS`], the list the wizard's closing
+/// screen prints, not copied from it. The read verbs are not
+/// enumerated here: `natural_name_hint` already holds that table, and
+/// a second copy is one that goes stale on its own schedule.
+fn top_after_help() -> String {
+    let mut out = String::from(
+        "\
 Environment:
   BOOKRACK_DATA_DIR     library data root (overridden by --data-dir)
   BOOKRACK_REGISTRY     TOML file mapping --library names to roots
   BOOKRACK_OLLAMA_URL   Ollama endpoint (default http://localhost:11434)
   BOOKRACK_LOG          tracing filter directive (default info; debug for verbose)
 
+First run: `bookrack init` picks a data root, checks Ollama, and writes
+the pointer other shells use. Then:
+",
+    );
+    for line in bookrack_cli_grammar::first_step_lines() {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out.push_str(
+        "
 Library reads (search, browse, metadata, status) are served by a running
 session: start one with `bookrack run`, then list the live control-plane
 surface with `bookrack rpc list`. The reads used most have verbs of their
@@ -53,14 +67,17 @@ own; a name this binary does not carry is answered with the verb that
 does the same thing.
 
 Prerequisites:
-  Run `bookrack doctor` to check Ollama and the embed model.";
+  Run `bookrack doctor` to check Ollama and the embed model.",
+    );
+    out
+}
 
 #[derive(clap::Parser)]
 #[command(
     name = "bookrack",
     version,
     about = "Search a local library of books.",
-    after_help = TOP_AFTER_HELP,
+    after_help = top_after_help(),
 )]
 struct Cli {
     /// Select the library at this data root, overriding the
@@ -2816,6 +2833,37 @@ mod tests {
         assert!(
             rejected.is_empty(),
             "these first steps do not parse: {rejected:?}"
+        );
+    }
+
+    /// The root trailer is where an operator with nothing set up reads
+    /// what to do first. It names `bookrack init` and then the same
+    /// first-run sequence the wizard closes on, from the same list.
+    #[test]
+    fn the_root_trailer_opens_with_init_and_the_first_steps() {
+        use clap::CommandFactory;
+
+        let trailer = Cli::command()
+            .get_after_help()
+            .expect("the root keeps its trailer")
+            .to_string();
+        assert!(
+            trailer.contains("`bookrack init`"),
+            "the trailer does not name the first step: {trailer}"
+        );
+        for line in bookrack_cli_grammar::first_step_lines() {
+            assert!(
+                trailer.contains(&line),
+                "the trailer lacks the first-run line {line:?}: {trailer}"
+            );
+        }
+        let init = trailer.find("`bookrack init`").expect("checked above");
+        let reads = trailer
+            .find("Library reads")
+            .expect("the trailer explains where reads are served");
+        assert!(
+            init < reads,
+            "the first run is read before the explanation of reads: {trailer}"
         );
     }
 }

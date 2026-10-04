@@ -71,6 +71,13 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **`bookrack --help` opens with the first run.** The trailer named
+  `run`, `rpc list`, and `doctor` but never `bookrack init`, the step
+  everything else assumes. It now says what `init` does and follows it
+  with the same three-command sequence the wizard's closing screen
+  prints, rendered from the same list, so the two surfaces cannot
+  drift apart in wording.
+
 - **`doctor` and `library.info` state what happened to a registry
   default a path-class selection passed over.** The data-root row
   called the default "shadowed by" the flag or variable, which on a
