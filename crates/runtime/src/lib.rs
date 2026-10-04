@@ -13,6 +13,7 @@
 //! REPL dispatch; everything from the daemon edge down lives here.
 
 pub mod audit_helpers;
+pub mod auto_register;
 pub mod backend_probe;
 pub mod cmd;
 pub mod control;

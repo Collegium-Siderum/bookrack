@@ -140,6 +140,11 @@ pub struct MethodContext {
     /// library that write touched instead — [`run_write`] takes it
     /// from the handler's own handle.
     pub library_name: String,
+    /// Registry names bring-up registered for the selected root, in
+    /// the order written; empty when it registered nothing. A fact
+    /// about this session, reported by `daemon.status` and not
+    /// persisted anywhere.
+    pub auto_registered: Vec<String>,
     /// Cached MCP tool list, populated by the daemon at startup from
     /// `bookrack_mcp::list_tools()`. Empty in entry points that do
     /// not bring up the MCP listener.
@@ -767,6 +772,7 @@ pub(crate) fn test_method_context(
         started_at_rfc3339: "2026-01-01T00:00:00Z".to_string(),
         selection: LibrarySelection::default(),
         library_name: library_name.unwrap_or("default").to_string(),
+        auto_registered: Vec::new(),
         mcp_tools: Arc::new(Vec::new()),
         queue_worker_enabled: false,
         tray_focus_signal: Arc::new(Notify::new()),

@@ -124,6 +124,10 @@ pub fn status(ctx: &MethodContext) -> Value {
         "library": ctx.info_context.library_name,
         "data_dir": ctx.info_context.data_dir,
         "served": served_libraries(ctx),
+        // What bring-up registered for the selected root this session;
+        // empty when nothing was. Not persisted: a restart on the same
+        // root finds it registered and reports nothing here.
+        "auto_registered": ctx.auto_registered,
     })
 }
 

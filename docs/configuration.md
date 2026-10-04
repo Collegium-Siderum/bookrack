@@ -29,10 +29,12 @@ bookrack chooses its data root by precedence, highest first:
    | Linux | `$XDG_CONFIG_HOME`, or `~/.config` if unset |
    | Windows | `%APPDATA%` (the Roaming AppData directory) |
 
-`bookrack init` writes step 6's registry file by default. When a
-path-class source (1, 3, or 4) wins while a registry `default` is also
-set, `bookrack info` and `bookrack doctor` report the eclipse so the
-shadowed default is visible rather than silently ignored.
+`bookrack init` writes step 6's registry file by default, and so does
+a daemon brought up on a path-class root that carries an identity
+manifest the registry does not know (see the registry section below).
+When a path-class source (1, 3, or 4) wins while a registry `default`
+is also set, `bookrack info` and `bookrack doctor` report the eclipse
+so the shadowed default is visible rather than silently ignored.
 
 A path-class root whose manifest identity the registry records at
 another path is claimed by no name: it is one library in two places,
@@ -122,6 +124,19 @@ one-command rebuild after a reinstall. It records entries only: the
 `default` pointer is left for `libraries default`, as it is by every
 write that merely refreshes an entry (`index-profile apply`,
 `libraries config`).
+
+The daemon is a registry writer too. `bookrack run` on a path-class
+root (`--data-dir`, `BOOKRACK_DATA_DIR`, the portable layout) that
+carries an identity manifest the registry does not know registers it
+under the manifest's name before deciding what to serve, so the daemon
+comes up serving the whole registry exactly as it would had
+`libraries add` run first; the `default` pointer is not touched, so an
+unnamed call still reaches whatever it pointed at. A root without a
+manifest, a manifest that cannot be read, or a manifest name another
+root already holds leaves the registry alone and the daemon serves
+that root by itself, saying why in its log. `bookrack status` reports
+what a session registered on a `registered_at_startup` row, and
+`daemon.status` carries it as `auto_registered`.
 
 ## Per-library settings: `config.toml`
 

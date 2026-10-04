@@ -2889,7 +2889,9 @@ fn claim_root_by_path(
 
 /// Whether two paths name the same root, comparing canonicalized forms
 /// and falling back to a raw comparison when canonicalization fails.
-fn same_root(a: &Path, b: &Path) -> bool {
+/// The one comparison every registry-aware check uses, so a symlink or
+/// mount alias matches the same way everywhere.
+pub fn same_root(a: &Path, b: &Path) -> bool {
     let ca = a.canonicalize();
     let cb = b.canonicalize();
     match (ca, cb) {

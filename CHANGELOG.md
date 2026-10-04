@@ -10,6 +10,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **A daemon brought up on an unregistered root with an identity
+  manifest registers it and serves the registry.** `bookrack run
+  --data-dir <root>` (or the data-root variable, or the portable
+  layout) on a root the registry did not know served that root alone,
+  anonymously, however complete its manifest. Bring-up now records the
+  root under its manifest name, leaves the `default` pointer as it
+  was, and comes up serving every registered library, as it would had
+  `libraries add` run first. A root with no manifest, an unreadable
+  manifest, or a name another root already holds is still served
+  alone, with the reason in the daemon log. `daemon.status` reports
+  the names a session registered as `auto_registered`, and
+  `bookrack status` shows them on a `registered_at_startup` row; both
+  are empty on the next start, which finds the entry in place.
+
 - **`-32018 STATE_UNUSABLE`: a store this build cannot serve has its
   own error code.** A catalog or corpus written by a newer schema or
   demanding a newer reader, an index without build stamps or with

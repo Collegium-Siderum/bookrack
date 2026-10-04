@@ -347,7 +347,7 @@ impl DaemonRuntime {
         // throws that result away; resolution happens here, after the
         // lock, so the configuration the daemon serves is the one that
         // was in place when it took ownership.
-        let cfg = Arc::new(Config::resolve(&opts.selection).context("resolve configuration")?);
+        let mut cfg = Config::resolve(&opts.selection).context("resolve configuration")?;
         // 4a. A path-class root whose manifest identity the registry
         //     records at another path is refused before anything is
         //     locked or opened: serving it under the registered name
@@ -355,15 +355,36 @@ impl DaemonRuntime {
         //     serving it anonymously would run one identity in two
         //     places.
         refuse_relocated_identity(&cfg)?;
+        // 4a'. A path-class root with a manifest the registry does not
+        //      know is registered under the manifest's name, then the
+        //      selection is resolved again so the name is claimed the
+        //      way any registered root's is and every consumer below
+        //      reads it off `cfg`.
+        let auto_registered: Vec<String> = match crate::auto_register::auto_register(&cfg) {
+            crate::auto_register::AutoRegistration::Registered { name } => {
+                tracing::info!(
+                    library = %name,
+                    root = %cfg.data_dir().display(),
+                    "registered the selected root under its manifest name",
+                );
+                cfg = Config::resolve(&opts.selection)
+                    .context("resolve configuration after registering the selected root")?;
+                vec![name]
+            }
+            crate::auto_register::AutoRegistration::Skipped(skip) => {
+                skip.log(cfg.data_dir());
+                Vec::new()
+            }
+        };
+        let cfg = Arc::new(cfg);
         // 4b. Decide the mount set and take every served root's lock
         //     before anything expensive comes up, so a contended root
         //     fails with no reranker spawned and no half-open handles.
         //     With the primary root selected through the registry the
         //     daemon serves every registered library; a path-class
         //     root the registry does not know (or a machine with no
-        //     registry) keeps the single-library form. Runtime
-        //     mount/unmount and auto-registration of unregistered
-        //     roots are later milestones.
+        //     registry) keeps the single-library form. The set changes
+        //     at runtime through `library.mount` / `library.unmount`.
         let primary_name = cfg.library().unwrap_or("default").to_string();
         let registry_entries = if cfg.library().is_some() {
             bookrack_config::list_libraries()
@@ -541,6 +562,7 @@ impl DaemonRuntime {
         tracing::info!(
             libraries = mounts.len(),
             default = %plan.default_name,
+            auto_registered = ?auto_registered,
             "library registry warmed up",
         );
 
@@ -753,6 +775,7 @@ impl DaemonRuntime {
             started_at_rfc3339: started_at_wall.to_rfc3339(),
             selection: selection_for_doctor,
             library_name: library_name.clone(),
+            auto_registered,
             mcp_tools,
             queue_worker_enabled: opts.spawn_queue_worker,
             tray_focus_signal: Arc::clone(&tray_focus_signal),

@@ -362,8 +362,9 @@ the exit-code bucket does not distinguish the two.
 - `daemon.shutdown` — fires the shared shutdown broadcast; the
   response is `null` and is written before the listener stops.
 - `daemon.status` — `{ state, queue_pending, queue_running,
-  queue_worker_enabled, library, data_dir, served }`. The canonical
-  name; `status` is a compatibility alias answered by the same handler.
+  queue_worker_enabled, library, data_dir, served, auto_registered }`.
+  The canonical name; `status` is a compatibility alias answered by
+  the same handler.
   `state` is one of
   `idle`, `writing`, `working`, `degraded`, `stopping`; see the
   `daemon.state` event for the semantics of each value.
@@ -385,6 +386,12 @@ the exit-code bucket does not distinguish the two.
   `default`, not `primary`. `served` is `null` when the registry could
   not be read; that is not the same as an empty set, which cannot
   occur (a daemon serves at least the library it came up under).
+
+  `auto_registered` lists the registry names bring-up recorded for the
+  selected root — a path-class root carrying an identity manifest the
+  registry did not know — and is `[]` when it recorded nothing. It is
+  a fact about this session, not persisted: the next start on the same
+  root finds the entry in place and reports an empty list.
 - `doctor.gather` — JSON serialisation of the same report the
   `bookrack doctor` subcommand prints. Gathered inside the daemon, so
   the `MCP endpoint` row probes the address this session bound and not

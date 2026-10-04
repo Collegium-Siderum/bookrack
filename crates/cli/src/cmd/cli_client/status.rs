@@ -160,7 +160,25 @@ fn compose_card(
         }
         card["library"]["served"] = served;
     }
+    // And for what bring-up registered: a row only on the session that
+    // did it, since the next start finds the entry already there.
+    if let Some(registered) = registered_at_startup(status) {
+        card["library"]["registered_at_startup"] = Value::String(registered);
+    }
     card
+}
+
+/// The names bring-up registered for the selected root, joined for one
+/// row; `None` when it registered nothing or the daemon predates the
+/// field.
+fn registered_at_startup(status: &Value) -> Option<String> {
+    let names: Vec<&str> = status
+        .get("auto_registered")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    (!names.is_empty()).then(|| names.join(", "))
 }
 
 /// The `served` set when this daemon holds more than one library, else
