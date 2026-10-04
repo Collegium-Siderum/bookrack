@@ -16,7 +16,7 @@ use ts_rs::TS;
 
 use super::{MethodContext, require_yes, run_write};
 use crate::cmd::vectors;
-use crate::control::error_map::{plan_lookup_err, registry_err, write_err};
+use crate::control::error_map::{handler_err, plan_lookup_err, registry_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::control::plan_registry::PlanId;
 
@@ -62,7 +62,7 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
             parsed.refine_factor,
         )
         .await
-        .map_err(|e| write_err("vectors.rebuild", e))?;
+        .map_err(|e| handler_err("vectors.rebuild", e))?;
         Ok(json!({ "ok": true }))
     })
     .await
@@ -133,7 +133,7 @@ async fn reembed_dry_run(
     run_write(ctx, handle.name(), move || async move {
         let plans = vectors::plan_reembed(&cfg, book, stale_only)
             .await
-            .map_err(|e| write_err("vectors.reembed", e))?;
+            .map_err(|e| handler_err("vectors.reembed", e))?;
         let registered = RegisteredReembedPlan {
             pinned_ids: plans.iter().map(|p| p.intake_id).collect(),
         };
@@ -175,7 +175,7 @@ async fn reembed_execute_from_plan(
     run_write(ctx, handle.name(), move || async move {
         let report = vectors::execute_reembed_from_plan(&cfg, plan.pinned_ids)
             .await
-            .map_err(|e| write_err("vectors.reembed", e))?;
+            .map_err(|e| handler_err("vectors.reembed", e))?;
         let chunks_written: usize = report
             .intakes
             .iter()
@@ -217,7 +217,7 @@ pub async fn reset(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
     run_write(ctx, handle.name(), move || async move {
         vectors::reset(&cfg, parsed.yes, parsed.resume, deny_destructive)
             .await
-            .map_err(|e| write_err("vectors.reset", e))?;
+            .map_err(|e| handler_err("vectors.reset", e))?;
         Ok(json!({ "ok": true }))
     })
     .await
@@ -248,7 +248,7 @@ pub async fn drop_index(params: &Option<Value>, ctx: &MethodContext) -> Result<V
     run_write(ctx, handle.name(), move || async move {
         vectors::drop(&cfg)
             .await
-            .map_err(|e| write_err("vectors.drop", e))?;
+            .map_err(|e| handler_err("vectors.drop", e))?;
         Ok(json!({ "ok": true }))
     })
     .await

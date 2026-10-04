@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use bookrack_core::{Explain, ItemKind, KindedNodeId, NodeId, Problem};
+use bookrack_core::{ItemKind, KindedNodeId, NodeId, Problem};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::{BookFilter, MetadataFilter, PaperFilter, ShowTocArgs, parse_statuses};
 use bookrack_ops::registry::LibraryHandle;
@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::MethodContext;
-use crate::control::error_map::{registry_err, rpc_from_problem, unknown_filter_value};
+use crate::control::error_map::{ops_err, registry_err, rpc_from_problem, unknown_filter_value};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Deserialize, Default)]
@@ -304,14 +304,6 @@ fn resolve(
     ctx.registry.get(library).map_err(registry_err)
 }
 
-fn ops_internal(e: OpsError) -> RpcError {
-    rpc_from_problem(INTERNAL_ERROR, e.explain())
-}
-
-fn ops_invalid(e: OpsError) -> RpcError {
-    rpc_from_problem(INVALID_PARAMS, e.explain())
-}
-
 fn to_value<T: serde::Serialize + ?Sized>(v: &T) -> Result<Value, RpcError> {
     serde_json::to_value(v)
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("serialise response: {e}")))
@@ -320,14 +312,14 @@ fn to_value<T: serde::Serialize + ?Sized>(v: &T) -> Result<Value, RpcError> {
 pub fn stats(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: LibraryOnlyParams = parse(params, "library.stats")?;
     let handle = resolve(ctx, p.library.as_deref())?;
-    let stats = reads::books::show_stats(handle.ops()).map_err(ops_internal)?;
+    let stats = reads::books::show_stats(handle.ops()).map_err(ops_err)?;
     to_value(&stats)
 }
 
 pub fn categories(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: LibraryOnlyParams = parse(params, "library.categories")?;
     let handle = resolve(ctx, p.library.as_deref())?;
-    let counts = reads::books::category_counts(handle.ops()).map_err(ops_internal)?;
+    let counts = reads::books::category_counts(handle.ops()).map_err(ops_err)?;
     to_value(&counts)
 }
 
@@ -335,7 +327,7 @@ pub fn list_books(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
     let p: PageParams = parse(params, "library.list_books")?;
     let handle = resolve(ctx, p.library.as_deref())?;
     let page = reads::books::list_books(handle.ops(), p.limit.unwrap_or(0), p.offset.unwrap_or(0))
-        .map_err(ops_internal)?;
+        .map_err(ops_err)?;
     to_value(&page)
 }
 
@@ -344,7 +336,7 @@ pub fn list_ocr_pending(params: &Option<Value>, ctx: &MethodContext) -> Result<V
     let handle = resolve(ctx, p.library.as_deref())?;
     let page =
         reads::books::list_ocr_pending(handle.ops(), p.limit.unwrap_or(0), p.offset.unwrap_or(0))
-            .map_err(ops_internal)?;
+            .map_err(ops_err)?;
     to_value(&page)
 }
 
@@ -368,7 +360,7 @@ pub fn find_books(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
         p.limit.unwrap_or(0),
         p.offset.unwrap_or(0),
     )
-    .map_err(ops_internal)?;
+    .map_err(ops_err)?;
     to_value(&page)
 }
 
@@ -378,7 +370,7 @@ pub fn show_book(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
     match reads::books::show_book(handle.ops(), p.intake_id) {
         Ok(detail) => to_value(&Some(detail)),
         Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
-        Err(e) => Err(ops_internal(e)),
+        Err(e) => Err(ops_err(e)),
     }
 }
 
@@ -388,7 +380,7 @@ pub fn show_toc(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, Rp
     match reads::books::show_toc(handle.ops(), p.intake_id, &p.toc_args()) {
         Ok(toc) => to_value(&Some(toc)),
         Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
-        Err(e) => Err(ops_internal(e)),
+        Err(e) => Err(ops_err(e)),
     }
 }
 
@@ -408,8 +400,7 @@ pub fn read_context(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
     match reads::passages::read_context(handle.ops(), target, before, after) {
         Ok(window) => to_value(&Some(window)),
         Err(OpsError::NodeNotFound { .. }) => Ok(Value::Null),
-        Err(e @ OpsError::NotALeaf { .. }) => Err(ops_invalid(e)),
-        Err(e) => Err(ops_internal(e)),
+        Err(e) => Err(ops_err(e)),
     }
 }
 
@@ -423,8 +414,7 @@ pub fn read_span(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
     match reads::passages::read_span(handle.ops(), target, p.start_after) {
         Ok(span) => to_value(&Some(span)),
         Err(OpsError::NodeNotFound { .. }) => Ok(Value::Null),
-        Err(e @ OpsError::NotOrganizing { .. }) => Err(ops_invalid(e)),
-        Err(e) => Err(ops_internal(e)),
+        Err(e) => Err(ops_err(e)),
     }
 }
 
@@ -434,7 +424,7 @@ pub fn show_metadata_audit(params: &Option<Value>, ctx: &MethodContext) -> Resul
     match reads::metadata::show_metadata_audit(handle.ops(), p.intake_id) {
         Ok(report) => to_value(&Some(report)),
         Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
-        Err(e) => Err(ops_internal(e)),
+        Err(e) => Err(ops_err(e)),
     }
 }
 
@@ -454,7 +444,7 @@ pub fn show_metadata_report(
     ) {
         Ok(report) => to_value(&Some(report)),
         Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
-        Err(e) => Err(ops_internal(e)),
+        Err(e) => Err(ops_err(e)),
     }
 }
 
@@ -498,7 +488,7 @@ pub fn show_paper_metadata_report(
     ) {
         Ok(report) => to_value(&Some(report)),
         Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
-        Err(e) => Err(ops_internal(e)),
+        Err(e) => Err(ops_err(e)),
     }
 }
 
@@ -511,7 +501,7 @@ pub fn show_paper_audit_trail(
     match reads::papers_metadata::show_paper_audit_trail(handle.ops(), p.intake_id) {
         Ok(entries) => to_value(&Some(entries)),
         Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
-        Err(e) => Err(ops_internal(e)),
+        Err(e) => Err(ops_err(e)),
     }
 }
 
@@ -530,7 +520,7 @@ pub fn list_metadata(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         p.limit.unwrap_or(0),
         p.offset.unwrap_or(0),
     )
-    .map_err(ops_internal)?;
+    .map_err(ops_err)?;
     to_value(&page)
 }
 
@@ -545,7 +535,7 @@ pub fn list_pending_reviews(
         p.limit.unwrap_or(0),
         p.offset.unwrap_or(0),
     )
-    .map_err(ops_internal)?;
+    .map_err(ops_err)?;
     to_value(&page)
 }
 
@@ -564,7 +554,7 @@ pub fn list_paper_metadata(params: &Option<Value>, ctx: &MethodContext) -> Resul
         p.limit.unwrap_or(0),
         p.offset.unwrap_or(0),
     )
-    .map_err(ops_internal)?;
+    .map_err(ops_err)?;
     to_value(&page)
 }
 
@@ -579,7 +569,7 @@ pub fn list_paper_pending_reviews(
         p.limit.unwrap_or(0),
         p.offset.unwrap_or(0),
     )
-    .map_err(ops_internal)?;
+    .map_err(ops_err)?;
     to_value(&page)
 }
 
@@ -589,7 +579,7 @@ pub fn show_audit_trail(params: &Option<Value>, ctx: &MethodContext) -> Result<V
     match reads::metadata::show_audit_trail(handle.ops(), p.intake_id) {
         Ok(trail) => to_value(&Some(trail)),
         Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
-        Err(e) => Err(ops_internal(e)),
+        Err(e) => Err(ops_err(e)),
     }
 }
 
@@ -599,7 +589,7 @@ pub fn show_pipeline_trail(params: &Option<Value>, ctx: &MethodContext) -> Resul
     match reads::pipeline::show_pipeline_trail(handle.ops(), p.intake_id) {
         Ok(trail) => to_value(&Some(trail)),
         Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
-        Err(e) => Err(ops_internal(e)),
+        Err(e) => Err(ops_err(e)),
     }
 }
 
@@ -612,10 +602,10 @@ pub async fn search(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
     let hits = match kind {
         "book" => reads::search::search(handle.ops(), &p.query, book_overrides, p.top_k)
             .await
-            .map_err(ops_internal)?,
+            .map_err(ops_err)?,
         "paper" => reads::search::search_paper(handle.ops(), &p.query, paper_overrides, p.top_k)
             .await
-            .map_err(ops_internal)?,
+            .map_err(ops_err)?,
         "all" => reads::search::search_unified(
             handle.ops(),
             &p.query,
@@ -624,7 +614,7 @@ pub async fn search(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             p.top_k,
         )
         .await
-        .map_err(ops_internal)?,
+        .map_err(ops_err)?,
         other => {
             return Err(RpcError::new(
                 INVALID_PARAMS,
@@ -654,7 +644,7 @@ pub async fn search_in_book(
             let empty: Vec<bookrack_ops::Citation> = Vec::new();
             to_value(&empty)
         }
-        Err(e) => Err(ops_internal(e)),
+        Err(e) => Err(ops_err(e)),
     }
 }
 
@@ -663,7 +653,7 @@ pub fn list_papers(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
     let handle = resolve(ctx, p.library.as_deref())?;
     let page =
         reads::papers::list_papers(handle.ops(), p.limit.unwrap_or(0), p.offset.unwrap_or(0))
-            .map_err(ops_internal)?;
+            .map_err(ops_err)?;
     to_value(&page)
 }
 
@@ -688,7 +678,7 @@ pub fn find_papers(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
         p.limit.unwrap_or(0),
         p.offset.unwrap_or(0),
     )
-    .map_err(ops_internal)?;
+    .map_err(ops_err)?;
     to_value(&page)
 }
 
@@ -698,7 +688,7 @@ pub fn show_paper(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
     match reads::papers::show_paper(handle.ops(), p.intake_id) {
         Ok(detail) => to_value(&Some(detail)),
         Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
-        Err(e) => Err(ops_internal(e)),
+        Err(e) => Err(ops_err(e)),
     }
 }
 
@@ -708,7 +698,7 @@ pub fn show_paper_toc(params: &Option<Value>, ctx: &MethodContext) -> Result<Val
     match reads::papers::show_paper_toc(handle.ops(), p.intake_id, &p.toc_args()) {
         Ok(toc) => to_value(&Some(toc)),
         Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
-        Err(e) => Err(ops_internal(e)),
+        Err(e) => Err(ops_err(e)),
     }
 }
 
@@ -728,7 +718,7 @@ pub async fn search_in_paper(
             let empty: Vec<bookrack_ops::Citation> = Vec::new();
             to_value(&empty)
         }
-        Err(e) => Err(ops_internal(e)),
+        Err(e) => Err(ops_err(e)),
     }
 }
 
@@ -738,7 +728,7 @@ pub fn papers_export_csl(params: &Option<Value>, ctx: &MethodContext) -> Result<
     match reads::papers::export_csl(handle.ops(), p.intake_id) {
         Ok(item) => to_value(&item),
         Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
-        Err(e) => Err(ops_internal(e)),
+        Err(e) => Err(ops_err(e)),
     }
 }
 
@@ -751,7 +741,7 @@ pub fn papers_fetch_source(params: &Option<Value>, ctx: &MethodContext) -> Resul
         // match on it without parsing an error envelope. A `null` here
         // matches the rest of the `library.show_*` / `papers.*` family.
         Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
-        Err(e) => Err(ops_internal(e)),
+        Err(e) => Err(ops_err(e)),
     }
 }
 
@@ -763,7 +753,7 @@ pub async fn vectors_status(
     let handle = resolve(ctx, p.library.as_deref())?;
     let status = reads::vectors::status(handle.ops())
         .await
-        .map_err(ops_internal)?;
+        .map_err(ops_err)?;
     to_value(&status)
 }
 

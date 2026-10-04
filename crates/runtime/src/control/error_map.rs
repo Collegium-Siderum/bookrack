@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Classify a write-handler error onto the right JSON-RPC code.
+//! Classify a control-plane handler's error onto the right JSON-RPC
+//! code.
 //!
-//! Write-class control-plane RPCs receive `eyre::Report` from the
-//! `cmd::*` layer (which folds typed downstream errors through
-//! `?`/`.context()`). Reporting every such error as
+//! Write-class RPCs receive `eyre::Report` from the `cmd::*` layer
+//! (which folds typed downstream errors through `?`/`.context()`); the
+//! `library.*` read proxies receive an [`OpsError`] straight from
+//! `bookrack_ops::reads`. Reporting every such error as
 //! [`INTERNAL_ERROR`] hides user-input failures — unknown intakes,
 //! validation refusals, unknown libraries — from MCP/CLI clients,
 //! who then cannot distinguish a caller-side input problem from a
-//! genuine server fault.
+//! genuine server fault. Both classes route through this one module,
+//! so the same condition takes the same code whichever side raised it.
 //!
-//! [`write_err`] walks the `eyre` cause chain looking for known typed
+//! [`handler_err`] walks the `eyre` cause chain looking for known typed
 //! errors and, when one matches, maps a user-input variant onto
 //! [`INVALID_PARAMS`] (or the bookrack-specific code reserved for that
 //! shape, e.g. [`INVALID_LIBRARY`]). Anything that does not match a
@@ -75,7 +78,7 @@ use super::plan_registry::PlanLookupError;
 use crate::cmd::input_error::CmdInputError;
 use crate::mount::MountRefusal;
 
-/// Map a write-handler error onto a JSON-RPC error envelope.
+/// Map a handler's `eyre::Report` onto a JSON-RPC error envelope.
 ///
 /// `method` is the wire-name of the failing RPC (`"metadata.set"`,
 /// `"corpus.rebuild"`, ...), used only to label the residual
@@ -85,7 +88,7 @@ use crate::mount::MountRefusal;
 /// [`rpc_from_problem`], so `data` is on the envelope unconditionally:
 /// `retryable` alone, since such an error has neither evidence nor a
 /// next step to name.
-pub(crate) fn write_err(method: &str, err: Report) -> RpcError {
+pub(crate) fn handler_err(method: &str, err: Report) -> RpcError {
     for cause in err.chain() {
         if let Some(e) = cause.downcast_ref::<OpsError>() {
             return from_ops(e);
@@ -124,8 +127,10 @@ pub(crate) fn write_err(method: &str, err: Report) -> RpcError {
     )
 }
 
-/// Map a directly-held [`OpsError`] without an `anyhow` round-trip.
-#[allow(dead_code)]
+/// Map a directly-held [`OpsError`] without an `eyre` round-trip: the
+/// read proxies get the typed error straight from `bookrack_ops::reads`
+/// and classify it here, with the same arms the write side reaches
+/// through [`handler_err`].
 pub(crate) fn ops_err(e: OpsError) -> RpcError {
     from_ops(&e)
 }
@@ -519,7 +524,7 @@ mod tests {
     #[test]
     fn ops_intake_not_found_is_invalid_params() {
         let err: Report = OpsError::IntakeNotFound { intake_id: 42 }.into();
-        let rpc = write_err("metadata.set", err);
+        let rpc = handler_err("metadata.set", err);
         assert_eq!(rpc.code, INVALID_PARAMS);
         assert!(rpc.message.contains("42"));
     }
@@ -531,7 +536,7 @@ mod tests {
             editable: vec![String::from("title")],
         }
         .into();
-        let rpc = write_err("metadata.set", err);
+        let rpc = handler_err("metadata.set", err);
         assert_eq!(rpc.code, INVALID_PARAMS);
         assert!(rpc.message.contains("no_such_field"));
     }
@@ -543,7 +548,7 @@ mod tests {
             .context("rebuild step")
             .context("outer wrap")
             .unwrap_err();
-        let rpc = write_err("corpus.rebuild", err);
+        let rpc = handler_err("corpus.rebuild", err);
         assert_eq!(rpc.code, INVALID_PARAMS);
     }
 
@@ -553,7 +558,7 @@ mod tests {
             reason: "no text layer".into(),
         }
         .into();
-        let rpc = write_err("papers.corpus_rebuild", err);
+        let rpc = handler_err("papers.corpus_rebuild", err);
         assert_eq!(rpc.code, INVALID_PARAMS);
         assert!(rpc.message.contains("no text layer"));
     }
@@ -565,7 +570,7 @@ mod tests {
             available: vec!["main".into()],
         }
         .into();
-        let rpc = write_err("library.set_default", err);
+        let rpc = handler_err("library.set_default", err);
         assert_eq!(rpc.code, INVALID_LIBRARY);
     }
 
@@ -587,7 +592,7 @@ mod tests {
             bookrack_embed::EmbedError::Unreachable("boom".into()),
         ))
         .into();
-        let rpc = write_err("library.search", err);
+        let rpc = handler_err("library.search", err);
         assert_eq!(rpc.code, BACKEND_UNAVAILABLE);
         let wire = serde_json::to_string(&rpc).expect("serialize");
         assert!(wire.contains("boom"), "root cause lost: {wire}");
@@ -609,7 +614,7 @@ mod tests {
             .context("probe embedding dimension")
             .context("stamps.reconcile")
             .unwrap_err();
-        let rpc = write_err("stamps.reconcile", err);
+        let rpc = handler_err("stamps.reconcile", err);
         assert_eq!(rpc.code, INVALID_PARAMS);
         let data: bookrack_core::ProblemData =
             serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
@@ -626,7 +631,7 @@ mod tests {
     fn a_bare_unreachable_backend_is_backend_unavailable_and_retryable() {
         let err: Report =
             bookrack_embed::EmbedError::Unreachable("connection refused".into()).into();
-        let rpc = write_err("stamps.reconcile", err);
+        let rpc = handler_err("stamps.reconcile", err);
         assert_eq!(rpc.code, BACKEND_UNAVAILABLE);
         let data: bookrack_core::ProblemData =
             serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
@@ -662,7 +667,7 @@ mod tests {
         ];
         for err in wrapped {
             let label = format!("{err:#}");
-            let rpc = write_err("vectors.reembed", err);
+            let rpc = handler_err("vectors.reembed", err);
             assert_eq!(rpc.code, INVALID_PARAMS, "{label}");
         }
     }
@@ -681,7 +686,7 @@ mod tests {
             bookrack_embed::EmbedError::MalformedResponse("not json".into()),
         ] {
             let label = format!("{e:?}");
-            let rpc = write_err("stamps.reconcile", e.into());
+            let rpc = handler_err("stamps.reconcile", e.into());
             assert_eq!(rpc.code, INTERNAL_ERROR, "{label}");
         }
     }
@@ -695,7 +700,7 @@ mod tests {
             },
         ))
         .into();
-        let rpc = write_err("library.search", err);
+        let rpc = handler_err("library.search", err);
         let data: bookrack_core::ProblemData =
             serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
         assert!(
@@ -717,7 +722,7 @@ mod tests {
             },
         ))
         .into();
-        let rpc = write_err("library.search", explained);
+        let rpc = handler_err("library.search", explained);
         assert!(rpc.message.contains("test-model"), "{}", rpc.message);
         assert!(
             !rpc.message.contains("query error"),
@@ -732,7 +737,7 @@ mod tests {
             "source file is not readable",
         ))
         .into();
-        let rpc = write_err("ingest.submit", unexplained);
+        let rpc = handler_err("ingest.submit", unexplained);
         assert!(
             rpc.message.contains("source file is not readable"),
             "{}",
@@ -806,7 +811,7 @@ mod tests {
     fn every_cmd_input_variant_maps_onto_a_caller_input_code() {
         for (e, expected) in cmd_input_cases() {
             let label = format!("{e:?}");
-            let rpc = write_err("remove", e.into());
+            let rpc = handler_err("remove", e.into());
             assert_eq!(rpc.code, expected, "{label}");
             assert_ne!(rpc.code, INTERNAL_ERROR, "{label}");
         }
@@ -818,7 +823,7 @@ mod tests {
     #[test]
     fn cmd_input_hint_survives_onto_the_wire() {
         let err: Report = CmdInputError::UnknownIntake { intake_id: 999_999 }.into();
-        let rpc = write_err("remove", err);
+        let rpc = handler_err("remove", err);
         assert!(rpc.message.contains("999999"), "{}", rpc.message);
         let data: bookrack_core::ProblemData =
             serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
@@ -840,7 +845,7 @@ mod tests {
             .context("execute remove plan")
             .context("remove")
             .unwrap_err();
-        let rpc = write_err("remove", err);
+        let rpc = handler_err("remove", err);
         assert_eq!(rpc.code, PLAN_TARGET_DRIFTED);
         assert!(rpc.message.contains("book 7"), "{}", rpc.message);
     }
@@ -888,7 +893,7 @@ mod tests {
             ),
         ];
         for (label, err) in cases {
-            let rpc = write_err("vectors.rebuild", err);
+            let rpc = handler_err("vectors.rebuild", err);
             assert_eq!(rpc.code, INVALID_PARAMS, "{label}: {}", rpc.message);
         }
     }
@@ -905,7 +910,7 @@ mod tests {
             .context("build the ANN index")
             .context("vectors.rebuild")
             .unwrap_err();
-        let rpc = write_err("vectors.rebuild", err);
+        let rpc = handler_err("vectors.rebuild", err);
         assert_eq!(rpc.code, INVALID_PARAMS, "{}", rpc.message);
         assert!(
             !rpc.message.contains("vectors.rebuild failed:"),
@@ -914,7 +919,7 @@ mod tests {
         );
 
         let err: Report = bookrack_corpus::CorpusError::InvalidIntakeId(-1).into();
-        assert_eq!(write_err("ingest.submit", err).code, INVALID_PARAMS);
+        assert_eq!(handler_err("ingest.submit", err).code, INVALID_PARAMS);
     }
 
     /// Every variant the classifier judges caller input carries a next
@@ -955,7 +960,7 @@ mod tests {
             ),
         ];
         for (label, err) in cases {
-            let rpc = write_err("vectors.rebuild", err);
+            let rpc = handler_err("vectors.rebuild", err);
             assert_eq!(rpc.code, INVALID_PARAMS, "{label}");
             let data: bookrack_core::ProblemData =
                 serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
@@ -978,7 +983,7 @@ mod tests {
             std::io::Error::new(std::io::ErrorKind::PermissionDenied, "backup dir read-only"),
         ))
         .into();
-        let rpc = write_err("metadata.set", err);
+        let rpc = handler_err("metadata.set", err);
         assert_eq!(rpc.code, INTERNAL_ERROR);
         assert!(
             !rpc.message.starts_with("catalog error"),
@@ -1071,7 +1076,7 @@ mod tests {
             ),
         ];
         for (label, err) in cases {
-            let rpc = write_err("vectors.rebuild", err);
+            let rpc = handler_err("vectors.rebuild", err);
             assert_eq!(rpc.code, STATE_UNUSABLE, "{label}: {}", rpc.message);
             let data: bookrack_core::ProblemData =
                 serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
@@ -1083,10 +1088,26 @@ mod tests {
         }
     }
 
+    /// The two read-shape refusals the read proxies used to hand-pick
+    /// are caller input in the shared classifier too, so routing the
+    /// proxies through it does not demote them to `-32603`.
+    #[test]
+    fn read_shape_refusals_are_caller_input_through_ops_err() {
+        for e in [
+            OpsError::NotALeaf { node_id: 7 },
+            OpsError::NotOrganizing { node_id: 7 },
+        ] {
+            let label = format!("{e:?}");
+            let rpc = ops_err(e);
+            assert_eq!(rpc.code, INVALID_PARAMS, "{label}");
+            assert!(rpc.message.contains("node 7"), "{label}: {}", rpc.message);
+        }
+    }
+
     #[test]
     fn unknown_error_falls_through_to_internal() {
         let err: Report = eyre::eyre!("disk on fire");
-        let rpc = write_err("vectors.rebuild", err);
+        let rpc = handler_err("vectors.rebuild", err);
         assert_eq!(rpc.code, INTERNAL_ERROR);
         assert!(rpc.message.contains("vectors.rebuild"));
         assert!(rpc.message.contains("disk on fire"));
@@ -1101,7 +1122,7 @@ mod tests {
     #[test]
     fn the_residual_channel_fills_the_data_slot() {
         let err: Report = eyre::eyre!("disk on fire");
-        let rpc = write_err("vectors.rebuild", err);
+        let rpc = handler_err("vectors.rebuild", err);
         assert_eq!(rpc.code, INTERNAL_ERROR);
         assert!(rpc.message.contains("vectors.rebuild failed:"));
         assert!(rpc.message.contains("disk on fire"));

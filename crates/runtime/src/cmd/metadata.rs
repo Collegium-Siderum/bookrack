@@ -431,7 +431,7 @@ async fn advance(cfg: &Config, book: i64, profile_name: Option<&str>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::error_map::write_err;
+    use crate::control::error_map::handler_err;
     use crate::control::jsonrpc::INVALID_PARAMS;
     use bookrack_catalog::NewIntake;
     use bookrack_core::ItemKind;
@@ -460,7 +460,7 @@ mod tests {
             .intake_id
     }
 
-    // The two tests below assert through `write_err`, the same
+    // The two tests below assert through `handler_err`, the same
     // classifier the control plane dispatches through, because the
     // defect they pin lives between two layers that were each already
     // covered: the ops layer raises the typed variant, and the mapper
@@ -483,7 +483,7 @@ mod tests {
         )
         .expect_err("an unknown contributor role must be refused");
 
-        let rpc = write_err("metadata.contributor_add", err);
+        let rpc = handler_err("metadata.contributor_add", err);
         assert_eq!(
             rpc.code, INVALID_PARAMS,
             "a mistyped role is caller input, not a handler fault; \
@@ -506,7 +506,7 @@ mod tests {
         let err = contributor_remove(&ops, book, 4242, None)
             .expect_err("an unknown contributor id must be refused");
 
-        let rpc = write_err("metadata.contributor_remove", err);
+        let rpc = handler_err("metadata.contributor_remove", err);
         assert_eq!(
             rpc.code, INVALID_PARAMS,
             "a contributor id that names no row is caller input"

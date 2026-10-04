@@ -18,7 +18,7 @@ use ts_rs::TS;
 
 use super::{MethodContext, require_yes, run_write};
 use crate::cmd::corpus;
-use crate::control::error_map::{plan_lookup_err, registry_err, write_err};
+use crate::control::error_map::{handler_err, plan_lookup_err, registry_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::control::plan_registry::PlanId;
 
@@ -98,7 +98,7 @@ async fn run_dry_run(parsed: CorpusRebuildParams, ctx: &MethodContext) -> Result
     let stale_only = parsed.stale_only;
     run_write(ctx, handle.name(), move || async move {
         let report = corpus::plan_rebuild(&cfg, book, stale_only)
-            .map_err(|e| write_err("corpus.rebuild", e))?;
+            .map_err(|e| handler_err("corpus.rebuild", e))?;
         let registered = RegisteredRebuildPlan {
             pinned_ids: report.rebuilt.clone(),
             include_vectors,
@@ -141,7 +141,7 @@ async fn run_execute_from_plan(
         let outcome =
             corpus::execute_rebuild_from_plan(&cfg, plan.pinned_ids, plan.include_vectors)
                 .await
-                .map_err(|e| write_err("corpus.rebuild", e))?;
+                .map_err(|e| handler_err("corpus.rebuild", e))?;
         Ok(serialize_execute_outcome(&outcome))
     })
     .await

@@ -104,6 +104,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **The `library.*` read proxies classify their failures the way the
+  write handlers do.** Each read proxy hand-picked its error code and
+  defaulted to `-32603`, so a condition the write side reported as
+  caller input — an `index_profile` reference naming no defined
+  profile, an embedding model the backend does not hold, a vector-store
+  refusal of a build parameter — came back from `library.info`,
+  `library.search`, and the other read methods as an internal error,
+  with the detail and hint the write side carries dropped. The proxies
+  now route through the shared mapping layer: those conditions answer
+  `-32602` with their detail and hint, a store this build cannot serve
+  answers `-32018`, and a node addressed with the wrong read shape
+  keeps its `-32602`. An id that resolves to nothing is still a `null`
+  body. `docs/control-plane.md` renames the mapping section to cover
+  both classes.
+
 - **A store refusing caller input is reported as caller input through
   every pipeline wrapper.** The write-class error mapping recognised
   the ops, ingest, and glean wrappers but classified only their own

@@ -105,7 +105,7 @@ pub use reads::snapshot_for;
 /// Render a [`CmdInputError`] straight onto the wire envelope.
 ///
 /// A handler that owns its own error mapping never hands an
-/// `eyre::Report` to `write_err`, so the cause-chain downcast there
+/// `eyre::Report` to `handler_err`, so the cause-chain downcast there
 /// does not reach it. What the shared type still buys such a handler
 /// is the wording and the code the book side already produces for the
 /// same refusal — which is what keeps the two sides from drifting

@@ -6,7 +6,7 @@
 //! `bail!` or `with_context` reaches the control plane as an untyped
 //! error and is classified as a handler-side fault. [`CmdInputError`]
 //! is the type a write command raises instead: the control plane's
-//! `write_err` recognises it in the cause chain and maps it onto the
+//! `handler_err` recognises it in the cause chain and maps it onto the
 //! caller-input codes.
 //!
 //! Every variant has a next step the caller can take — that is the

@@ -14,7 +14,7 @@ use ts_rs::TS;
 
 use super::{MethodContext, require_yes, run_write};
 use crate::cmd::remove::{ExpectedFingerprint, RemoveArgs, execute_remove_from_plan, plan_remove};
-use crate::control::error_map::{plan_lookup_err, registry_err, write_err};
+use crate::control::error_map::{handler_err, plan_lookup_err, registry_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::control::plan_registry::PlanId;
 
@@ -99,7 +99,7 @@ async fn remove_dry_run(parsed: RemoveParams, ctx: &MethodContext) -> Result<Val
     run_write(ctx, handle.name(), move || async move {
         let plan = plan_remove(&cfg, &args)
             .await
-            .map_err(|e| write_err("remove", e))?;
+            .map_err(|e| handler_err("remove", e))?;
         let fingerprint = plan.fingerprint();
         let registered = RegisteredRemovePlan {
             intake_id: plan.intake.intake_id,
@@ -146,7 +146,7 @@ async fn remove_execute_from_plan(
             ExpectedFingerprint::Required(&plan.fingerprint),
         )
         .await
-        .map_err(|e| write_err("remove", e))?;
+        .map_err(|e| handler_err("remove", e))?;
         Ok(json!({
             "intake_id": outcome.intake_id,
             "source_sha256": outcome.source_sha256,

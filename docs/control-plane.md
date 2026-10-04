@@ -192,17 +192,21 @@ wording falls back to a flattened cause chain as the summary and sends
 `data` with `retryable` alone. `data` is additive — a client that
 ignores it sees exactly what it saw before the slot was filled.
 
-#### Write-class error mapping
+#### Error mapping
 
 Write-class RPCs — `metadata.*`, `corpus.rebuild`, `vectors.*`,
 `remove`, `dryrun`, `stamps.reconcile`, `library.fork`, and their
-`papers.*` counterparts — route their failure through one mapping
-layer, which walks the error's cause chain looking for a **typed**
-error it recognises. That is where the split is drawn, and it is drawn
-by the type the failing layer raised, not by the method that was
-called: a step that folds its refusal into an untyped error is
-reported as a handler-side fault even when the refusal is plainly
-caller input.
+`papers.*` counterparts — and the `library.*` read proxies route their
+failure through one mapping layer, which walks the error's cause chain
+looking for a **typed** error it recognises. That is where the split is
+drawn, and it is drawn by the type the failing layer raised, not by the
+method that was called or the class it belongs to: a step that folds
+its refusal into an untyped error is reported as a handler-side fault
+even when the refusal is plainly caller input, and the same typed error
+takes the same code whether a write handler or a read proxy raised it.
+The read proxies keep one rule of their own, below: an id that resolves
+to nothing is a `null` body, not an error, and never reaches this
+layer.
 
 Each item below names a scenario and, in parentheses, the code it maps
 onto.
@@ -760,7 +764,12 @@ catalog and corpus handles the daemon already holds.
 All of them accept an optional `library` param naming a mounted
 library. A name the registry does not carry is reported as
 `-32010 invalid library`, the same code the write-class handlers raise
-for the same parameter.
+for the same parameter. Every other failure takes the code the shared
+mapping layer assigns (see *Error mapping* above): a node addressed
+with the wrong read shape, an `index_profile` reference naming no
+defined profile, or an embedding model the backend does not hold is
+`-32602` with its detail and hint; a store this build cannot serve is
+`-32018`; a fault is `-32603`.
 
 - `library.stats` — aggregate counts over the library.
 - `library.categories` — `{ library? }` → `{ categories: [{ category,

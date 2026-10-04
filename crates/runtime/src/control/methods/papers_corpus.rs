@@ -12,7 +12,7 @@ use ts_rs::TS;
 
 use super::{MethodContext, require_yes, run_write};
 use crate::cmd::papers_corpus;
-use crate::control::error_map::{plan_lookup_err, registry_err, write_err};
+use crate::control::error_map::{handler_err, plan_lookup_err, registry_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::control::plan_registry::PlanId;
 
@@ -91,7 +91,7 @@ async fn run_dry_run(
     let stale_only = parsed.stale_only;
     run_write(ctx, handle.name(), move || async move {
         let report = papers_corpus::plan_rebuild(&cfg, paper, stale_only)
-            .map_err(|e| write_err("papers.corpus_rebuild", e))?;
+            .map_err(|e| handler_err("papers.corpus_rebuild", e))?;
         let registered = RegisteredPapersRebuildPlan {
             pinned_ids: report.rebuilt.clone(),
             include_vectors,
@@ -138,7 +138,7 @@ async fn run_execute_from_plan(
         let outcome =
             papers_corpus::execute_rebuild_from_plan(&cfg, plan.pinned_ids, plan.include_vectors)
                 .await
-                .map_err(|e| write_err("papers.corpus_rebuild", e))?;
+                .map_err(|e| handler_err("papers.corpus_rebuild", e))?;
         Ok(serialize_execute_outcome(&outcome))
     })
     .await

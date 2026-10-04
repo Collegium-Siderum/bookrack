@@ -15,7 +15,7 @@ use ts_rs::TS;
 use super::{MethodContext, input_err, run_write};
 use crate::audit_helpers::require_known_profile;
 use crate::cmd::metadata::{WriteMetadataAction, run_write as run_metadata};
-use crate::control::error_map::{registry_err, write_err};
+use crate::control::error_map::{handler_err, registry_err};
 use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Deserialize)]
@@ -330,7 +330,7 @@ async fn run_metadata_action(
     run_write(ctx, handle.name(), move || async move {
         run_metadata(&cfg, action, profile_name.as_deref())
             .await
-            .map_err(|e| write_err("metadata.write", e))?;
+            .map_err(|e| handler_err("metadata.write", e))?;
         Ok(json!({ "ok": true }))
     })
     .await

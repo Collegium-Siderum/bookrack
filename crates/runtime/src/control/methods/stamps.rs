@@ -9,8 +9,8 @@ use ts_rs::TS;
 
 use super::{MethodContext, run_write};
 use crate::cmd::stamps;
+use crate::control::error_map::handler_err;
 use crate::control::error_map::registry_err;
-use crate::control::error_map::write_err;
 use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 
 /// Which library's stamps to reconcile.
@@ -44,7 +44,7 @@ pub async fn reconcile(params: &Option<Value>, ctx: &MethodContext) -> Result<Va
     run_write(ctx, handle.name(), move || async move {
         stamps::reconcile(&cfg)
             .await
-            .map_err(|e| write_err("stamps.reconcile", e))?;
+            .map_err(|e| handler_err("stamps.reconcile", e))?;
         Ok(json!({ "ok": true }))
     })
     .await
