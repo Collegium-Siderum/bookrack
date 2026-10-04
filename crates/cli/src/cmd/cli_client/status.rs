@@ -665,6 +665,52 @@ mod tests {
         );
     }
 
+    /// What bring-up registered gets a row of its own, joined for the
+    /// table, and only when there is something to say: an empty list
+    /// and a daemon that predates the field both leave the row out.
+    #[test]
+    fn a_session_that_registered_the_root_says_so_and_a_quiet_one_does_not() {
+        let base = json!({
+            "library": "gamma",
+            "data_dir": "/data/gamma",
+            "served": [
+                { "name": "alpha", "data_dir": "/data/alpha", "default": true, "primary": false },
+                { "name": "gamma", "data_dir": "/data/gamma", "default": false, "primary": true },
+            ],
+        });
+        let card_for = |status: &Value| {
+            compose_card(
+                Path::new("/run/bookrack.tty.lock"),
+                &lock_info(None),
+                &json!({ "version": "0.1.0" }),
+                status,
+                &json!({}),
+            )
+        };
+
+        let mut registered = base.clone();
+        registered["auto_registered"] = json!(["gamma"]);
+        let card = card_for(&registered);
+        assert_eq!(
+            card["library"]["registered_at_startup"], "gamma",
+            "the row names what this session registered: {card}",
+        );
+
+        let mut quiet = base.clone();
+        quiet["auto_registered"] = json!([]);
+        let card = card_for(&quiet);
+        assert!(
+            card["library"].get("registered_at_startup").is_none(),
+            "nothing registered, no row: {card}",
+        );
+
+        let card = card_for(&base);
+        assert!(
+            card["library"].get("registered_at_startup").is_none(),
+            "a daemon without the field gets no row: {card}",
+        );
+    }
+
     /// Coming up under the default is the ordinary multi-library case:
     /// the list is still there, the extra row is not.
     #[test]
