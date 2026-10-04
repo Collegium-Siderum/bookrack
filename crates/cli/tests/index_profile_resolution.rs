@@ -194,6 +194,34 @@ fn apply_declares_into_an_unregistered_root_without_touching_the_registry() {
     );
 }
 
+/// Refreshing the cached copy is the whole of the registry leg: a
+/// registry with no `default` recorded keeps none after `apply`, so the
+/// verb never chooses a default library on the operator's behalf.
+#[test]
+fn apply_does_not_set_an_absent_registry_default() {
+    let world = World::new(
+        "[libraries.alpha]\n\
+         data_dir = \"{alpha}\"\n\
+         kind = \"test\"\n",
+    );
+    stdout_of(
+        &world.run(
+            &["index-profile", "apply", "qwen3-0.6b-default", "--yes"],
+            Some(&world.alpha),
+        ),
+        "apply on a registered root with no default",
+    );
+    let registry = world.registry_text();
+    assert!(
+        registry.contains("index_profile = \"qwen3-0.6b-default\""),
+        "the registry cache must be refreshed: {registry}",
+    );
+    assert!(
+        !registry.contains("default = "),
+        "apply must not set a registry default: {registry}",
+    );
+}
+
 /// The registry leg still runs for a root the registry does carry: the
 /// entry's cached `index_profile` is refreshed alongside the manifest,
 /// and resolution through the registry `default` still reaches it.

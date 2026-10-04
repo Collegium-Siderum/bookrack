@@ -106,11 +106,15 @@ bookrack libraries fork <name> --data-dir <p>  # clone into a sibling library
 `add` and `register` write an identity manifest to a root that lacks
 one (previewed and confirmed first, unless `--yes`); `--new-uuid`
 re-mints the identity so a copied root registers as a distinct library.
-`remove` never deletes data unless `--purge` is given, which is gated
-on a detect verdict and a typed confirmation. `scan --register` brings
-every confirmed root it finds into the registry — turning
-`scan --volumes --register` into a one-command rebuild after a
-reinstall.
+When the registry records no `default`, the entry they write becomes
+it, and the command says so. `remove` never deletes data unless
+`--purge` is given, which is gated on a detect verdict and a typed
+confirmation. `scan --register` brings every confirmed root it finds
+into the registry — turning `scan --volumes --register` into a
+one-command rebuild after a reinstall. It records entries only: the
+`default` pointer is left for `libraries default`, as it is by every
+write that merely refreshes an entry (`index-profile apply`,
+`libraries config`).
 
 ## Per-library settings: `config.toml`
 

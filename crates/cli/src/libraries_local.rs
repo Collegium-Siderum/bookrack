@@ -185,6 +185,18 @@ fn scan_register(outcome: &ScanOutcome, kind: Option<LibraryKind>) -> Result<()>
              {clashed} clash(es), {} unreadable",
             outcome.skipped
         );
+        // A sweep records entries without choosing among them, so a
+        // registry that still has no default is named here rather than
+        // discovered by the next unqualified command.
+        if registered > 0
+            && let Ok(entries) = bookrack_config::list_libraries_at(&registry_path)
+            && !entries.iter().any(|e| e.is_default)
+        {
+            println!(
+                "no default library is set; choose one with \
+                 'bookrack libraries default <name>'"
+            );
+        }
     }
     Ok(())
 }
@@ -223,7 +235,10 @@ pub fn add(
         &path,
         kind,
         description,
-        AddOptions { new_uuid },
+        AddOptions {
+            new_uuid,
+            default_when_absent: true,
+        },
         confirm,
     )
     .map_err(op_error)?;

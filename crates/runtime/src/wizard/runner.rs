@@ -14,7 +14,7 @@ use bookrack_config::{
     Config, DEFAULT_OLLAMA_URL, EmbedConfig, LibraryEntryFields, LibraryKind, LibraryManifest,
     MANIFEST_FILENAME, OLLAMA_URL_ENV, ROOT_CONFIG_NAME, default_data_root, load_manifest,
     locate_pdfium, new_manifest, pdfium_library_filename, portable_data_dir, registry_target_path,
-    render_root_config_toml, upsert_library_entry, write_manifest,
+    render_root_config_toml, upsert_library_entry_claiming_default, write_manifest,
 };
 
 use bookrack_corpus::Corpus;
@@ -373,7 +373,7 @@ fn write_default_registry(data_root: &Path, manifest: &LibraryManifest) -> Resul
         created_at: manifest.created_at.clone(),
         uuid: Some(manifest.uuid.clone()),
     };
-    upsert_library_entry(&path, "default", &entry)
+    upsert_library_entry_claiming_default(&path, "default", &entry)
         .with_context(|| format!("register {} into registry", data_root.display()))?;
     Ok(Some(path))
 }

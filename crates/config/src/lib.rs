@@ -2911,8 +2911,9 @@ fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, 
 }
 
 /// Point the registry's `default = "..."` selection at `name`, writing
-/// the change straight to disk. Unlike the entry writers, which record
-/// a default only when none exists yet, this overwrites any existing
+/// the change straight to disk. Unlike
+/// [`upsert_library_entry_claiming_default`], which records a default
+/// only when none exists yet, this overwrites any existing
 /// default — it is the explicit "make this the default" entry point
 /// behind `bookrack libraries default`, and the change persists across
 /// daemon restarts. Errors with [`ConfigError::UnknownLibrary`] when
@@ -2940,10 +2941,11 @@ pub fn remove_library_from_registry(path: &Path, name: &str) -> Result<(), Confi
 
 /// Insert or replace a full registry entry, writing every metadata
 /// field the caller sets, and creating the file (with its parent
-/// directories) when absent. The `default` pointer is set to `name`
-/// only when none is recorded yet — an operator who has already chosen
-/// a default is never silently overridden. This is the write-side
-/// counterpart of the read-side entry table.
+/// directories) when absent. The `default` pointer is never touched:
+/// this is the write for a cache refresh or an unattended registration,
+/// where choosing a default is not part of what the caller was asked
+/// to do. This is the write-side counterpart of the read-side entry
+/// table.
 ///
 /// Entries record absolute roots: a relative `data_dir` is refused
 /// with [`ConfigError::RelativeDataRoot`] before the file is touched.
@@ -2954,6 +2956,34 @@ pub fn upsert_library_entry(
     name: &str,
     entry: &LibraryEntryFields,
 ) -> Result<(), ConfigError> {
+    write_library_entry(path, name, entry, false).map(|_| ())
+}
+
+/// [`upsert_library_entry`], plus: when the registry records no
+/// `default` yet, `name` becomes it in the same write. Returns whether
+/// it did. This is the write behind the verbs an operator runs to bring
+/// a library in by hand — `libraries add`, `register`, `fork`, the
+/// wizard — where a first library with no default would otherwise leave
+/// every unqualified command with nowhere to go. An operator who has
+/// already chosen a default is never overridden.
+pub fn upsert_library_entry_claiming_default(
+    path: &Path,
+    name: &str,
+    entry: &LibraryEntryFields,
+) -> Result<bool, ConfigError> {
+    write_library_entry(path, name, entry, true)
+}
+
+/// The one entry write behind both public forms. Refuses a relative
+/// root before taking the lock, then inserts the entry and, with
+/// `claim_default`, points an absent `default` at it inside the same
+/// read-modify-write window. Returns whether the default was claimed.
+fn write_library_entry(
+    path: &Path,
+    name: &str,
+    entry: &LibraryEntryFields,
+    claim_default: bool,
+) -> Result<bool, ConfigError> {
     if !entry.data_dir.is_absolute() {
         return Err(ConfigError::RelativeDataRoot {
             name: name.to_string(),
@@ -2967,10 +2997,11 @@ pub fn upsert_library_entry(
             .as_table_mut()
             .expect("normalize_registry_entries guarantees a table");
         libraries.insert(name.to_string(), toml::Value::Table(entry.to_toml_table()));
-        if !doc.contains_key("default") {
+        let claimed = claim_default && !doc.contains_key("default");
+        if claimed {
             doc.insert("default".to_string(), toml::Value::String(name.to_string()));
         }
-        Ok(())
+        Ok(claimed)
     })
 }
 
@@ -3060,6 +3091,11 @@ pub struct AddOptions {
     /// rewriting its identity manifest. Resolves a uuid clash by turning
     /// the new root into a genuine copy with its own identity.
     pub new_uuid: bool,
+    /// Make the entry the registry `default` when none is recorded.
+    /// On for the verbs an operator runs one library at a time, off
+    /// for a bulk sweep, where which root the walk reached first is no
+    /// basis for choosing one.
+    pub default_when_absent: bool,
 }
 
 /// The result of an [`add_library`] call: either a completed
@@ -3164,7 +3200,6 @@ where
     let key = resolve_add_key(key, existing.as_ref(), data_dir);
     let registry = load_registry_at(registry_path)?;
     let entries = library_entries(&registry);
-    let became_default = registry.default.is_none();
 
     // A derived key that already names a root at a different path is a
     // collision the operator must break with an explicit alias. An
@@ -3240,7 +3275,8 @@ where
         created_at,
         uuid: uuid.clone(),
     };
-    upsert_library_entry(registry_path, &key, &fields)?;
+    let became_default =
+        write_library_entry(registry_path, &key, &fields, opts.default_when_absent)?;
 
     Ok(AddOutcome::Registered(AddReport {
         key,
@@ -6218,6 +6254,51 @@ mod tests {
     }
 
     #[test]
+    fn upsert_library_entry_claiming_default_keeps_an_existing_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(
+            &path,
+            "default = \"alpha\"\n\
+             [libraries]\n\
+             alpha = \"/roots/alpha\"\n",
+        )
+        .expect("seed");
+        let beta_root = tmp.path().join("beta");
+        std::fs::create_dir_all(&beta_root).expect("create beta");
+        let claimed =
+            upsert_library_entry_claiming_default(&path, "beta", &entry_fields(&beta_root))
+                .expect("upsert");
+        let registry = parse_registry(&std::fs::read_to_string(&path).expect("read"))
+            .expect("registry parses");
+        assert!(!claimed, "an existing default is never overridden");
+        assert_eq!(registry.default.as_deref(), Some("alpha"));
+        assert!(registry.libraries.contains_key("beta"));
+    }
+
+    #[test]
+    fn upsert_library_entry_leaves_an_absent_default_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(
+            &path,
+            "[libraries]\n\
+             alpha = \"/roots/alpha\"\n",
+        )
+        .expect("seed");
+        let beta_root = tmp.path().join("beta");
+        std::fs::create_dir_all(&beta_root).expect("create beta");
+        upsert_library_entry(&path, "beta", &entry_fields(&beta_root)).expect("upsert");
+        let registry = parse_registry(&std::fs::read_to_string(&path).expect("read"))
+            .expect("registry parses");
+        assert_eq!(
+            registry.default, None,
+            "writing an entry must not choose a default"
+        );
+        assert!(registry.libraries.contains_key("beta"));
+    }
+
+    #[test]
     fn upsert_library_entry_overwrites_an_existing_entry_with_the_same_name() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("registry.toml");
@@ -6416,10 +6497,12 @@ mod tests {
             created_at: Some("2026-06-30T12:00:00Z".to_string()),
             uuid: Some("01890a5d-0000-7000-8000-000000000000".to_string()),
         };
-        upsert_library_entry(&path, "prod", &entry).expect("upsert");
+        let claimed = upsert_library_entry_claiming_default(&path, "prod", &entry).expect("upsert");
         let registry = parse_registry(&std::fs::read_to_string(&path).expect("read"))
             .expect("registry parses");
-        // First entry becomes the default when none was recorded.
+        // The claiming form makes a first entry the default when none
+        // was recorded, and reports that it did.
+        assert!(claimed);
         assert_eq!(registry.default.as_deref(), Some("prod"));
         let raw = &registry.libraries["prod"];
         assert_eq!(raw.data_dir(), Path::new("/roots/prod"));
@@ -6455,7 +6538,10 @@ mod tests {
             &root,
             None,
             None,
-            AddOptions::default(),
+            AddOptions {
+                default_when_absent: true,
+                ..AddOptions::default()
+            },
             |_m| Ok(true),
         )
         .expect("add");
@@ -6640,7 +6726,10 @@ mod tests {
             &copy,
             None,
             None,
-            AddOptions { new_uuid: true },
+            AddOptions {
+                new_uuid: true,
+                ..AddOptions::default()
+            },
             |_m| Ok(true),
         )
         .expect("add copy");

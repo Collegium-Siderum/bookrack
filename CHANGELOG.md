@@ -104,6 +104,19 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **Refreshing a registry entry no longer chooses the default
+  library.** Every registry entry write set the `default` pointer when
+  none was recorded, so after `libraries remove` cleared it, the next
+  `index-profile apply`, `libraries config` edit, or `libraries scan
+  --register` picked a default on the operator's behalf without saying
+  so — the scan by whichever root its walk reached first. Those writes
+  now record the entry alone, and a scan that leaves the registry
+  without a default says so and names `libraries default`.
+  `libraries add`, `libraries register`,
+  `libraries fork`, and `bookrack init` still make a first library the
+  default when none is set, as before, and `libraries add` still says
+  so.
+
 - **Registry entries record absolute data roots.** `libraries add`,
   `libraries register`, `libraries scan --register`, and
   `index-profile apply` wrote the path they were given, so a root
