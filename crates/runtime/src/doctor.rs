@@ -599,8 +599,11 @@ fn push_data_root_row(rows: &mut Vec<Row>, selection: &LibrarySelection) -> Opti
 /// bundle the root sits inside, if any; the wizard refuses such a path,
 /// so this is the only surface that reaches a root established before
 /// the guard existed. It leads the note when both warnings hold: a
-/// shadowed default serves the wrong library, a bundled root loses the
-/// library outright on the next upgrade.
+/// registry default the selection passed over may mean the wrong
+/// library is served, a bundled root loses the library outright on the
+/// next upgrade. The default is stated as a fact — which source chose
+/// the root, where the default points — because on a daemon serving the
+/// registry an unnamed call still reaches that default.
 fn data_root_status(
     source: &str,
     shadowed: Option<&ShadowedDefault>,
@@ -612,8 +615,8 @@ fn data_root_status(
         .unwrap_or_default();
     let shadow_note = shadowed.map(|shadowed| {
         format!(
-            "registry default '{}' ({}) is shadowed by {source}; unset it or \
-             pass --library {} to serve the registered library",
+            "resolved via {source}; the registry default '{}' points at {}, which was \
+             not consulted; unset it or pass --library {} to serve the registered library",
             shadowed.name,
             shadowed.data_dir.display(),
             shadowed.name,
@@ -3331,8 +3334,8 @@ mod tests {
     }
 
     /// The two warnings are independent, and the bundle one leads: a
-    /// shadowed default serves the wrong library, a bundled root loses
-    /// the library on the next upgrade.
+    /// default the selection passed over may mean the wrong library is
+    /// served, a bundled root loses the library on the next upgrade.
     #[test]
     fn data_root_status_leads_with_the_bundle_when_both_warnings_hold() {
         let shadowed = ShadowedDefault {
@@ -3378,8 +3381,12 @@ mod tests {
         );
     }
 
+    /// The row states facts, not a verdict: which source selected the
+    /// root, and where the default it passed over points. "Shadowed"
+    /// would be wrong on a daemon serving the registry, where an unnamed
+    /// call still reaches that default.
     #[test]
-    fn data_root_status_warns_when_a_registry_default_is_shadowed() {
+    fn data_root_status_states_the_facts_when_a_registry_default_was_passed_over() {
         let shadowed = ShadowedDefault {
             name: "eval-data".to_string(),
             data_dir: std::path::PathBuf::from("/roots/eval-data"),
@@ -3388,12 +3395,16 @@ mod tests {
         match status {
             Status::Warn { note } => {
                 assert!(
-                    note.contains("registry default 'eval-data' (/roots/eval-data)"),
+                    note.contains("the registry default 'eval-data' points at /roots/eval-data"),
                     "missing name and path: {note}"
                 );
                 assert!(
-                    note.contains("is shadowed by BOOKRACK_DATA_DIR env"),
+                    note.starts_with("resolved via BOOKRACK_DATA_DIR env"),
                     "missing source: {note}"
+                );
+                assert!(
+                    !note.contains("shadowed"),
+                    "the row must state facts, not a verdict: {note}"
                 );
                 assert!(
                     note.contains("pass --library eval-data"),

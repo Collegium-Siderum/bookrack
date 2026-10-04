@@ -8,7 +8,11 @@ authoritative, commented list of every environment variable is
 
 ## Data-root resolution order
 
-bookrack chooses its data root by precedence, highest first:
+bookrack chooses its data root from six sources on two levels. An
+**explicit target** (1–4) names a root or a library outright; a
+**default pointer** (5–6) is what a registry supplies when nothing was
+named. Any explicit target beats any default pointer; within a level,
+the order below settles ties. Highest first:
 
 1. `--data-dir <path>` flag
 2. `--library <name>` flag (looked up in the registry named by
@@ -33,8 +37,12 @@ bookrack chooses its data root by precedence, highest first:
 a daemon brought up on a path-class root that carries an identity
 manifest the registry does not know (see the registry section below).
 When a path-class source (1, 3, or 4) wins while a registry `default`
-is also set, `bookrack info` and `bookrack doctor` report the eclipse
-so the shadowed default is visible rather than silently ignored.
+is also set, `bookrack info` and `bookrack doctor` state both facts —
+which source selected the root, and where the registry default
+points — so a default that did not decide the root is visible rather
+than silently passed over. It is a statement, not a verdict: on a
+daemon serving the registry, an unnamed call still reaches that
+default (see [operating.md](operating.md)).
 
 A path-class root whose manifest identity the registry records at
 another path is claimed by no name: it is one library in two places,
@@ -47,9 +55,9 @@ A registry that cannot be read is fatal only to a resolution that
 needed it. A root fixed by `--data-dir`, `BOOKRACK_DATA_DIR`, or the
 portable layout never consults the registry, so an unreadable or
 malformed one does not veto it: the resolution succeeds and the
-annotations that would have come from the registry — the shadowed
-default, the library name claimed for a path-class root — are simply
-absent. A selection that does need the registry (`--library`, or
+annotations that would have come from the registry — the registry
+default the selection passed over, the library name claimed for a
+path-class root — are simply absent. A selection that does need the registry (`--library`, or
 falling through to a `default`) still fails, and it fails naming the
 registry rather than reporting that no library is configured.
 

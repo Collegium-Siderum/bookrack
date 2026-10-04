@@ -1286,8 +1286,9 @@ pub fn library_info_context(cfg: &Config, embed_model: &str, mcp_addr: &str) -> 
         resolution_source: resolution_source_label(cfg.source()).to_string(),
         shadowed_default: cfg.shadowed_default().map(|shadowed| {
             format!(
-                "registry default '{}' is shadowed by {}",
+                "registry default '{}' ({}) was not consulted; {} selected the root",
                 shadowed.name,
+                shadowed.data_dir.display(),
                 resolution_source_label(cfg.source())
             )
         }),

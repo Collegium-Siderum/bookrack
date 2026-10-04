@@ -71,6 +71,13 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **`doctor` and `library.info` state what happened to a registry
+  default a path-class selection passed over.** The data-root row
+  called the default "shadowed by" the flag or variable, which on a
+  daemon serving the whole registry is not so: an unnamed call still
+  reaches that default. Both surfaces now say which source selected
+  the root and where the default points; the row keeps its remedy.
+
 - **`bookrack runs show` reads its `profiles:` section from the run's
   rollup instead of re-counting the audit tables.** The rollup row a
   run materialises at close (`n_books`, `n_papers`, the histograms)

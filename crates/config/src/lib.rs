@@ -2548,12 +2548,19 @@ struct Resolved {
 /// tested without mutating the environment, writing registry files, or
 /// touching the running executable's directory.
 ///
-/// Order, highest first:
+/// Two levels decide it. An explicit target names a root or a library
+/// outright; a default pointer is what a registry supplies when nothing
+/// was named. Any explicit target beats any default pointer, and within
+/// a level the order below settles ties. Highest first:
+///
+/// Explicit targets —
 /// 1. the `--data-dir` flag,
 /// 2. the `--library` flag (looked up in the registry, then the
 ///    platform-default registry),
 /// 3. the data-root environment variable,
-/// 4. a `bookrack-data` directory probed beside the running binary,
+/// 4. a `bookrack-data` directory probed beside the running binary.
+///
+/// Default pointers —
 /// 5. the registry's default library,
 /// 6. the platform-default registry's default library.
 ///
@@ -4086,6 +4093,8 @@ mod tests {
         ));
     }
 
+    /// Explicit targets among themselves: the flag outranks every other
+    /// explicit target, and with it the default-pointer level below.
     #[test]
     fn data_dir_flag_wins_over_everything() {
         let selection = LibrarySelection {
@@ -4273,6 +4282,8 @@ mod tests {
         }
     }
 
+    /// Explicit target over default pointer: the variable, near the
+    /// bottom of the explicit level, still beats the registry default.
     #[test]
     fn data_root_variable_wins_over_the_registry_default() {
         let selection = LibrarySelection::default();
@@ -4289,6 +4300,8 @@ mod tests {
         assert_eq!(resolved.library, None);
     }
 
+    /// Default pointers: the registry default answers only once every
+    /// explicit target has abstained.
     #[test]
     fn registry_default_is_the_last_resort() {
         let selection = LibrarySelection::default();
@@ -5802,6 +5815,9 @@ mod tests {
         assert_eq!(registry_target_path_from(None, None), None);
     }
 
+    /// Both levels in one: the portable layout, the lowest explicit
+    /// target, beats the registry default; among explicit targets the
+    /// variable outranks it.
     #[test]
     fn portable_data_dir_beats_registry_default_but_loses_to_env_var() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -5831,6 +5847,8 @@ mod tests {
         assert_eq!(resolved.source, ResolutionSource::EnvVar);
     }
 
+    /// Default pointers: the platform-default registry's default is the
+    /// last pointer before nothing resolves at all.
     #[test]
     fn default_registry_is_the_last_resort_before_missing_data_dir() {
         // No flag, no env var, no portable layout, no explicit registry:
@@ -5848,6 +5866,8 @@ mod tests {
         assert_eq!(resolved.library.as_deref(), Some("prod"));
     }
 
+    /// Default pointers among themselves: the registry named by the
+    /// environment outranks the platform-default registry.
     #[test]
     fn registry_default_beats_default_registry_default() {
         // The explicit registry (named by BOOKRACK_REGISTRY) wins over
