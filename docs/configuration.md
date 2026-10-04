@@ -34,6 +34,13 @@ path-class source (1, 3, or 4) wins while a registry `default` is also
 set, `bookrack info` and `bookrack doctor` report the eclipse so the
 shadowed default is visible rather than silently ignored.
 
+A path-class root whose manifest identity the registry records at
+another path is claimed by no name: it is one library in two places,
+and `info` and `doctor` show it as unregistered rather than under the
+recorded entry. `bookrack run` refuses such a root and names both
+paths. `libraries add <name> <path>` re-registers a library that
+moved; `--new-uuid` gives a copy an identity of its own.
+
 A registry that cannot be read is fatal only to a resolution that
 needed it. A root fixed by `--data-dir`, `BOOKRACK_DATA_DIR`, or the
 portable layout never consults the registry, so an unreadable or

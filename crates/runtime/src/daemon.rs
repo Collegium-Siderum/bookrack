@@ -30,8 +30,9 @@ use chrono::{DateTime, Utc};
 use bookrack_catalog::Catalog;
 use bookrack_config::{
     Config, EmbedConfig, LibraryEntry, LibraryIdentification, LibrarySelection, LogConfig,
-    McpConfig, ResolutionSource, SearchConfig,
+    McpConfig, ResolutionSource, RootIdentity, SearchConfig,
 };
+use bookrack_core::Problem;
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_glean::GleanParams;
@@ -347,6 +348,13 @@ impl DaemonRuntime {
         // lock, so the configuration the daemon serves is the one that
         // was in place when it took ownership.
         let cfg = Arc::new(Config::resolve(&opts.selection).context("resolve configuration")?);
+        // 4a. A path-class root whose manifest identity the registry
+        //     records at another path is refused before anything is
+        //     locked or opened: serving it under the registered name
+        //     would redirect the daemon to the recorded root, and
+        //     serving it anonymously would run one identity in two
+        //     places.
+        refuse_relocated_identity(&cfg)?;
         // 4b. Decide the mount set and take every served root's lock
         //     before anything expensive comes up, so a contended root
         //     fails with no reranker spawned and no half-open handles.
@@ -915,6 +923,56 @@ struct MountPlan {
     /// Whether each name resolves through the registry (`true`) or
     /// the set is the single primary selection (`false`).
     eager: bool,
+}
+
+/// Refuse bring-up on a path-class root whose manifest uuid the
+/// registry records under a name pointing at another path. A
+/// registry-class selection already names its library and is not
+/// consulted; a root the registry does not know, or knows at this
+/// path, passes.
+fn refuse_relocated_identity(cfg: &Config) -> Result<(), crate::backend_probe::PreflightRefusal> {
+    if !matches!(
+        cfg.source(),
+        ResolutionSource::DataDirFlag
+            | ResolutionSource::EnvVar
+            | ResolutionSource::PortableExeNeighbor
+    ) {
+        return Ok(());
+    }
+    match bookrack_config::identify_root(cfg.data_dir()) {
+        RootIdentity::UuidElsewhere { name, entry_root } => {
+            Err(crate::backend_probe::PreflightRefusal {
+                problem: relocated_identity_problem(cfg.data_dir(), &name, &entry_root),
+                library: name,
+            })
+        }
+        RootIdentity::Named { .. } | RootIdentity::Unregistered => Ok(()),
+    }
+}
+
+/// The three-part refusal for a root carrying a registered library's
+/// identity at a path the registry does not record: the summary names
+/// the root and the library, the detail both paths, the hint the two
+/// `libraries add` forms that resolve a move and a copy.
+fn relocated_identity_problem(root: &Path, name: &str, entry_root: &Path) -> Problem {
+    Problem::new(format!(
+        "cannot serve '{}': its manifest identifies library '{name}', which the registry \
+         places at another path",
+        root.display()
+    ))
+    .detail(format!(
+        "The manifest at '{}' carries the uuid the registry records for '{name}' at '{}'. \
+         Serving this root under that name would redirect the daemon to the registered \
+         root; serving it anonymously would run one identity in two places.",
+        root.display(),
+        entry_root.display()
+    ))
+    .hint(format!(
+        "If the library moved, re-register it with `bookrack libraries add {name} {root}`; \
+         if this is a copy, give it its own identity with `bookrack libraries add <name> \
+         {root} --new-uuid`.",
+        root = root.display()
+    ))
 }
 
 /// Decide which libraries the daemon serves. `primary_name` is the

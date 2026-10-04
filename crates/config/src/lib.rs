@@ -2732,10 +2732,14 @@ fn registry_default_root(registry: &Registry) -> Option<(String, PathBuf)> {
 /// matched back against the registry: an `Ok(Some(_))` manifest is tried
 /// by uuid first ([`LibraryIdentification::ManifestUuid`]); an absent
 /// manifest, or a uuid that matches no entry, falls back to a path match
-/// ([`LibraryIdentification::Path`]). A manifest that fails to read
-/// yields no claim at all — the root stays anonymous rather than being
-/// claimed on shaky identity. The registry is consulted before the
-/// platform-default registry, matching [`select_root`]'s precedence.
+/// ([`LibraryIdentification::Path`]). A uuid the registry records at
+/// another path yields no claim: the root is the same library by
+/// identity and another place on disk, and naming it would redirect
+/// every registry-aware surface to the recorded root. A manifest that
+/// fails to read yields no claim either — the root stays anonymous
+/// rather than being claimed on shaky identity. The registry is
+/// consulted before the platform-default registry, matching
+/// [`select_root`]'s precedence.
 fn identify_library(
     source: ResolutionSource,
     resolved_dir: &Path,
@@ -2755,17 +2759,45 @@ fn identify_library(
     }
     let registries: Vec<&Registry> = [registry, default_registry].into_iter().flatten().collect();
     match load_manifest(resolved_dir) {
-        Ok(Some(manifest)) => {
-            for reg in &registries {
-                if let Some(entry) = find_library_by_uuid(reg, &manifest.uuid) {
-                    return (Some(entry.name), Some(LibraryIdentification::ManifestUuid));
-                }
-            }
-            claim_root_by_path(&registries, resolved_dir)
-        }
+        Ok(Some(manifest)) => match claim_root_by_uuid(&registries, &manifest.uuid, resolved_dir) {
+            UuidClaim::Named(name) => (Some(name), Some(LibraryIdentification::ManifestUuid)),
+            UuidClaim::Elsewhere { .. } => (None, None),
+            UuidClaim::NoMatch => claim_root_by_path(&registries, resolved_dir),
+        },
         Ok(None) => claim_root_by_path(&registries, resolved_dir),
         Err(_) => (None, None),
     }
+}
+
+/// What a manifest uuid says about a root once matched against the
+/// registries. Shared by [`identify_library`] and [`identify_root_in`],
+/// so the resolver and the routing translation never disagree on
+/// whether a hit at another path counts as a claim.
+enum UuidClaim {
+    /// An entry carries the uuid and points at this root.
+    Named(String),
+    /// An entry carries the uuid and points somewhere else.
+    Elsewhere { name: String, entry_root: PathBuf },
+    /// No entry carries the uuid.
+    NoMatch,
+}
+
+/// Match `uuid` against the registries, registry before platform
+/// default, and compare the hit's recorded root with `root`.
+fn claim_root_by_uuid(registries: &[&Registry], uuid: &str, root: &Path) -> UuidClaim {
+    for reg in registries {
+        if let Some(entry) = find_library_by_uuid(reg, uuid) {
+            return if same_root(&entry.data_dir, root) {
+                UuidClaim::Named(entry.name)
+            } else {
+                UuidClaim::Elsewhere {
+                    name: entry.name,
+                    entry_root: entry.data_dir,
+                }
+            };
+        }
+    }
+    UuidClaim::NoMatch
 }
 
 /// What a data root turns out to be, once matched against the library
@@ -2816,20 +2848,17 @@ pub fn identify_root(root: &Path) -> RootIdentity {
 /// [`identify_root`] against registries already in hand. Pure.
 fn identify_root_in(registries: &[&Registry], root: &Path) -> RootIdentity {
     if let Ok(Some(manifest)) = load_manifest(root) {
-        for reg in registries {
-            if let Some(entry) = find_library_by_uuid(reg, &manifest.uuid) {
-                return if same_root(&entry.data_dir, root) {
-                    RootIdentity::Named {
-                        name: entry.name,
-                        by: LibraryIdentification::ManifestUuid,
-                    }
-                } else {
-                    RootIdentity::UuidElsewhere {
-                        name: entry.name,
-                        entry_root: entry.data_dir,
-                    }
+        match claim_root_by_uuid(registries, &manifest.uuid, root) {
+            UuidClaim::Named(name) => {
+                return RootIdentity::Named {
+                    name,
+                    by: LibraryIdentification::ManifestUuid,
                 };
             }
+            UuidClaim::Elsewhere { name, entry_root } => {
+                return RootIdentity::UuidElsewhere { name, entry_root };
+            }
+            UuidClaim::NoMatch => {}
         }
     }
     match claim_root_by_path(registries, root) {
@@ -4403,16 +4432,40 @@ mod tests {
         let root = tmp.path();
         let manifest = new_manifest("birth-name", LibraryKind::Prod, None);
         write_manifest(root, &manifest).expect("write manifest");
-        // The registry entry points elsewhere but shares the uuid: the
-        // uuid match claims it regardless of the recorded path.
+        // The entry records the root under another name; the uuid
+        // match claims that name.
         let registry = parse_registry(&format!(
-            "[libraries.hammer]\ndata_dir = \"/roots/elsewhere\"\nuuid = \"{}\"\n",
+            "[libraries.hammer]\ndata_dir = \"{}\"\nuuid = \"{}\"\n",
+            root.display(),
             manifest.uuid
         ))
         .expect("registry parses");
         let (name, id) = identify_library(ResolutionSource::EnvVar, root, Some(&registry), None);
         assert_eq!(name.as_deref(), Some("hammer"));
         assert_eq!(id, Some(LibraryIdentification::ManifestUuid));
+    }
+
+    /// A root whose manifest uuid the registry records at another path
+    /// is not claimed: it is the same library by identity and another
+    /// place on disk, and naming it would redirect every registry-aware
+    /// surface to the recorded root while the operator typed this one.
+    #[test]
+    fn identify_does_not_claim_a_uuid_the_registry_places_elsewhere() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let manifest = new_manifest("birth-name", LibraryKind::Prod, None);
+        write_manifest(root, &manifest).expect("write manifest");
+        let registry = parse_registry(&format!(
+            "[libraries.hammer]\ndata_dir = \"/roots/elsewhere\"\nuuid = \"{}\"\n",
+            manifest.uuid
+        ))
+        .expect("registry parses");
+        let (name, id) = identify_library(ResolutionSource::EnvVar, root, Some(&registry), None);
+        assert_eq!(
+            (name.as_deref(), id),
+            (None, None),
+            "a relocated identity must stay anonymous"
+        );
     }
 
     #[test]
@@ -4498,15 +4551,17 @@ mod tests {
         let root = tmp.path();
         let manifest = new_manifest("birth-name", LibraryKind::Prod, None);
         write_manifest(root, &manifest).expect("write manifest");
-        // Both registries carry the uuid under different names; the
+        // Both registries record this root under different names; the
         // primary registry wins, in step with select_root's precedence.
         let registry = parse_registry(&format!(
-            "[libraries.primary]\ndata_dir = \"/roots/primary\"\nuuid = \"{}\"\n",
+            "[libraries.primary]\ndata_dir = \"{}\"\nuuid = \"{}\"\n",
+            root.display(),
             manifest.uuid
         ))
         .expect("registry parses");
         let default_registry = parse_registry(&format!(
-            "[libraries.platform]\ndata_dir = \"/roots/platform\"\nuuid = \"{}\"\n",
+            "[libraries.platform]\ndata_dir = \"{}\"\nuuid = \"{}\"\n",
+            root.display(),
             manifest.uuid
         ))
         .expect("platform-default registry parses");

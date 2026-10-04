@@ -104,6 +104,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A data root carrying a registered library's identity at another
+  path is refused, not followed.** Resolving `--data-dir` or
+  `BOOKRACK_DATA_DIR` matched the root's manifest uuid against the
+  registry and claimed the entry's name whatever path the entry
+  recorded, so `bookrack run --data-dir <copy>` came up serving the
+  registered root instead of the one named, and `info` and `doctor`
+  reported the copy under the original's name. Such a root now stays
+  anonymous on every local surface, and `bookrack run` refuses it
+  before opening anything, naming both paths and the two
+  `libraries add` forms that resolve a move and a copy. A root at the
+  path its entry records is claimed as before.
+
 - **Refreshing a registry entry no longer chooses the default
   library.** Every registry entry write set the `default` pointer when
   none was recorded, so after `libraries remove` cleared it, the next
