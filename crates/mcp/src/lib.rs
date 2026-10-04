@@ -34,8 +34,8 @@ use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
 mod error_map;
 mod reference;
 use error_map::{
-    invalid_params_err, ops_error_to_edit_error, ops_error_to_internal, reference_error_to_mcp,
-    respond_with, unknown_filter_value_to_mcp,
+    invalid_params_err, ops_error_to_mcp, reference_error_to_mcp, respond_with,
+    unknown_filter_value_to_mcp,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -837,11 +837,11 @@ impl BookrackServer {
         let hits = match kind {
             "book" => reads::search::search(handle.ops(), &args.query, book_overrides, args.top_k)
                 .await
-                .map_err(ops_error_to_internal)?,
+                .map_err(ops_error_to_mcp)?,
             "paper" => {
                 reads::search::search_paper(handle.ops(), &args.query, paper_overrides, args.top_k)
                     .await
-                    .map_err(ops_error_to_internal)?
+                    .map_err(ops_error_to_mcp)?
             }
             "all" => reads::search::search_unified(
                 handle.ops(),
@@ -851,7 +851,7 @@ impl BookrackServer {
                 args.top_k,
             )
             .await
-            .map_err(ops_error_to_internal)?,
+            .map_err(ops_error_to_mcp)?,
             other => {
                 return Err(ErrorData::invalid_params(
                     format!(
@@ -901,7 +901,7 @@ impl BookrackServer {
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Vec<bookrack_ops::Citation>>(&Vec::new())
             }
-            Err(e) => Err(ops_error_to_internal(e)),
+            Err(e) => Err(ops_error_to_mcp(e)),
         }
     }
 
@@ -918,7 +918,7 @@ impl BookrackServer {
         Parameters(args): Parameters<LibraryOnlyArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
-        let stats = reads::books::show_stats(handle.ops()).map_err(ops_error_to_internal)?;
+        let stats = reads::books::show_stats(handle.ops()).map_err(ops_error_to_mcp)?;
         respond_with(&stats)
     }
 
@@ -936,7 +936,7 @@ impl BookrackServer {
         Parameters(args): Parameters<LibraryOnlyArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
-        let counts = reads::books::category_counts(handle.ops()).map_err(ops_error_to_internal)?;
+        let counts = reads::books::category_counts(handle.ops()).map_err(ops_error_to_mcp)?;
         respond_with(&counts)
     }
 
@@ -958,7 +958,7 @@ impl BookrackServer {
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
         let page =
-            reads::books::list_books(handle.ops(), limit, offset).map_err(ops_error_to_internal)?;
+            reads::books::list_books(handle.ops(), limit, offset).map_err(ops_error_to_mcp)?;
         tracing::info!(
             returned = page.books.len(),
             total = page.total,
@@ -995,7 +995,7 @@ impl BookrackServer {
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
         let page = reads::books::find_books(handle.ops(), filter, limit, offset)
-            .map_err(ops_error_to_internal)?;
+            .map_err(ops_error_to_mcp)?;
         tracing::info!(
             returned = page.books.len(),
             total = page.total,
@@ -1030,7 +1030,7 @@ impl BookrackServer {
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::BookDetail>>(&None)
             }
-            Err(e) => Err(ops_error_to_internal(e)),
+            Err(e) => Err(ops_error_to_mcp(e)),
         }
     }
 
@@ -1060,7 +1060,7 @@ impl BookrackServer {
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::Toc>>(&None)
             }
-            Err(e) => Err(ops_error_to_internal(e)),
+            Err(e) => Err(ops_error_to_mcp(e)),
         }
     }
 
@@ -1081,8 +1081,8 @@ impl BookrackServer {
         let handle = self.resolve_handle(args.library.as_deref())?;
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
-        let page = reads::papers::list_papers(handle.ops(), limit, offset)
-            .map_err(ops_error_to_internal)?;
+        let page =
+            reads::papers::list_papers(handle.ops(), limit, offset).map_err(ops_error_to_mcp)?;
         tracing::info!(
             returned = page.papers.len(),
             total = page.total,
@@ -1120,7 +1120,7 @@ impl BookrackServer {
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
         let page = reads::papers::find_papers(handle.ops(), filter, limit, offset)
-            .map_err(ops_error_to_internal)?;
+            .map_err(ops_error_to_mcp)?;
         tracing::info!(
             returned = page.papers.len(),
             total = page.total,
@@ -1153,7 +1153,7 @@ impl BookrackServer {
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::PaperDetail>>(&None)
             }
-            Err(e) => Err(ops_error_to_internal(e)),
+            Err(e) => Err(ops_error_to_mcp(e)),
         }
     }
 
@@ -1178,7 +1178,7 @@ impl BookrackServer {
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::PaperSource>>(&None)
             }
-            Err(e) => Err(ops_error_to_internal(e)),
+            Err(e) => Err(ops_error_to_mcp(e)),
         }
     }
 
@@ -1202,7 +1202,7 @@ impl BookrackServer {
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::Toc>>(&None)
             }
-            Err(e) => Err(ops_error_to_internal(e)),
+            Err(e) => Err(ops_error_to_mcp(e)),
         }
     }
 
@@ -1242,7 +1242,7 @@ impl BookrackServer {
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Vec<bookrack_ops::Citation>>(&Vec::new())
             }
-            Err(e) => Err(ops_error_to_internal(e)),
+            Err(e) => Err(ops_error_to_mcp(e)),
         }
     }
 
@@ -1277,7 +1277,7 @@ impl BookrackServer {
                 respond_with::<Option<bookrack_ops::dto::ContextWindow>>(&None)
             }
             Err(e @ OpsError::NotALeaf { .. }) => Err(invalid_params_err(&e)),
-            Err(e) => Err(ops_error_to_internal(e)),
+            Err(e) => Err(ops_error_to_mcp(e)),
         }
     }
 
@@ -1306,7 +1306,7 @@ impl BookrackServer {
                 respond_with::<Option<bookrack_ops::dto::SpanText>>(&None)
             }
             Err(e @ OpsError::NotOrganizing { .. }) => Err(invalid_params_err(&e)),
-            Err(e) => Err(ops_error_to_internal(e)),
+            Err(e) => Err(ops_error_to_mcp(e)),
         }
     }
 
@@ -1328,7 +1328,7 @@ impl BookrackServer {
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::metadata_report::MetadataReport>>(&None)
             }
-            Err(e) => Err(ops_error_to_internal(e)),
+            Err(e) => Err(ops_error_to_mcp(e)),
         }
     }
 
@@ -1364,7 +1364,7 @@ impl BookrackServer {
             Err(OpsError::IntakeNotFound { .. }) => respond_with::<
                 Option<bookrack_ops::dto::metadata_report::MetadataAuditReport>,
             >(&None),
-            Err(e) => Err(ops_error_to_internal(e)),
+            Err(e) => Err(ops_error_to_mcp(e)),
         }
     }
 
@@ -1393,7 +1393,7 @@ impl BookrackServer {
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
         let page = reads::metadata::list_metadata(handle.ops(), filter, limit, offset)
-            .map_err(ops_error_to_internal)?;
+            .map_err(ops_error_to_mcp)?;
         respond_with(&page)
     }
 
@@ -1411,7 +1411,7 @@ impl BookrackServer {
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
         let page = reads::metadata::list_pending_reviews(handle.ops(), limit, offset)
-            .map_err(ops_error_to_internal)?;
+            .map_err(ops_error_to_mcp)?;
         respond_with(&page)
     }
 
@@ -1431,7 +1431,7 @@ impl BookrackServer {
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<Vec<bookrack_ops::dto::audit::AuditTrailEntry>>>(&None)
             }
-            Err(e) => Err(ops_error_to_internal(e)),
+            Err(e) => Err(ops_error_to_mcp(e)),
         }
     }
 
@@ -1468,7 +1468,7 @@ impl BookrackServer {
             Err(OpsError::IntakeNotFound { .. }) => respond_with::<
                 Option<bookrack_ops::dto::metadata_report::PaperMetadataAuditReport>,
             >(&None),
-            Err(e) => Err(ops_error_to_internal(e)),
+            Err(e) => Err(ops_error_to_mcp(e)),
         }
     }
 
@@ -1497,7 +1497,7 @@ impl BookrackServer {
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
         let page = reads::papers_metadata::list_paper_metadata(handle.ops(), filter, limit, offset)
-            .map_err(ops_error_to_internal)?;
+            .map_err(ops_error_to_mcp)?;
         respond_with(&page)
     }
 
@@ -1515,7 +1515,7 @@ impl BookrackServer {
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
         let page = reads::papers_metadata::list_paper_pending_reviews(handle.ops(), limit, offset)
-            .map_err(ops_error_to_internal)?;
+            .map_err(ops_error_to_mcp)?;
         respond_with(&page)
     }
 
@@ -1537,7 +1537,7 @@ impl BookrackServer {
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<Vec<bookrack_ops::dto::audit::AuditTrailEntry>>>(&None)
             }
-            Err(e) => Err(ops_error_to_internal(e)),
+            Err(e) => Err(ops_error_to_mcp(e)),
         }
     }
 
@@ -1559,7 +1559,7 @@ impl BookrackServer {
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<Vec<bookrack_ops::dto::audit::PipelineAuditEntry>>>(&None)
             }
-            Err(e) => Err(ops_error_to_internal(e)),
+            Err(e) => Err(ops_error_to_mcp(e)),
         }
     }
 
@@ -1578,7 +1578,7 @@ impl BookrackServer {
         let ctx = self.info_context.clone();
         let info = reads::info::show_library_info(handle.ops(), ctx)
             .await
-            .map_err(ops_error_to_internal)?;
+            .map_err(ops_error_to_mcp)?;
         respond_with(&info)
     }
 
@@ -1735,7 +1735,7 @@ impl BookrackServer {
         let handle = self.resolve_handle(args.library.as_deref())?;
         let status = reads::vectors::status(handle.ops())
             .await
-            .map_err(ops_error_to_internal)?;
+            .map_err(ops_error_to_mcp)?;
         respond_with(&status)
     }
 
@@ -1762,8 +1762,8 @@ impl BookrackServer {
             reason: Some(args.reason),
             confirmed: args.confirmed.unwrap_or(false),
         };
-        let outcome = writes::metadata::set_metadata_field(handle.ops(), req)
-            .map_err(ops_error_to_edit_error)?;
+        let outcome =
+            writes::metadata::set_metadata_field(handle.ops(), req).map_err(ops_error_to_mcp)?;
         respond_with(&outcome)
     }
 
@@ -1788,8 +1788,8 @@ impl BookrackServer {
             field: args.field,
             reason: Some(args.reason),
         };
-        let outcome = writes::metadata::clear_metadata_field(handle.ops(), req)
-            .map_err(ops_error_to_edit_error)?;
+        let outcome =
+            writes::metadata::clear_metadata_field(handle.ops(), req).map_err(ops_error_to_mcp)?;
         respond_with(&outcome)
     }
 
@@ -1813,8 +1813,8 @@ impl BookrackServer {
             field: args.field,
             reason: Some(args.reason),
         };
-        let outcome = writes::metadata::void_metadata_field(handle.ops(), req)
-            .map_err(ops_error_to_edit_error)?;
+        let outcome =
+            writes::metadata::void_metadata_field(handle.ops(), req).map_err(ops_error_to_mcp)?;
         respond_with(&outcome)
     }
 
@@ -1840,8 +1840,8 @@ impl BookrackServer {
             nationality: args.nationality,
             reason: Some(args.reason),
         };
-        let outcome = writes::metadata::add_contributor(handle.ops(), req)
-            .map_err(ops_error_to_edit_error)?;
+        let outcome =
+            writes::metadata::add_contributor(handle.ops(), req).map_err(ops_error_to_mcp)?;
         respond_with(&outcome)
     }
 
@@ -1867,8 +1867,8 @@ impl BookrackServer {
             contributor_id: args.contributor_id,
             reason: Some(args.reason),
         };
-        let outcome = writes::metadata::remove_contributor(handle.ops(), req)
-            .map_err(ops_error_to_edit_error)?;
+        let outcome =
+            writes::metadata::remove_contributor(handle.ops(), req).map_err(ops_error_to_mcp)?;
         respond_with(&outcome)
     }
 
@@ -1895,7 +1895,7 @@ impl BookrackServer {
         let audit_profile = bookrack_ops::AuditProfile::default();
         let outcome =
             writes::metadata::reaudit_metadata(handle.ops(), req, &audit_data, &audit_profile)
-                .map_err(ops_error_to_internal)?;
+                .map_err(ops_error_to_mcp)?;
         respond_with(&outcome)
     }
 
@@ -1918,7 +1918,7 @@ impl BookrackServer {
             reason: args.reason,
         };
         let outcome = writes::metadata::acknowledge_metadata_gap(handle.ops(), req)
-            .map_err(ops_error_to_internal)?;
+            .map_err(ops_error_to_mcp)?;
         respond_with(&outcome)
     }
 
@@ -1939,7 +1939,7 @@ impl BookrackServer {
             reason: args.reason,
         };
         let outcome =
-            writes::metadata::approve_metadata(handle.ops(), req).map_err(ops_error_to_internal)?;
+            writes::metadata::approve_metadata(handle.ops(), req).map_err(ops_error_to_mcp)?;
         respond_with(&outcome)
     }
 
@@ -1960,7 +1960,7 @@ impl BookrackServer {
             reason: args.reason,
         };
         let outcome =
-            writes::metadata::reject_metadata(handle.ops(), req).map_err(ops_error_to_internal)?;
+            writes::metadata::reject_metadata(handle.ops(), req).map_err(ops_error_to_mcp)?;
         respond_with(&outcome)
     }
 
@@ -2644,32 +2644,6 @@ mod tests {
         let payload = serde_json::json!({ "node_id": 7 });
         let args: super::ReadSpanArgs = serde_json::from_value(payload).expect("deserialize");
         assert_eq!(args.kind, ItemKind::Book);
-    }
-
-    #[test]
-    fn edit_errors_promote_caller_input_variants_to_invalid_params() {
-        use bookrack_ops::OpsError;
-        use rmcp::model::ErrorCode;
-
-        for err in [
-            OpsError::UnknownMetadataField {
-                field: "bogus".to_string(),
-                editable: vec!["title".to_string()],
-            },
-            OpsError::UnknownContributorRole {
-                role: "bogus".to_string(),
-            },
-            OpsError::ContributorNotFound {
-                contributor_id: 7,
-                intake_id: 1,
-            },
-        ] {
-            let mapped = super::ops_error_to_edit_error(err);
-            assert_eq!(mapped.code, ErrorCode::INVALID_PARAMS, "{}", mapped.message);
-        }
-        // Every other variant stays an environmental fault.
-        let mapped = super::ops_error_to_edit_error(OpsError::SearchUnavailable);
-        assert_eq!(mapped.code, ErrorCode::INTERNAL_ERROR);
     }
 
     #[test]

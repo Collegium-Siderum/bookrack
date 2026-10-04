@@ -128,10 +128,12 @@ pub(crate) fn handler_err(method: &str, err: Report) -> RpcError {
 }
 
 /// Map a directly-held [`OpsError`] without an `eyre` round-trip: the
-/// read proxies get the typed error straight from `bookrack_ops::reads`
-/// and classify it here, with the same arms the write side reaches
-/// through [`handler_err`].
-pub(crate) fn ops_err(e: OpsError) -> RpcError {
+/// read proxies and the MCP tools get the typed error straight from
+/// `bookrack_ops` and classify it here, with the same arms the write
+/// side reaches through [`handler_err`]. The MCP front end re-wraps the
+/// returned envelope in its own error type without re-deciding the
+/// code, so one typed error takes one code on both surfaces.
+pub fn ops_err(e: OpsError) -> RpcError {
     from_ops(&e)
 }
 

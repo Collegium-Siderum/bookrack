@@ -104,6 +104,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **MCP tools classify their failures the way the control plane
+  does.** Every tool mapped an ops error to `-32603` unless a hand-
+  written arm picked it out, so a write against an unknown intake, a
+  store written by a newer schema, an embedding model the backend does
+  not hold, and a vector-store refusal of a build parameter all told an
+  agent to report a bug. The tools now hand the typed error to the
+  shared mapping layer: those conditions answer `-32602` or `-32018`
+  with the detail and hint the control plane carries, and a condition
+  takes the same code on both surfaces. An id that resolves to nothing
+  is still a `null` body. `docs/control-plane.md` states the rule in
+  the MCP tool surface section.
+
 - **The `library.*` read proxies classify their failures the way the
   write handlers do.** Each read proxy hand-picked its error code and
   defaulted to `-32603`, so a condition the write side reported as

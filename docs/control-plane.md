@@ -206,7 +206,9 @@ even when the refusal is plainly caller input, and the same typed error
 takes the same code whether a write handler or a read proxy raised it.
 The read proxies keep one rule of their own, below: an id that resolves
 to nothing is a `null` body, not an error, and never reaches this
-layer.
+layer. The MCP tools hand their typed ops errors to the same layer, so
+a condition takes one code whether an agent reaches it over MCP or an
+operator over the socket; see *MCP tool surface*.
 
 Each item below names a scenario and, in parentheses, the code it maps
 onto.
@@ -915,6 +917,17 @@ Every write tool runs attributed to `Caller::mcp()`, so its audit rows
 carry `actor_kind=llm` / `actor_detail=mcp` regardless of the surface
 that launched the daemon. The metadata write tools all require a
 `reason`, which lands on the audit row.
+
+A tool that fails answers with the error codes listed under *Error
+codes* above, in the MCP error envelope: the summary in `message`, the
+detail / hint / retryable triple in `data`. The typed ops errors the
+tools raise go through the same mapping layer as the control-plane
+methods, so `-32602`, `-32017`, and `-32018` mean on this surface
+exactly what they mean there, and a residual `-32603` is a fault to
+report rather than a state to repair. The tools keep the read proxies'
+own rule: an intake or node id that resolves to nothing is a `null`
+body (or an empty list, where the tool description says so), not an
+error.
 
 Two properties the tool set deliberately does *not* have:
 
