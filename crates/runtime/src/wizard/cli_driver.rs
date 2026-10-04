@@ -697,4 +697,135 @@ mod tests {
             "the screen renders the shared list, not a copy"
         );
     }
+
+    /// A PDFium search that found nothing, with every directory the
+    /// loader would have checked.
+    fn pdfium_missing(installable: bool) -> PdfiumReport {
+        PdfiumReport {
+            filename: "libpdfium.dylib",
+            found: None,
+            probed: vec![
+                PathBuf::from("/opt/bookrack/bin"),
+                PathBuf::from("/opt/bookrack/managed"),
+            ],
+            installable,
+        }
+    }
+
+    /// The step has nothing to offer when no pinned binary exists for
+    /// the platform: it says where it looked and moves on without a
+    /// question.
+    #[tokio::test]
+    async fn the_pdfium_step_continues_when_nothing_is_installable() {
+        let script = Script::with_answers([]);
+        let driver = scripted_driver(&script);
+
+        let choice = driver
+            .step_pdfium(&pdfium_missing(false))
+            .await
+            .expect("a missing library is a warning");
+
+        assert_eq!(choice, PdfiumChoice::Continue);
+        assert_eq!(
+            script.times_rendered("Download the pinned PDFium build"),
+            0,
+            "no question when nothing can be installed: {:?}",
+            script.captured()
+        );
+        assert_eq!(
+            script.times_rendered("/opt/bookrack/managed"),
+            1,
+            "every probed directory is listed: {:?}",
+            script.captured()
+        );
+    }
+
+    /// Declining the download is a valid answer: the wizard continues
+    /// and names the command that installs the library later.
+    #[tokio::test]
+    async fn the_pdfium_step_continues_when_the_download_is_declined() {
+        let script = Script::with_answers(["n"]);
+        let driver = scripted_driver(&script);
+
+        let choice = driver
+            .step_pdfium(&pdfium_missing(true))
+            .await
+            .expect("a declined download is a warning");
+
+        assert_eq!(choice, PdfiumChoice::Continue);
+        assert_eq!(script.answers_left(), 0, "the question was asked once");
+        assert_eq!(
+            script.times_rendered("doctor --install-pdfium"),
+            1,
+            "the later remedy is named: {:?}",
+            script.captured()
+        );
+    }
+
+    /// The question reads `[Y/n]`, so pressing enter accepts the
+    /// download.
+    #[tokio::test]
+    async fn an_empty_answer_to_the_download_question_installs() {
+        let script = Script::with_answers([""]);
+        let driver = scripted_driver(&script);
+
+        let choice = driver
+            .step_pdfium(&pdfium_missing(true))
+            .await
+            .expect("accepting the download is not an error");
+
+        assert_eq!(choice, PdfiumChoice::Install);
+    }
+
+    /// `--non-interactive` suppresses the download question: the step
+    /// continues without the library and without reading stdin.
+    #[tokio::test]
+    async fn a_non_interactive_run_continues_without_asking() {
+        let script = Script::with_answers([]);
+        let driver = CliWizardDriver {
+            non_interactive: true,
+            console: Box::new(ScriptedConsole(Arc::clone(&script))),
+        };
+
+        let choice = driver
+            .step_pdfium(&pdfium_missing(true))
+            .await
+            .expect("a missing library is a warning");
+
+        assert_eq!(choice, PdfiumChoice::Continue);
+        assert_eq!(
+            script.times_rendered("Download the pinned PDFium build"),
+            0,
+            "no prompt without a terminal to answer it: {:?}",
+            script.captured()
+        );
+    }
+
+    /// A download that fails is reported with its reason and does not
+    /// end the wizard: PDF ingest is what it costs, nothing more.
+    #[tokio::test]
+    async fn a_failed_install_is_reported_and_does_not_abort() {
+        let script = Script::with_answers([]);
+        let driver = scripted_driver(&script);
+
+        driver
+            .step_pdfium_install(&PdfiumInstallOutcome::Failed(
+                "archive checksum mismatch".to_string(),
+            ))
+            .await
+            .expect("a failed install is a warning");
+
+        assert_eq!(
+            script.times_rendered("archive checksum mismatch"),
+            1,
+            "the reason reaches the operator: {:?}",
+            script.captured()
+        );
+        assert_eq!(
+            script.times_rendered("doctor --install-pdfium"),
+            1,
+            "the retry command is named: {:?}",
+            script.captured()
+        );
+    }
 }
