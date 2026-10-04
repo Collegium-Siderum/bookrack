@@ -203,6 +203,24 @@ release workflow extracts the matching section verbatim from this file.
   changed nothing; with `--allow-partial`, or an explicit expected page
   count, nothing caught it.
 
+### Security
+
+- **deps: `rmcp` moves from 1.7.0 to 3.5.0, clearing
+  GHSA-9pj6-vhgr-3mwh.** The advisory (high) is a session-table leak in
+  the streamable-HTTP server transport: a well-formed JSON-RPC `POST`
+  that is not an `initialize` request allocated a session before the
+  body was validated and never released it, so every such request grew
+  the daemon's memory for the life of the process. The `/mcp` endpoint
+  hosts exactly that transport with the default session manager; it
+  binds to loopback by default, so the reachable callers were local
+  processes and browser pages. The other advisories cleared by the same
+  range concern the client transports and OAuth, neither of which the
+  daemon enables. The wire format a legacy client sees is unchanged:
+  `initialize` and `mcp-session-id` sessions remain the default path,
+  and clients that negotiate protocol version 2026-07-28 are served
+  statelessly, one handler per request, as the new specification
+  requires.
+
 ## [0.11.0] - 2026-08-08
 
 ### Added

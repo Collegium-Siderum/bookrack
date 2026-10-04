@@ -2028,8 +2028,8 @@ impl ServerHandler for BookrackServer {
     /// server. Agent clients list what this returns, and
     /// `bookrack doctor` matches the name to tell this daemon apart
     /// from another service on the same address.
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(rmcp::model::Implementation::new(
                 bookrack_config::MCP_SERVER_NAME,
                 env!("CARGO_PKG_VERSION"),
@@ -2060,7 +2060,7 @@ impl ServerHandler for BookrackServer {
         &self,
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         with_caller_override(Caller::mcp(), self.tool_router.call(tcc)).await
     }

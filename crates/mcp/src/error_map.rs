@@ -18,7 +18,7 @@ use bookrack_core::{Explain, Problem};
 use bookrack_ops::OpsError;
 use bookrack_ops::dto::UnknownFilterValue;
 use rmcp::ErrorData;
-use rmcp::model::{CallToolResult, Content, ErrorCode};
+use rmcp::model::{CallToolResult, ContentBlock, ErrorCode};
 use serde::Serialize;
 
 use crate::reference;
@@ -29,7 +29,7 @@ use crate::reference;
 pub(crate) fn respond_with<T: Serialize>(value: &T) -> Result<CallToolResult, ErrorData> {
     let json = serde_json::to_string(value)
         .map_err(|e| mcp_from_problem(ErrorCode::INTERNAL_ERROR, Problem::from_error_chain(&e)))?;
-    Ok(CallToolResult::success(vec![Content::text(json)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
 }
 
 /// Build the MCP error envelope from a rendered [`Problem`]: the
