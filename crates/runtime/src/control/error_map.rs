@@ -11,24 +11,29 @@
 //! genuine server fault.
 //!
 //! [`write_err`] walks the `eyre` cause chain looking for known typed
-//! errors ([`OpsError`], [`IngestError`], [`GleanError`],
-//! [`RegistryError`], [`CmdInputError`], [`EmbedError`]) and, when one
-//! matches, maps a user-input variant onto [`INVALID_PARAMS`] (or the
-//! bookrack-specific code reserved for that shape, e.g.
-//! [`INVALID_LIBRARY`]). Anything that does not match a known
-//! user-input variant falls through to [`INTERNAL_ERROR`].
+//! errors and, when one matches, maps a user-input variant onto
+//! [`INVALID_PARAMS`] (or the bookrack-specific code reserved for that
+//! shape, e.g. [`INVALID_LIBRARY`]). Anything that does not match a
+//! known user-input variant falls through to [`INTERNAL_ERROR`].
 //!
-//! The first four are raised by the layers below `cmd::*`, so a
-//! refusal a write command makes on its own — before it reaches ops,
-//! ingest, or glean — is only classified if the command raises
-//! [`CmdInputError`] rather than a bare `bail!`.
+//! The walk recognises two tiers of type. The pipeline wrappers —
+//! [`OpsError`], [`IngestError`], [`GleanError`], [`QueryError`] — are
+//! raised by the layers below `cmd::*` and carry their own caller-input
+//! variants; a refusal a write command makes on its own, before it
+//! reaches those layers, is only classified if the command raises
+//! [`CmdInputError`] rather than a bare `bail!`. The leaves —
+//! [`EmbedError`], [`VectorsError`], [`CatalogError`], [`CorpusError`],
+//! [`RegistryError`] — are the store and backend types the wrappers
+//! fold in.
 //!
-//! An [`EmbedError`] reaches the chain in two shapes: bare, from a
-//! command that calls the embedder directly, and wrapped in
-//! `IngestError::Embed`, `GleanError::Embed`, or
-//! `OpsError::Query(QueryError::Embed)`. The three wrappers delegate to
-//! [`from_embed`] so both shapes take the same code, matching what
-//! their `Explain` impls already do for the wording.
+//! Classification is recursive: a wrapper's `from_*` delegates every
+//! variant that holds a leaf to that leaf's own `from_*`, so a leaf
+//! reaches the same code whether a command raised it bare or a wrapper
+//! (or two — `OpsError::Query(QueryError::Vectors(..))`) carried it.
+//! The one shape the recursion cannot see through is
+//! `OpsError::Other(eyre::Report)`: the report inside is opaque to the
+//! `match`, and whatever typed error it holds takes the wrapper's
+//! residual code.
 //!
 //! Wording is not written here. Each error renders itself through
 //! [`bookrack_core::Explain`], and [`rpc_from_problem`] splits the
@@ -39,15 +44,27 @@
 //! prints only its own text ("query error"), so a bare `to_string()`
 //! here would drop the root cause at the process boundary.
 //! `scripts/error-boundary-check.sh` enforces that.
+//!
+//! The exception to "wording is not written here" is the hint on a
+//! leaf the classifier judges caller input. The leaf store types write
+//! no wording of their own, and a caller-input code without a next
+//! step is an empty promise, so the `from_*` for those types attaches
+//! the step beside the code it chose. That is the classifier stating
+//! what its own judgement implies, not the leaf inventing facts about
+//! itself: the summary stays the leaf's flattened chain.
 
+use bookrack_catalog::CatalogError;
 use bookrack_config::ConfigError;
 use bookrack_core::{Explain, Problem};
+use bookrack_corpus::CorpusError;
 use bookrack_embed::EmbedError;
 use bookrack_glean::GleanError;
 use bookrack_ingest::IngestError;
 use bookrack_ops::OpsError;
 use bookrack_ops::dto::UnknownFilterValue;
 use bookrack_ops::registry::RegistryError;
+use bookrack_query::QueryError;
+use bookrack_vectors::VectorsError;
 use eyre::Report;
 
 use super::jsonrpc::{
@@ -87,6 +104,18 @@ pub(crate) fn write_err(method: &str, err: Report) -> RpcError {
         }
         if let Some(e) = cause.downcast_ref::<EmbedError>() {
             return from_embed(e);
+        }
+        if let Some(e) = cause.downcast_ref::<QueryError>() {
+            return from_query(e);
+        }
+        if let Some(e) = cause.downcast_ref::<VectorsError>() {
+            return from_vectors(e);
+        }
+        if let Some(e) = cause.downcast_ref::<CatalogError>() {
+            return from_catalog(e);
+        }
+        if let Some(e) = cause.downcast_ref::<CorpusError>() {
+            return from_corpus(e);
         }
     }
     rpc_from_problem(
@@ -224,11 +253,19 @@ fn from_embed(e: &EmbedError) -> RpcError {
     rpc_from_problem(code, e.explain())
 }
 
+/// Map a pipeline wrapper onto its wire code, delegating every variant
+/// that carries a leaf to that leaf's classifier. `Rerank` stays here:
+/// `RerankError` writes its own wording but has no caller-input
+/// variant, so the wrapper's residual code is already right for it.
 fn from_ops(e: &OpsError) -> RpcError {
-    if let OpsError::Query(bookrack_query::QueryError::Embed(e)) = e {
-        return from_embed(e);
-    }
     use OpsError::*;
+    match e {
+        Query(e) => return from_query(e),
+        Catalog(e) => return from_catalog(e),
+        Corpus(e) => return from_corpus(e),
+        Vectors(e) => return from_vectors(e),
+        _ => {}
+    }
     let code = match e {
         IntakeNotFound { .. }
         | UnknownMetadataField { .. }
@@ -243,11 +280,20 @@ fn from_ops(e: &OpsError) -> RpcError {
     rpc_from_problem(code, e.explain())
 }
 
+/// `Extract`, `Envelope`, and `Io` are not delegated: the extraction
+/// refusals that look like caller input (`UnsupportedFormat`,
+/// `DrmProtected`) are intercepted earlier on the write path by the
+/// queue's extension check and by `NeedsOcr`, so a second judgement
+/// here would be a second place for the two to drift apart.
 fn from_ingest(e: &IngestError) -> RpcError {
-    if let IngestError::Embed(e) = e {
-        return from_embed(e);
-    }
     use IngestError::*;
+    match e {
+        Embed(e) => return from_embed(e),
+        Catalog(e) => return from_catalog(e),
+        Corpus(e) => return from_corpus(e),
+        Vectors(e) => return from_vectors(e),
+        _ => {}
+    }
     let code = match e {
         EmptyExtraction
         | NeedsOcr { .. }
@@ -264,10 +310,14 @@ fn from_ingest(e: &IngestError) -> RpcError {
 }
 
 fn from_glean(e: &GleanError) -> RpcError {
-    if let GleanError::Embed(e) = e {
-        return from_embed(e);
-    }
     use GleanError::*;
+    match e {
+        Embed(e) => return from_embed(e),
+        Catalog(e) => return from_catalog(e),
+        Corpus(e) => return from_corpus(e),
+        Vectors(e) => return from_vectors(e),
+        _ => {}
+    }
     let code = match e {
         NeedsOcr { .. }
         | UnknownIntake(_)
@@ -277,6 +327,95 @@ fn from_glean(e: &GleanError) -> RpcError {
         _ => INTERNAL_ERROR,
     };
     rpc_from_problem(code, e.explain())
+}
+
+/// Map a query-layer wrapper onto its wire code. Every variant but the
+/// two the query layer raises itself (`Search`, `EmptyProbe`) carries
+/// a leaf and delegates to it; those two are faults in this binary.
+fn from_query(e: &QueryError) -> RpcError {
+    match e {
+        QueryError::Embed(e) => from_embed(e),
+        QueryError::Vectors(e) => from_vectors(e),
+        QueryError::Corpus(e) => from_corpus(e),
+        QueryError::Catalog(e) => from_catalog(e),
+        QueryError::Search(_) | QueryError::EmptyProbe => {
+            rpc_from_problem(INTERNAL_ERROR, e.explain())
+        }
+        // `QueryError` is `#[non_exhaustive]`; a variant this build does
+        // not know is a fault until someone judges otherwise.
+        _ => rpc_from_problem(INTERNAL_ERROR, e.explain()),
+    }
+}
+
+/// Map a leaf `VectorsError` onto its wire code.
+///
+/// The type has no `Explain` impl, so the summary is the flattened
+/// chain. Only the variants whose next step is "change what you
+/// passed" are caller input, and each carries that step as its hint;
+/// store state that needs a rebuild or a newer binary stays on
+/// [`INTERNAL_ERROR`] — calling it invalid params would be a lie of
+/// the same shape this line rejected for `-32013` and `-32001`.
+fn from_vectors(e: &VectorsError) -> RpcError {
+    use VectorsError::*;
+    let problem = Problem::from_error_chain(e);
+    match e {
+        BuildOnBruteForceKind => rpc_from_problem(
+            INVALID_PARAMS,
+            problem.hint(
+                "Brute-force search has no index to build. Choose an ANN kind in the \
+                 index profile, or drop the index instead of building one.",
+            ),
+        ),
+        MissingPqParam(param) => rpc_from_problem(
+            INVALID_PARAMS,
+            problem.hint(format!(
+                "Set `{param}` in the index profile; an IvfPq build does not run without it."
+            )),
+        ),
+        IvfPqQuantizationTooCoarse {
+            dim,
+            num_sub_vectors: _,
+        } => rpc_from_problem(
+            INVALID_PARAMS,
+            problem.hint(format!(
+                "Raise `num_sub_vectors` to at least {} (the embedding dimension divided by \
+                 8) in the index profile, or choose a kind other than IvfPq.",
+                dim.div_ceil(8)
+            )),
+        ),
+        _ => rpc_from_problem(INTERNAL_ERROR, problem),
+    }
+}
+
+/// Map a leaf `CatalogError` onto its wire code. Same contract as
+/// [`from_vectors`]: no `Explain` on the type, a hint only beside a
+/// caller-input code.
+fn from_catalog(e: &CatalogError) -> RpcError {
+    let problem = Problem::from_error_chain(e);
+    match e {
+        CatalogError::DerivedFromConflict { .. } => rpc_from_problem(
+            INVALID_PARAMS,
+            problem.hint(
+                "A derived text keeps the source it was first registered against. Register \
+                 it against that source, or remove the intake and ingest it again for the \
+                 new one.",
+            ),
+        ),
+        _ => rpc_from_problem(INTERNAL_ERROR, problem),
+    }
+}
+
+/// Map a leaf `CorpusError` onto its wire code. Same contract as
+/// [`from_vectors`].
+fn from_corpus(e: &CorpusError) -> RpcError {
+    let problem = Problem::from_error_chain(e);
+    match e {
+        CorpusError::InvalidIntakeId(_) => rpc_from_problem(
+            INVALID_PARAMS,
+            problem.hint("Pass a positive intake id; `bookrack list` prints them."),
+        ),
+        _ => rpc_from_problem(INTERNAL_ERROR, problem),
+    }
 }
 
 fn from_registry(e: &RegistryError) -> RpcError {
@@ -649,6 +788,153 @@ mod tests {
         let rpc = write_err("remove", err);
         assert_eq!(rpc.code, PLAN_TARGET_DRIFTED);
         assert!(rpc.message.contains("book 7"), "{}", rpc.message);
+    }
+
+    /// Pins the recursion itself: a leaf variant two wrappers deep takes
+    /// the code its own classifier assigns. Asserted against the literal
+    /// code — before the wrappers delegated, every leaf under them was
+    /// `-32603`, so comparing wrapped to bare would have passed while
+    /// both were wrong.
+    #[test]
+    fn a_wrapped_leaf_variant_takes_its_own_code_through_every_wrapper() {
+        use bookrack_vectors::VectorsError;
+        let cases: Vec<(&str, Report)> = vec![
+            (
+                "ingest > vectors",
+                IngestError::Vectors(VectorsError::MissingPqParam("num_sub_vectors")).into(),
+            ),
+            (
+                "glean > vectors",
+                GleanError::Vectors(VectorsError::BuildOnBruteForceKind).into(),
+            ),
+            (
+                "ops > query > vectors",
+                OpsError::Query(bookrack_query::QueryError::Vectors(
+                    VectorsError::MissingPqParam("num_sub_vectors"),
+                ))
+                .into(),
+            ),
+            (
+                "ops > corpus",
+                OpsError::Corpus(bookrack_corpus::CorpusError::InvalidIntakeId(-1)).into(),
+            ),
+            (
+                "ingest > corpus",
+                IngestError::Corpus(bookrack_corpus::CorpusError::InvalidIntakeId(-1)).into(),
+            ),
+            (
+                "glean > catalog",
+                GleanError::Catalog(bookrack_catalog::CatalogError::DerivedFromConflict {
+                    intake_id: 7,
+                    existing: "aaa".into(),
+                    requested: "bbb".into(),
+                })
+                .into(),
+            ),
+        ];
+        for (label, err) in cases {
+            let rpc = write_err("vectors.rebuild", err);
+            assert_eq!(rpc.code, INVALID_PARAMS, "{label}: {}", rpc.message);
+        }
+    }
+
+    /// A leaf error a command raises without any pipeline wrapper around
+    /// it must be recognised by the walk, not swept into the residual
+    /// channel.
+    #[test]
+    fn a_bare_leaf_variant_is_recognised_by_the_walk() {
+        let inner: Result<(), bookrack_vectors::VectorsError> = Err(
+            bookrack_vectors::VectorsError::MissingPqParam("num_sub_vectors"),
+        );
+        let err: Report = inner
+            .context("build the ANN index")
+            .context("vectors.rebuild")
+            .unwrap_err();
+        let rpc = write_err("vectors.rebuild", err);
+        assert_eq!(rpc.code, INVALID_PARAMS, "{}", rpc.message);
+        assert!(
+            !rpc.message.contains("vectors.rebuild failed:"),
+            "the residual channel must not have handled it: {}",
+            rpc.message
+        );
+
+        let err: Report = bookrack_corpus::CorpusError::InvalidIntakeId(-1).into();
+        assert_eq!(write_err("ingest.submit", err).code, INVALID_PARAMS);
+    }
+
+    /// Every variant the classifier judges caller input carries a next
+    /// step on the wire. The leaf types write no wording of their own,
+    /// so the hint is the classifier's, keyed on the code it chose.
+    #[test]
+    fn every_caller_input_leaf_variant_carries_a_hint() {
+        use bookrack_vectors::VectorsError;
+        let cases: Vec<(&str, Report)> = vec![
+            (
+                "BuildOnBruteForceKind",
+                VectorsError::BuildOnBruteForceKind.into(),
+            ),
+            (
+                "MissingPqParam",
+                VectorsError::MissingPqParam("num_sub_vectors").into(),
+            ),
+            (
+                "IvfPqQuantizationTooCoarse",
+                VectorsError::IvfPqQuantizationTooCoarse {
+                    dim: 1024,
+                    num_sub_vectors: 16,
+                }
+                .into(),
+            ),
+            (
+                "InvalidIntakeId",
+                bookrack_corpus::CorpusError::InvalidIntakeId(0).into(),
+            ),
+            (
+                "DerivedFromConflict",
+                bookrack_catalog::CatalogError::DerivedFromConflict {
+                    intake_id: 7,
+                    existing: "aaa".into(),
+                    requested: "bbb".into(),
+                }
+                .into(),
+            ),
+        ];
+        for (label, err) in cases {
+            let rpc = write_err("vectors.rebuild", err);
+            assert_eq!(rpc.code, INVALID_PARAMS, "{label}");
+            let data: bookrack_core::ProblemData =
+                serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
+            let hint = data.hint.unwrap_or_default();
+            assert!(
+                !hint.trim().is_empty(),
+                "{label}: caller input without a next step"
+            );
+            assert!(!data.retryable, "{label}");
+        }
+    }
+
+    /// Delegation must not widen the caller-input bucket: a leaf fault
+    /// stays `-32603`. The one visible trace of the delegation is the
+    /// wrapper's own `Display` ("catalog error: ") leaving the summary,
+    /// because the leaf is now rendered from its own chain.
+    #[test]
+    fn a_wrapped_leaf_fault_stays_internal_and_drops_the_wrapper_prefix() {
+        let err: Report = OpsError::Catalog(bookrack_catalog::CatalogError::Io(
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "backup dir read-only"),
+        ))
+        .into();
+        let rpc = write_err("metadata.set", err);
+        assert_eq!(rpc.code, INTERNAL_ERROR);
+        assert!(
+            !rpc.message.starts_with("catalog error"),
+            "wrapper Display leaked onto the wire: {}",
+            rpc.message
+        );
+        assert!(
+            rpc.message.contains("backup dir read-only"),
+            "{}",
+            rpc.message
+        );
     }
 
     #[test]

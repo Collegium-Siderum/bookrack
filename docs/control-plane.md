@@ -250,6 +250,16 @@ onto.
   plan pinned. It is the one `CmdInputError` variant with its own
   code, because a client recovers from it differently: by minting a
   fresh plan rather than by correcting a parameter.
+- **A store refusing what the caller passed** (`-32602`): three
+  vector-store refusals — an ANN build asked of the brute-force kind,
+  an IvfPq build missing a required parameter, an IvfPq quantization
+  too coarse for the embedding dimension — plus a non-positive intake
+  id (`CorpusError::InvalidIntakeId`) and an attempt to re-point a
+  derived text at a different source (`CatalogError::DerivedFromConflict`).
+  Each carries the next step in `error.data.hint`. The mapping is
+  recursive, so the code is the same whether the command raised the
+  store error bare or a pipeline wrapper carried it
+  (`OpsError::Query(QueryError::Vectors(..))` included).
 - **Everything else** (`-32603`): the handler tried and a downstream
   subsystem — catalog DB, vector store, file IO — failed. A request
   the embed client itself malformed (`EmbedError::{BadRequest,

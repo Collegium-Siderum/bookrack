@@ -89,6 +89,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A store refusing caller input is reported as caller input through
+  every pipeline wrapper.** The write-class error mapping recognised
+  the ops, ingest, and glean wrappers but classified only their own
+  variants; a vector-store, catalog, or corpus refusal those wrappers
+  carried fell to the wrapper's residual `-32603`, and the same
+  refusal raised bare by a command fell to the residual channel. An
+  IvfPq build missing `num_sub_vectors`, an ANN build asked of the
+  brute-force kind, a quantization too coarse for the embedding
+  dimension, a non-positive intake id, and a derived text re-pointed at
+  another source now answer `-32602` whether bare or wrapped, and each
+  carries its next step in `error.data.hint`. Store faults keep
+  `-32603`; their summary no longer leads with the wrapper's own text
+  (`catalog error: `), since the leaf is rendered from its own chain.
+  `docs/control-plane.md` lists the five under the write-class mapping.
+
 - **`library.info` now says why `vectors_meta.json` could not be read.**
   The `vectors_error` field of the book and paper sections carried
   only the outer message, `vectors_meta parse error` or `vectors_meta
