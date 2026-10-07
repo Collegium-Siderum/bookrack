@@ -643,6 +643,20 @@ pub enum ConfigError {
     /// not understand; the operator fixes it (or removes it) by hand.
     #[error("the registry at {} cannot be merged: {reason}", .path.display())]
     RegistryShape { path: PathBuf, reason: String },
+    /// A writer handed the registry a data root that is not absolute.
+    /// Entries record absolute roots, so the entry is refused before
+    /// anything is written; a caller resolves an operator-typed path
+    /// against the working directory first.
+    #[error(
+        "cannot record library {name:?}: the data root {} is not an absolute path",
+        .data_dir.display()
+    )]
+    RelativeDataRoot {
+        /// The registry key the entry would have been written under.
+        name: String,
+        /// The relative path the writer was given.
+        data_dir: PathBuf,
+    },
     /// `<data_root>/config.toml` exists but could not be read.
     #[error("cannot read the root config at {}", .path.display())]
     RootConfigUnreadable {
@@ -2541,12 +2555,19 @@ struct Resolved {
 /// tested without mutating the environment, writing registry files, or
 /// touching the running executable's directory.
 ///
-/// Order, highest first:
+/// Two levels decide it. An explicit target names a root or a library
+/// outright; a default pointer is what a registry supplies when nothing
+/// was named. Any explicit target beats any default pointer, and within
+/// a level the order below settles ties. Highest first:
+///
+/// Explicit targets —
 /// 1. the `--data-dir` flag,
 /// 2. the `--library` flag (looked up in the registry, then the
 ///    platform-default registry),
 /// 3. the data-root environment variable,
-/// 4. a `bookrack-data` directory probed beside the running binary,
+/// 4. a `bookrack-data` directory probed beside the running binary.
+///
+/// Default pointers —
 /// 5. the registry's default library,
 /// 6. the platform-default registry's default library.
 ///
@@ -2725,10 +2746,14 @@ fn registry_default_root(registry: &Registry) -> Option<(String, PathBuf)> {
 /// matched back against the registry: an `Ok(Some(_))` manifest is tried
 /// by uuid first ([`LibraryIdentification::ManifestUuid`]); an absent
 /// manifest, or a uuid that matches no entry, falls back to a path match
-/// ([`LibraryIdentification::Path`]). A manifest that fails to read
-/// yields no claim at all — the root stays anonymous rather than being
-/// claimed on shaky identity. The registry is consulted before the
-/// platform-default registry, matching [`select_root`]'s precedence.
+/// ([`LibraryIdentification::Path`]). A uuid the registry records at
+/// another path yields no claim: the root is the same library by
+/// identity and another place on disk, and naming it would redirect
+/// every registry-aware surface to the recorded root. A manifest that
+/// fails to read yields no claim either — the root stays anonymous
+/// rather than being claimed on shaky identity. The registry is
+/// consulted before the platform-default registry, matching
+/// [`select_root`]'s precedence.
 fn identify_library(
     source: ResolutionSource,
     resolved_dir: &Path,
@@ -2748,17 +2773,45 @@ fn identify_library(
     }
     let registries: Vec<&Registry> = [registry, default_registry].into_iter().flatten().collect();
     match load_manifest(resolved_dir) {
-        Ok(Some(manifest)) => {
-            for reg in &registries {
-                if let Some(entry) = find_library_by_uuid(reg, &manifest.uuid) {
-                    return (Some(entry.name), Some(LibraryIdentification::ManifestUuid));
-                }
-            }
-            claim_root_by_path(&registries, resolved_dir)
-        }
+        Ok(Some(manifest)) => match claim_root_by_uuid(&registries, &manifest.uuid, resolved_dir) {
+            UuidClaim::Named(name) => (Some(name), Some(LibraryIdentification::ManifestUuid)),
+            UuidClaim::Elsewhere { .. } => (None, None),
+            UuidClaim::NoMatch => claim_root_by_path(&registries, resolved_dir),
+        },
         Ok(None) => claim_root_by_path(&registries, resolved_dir),
         Err(_) => (None, None),
     }
+}
+
+/// What a manifest uuid says about a root once matched against the
+/// registries. Shared by [`identify_library`] and [`identify_root_in`],
+/// so the resolver and the routing translation never disagree on
+/// whether a hit at another path counts as a claim.
+enum UuidClaim {
+    /// An entry carries the uuid and points at this root.
+    Named(String),
+    /// An entry carries the uuid and points somewhere else.
+    Elsewhere { name: String, entry_root: PathBuf },
+    /// No entry carries the uuid.
+    NoMatch,
+}
+
+/// Match `uuid` against the registries, registry before platform
+/// default, and compare the hit's recorded root with `root`.
+fn claim_root_by_uuid(registries: &[&Registry], uuid: &str, root: &Path) -> UuidClaim {
+    for reg in registries {
+        if let Some(entry) = find_library_by_uuid(reg, uuid) {
+            return if same_root(&entry.data_dir, root) {
+                UuidClaim::Named(entry.name)
+            } else {
+                UuidClaim::Elsewhere {
+                    name: entry.name,
+                    entry_root: entry.data_dir,
+                }
+            };
+        }
+    }
+    UuidClaim::NoMatch
 }
 
 /// What a data root turns out to be, once matched against the library
@@ -2809,20 +2862,17 @@ pub fn identify_root(root: &Path) -> RootIdentity {
 /// [`identify_root`] against registries already in hand. Pure.
 fn identify_root_in(registries: &[&Registry], root: &Path) -> RootIdentity {
     if let Ok(Some(manifest)) = load_manifest(root) {
-        for reg in registries {
-            if let Some(entry) = find_library_by_uuid(reg, &manifest.uuid) {
-                return if same_root(&entry.data_dir, root) {
-                    RootIdentity::Named {
-                        name: entry.name,
-                        by: LibraryIdentification::ManifestUuid,
-                    }
-                } else {
-                    RootIdentity::UuidElsewhere {
-                        name: entry.name,
-                        entry_root: entry.data_dir,
-                    }
+        match claim_root_by_uuid(registries, &manifest.uuid, root) {
+            UuidClaim::Named(name) => {
+                return RootIdentity::Named {
+                    name,
+                    by: LibraryIdentification::ManifestUuid,
                 };
             }
+            UuidClaim::Elsewhere { name, entry_root } => {
+                return RootIdentity::UuidElsewhere { name, entry_root };
+            }
+            UuidClaim::NoMatch => {}
         }
     }
     match claim_root_by_path(registries, root) {
@@ -2853,7 +2903,9 @@ fn claim_root_by_path(
 
 /// Whether two paths name the same root, comparing canonicalized forms
 /// and falling back to a raw comparison when canonicalization fails.
-fn same_root(a: &Path, b: &Path) -> bool {
+/// The one comparison every registry-aware check uses, so a symlink or
+/// mount alias matches the same way everywhere.
+pub fn same_root(a: &Path, b: &Path) -> bool {
     let ca = a.canonicalize();
     let cb = b.canonicalize();
     match (ca, cb) {
@@ -2863,16 +2915,26 @@ fn same_root(a: &Path, b: &Path) -> bool {
 }
 
 /// Validate the chosen root and build a [`Config`]. The root must be an
-/// existing directory. The Ollama endpoint is resolved by precedence
-/// `env var > <data_root>/config.toml > hardcoded default`, so a
-/// per-library override in the TOML still loses to an explicit
-/// environment variable.
+/// existing directory; a relative one is joined to the working
+/// directory first, so the lock file, the registry, and every reported
+/// path carry the same absolute form. The Ollama endpoint is resolved
+/// by precedence `env var > <data_root>/config.toml > hardcoded
+/// default`, so a per-library override in the TOML still loses to an
+/// explicit environment variable.
 fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, ConfigError> {
     let Resolved {
         data_dir,
         source,
         library,
     } = resolved;
+    // `absolute` keeps the operator's spelling where `canonicalize`
+    // would rewrite a symlink; comparisons canonicalize at their own
+    // call sites. It fails only on an empty path or an unreadable
+    // working directory, neither of which names a directory.
+    let data_dir = match std::path::absolute(&data_dir) {
+        Ok(path) => path,
+        Err(_) => return Err(ConfigError::DataDirNotFound(data_dir)),
+    };
     if !data_dir.is_dir() {
         return Err(ConfigError::DataDirNotFound(data_dir));
     }
@@ -2894,8 +2956,9 @@ fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, 
 }
 
 /// Point the registry's `default = "..."` selection at `name`, writing
-/// the change straight to disk. Unlike the entry writers, which record
-/// a default only when none exists yet, this overwrites any existing
+/// the change straight to disk. Unlike
+/// [`upsert_library_entry_claiming_default`], which records a default
+/// only when none exists yet, this overwrites any existing
 /// default — it is the explicit "make this the default" entry point
 /// behind `bookrack libraries default`, and the change persists across
 /// daemon restarts. Errors with [`ConfigError::UnknownLibrary`] when
@@ -2923,15 +2986,55 @@ pub fn remove_library_from_registry(path: &Path, name: &str) -> Result<(), Confi
 
 /// Insert or replace a full registry entry, writing every metadata
 /// field the caller sets, and creating the file (with its parent
-/// directories) when absent. The `default` pointer is set to `name`
-/// only when none is recorded yet — an operator who has already chosen
-/// a default is never silently overridden. This is the write-side
-/// counterpart of the read-side entry table.
+/// directories) when absent. The `default` pointer is never touched:
+/// this is the write for a cache refresh or an unattended registration,
+/// where choosing a default is not part of what the caller was asked
+/// to do. This is the write-side counterpart of the read-side entry
+/// table.
+///
+/// Entries record absolute roots: a relative `data_dir` is refused
+/// with [`ConfigError::RelativeDataRoot`] before the file is touched.
+/// Resolving an operator-typed path against the working directory is
+/// the caller's job, done once where the path enters.
 pub fn upsert_library_entry(
     path: &Path,
     name: &str,
     entry: &LibraryEntryFields,
 ) -> Result<(), ConfigError> {
+    write_library_entry(path, name, entry, false).map(|_| ())
+}
+
+/// [`upsert_library_entry`], plus: when the registry records no
+/// `default` yet, `name` becomes it in the same write. Returns whether
+/// it did. This is the write behind the verbs an operator runs to bring
+/// a library in by hand — `libraries add`, `register`, `fork`, the
+/// wizard — where a first library with no default would otherwise leave
+/// every unqualified command with nowhere to go. An operator who has
+/// already chosen a default is never overridden.
+pub fn upsert_library_entry_claiming_default(
+    path: &Path,
+    name: &str,
+    entry: &LibraryEntryFields,
+) -> Result<bool, ConfigError> {
+    write_library_entry(path, name, entry, true)
+}
+
+/// The one entry write behind both public forms. Refuses a relative
+/// root before taking the lock, then inserts the entry and, with
+/// `claim_default`, points an absent `default` at it inside the same
+/// read-modify-write window. Returns whether the default was claimed.
+fn write_library_entry(
+    path: &Path,
+    name: &str,
+    entry: &LibraryEntryFields,
+    claim_default: bool,
+) -> Result<bool, ConfigError> {
+    if !entry.data_dir.is_absolute() {
+        return Err(ConfigError::RelativeDataRoot {
+            name: name.to_string(),
+            data_dir: entry.data_dir.clone(),
+        });
+    }
     update_registry_table(path, |doc| {
         let libraries = doc
             .get_mut("libraries")
@@ -2939,10 +3042,11 @@ pub fn upsert_library_entry(
             .as_table_mut()
             .expect("normalize_registry_entries guarantees a table");
         libraries.insert(name.to_string(), toml::Value::Table(entry.to_toml_table()));
-        if !doc.contains_key("default") {
+        let claimed = claim_default && !doc.contains_key("default");
+        if claimed {
             doc.insert("default".to_string(), toml::Value::String(name.to_string()));
         }
-        Ok(())
+        Ok(claimed)
     })
 }
 
@@ -3032,6 +3136,11 @@ pub struct AddOptions {
     /// rewriting its identity manifest. Resolves a uuid clash by turning
     /// the new root into a genuine copy with its own identity.
     pub new_uuid: bool,
+    /// Make the entry the registry `default` when none is recorded.
+    /// On for the verbs an operator runs one library at a time, off
+    /// for a bulk sweep, where which root the walk reached first is no
+    /// basis for choosing one.
+    pub default_when_absent: bool,
 }
 
 /// The result of an [`add_library`] call: either a completed
@@ -3100,6 +3209,10 @@ pub struct AddReport {
 /// manifest write that fails because the root is read-only degrades to a
 /// uuid-less registration rather than an error, so a snapshot or optical
 /// volume can still be registered.
+///
+/// A relative `data_dir` is joined to the working directory before
+/// anything is detected, compared, or written, so the entry records the
+/// absolute root and the key collision check compares like with like.
 pub fn add_library<C>(
     registry_path: &Path,
     key: Option<&str>,
@@ -3112,6 +3225,10 @@ pub fn add_library<C>(
 where
     C: FnOnce(&LibraryManifest) -> std::io::Result<bool>,
 {
+    let data_dir = std::path::absolute(data_dir).map_err(|e| {
+        LibraryOpError::BadTarget(format!("cannot resolve {}: {e}", data_dir.display()))
+    })?;
+    let data_dir = data_dir.as_path();
     let verdict = detect_library(data_dir).map_err(|e| LibraryOpError::BadTarget(e.to_string()))?;
     let existing = match verdict {
         DetectVerdict::Confirmed(manifest) => Some(manifest),
@@ -3128,7 +3245,6 @@ where
     let key = resolve_add_key(key, existing.as_ref(), data_dir);
     let registry = load_registry_at(registry_path)?;
     let entries = library_entries(&registry);
-    let became_default = registry.default.is_none();
 
     // A derived key that already names a root at a different path is a
     // collision the operator must break with an explicit alias. An
@@ -3204,7 +3320,8 @@ where
         created_at,
         uuid: uuid.clone(),
     };
-    upsert_library_entry(registry_path, &key, &fields)?;
+    let became_default =
+        write_library_entry(registry_path, &key, &fields, opts.default_when_absent)?;
 
     Ok(AddOutcome::Registered(AddReport {
         key,
@@ -3942,6 +4059,26 @@ mod tests {
     }
 
     #[test]
+    fn a_relative_data_root_resolves_against_the_working_directory() {
+        // `.` is the one relative path guaranteed to exist from any
+        // working directory, and it exercises the same join as `./lib`.
+        let selection = LibrarySelection {
+            data_dir: Some(PathBuf::from(".")),
+            library: None,
+        };
+        let root = select_root(&selection, None, None, None, None).expect("selects");
+        let cfg = finish(root, None).expect("resolves");
+        let cwd = std::env::current_dir().expect("cwd");
+        assert!(
+            cfg.data_dir().is_absolute(),
+            "data root should be absolute, got {}",
+            cfg.data_dir().display()
+        );
+        assert_eq!(cfg.data_dir(), cwd.as_path());
+        assert_eq!(cfg.source(), ResolutionSource::DataDirFlag);
+    }
+
+    #[test]
     fn missing_data_dir_is_an_error() {
         assert!(matches!(
             resolve(None, None),
@@ -3963,6 +4100,8 @@ mod tests {
         ));
     }
 
+    /// Explicit targets among themselves: the flag outranks every other
+    /// explicit target, and with it the default-pointer level below.
     #[test]
     fn data_dir_flag_wins_over_everything() {
         let selection = LibrarySelection {
@@ -4150,6 +4289,8 @@ mod tests {
         }
     }
 
+    /// Explicit target over default pointer: the variable, near the
+    /// bottom of the explicit level, still beats the registry default.
     #[test]
     fn data_root_variable_wins_over_the_registry_default() {
         let selection = LibrarySelection::default();
@@ -4166,6 +4307,8 @@ mod tests {
         assert_eq!(resolved.library, None);
     }
 
+    /// Default pointers: the registry default answers only once every
+    /// explicit target has abstained.
     #[test]
     fn registry_default_is_the_last_resort() {
         let selection = LibrarySelection::default();
@@ -4311,16 +4454,40 @@ mod tests {
         let root = tmp.path();
         let manifest = new_manifest("birth-name", LibraryKind::Prod, None);
         write_manifest(root, &manifest).expect("write manifest");
-        // The registry entry points elsewhere but shares the uuid: the
-        // uuid match claims it regardless of the recorded path.
+        // The entry records the root under another name; the uuid
+        // match claims that name.
         let registry = parse_registry(&format!(
-            "[libraries.hammer]\ndata_dir = \"/roots/elsewhere\"\nuuid = \"{}\"\n",
+            "[libraries.hammer]\ndata_dir = \"{}\"\nuuid = \"{}\"\n",
+            root.display(),
             manifest.uuid
         ))
         .expect("registry parses");
         let (name, id) = identify_library(ResolutionSource::EnvVar, root, Some(&registry), None);
         assert_eq!(name.as_deref(), Some("hammer"));
         assert_eq!(id, Some(LibraryIdentification::ManifestUuid));
+    }
+
+    /// A root whose manifest uuid the registry records at another path
+    /// is not claimed: it is the same library by identity and another
+    /// place on disk, and naming it would redirect every registry-aware
+    /// surface to the recorded root while the operator typed this one.
+    #[test]
+    fn identify_does_not_claim_a_uuid_the_registry_places_elsewhere() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let manifest = new_manifest("birth-name", LibraryKind::Prod, None);
+        write_manifest(root, &manifest).expect("write manifest");
+        let registry = parse_registry(&format!(
+            "[libraries.hammer]\ndata_dir = \"/roots/elsewhere\"\nuuid = \"{}\"\n",
+            manifest.uuid
+        ))
+        .expect("registry parses");
+        let (name, id) = identify_library(ResolutionSource::EnvVar, root, Some(&registry), None);
+        assert_eq!(
+            (name.as_deref(), id),
+            (None, None),
+            "a relocated identity must stay anonymous"
+        );
     }
 
     #[test]
@@ -4406,15 +4573,17 @@ mod tests {
         let root = tmp.path();
         let manifest = new_manifest("birth-name", LibraryKind::Prod, None);
         write_manifest(root, &manifest).expect("write manifest");
-        // Both registries carry the uuid under different names; the
+        // Both registries record this root under different names; the
         // primary registry wins, in step with select_root's precedence.
         let registry = parse_registry(&format!(
-            "[libraries.primary]\ndata_dir = \"/roots/primary\"\nuuid = \"{}\"\n",
+            "[libraries.primary]\ndata_dir = \"{}\"\nuuid = \"{}\"\n",
+            root.display(),
             manifest.uuid
         ))
         .expect("registry parses");
         let default_registry = parse_registry(&format!(
-            "[libraries.platform]\ndata_dir = \"/roots/platform\"\nuuid = \"{}\"\n",
+            "[libraries.platform]\ndata_dir = \"{}\"\nuuid = \"{}\"\n",
+            root.display(),
             manifest.uuid
         ))
         .expect("platform-default registry parses");
@@ -5653,6 +5822,9 @@ mod tests {
         assert_eq!(registry_target_path_from(None, None), None);
     }
 
+    /// Both levels in one: the portable layout, the lowest explicit
+    /// target, beats the registry default; among explicit targets the
+    /// variable outranks it.
     #[test]
     fn portable_data_dir_beats_registry_default_but_loses_to_env_var() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -5682,6 +5854,8 @@ mod tests {
         assert_eq!(resolved.source, ResolutionSource::EnvVar);
     }
 
+    /// Default pointers: the platform-default registry's default is the
+    /// last pointer before nothing resolves at all.
     #[test]
     fn default_registry_is_the_last_resort_before_missing_data_dir() {
         // No flag, no env var, no portable layout, no explicit registry:
@@ -5699,6 +5873,8 @@ mod tests {
         assert_eq!(resolved.library.as_deref(), Some("prod"));
     }
 
+    /// Default pointers among themselves: the registry named by the
+    /// environment outranks the platform-default registry.
     #[test]
     fn registry_default_beats_default_registry_default() {
         // The explicit registry (named by BOOKRACK_REGISTRY) wins over
@@ -6162,6 +6338,51 @@ mod tests {
     }
 
     #[test]
+    fn upsert_library_entry_claiming_default_keeps_an_existing_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(
+            &path,
+            "default = \"alpha\"\n\
+             [libraries]\n\
+             alpha = \"/roots/alpha\"\n",
+        )
+        .expect("seed");
+        let beta_root = tmp.path().join("beta");
+        std::fs::create_dir_all(&beta_root).expect("create beta");
+        let claimed =
+            upsert_library_entry_claiming_default(&path, "beta", &entry_fields(&beta_root))
+                .expect("upsert");
+        let registry = parse_registry(&std::fs::read_to_string(&path).expect("read"))
+            .expect("registry parses");
+        assert!(!claimed, "an existing default is never overridden");
+        assert_eq!(registry.default.as_deref(), Some("alpha"));
+        assert!(registry.libraries.contains_key("beta"));
+    }
+
+    #[test]
+    fn upsert_library_entry_leaves_an_absent_default_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(
+            &path,
+            "[libraries]\n\
+             alpha = \"/roots/alpha\"\n",
+        )
+        .expect("seed");
+        let beta_root = tmp.path().join("beta");
+        std::fs::create_dir_all(&beta_root).expect("create beta");
+        upsert_library_entry(&path, "beta", &entry_fields(&beta_root)).expect("upsert");
+        let registry = parse_registry(&std::fs::read_to_string(&path).expect("read"))
+            .expect("registry parses");
+        assert_eq!(
+            registry.default, None,
+            "writing an entry must not choose a default"
+        );
+        assert!(registry.libraries.contains_key("beta"));
+    }
+
+    #[test]
     fn upsert_library_entry_overwrites_an_existing_entry_with_the_same_name() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("registry.toml");
@@ -6181,6 +6402,41 @@ mod tests {
             registry.libraries.get("default").map(|e| e.data_dir()),
             Some(new_root.as_path())
         );
+    }
+
+    #[test]
+    fn upsert_library_entry_refuses_a_relative_data_root_and_leaves_the_file_alone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(
+            &path,
+            "default = \"alpha\"\n\
+             [libraries]\n\
+             alpha = \"/roots/alpha\"\n",
+        )
+        .expect("seed");
+        let before = std::fs::read_to_string(&path).expect("read seed");
+        let err = upsert_library_entry(&path, "beta", &entry_fields(Path::new("./beta")))
+            .expect_err("a relative data root must be refused");
+        assert!(
+            matches!(
+                &err,
+                ConfigError::RelativeDataRoot { name, data_dir }
+                    if name == "beta" && data_dir == Path::new("./beta")
+            ),
+            "got {err:?}"
+        );
+        let after = std::fs::read_to_string(&path).expect("read after");
+        assert_eq!(after, before, "a refused write must not touch the file");
+    }
+
+    #[test]
+    fn upsert_library_entry_refuses_a_relative_data_root_before_creating_the_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        upsert_library_entry(&path, "beta", &entry_fields(Path::new("beta")))
+            .expect_err("a relative data root must be refused");
+        assert!(!path.exists(), "a refused write must not create the file");
     }
 
     #[test]
@@ -6325,10 +6581,12 @@ mod tests {
             created_at: Some("2026-06-30T12:00:00Z".to_string()),
             uuid: Some("01890a5d-0000-7000-8000-000000000000".to_string()),
         };
-        upsert_library_entry(&path, "prod", &entry).expect("upsert");
+        let claimed = upsert_library_entry_claiming_default(&path, "prod", &entry).expect("upsert");
         let registry = parse_registry(&std::fs::read_to_string(&path).expect("read"))
             .expect("registry parses");
-        // First entry becomes the default when none was recorded.
+        // The claiming form makes a first entry the default when none
+        // was recorded, and reports that it did.
+        assert!(claimed);
         assert_eq!(registry.default.as_deref(), Some("prod"));
         let raw = &registry.libraries["prod"];
         assert_eq!(raw.data_dir(), Path::new("/roots/prod"));
@@ -6364,7 +6622,10 @@ mod tests {
             &root,
             None,
             None,
-            AddOptions::default(),
+            AddOptions {
+                default_when_absent: true,
+                ..AddOptions::default()
+            },
             |_m| Ok(true),
         )
         .expect("add");
@@ -6549,7 +6810,10 @@ mod tests {
             &copy,
             None,
             None,
-            AddOptions { new_uuid: true },
+            AddOptions {
+                new_uuid: true,
+                ..AddOptions::default()
+            },
             |_m| Ok(true),
         )
         .expect("add copy");

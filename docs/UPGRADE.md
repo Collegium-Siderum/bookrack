@@ -6,6 +6,36 @@ library, keep working. Some upgrades require derived content to be
 rebuilt before search returns correct results. This document is the
 runbook for the cases that need action.
 
+## Installing a new build
+
+A release is an archive of binaries, not an installer: upgrading is
+extracting the new one and using it in place of the old. Nothing the
+binary needs to find is stored beside it — the registry under the
+platform config directory names the data roots, the daemon's own state
+and the managed native libraries live under the platform data
+directory, and an MCP client holds a URL — so none of them move.
+
+1. Stop the daemon: `bookrack quit`.
+2. Extract the new archive beside the old directory — on macOS a new
+   `Bookrack.app`, on Linux and Windows a new directory — and clear the
+   quarantine or SmartScreen tag as on first install.
+3. From the new directory, run `bookrack doctor`. It opens every store
+   through its read-only door, so nothing is migrated by the check, and
+   it reports which PDFium library will be used: the one the archive
+   bundles beside the executable is searched before the per-user copy
+   `doctor --install-pdfium` manages, so an older managed copy does not
+   shadow it.
+4. Start it: `bookrack run`. The first open of each catalog migrates it
+   forward, after taking the snapshot described under *Downgrading*.
+   The release notes name any row of the matrix below that applies.
+5. Delete the old directory. The one thing that does live beside a
+   binary is a portable layout, `bookrack-data/` next to it: move the
+   directory beside the new binary first, then update the registry
+   entry `init` wrote for it, which still names the old path —
+   `bookrack libraries remove <name>` forgets the entry without touching
+   data, and `bookrack libraries register <new path>` records the new
+   one under the name in its manifest.
+
 ## Compatibility model in one paragraph
 
 Each on-disk store records the build parameters of the data it holds:
@@ -43,6 +73,7 @@ earlier ones already happened.
 | A `bookrack-distill` stage's behaviour, or a book's `parser.stages` | that book's `parser_version` (declared in its `book.toml`, bumped by hand) | the book's distilled entries in `reference.db` | `bookrack distill verify <path>` to see the diff, then `bookrack distill build <path>` |
 | `rusqlite`, `lancedb` | engine-level | normally none — upstream guarantees backward compatibility for reads | open the library |
 | Workspace `READER_VERSION` (manual bump) | per-store `min_reader_version` on next write | none on its own — a guard against older binaries | open the library |
+| `bookrack_index_profile::SCHEMA_VERSION` (manual bump) | the `schema_version` field of every profile file under `<config_dir>/bookrack/index-profiles/` | none — profile files are read, not derived | nothing for the operator: the bump ships with a reader for the previous schema, or a rewrite command, in the same change; a file above the binary's version is refused, naming both |
 
 For every row whose stale layers are `chunks → vectors` — a chunking or
 normalization version bump, or an embedding-model / vector-width change
@@ -158,6 +189,14 @@ refused while a daemon is serving the library, and `--dry-run` opens
 the catalog read-only so a plan never migrates or writes. Libraries
 created at or after v14 never need it.
 
+Catalog v17 adds `pipeline_run_summary.profile_buckets`, the profile
+histogram a run materialises at close. Rollups written before v17 keep
+the column NULL, and nothing backfills it: the rows a closed run judged
+may since have been re-judged by another, so the count at close cannot
+be recovered. `bookrack runs show` counts such a run live and labels
+the section `profiles (counted now, not at run close)`; runs closed by
+a v17 binary carry the snapshot.
+
 ## Recommended window
 
 A refresh that touches `extractor_version` or the embedding model is
@@ -175,7 +214,55 @@ one embedding pass per book.
 The matrix above describes moving forward. Going back is not a
 supported operation: a store whose schema was rolled forward in place
 refuses an older binary, and this document has no command that reverses
-a migration. Treat the snapshot a migration takes as the way back.
+a migration. What there is instead is the snapshot a catalog migration
+takes before it runs, and the derived stores, which an older binary
+rebuilds from the intake store.
+
+### What an older binary refuses
+
+Each store checks its own stamp when it is opened, and refuses rather
+than reads:
+
+| Store | Refused when | How it shows |
+|---|---|---|
+| `catalog.db`, `papers_catalog.db` | `user_version` is above the binary's target | `catalog schema version newer than this binary` |
+| every SQLite store and the vector sidecar | `min_reader_version` is above the binary's `READER_VERSION` | `ReaderTooOld` |
+| `corpus.db`, `papers_corpus.db` | `schema_version` differs from the binary's, in either direction | a schema mismatch; `bookrack corpus rebuild` writes the binary's own |
+| `reference.db` | `user_version` is above the binary's target | a read refuses it |
+| `bookrack-library.toml` | `format_version` is above the binary's | the root is not recognised as a library |
+| `queue.json` | `schema_version` is above the binary's | the daemon starts nothing, naming both versions |
+| an index-profile file | `schema_version` is above the binary's | the profile does not load, naming both versions |
+
+### The snapshot a migration takes
+
+Before a catalog migration runs on a database that already holds rows,
+the binary writes a complete copy of it with `VACUUM INTO` into the
+backup directory: `BOOKRACK_BACKUP_DIR`, or `<data root>/backup/` when
+that is unset — `bookrack doctor` reports which. The copy is named
+`<stem>-<timestamp>-from-v<N>.bak`, where `<stem>` is `catalog` or
+`papers_catalog` and `<N>` the schema it was migrated from, and the
+five newest per stem are kept. A fresh or empty database takes no
+snapshot, and nothing else is snapshotted: the corpus, the vector store
+and the reference store are derived, and the way back for them is a
+rebuild.
+
+### Going back
+
+1. Stop the daemon with `bookrack quit`, so no writer holds a store.
+2. For each catalog the newer binary migrated, move `catalog.db` aside
+   together with `catalog.db-wal` and `catalog.db-shm`, and copy the
+   snapshot whose `from-v<N>` matches the older binary's schema to
+   `catalog.db`. The two siblings go too: a write-ahead log left beside
+   a restored copy is replayed over it on the next open. Repeat for
+   `papers_catalog.db`.
+3. Anything ingested after the snapshot was taken is not known to the
+   restored catalog; ingest those sources again.
+4. Run the older binary's `bookrack doctor`. A corpus or vector store it
+   refuses is rebuilt with `bookrack corpus rebuild` and `bookrack
+   vectors rebuild` (and the `bookrack papers` forms); `reference.db`
+   with `bookrack distill build <path>` per book.
+
+### The queue document
 
 The queue document is the one piece of state that outlives a data root
 swap — it spans libraries, so it lives in the daemon state directory
@@ -345,6 +432,35 @@ The knobs themselves are unchanged. Declare the listen address with
 [`.env.example`](../.env.example) documents both with their defaults.
 Nothing about the resolved values changes — only where they may be
 written.
+
+## Diagnose bundle schema 4
+
+`manifest.json` inside a `bookrack diagnose` bundle carries a
+`schema_version`. It moved from 3 to 4 because the scrubbing contract
+changed: rule 5, which replaces runs of two or more CJK characters
+with a `<cjk:…>` hash token, no longer treats U+FFFD as the end of a
+run. A log file whose bytes were damaged decodes with U+FFFD wherever
+the damage was, and a damaged run used to break into pieces too short
+for the rule to redact.
+
+Nothing on disk goes stale and there is no refresh command — a bundle
+is a product, not a store, and this binary neither reads nor rewrites
+one it produced earlier. The version matters to whoever *reads* a
+bundle:
+
+- A bundle stamped 3 or lower may carry CJK text the current rule
+  would have redacted, in the files listed under `logs/` and
+  `crashes/`. Treat an old bundle as less redacted than its
+  `scrubbed: true` claims.
+- A run of CJK characters and the same run with damaged bytes inside
+  it now hash to the same token, so two bundles from one library stay
+  comparable across the damage.
+
+Bundles from schema 4 also carry `<section>/read-notes.json` in any
+section that could not copy a file verbatim. A file listed there as
+`lossy-utf8` is present but decoded with substitutions; one listed as
+`unreadable` or `unwritable` is absent from the bundle entirely. A
+section with nothing to report writes no such file.
 
 ## What never refreshes automatically
 

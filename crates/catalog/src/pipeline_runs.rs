@@ -6,9 +6,11 @@
 //! Every command that drives a pipeline over a set of items opens one
 //! `pipeline_runs` row at entry and closes it at exit with a terminal
 //! `status`. The registered commands are `ingest`, `dryrun`,
-//! `papers_dryrun`, `distill_build`, `glean`, and the whole-library
-//! maintenance passes `reembed` / `reset` / `papers_reembed` /
-//! `papers_reset`. Per-item maintenance verbs — `metadata reaudit` and
+//! `papers_dryrun`, `distill_build`, `distill_dryrun`, `glean`, and the
+//! whole-library maintenance passes `reembed` / `reset` /
+//! `papers_reembed` / `papers_reset`. Each pipeline's preview carries
+//! its own name, so the registry tells a rehearsal from the run that
+//! wrote. Per-item maintenance verbs — `metadata reaudit` and
 //! its paper-side peer — are deliberately outside the registry: they
 //! recompute one rollup for one intake, and registering each would
 //! turn `bookrack runs list` into a log of single-row edits. Their
@@ -17,9 +19,11 @@
 //!
 //! A run that writes audit rows also copies the assigned
 //! `pipeline_run_id` onto them, and downstream rollups address one run
-//! by that id. The passes above write neither `book_distill_audit` nor
-//! `node_paper_audit`, so they register without a rollup and
-//! `bookrack runs show` renders them header-only.
+//! by that id. The maintenance passes write neither `book_distill_audit`
+//! nor `node_paper_audit`, so they register without a rollup and
+//! `bookrack runs show` renders them header-only. Of the three
+//! previews only `distill_dryrun` writes audit rows: `dryrun` and
+//! `papers_dryrun` leave their report on disk and register header-only.
 //!
 //! The id is a short, human-readable composite — the command name, the
 //! start instant as ISO-8601 UTC, and an 8-hex SHA-256 prefix over
@@ -63,7 +67,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
             .primary_key()
             .comment("composite id: '<command>-<ISO8601 UTC>-<sha8>'"),
         ColumnSpec::text("command").not_null().comment(
-            "top-level action: ingest / dryrun / papers_dryrun / distill_build / glean / reembed / reset / papers_reembed / papers_reset",
+            "top-level action: ingest / dryrun / papers_dryrun / distill_build / distill_dryrun / glean / reembed / reset / papers_reembed / papers_reset",
         ),
         ColumnSpec::text("command_args").comment("JSON invocation snapshot; no stdout or stderr"),
         ColumnSpec::text("library_root").comment("short name when known; absolute path otherwise"),

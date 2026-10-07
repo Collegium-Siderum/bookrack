@@ -138,6 +138,18 @@ systems. bookrack is a local-first system and does not probe for it.
   rather than the exit `2` the same condition produces at bring-up.
   A model that is simply not pulled is `-32602` instead: no amount of
   waiting fixes it, and the repair is `ollama pull`.
+- `-32018` state unusable (bookrack-specific; a store the call depends
+  on is in a state this build cannot serve — a catalog or corpus
+  written by a newer schema or demanding a newer reader, an index whose
+  build stamps are missing or disagree with this build, a vector
+  sidecar naming an ANN kind this build does not know or a dimension
+  the store was not built at). Distinct from `-32602`, which says the
+  request was wrong: here the request was fine and the library is not
+  in a state to take it. Distinct from `-32603`, which says there is
+  nothing for the caller to do but report: here there is a step, and
+  it is the operator's — run a newer build, rebuild the layer, reset
+  the vectors — named in `error.data.hint`. Not retryable as sent;
+  exit `2`.
 
 #### Error data
 
@@ -180,17 +192,23 @@ wording falls back to a flattened cause chain as the summary and sends
 `data` with `retryable` alone. `data` is additive — a client that
 ignores it sees exactly what it saw before the slot was filled.
 
-#### Write-class error mapping
+#### Error mapping
 
 Write-class RPCs — `metadata.*`, `corpus.rebuild`, `vectors.*`,
 `remove`, `dryrun`, `stamps.reconcile`, `library.fork`, and their
-`papers.*` counterparts — route their failure through one mapping
-layer, which walks the error's cause chain looking for a **typed**
-error it recognises. That is where the split is drawn, and it is drawn
-by the type the failing layer raised, not by the method that was
-called: a step that folds its refusal into an untyped error is
-reported as a handler-side fault even when the refusal is plainly
-caller input.
+`papers.*` counterparts — and the `library.*` read proxies route their
+failure through one mapping layer, which walks the error's cause chain
+looking for a **typed** error it recognises. That is where the split is
+drawn, and it is drawn by the type the failing layer raised, not by the
+method that was called or the class it belongs to: a step that folds
+its refusal into an untyped error is reported as a handler-side fault
+even when the refusal is plainly caller input, and the same typed error
+takes the same code whether a write handler or a read proxy raised it.
+The read proxies keep one rule of their own, below: an id that resolves
+to nothing is a `null` body, not an error, and never reaches this
+layer. The MCP tools hand their typed ops errors to the same layer, so
+a condition takes one code whether an agent reaches it over MCP or an
+operator over the socket; see *MCP tool surface*.
 
 Each item below names a scenario and, in parentheses, the code it maps
 onto.
@@ -250,14 +268,36 @@ onto.
   plan pinned. It is the one `CmdInputError` variant with its own
   code, because a client recovers from it differently: by minting a
   fresh plan rather than by correcting a parameter.
+- **A store refusing what the caller passed** (`-32602`): three
+  vector-store refusals — an ANN build asked of the brute-force kind,
+  an IvfPq build missing a required parameter, an IvfPq quantization
+  too coarse for the embedding dimension — plus a non-positive intake
+  id (`CorpusError::InvalidIntakeId`) and an attempt to re-point a
+  derived text at a different source (`CatalogError::DerivedFromConflict`).
+  Each carries the next step in `error.data.hint`. The mapping is
+  recursive, so the code is the same whether the command raised the
+  store error bare or a pipeline wrapper carried it
+  (`OpsError::Query(QueryError::Vectors(..))` included).
+- **A store this build cannot serve** (`-32018`): a catalog or corpus
+  from a newer schema or demanding a newer reader
+  (`CatalogError::{SchemaTooNew, ReaderTooOld}`,
+  `CorpusError::{SchemaMismatch, ReaderTooOld}`), an index without
+  build stamps or with stamps that disagree with this build
+  (`CorpusError::{IndexNotStamped, IndexStampMismatch}`), and a vector
+  store whose sidecar names an unknown ANN kind, whose dimension does
+  not match, or whose reader stamp is too new
+  (`VectorsError::{UnknownAnnKind, DimensionMismatch, ReaderTooOld}`).
+  Each carries the operator's next step in `error.data.hint`, through
+  the same wrappers as the `-32602` leaves above.
 - **Everything else** (`-32603`): the handler tried and a downstream
   subsystem — catalog DB, vector store, file IO — failed. A request
   the embed client itself malformed (`EmbedError::{BadRequest,
   MalformedResponse}`) belongs here too: the operator did not write it.
 
 Clients distinguish "fix the request and retry" (`-32602` / `-32010` /
-`-32016`) from "report or escalate" (`-32603`) by the code, not by
-parsing the human-readable `error.message`.
+`-32016`), "the library needs an operator" (`-32018`), and "report or
+escalate" (`-32603`) by the code, not by parsing the human-readable
+`error.message`.
 
 The residual bucket is not a promise that nothing caller-shaped can
 land in it. The split is drawn by the type the failing step raised, so
@@ -304,8 +344,8 @@ the kind of failure without parsing stderr.
 | exit | meaning | sources |
 | --- | --- | --- |
 | `0` | success | — |
-| `1` | internal / unexpected error | color-eyre fallback for unclassified errors; `-32700 parse error`, `-32600 invalid request`, `-32603 internal error`, and unknown JSON-RPC codes; `SessionLockUnreadable`; `doctor` reported a FAIL row; `libraries detect` returned a not-a-library or unreadable-manifest verdict |
-| `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32016` plan-id mismatches and plan-target drift; a locally-resolved command rejected operator input (`libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate, `config effective` given a data root that does not resolve — the report is still printed, with the failure at its head, because a configuration report that fails when the configuration is broken is useless exactly when it is needed); a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0`; `bookrack run` refused to start because an external backend it needs is unusable (the embed model is not pulled, or the Ollama endpoint does not answer) — the check runs before any library is opened, so nothing was half-started. The same judgement on a live write RPC splits: an unpulled model stays `-32602` and exit `2`, while an unreachable or overloaded backend is `-32017` and exit `4`, because a call that failed mid-session may succeed on the next attempt; `bookrack rpc call` was handed params that are not valid JSON (`RpcParamsInvalid`) or a method name carrying no namespace (`RpcMethodNotNamespaced`), both judged locally before the call is sent |
+| `1` | internal / unexpected error | color-eyre fallback for unclassified errors; `-32700 parse error`, `-32600 invalid request`, `-32603 internal error`, and unknown JSON-RPC codes; `SessionLockUnreadable`; `doctor` reported a FAIL row; `verify` judged a finding as damage (see `verify.run` below for the table); `libraries detect` returned a not-a-library or unreadable-manifest verdict |
+| `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32016` plan-id mismatches and plan-target drift, `-32018 state unusable` (a store from another build or with drifted stamps; the hint names the rebuild or the build to run); a locally-resolved command rejected operator input (`libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate, `config effective` given a data root that does not resolve — the report is still printed, with the failure at its head, because a configuration report that fails when the configuration is broken is useless exactly when it is needed); a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0`; `bookrack run` refused to start because an external backend it needs is unusable (the embed model is not pulled, or the Ollama endpoint does not answer), or because the selected data root carries the identity of a library the registry records at another path — either check runs before any library is opened, so nothing was half-started. The same judgement on a live write RPC splits: an unpulled model stays `-32602` and exit `2`, while an unreachable or overloaded backend is `-32017` and exit `4`, because a call that failed mid-session may succeed on the next attempt; `bookrack rpc call` was handed params that are not valid JSON (`RpcParamsInvalid`) or a method name carrying no namespace (`RpcMethodNotNamespaced`), both judged locally before the call is sent; `bookrack init` refused on its input or the host (`--non-interactive` without `--data-dir`, a data root inside the application bundle, a path that is not a directory, a root that already holds a library without `--force`, Ollama unreachable or the embed model not pulled) — each decided before anything is written |
 | `3` | needs operator cleanup | a stale session lock points at a daemon that no longer answers; the operator must remove the lock file before retrying |
 | `4` | busy / not ready (retryable) | `-32001 busy`, `-32002 not ready` and `queue worker disabled`; `-32017 backend unavailable` (the Ollama daemon did not answer, or reported itself overloaded); a scripted caller can sleep and retry |
 | `5` | async job batch had failures | `bookrack ingest`, `bookrack papers ingest`, and `bookrack intake ocr` return this when at least one queued job ended in `Failed` or `Cancelled`. `Done`, `SkippedDuplicate`, and `NeedsOcr` are terminal successes and do not trigger it — a batch of scan sources that all end in `needs_ocr` returns `0` and points at `bookrack intake list-ocr-pending`. The per-job summary on stdout names the offenders; `--no-wait` returns `0` because the batch is not awaited |
@@ -322,8 +362,9 @@ the exit-code bucket does not distinguish the two.
 - `daemon.shutdown` — fires the shared shutdown broadcast; the
   response is `null` and is written before the listener stops.
 - `daemon.status` — `{ state, queue_pending, queue_running,
-  queue_worker_enabled, library, data_dir, served }`. The canonical
-  name; `status` is a compatibility alias answered by the same handler.
+  queue_worker_enabled, library, data_dir, served, auto_registered }`.
+  The canonical name; `status` is a compatibility alias answered by
+  the same handler.
   `state` is one of
   `idle`, `writing`, `working`, `degraded`, `stopping`; see the
   `daemon.state` event for the semantics of each value.
@@ -345,6 +386,12 @@ the exit-code bucket does not distinguish the two.
   `default`, not `primary`. `served` is `null` when the registry could
   not be read; that is not the same as an empty set, which cannot
   occur (a daemon serves at least the library it came up under).
+
+  `auto_registered` lists the registry names bring-up recorded for the
+  selected root — a path-class root carrying an identity manifest the
+  registry did not know — and is `[]` when it recorded nothing. It is
+  a fact about this session, not persisted: the next start on the same
+  root finds the entry in place and reports an empty list.
 - `doctor.gather` — JSON serialisation of the same report the
   `bookrack doctor` subcommand prints. Gathered inside the daemon, so
   the `MCP endpoint` row probes the address this session bound and not
@@ -468,10 +515,20 @@ the exit-code bucket does not distinguish the two.
   write lock, so the report answers alongside a write in flight rather
   than queueing behind the write mutex. Each store reports for itself:
   one that cannot be read carries its reason in its own `*_error` field
-  and leaves the others untouched. An absent store and an absent vector
-  sidecar are how a fresh library looks and are not errors —
-  `vectors_meta_error` is populated only when the sidecar is there and
-  unreadable.
+  and leaves the others untouched. A root with neither store
+  (`not_initialised`) and an absent vector sidecar are how a fresh
+  library looks and are not errors — `vectors_meta_error` is populated
+  only when the sidecar is there and unreadable. The method returns
+  findings, not a verdict; `bookrack verify` judges them on the client
+  side and exits `1` when any of these holds: `catalog_schema_error`,
+  `corpus_schema_error`, `intake_scan_error`, or `vectors_meta_error` is
+  set; exactly one of `catalog_missing` / `corpus_missing` is true (half
+  a library is a damaged one, not an uninitialised one); or
+  `missing_intake_files` is non-empty. `not_initialised`, an absent
+  vector sidecar, and any `vectors_churn` value exit `0` — not built is
+  not broken, and a rebuild is `bookrack vectors rebuild`'s to decide.
+  The report is printed as text, or as the raw result under `--json`,
+  before the exit code is set, so a script has both.
 - `diagnose.run` — `{ out?, days?, no_scrub? }` → `{ out_path, files,
   scrubbed, scrub_gaps }`. Bundles crash reports, recent logs, and a
   catalog snapshot for a bug attachment. Scrubbed of local paths and
@@ -716,9 +773,24 @@ catalog and corpus handles the daemon already holds.
 All of them accept an optional `library` param naming a mounted
 library. A name the registry does not carry is reported as
 `-32010 invalid library`, the same code the write-class handlers raise
-for the same parameter.
+for the same parameter. Every other failure takes the code the shared
+mapping layer assigns (see *Error mapping* above): a node addressed
+with the wrong read shape, an `index_profile` reference naming no
+defined profile, or an embedding model the backend does not hold is
+`-32602` with its detail and hint; a store this build cannot serve is
+`-32018`; a fault is `-32603`.
 
 - `library.stats` — aggregate counts over the library.
+- `library.categories` — `{ library? }` → `{ categories: [{ category,
+  books }], uncategorised, total }`; the library-wide category
+  distribution, most-used first and by name within a count, plus the
+  books no category reaches. A book carrying several categories is
+  counted under each, so the category counts do not sum to `total`;
+  `uncategorised` and the categorised books together do. This is the
+  browse entry to the `categories` filter below: a tag it lists is one
+  `find_books` can match, and a library nobody has tagged reports every
+  book under `uncategorised` rather than promising a filter that
+  matches nothing.
 - `library.list_books` / `library.find_books` — paginated registry
   browse and filter. `library.find_books` accepts a `categories`
   list that matches books tagged with at least one of the listed
@@ -852,6 +924,17 @@ Every write tool runs attributed to `Caller::mcp()`, so its audit rows
 carry `actor_kind=llm` / `actor_detail=mcp` regardless of the surface
 that launched the daemon. The metadata write tools all require a
 `reason`, which lands on the audit row.
+
+A tool that fails answers with the error codes listed under *Error
+codes* above, in the MCP error envelope: the summary in `message`, the
+detail / hint / retryable triple in `data`. The typed ops errors the
+tools raise go through the same mapping layer as the control-plane
+methods, so `-32602`, `-32017`, and `-32018` mean on this surface
+exactly what they mean there, and a residual `-32603` is a fault to
+report rather than a state to repair. The tools keep the read proxies'
+own rule: an intake or node id that resolves to nothing is a `null`
+body (or an empty list, where the tool description says so), not an
+error.
 
 Two properties the tool set deliberately does *not* have:
 

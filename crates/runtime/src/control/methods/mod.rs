@@ -105,7 +105,7 @@ pub use reads::snapshot_for;
 /// Render a [`CmdInputError`] straight onto the wire envelope.
 ///
 /// A handler that owns its own error mapping never hands an
-/// `eyre::Report` to `write_err`, so the cause-chain downcast there
+/// `eyre::Report` to `handler_err`, so the cause-chain downcast there
 /// does not reach it. What the shared type still buys such a handler
 /// is the wording and the code the book side already produces for the
 /// same refusal — which is what keeps the two sides from drifting
@@ -140,6 +140,11 @@ pub struct MethodContext {
     /// library that write touched instead — [`run_write`] takes it
     /// from the handler's own handle.
     pub library_name: String,
+    /// Registry names bring-up registered for the selected root, in
+    /// the order written; empty when it registered nothing. A fact
+    /// about this session, reported by `daemon.status` and not
+    /// persisted anywhere.
+    pub auto_registered: Vec<String>,
     /// Cached MCP tool list, populated by the daemon at startup from
     /// `bookrack_mcp::list_tools()`. Empty in entry points that do
     /// not bring up the MCP listener.
@@ -359,6 +364,8 @@ methods! {
 
     // library reads (sync, parametrised)
     read  no_queue sync    routed(LibraryOnlyParams)  "library.stats" => reads_library::stats,
+    read  no_queue sync    routed(LibraryOnlyParams)
+        "library.categories" => reads_library::categories,
     read  no_queue sync    routed(PageParams)
         "library.list_books" => reads_library::list_books,
     read  no_queue sync    routed(PageParams)
@@ -765,6 +772,7 @@ pub(crate) fn test_method_context(
         started_at_rfc3339: "2026-01-01T00:00:00Z".to_string(),
         selection: LibrarySelection::default(),
         library_name: library_name.unwrap_or("default").to_string(),
+        auto_registered: Vec::new(),
         mcp_tools: Arc::new(Vec::new()),
         queue_worker_enabled: false,
         tray_focus_signal: Arc::new(Notify::new()),

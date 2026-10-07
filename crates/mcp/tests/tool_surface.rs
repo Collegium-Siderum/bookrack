@@ -24,6 +24,7 @@ use std::collections::BTreeSet;
 /// "read" here means "does not edit what it reports on", not "free of
 /// side effects".
 const READ_TOOLS: &[&str] = &[
+    "library.categories",
     "library.find_books",
     "library.find_papers",
     "library.info",

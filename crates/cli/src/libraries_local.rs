@@ -18,7 +18,7 @@ use bookrack_config::{
     set_root_config_values, upsert_library_entry,
 };
 use bookrack_session::{RootLock, is_root_lock_conflict};
-use eyre::{Report, Result};
+use eyre::{Context, Report, Result};
 use serde::Serialize;
 
 use crate::error::BookrackCliError;
@@ -91,10 +91,12 @@ pub fn scan(
         (mounted_volumes(), VOLUMES_SCAN_DEPTH)
     } else {
         // clap's ArgGroup guarantees a parent when `--volumes` is off.
-        (
-            vec![parent.expect("clap requires a parent without --volumes")],
-            PARENT_SCAN_DEPTH,
-        )
+        // The parent is made absolute once so every root found under
+        // it, and so every entry `--register` writes, is absolute too.
+        let parent = parent.expect("clap requires a parent without --volumes");
+        let parent = std::path::absolute(&parent)
+            .with_context(|| format!("resolve {}", parent.display()))?;
+        (vec![parent], PARENT_SCAN_DEPTH)
     };
     let outcome = scan_for_libraries(&roots, depth);
 
@@ -183,6 +185,18 @@ fn scan_register(outcome: &ScanOutcome, kind: Option<LibraryKind>) -> Result<()>
              {clashed} clash(es), {} unreadable",
             outcome.skipped
         );
+        // A sweep records entries without choosing among them, so a
+        // registry that still has no default is named here rather than
+        // discovered by the next unqualified command.
+        if registered > 0
+            && let Ok(entries) = bookrack_config::list_libraries_at(&registry_path)
+            && !entries.iter().any(|e| e.is_default)
+        {
+            println!(
+                "no default library is set; choose one with \
+                 'bookrack libraries default <name>'"
+            );
+        }
     }
     Ok(())
 }
@@ -221,7 +235,10 @@ pub fn add(
         &path,
         kind,
         description,
-        AddOptions { new_uuid },
+        AddOptions {
+            new_uuid,
+            default_when_absent: true,
+        },
         confirm,
     )
     .map_err(op_error)?;

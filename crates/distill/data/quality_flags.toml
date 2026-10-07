@@ -23,6 +23,10 @@ description = "The OCR engine reported low confidence on the source region."
 severity = "warn"
 description = "Anchor line could not be cleanly separated from its body paragraph."
 
+[anchor_without_latin_head]
+severity = "warn"
+description = "Anchor had no latin text ahead of its first CJK character; the whole anchor was kept as the headword."
+
 [verified_by_user]
 severity = "ok"
 description = "User has reviewed and confirmed this entry via the overlay surface."

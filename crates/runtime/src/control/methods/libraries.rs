@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 #[cfg(test)]
 use ts_rs::TS;
 
-use super::super::error_map::{config_err, mount_err, registry_err, write_err};
+use super::super::error_map::{config_err, handler_err, mount_err, registry_err};
 use super::super::events::Event;
 use super::super::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, NOT_READY, RpcError};
 use super::MethodContext;
@@ -99,7 +99,7 @@ pub async fn fork(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
         crate::cmd::libraries::fork(&cfg, &new_name, &target, &registry_path, mode, true, |_| {
             Ok(true)
         })
-        .map_err(|e| write_err("library.fork", e))?;
+        .map_err(|e| handler_err("library.fork", e))?;
         // Mount failure does not roll the fork back: the library is
         // built and registered by now, and undoing it would delete
         // data to report a serving problem. The fork succeeds and says

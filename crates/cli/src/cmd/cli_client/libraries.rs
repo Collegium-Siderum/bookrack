@@ -7,7 +7,7 @@ use bookrack_cli::render::confirm::{ConfirmMode, Confirmation, confirm_destructi
 use bookrack_cli::render::ctx;
 use bookrack_cli::render::table::{KvTable, flatten_into_kv};
 use bookrack_runtime::cmd::libraries::CopyMode;
-use eyre::Result;
+use eyre::{Context, Result};
 use serde_json::{Value, json};
 
 use crate::LibrariesAction;
@@ -115,6 +115,11 @@ pub async fn run(action: LibrariesAction, runtime_dir: Option<PathBuf>) -> Resul
             copy_mode,
             yes,
         } => {
+            // The daemon has no view of this process's working
+            // directory, so a relative target is resolved here, before
+            // it is confirmed or sent.
+            let data_dir = std::path::absolute(&data_dir)
+                .with_context(|| format!("resolve --data-dir {}", data_dir.display()))?;
             let confirmed = confirm_fork(&new_name, &data_dir, yes, |prompt, mode| {
                 confirm_destructive(prompt, mode, false)
             })?;

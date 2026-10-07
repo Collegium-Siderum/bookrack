@@ -55,8 +55,10 @@ which unmounting refuses — `bookrack quit`. The root is released once
 any call still using that library finishes, so a purge racing a long
 read may need a second attempt. Read-only commands take neither.
 
-For a headless deployment — a systemd unit, a Windows service — run
-`bookrack-mcp` instead. It serves the same MCP endpoint, and takes
+For a headless deployment, run `bookrack-mcp` instead: a foreground
+process bookrack ships no service definition for, so running it under
+systemd, launchd or a Windows service is the operator's setup. It
+serves the same MCP endpoint, and takes
 `--with-queue-worker` when it should also process ingest jobs; without
 that flag the queue-bound write methods short-circuit rather than
 enqueue work no one will run. `bookrack run` and `bookrack-mcp` are
@@ -374,8 +376,12 @@ corrupted is a `FAIL` naming the reason rather than an `OK` naming its
 path; those doors take no write lock and materialise nothing, so the
 check is safe beside a running daemon. What a store *holds* — intake
 counts, missing files, drift against a rebuild — is `bookrack verify`
-and, on a running daemon, `bookrack status`. One more row covers what
-those cannot:
+and, on a running daemon, `bookrack status`. `verify` also judges what
+it finds: a store that does not verify or cannot be read, one store
+missing beside the other, or an intake whose file is gone exits `1`,
+while an uninitialised root or a library that never built its vector
+index exits `0` (the table is in `docs/control-plane.md`, under
+`verify.run`). One more row covers what those cannot:
 free space on the volume holding the data root, warned on below the floor
 `bookrack config fixed` reports, since a store that exists is not the same
 as a store that can grow.
@@ -446,8 +452,9 @@ The last two write the catalog directly, so both are refused while a
 daemon is serving the library — stop it with `bookrack quit` first.
 
 When something is broken, `bookrack diagnose` bundles crash reports,
-recent logs, and a scrubbed catalog snapshot into a `.tar.gz` for
-issue attachments. The scrubber removes local paths and book titles;
+recent logs, scrubbed snapshots of the book and paper stores, a
+summary of the reference store, and the daemon's queue document into
+a `.tar.gz` for issue attachments. The scrubber removes local paths and book titles;
 `--no-scrub` keeps them verbatim for a bundle kept locally.
 
 A redaction whose input the host does not expose is reported rather
@@ -463,6 +470,15 @@ the process, a `.env` above the working directory included. Fix either
 by correcting `HOME` and running again, or read the bundle before
 attaching it.
 
+A file the bundle could not copy verbatim is reported the same way.
+One damaged log or crash report costs that file, not the run, and the
+section it belongs to gains a `read-notes.json` listing what happened
+to it: `lossy-utf8` means the file is in the bundle but held bytes
+that are not valid UTF-8, which read back as `U+FFFD`; `unreadable`
+and `unwritable` mean it is not in the bundle at all. A section with
+nothing to report writes no such file, so the bundle only carries the
+notes when there is something to know.
+
 ## Observability
 
 `bookrack logs` reads the daemon's log stream: `--follow` (the default
@@ -476,14 +492,30 @@ with the audit rows it wrote:
 
 ```
 bookrack runs list [--last N] [--command <name>]
-bookrack runs show <run-id>       # verdict / flag / coverage histograms
+bookrack runs show <run-id>       # profiles, verdict / flag / coverage histograms
 ```
 
+Everything `runs show` prints below the header is the rollup the run
+materialised when it closed, the `profiles:` section included. The
+audit tables themselves hold one row per item, rewritten by whichever
+run judges the item last, so a live count would drift after a
+`glean --force` or a per-item re-audit; the snapshot does not. A run
+closed by a binary older than catalog v17 has no profile snapshot, and
+for it the section is counted live and headed
+`profiles (counted now, not at run close)` with a note that the
+numbers need not add up to `n_books` / `n_papers`.
+
 The registered command names are `ingest`, `dryrun`, `papers_dryrun`,
-`distill_build`, `glean`, and the whole-library maintenance passes
-`reembed`, `reset`, `papers_reembed`, and `papers_reset`; any of them
-is a valid `--command` filter. The passes write no audit rows, so
-`runs show` renders them without the histograms.
+`distill_build`, `distill_dryrun`, `glean`, and the whole-library
+maintenance passes `reembed`, `reset`, `papers_reembed`, and
+`papers_reset`; any of them is a valid `--command` filter. The passes
+write no audit rows, so `runs show` renders them without the
+histograms. Each pipeline's preview registers under its own name, but
+the three differ in what they leave behind: `dryrun` and
+`papers_dryrun` write their report to disk and register header-only,
+while `distill_dryrun` writes the same `book_distill_audit` rows a
+build would, so its `runs show` carries the histograms of a build that
+never touched `reference.db`.
 
 A run still reading `running` whose owning process is gone prints its
 status as `abandoned?` — the question mark marks the column as this

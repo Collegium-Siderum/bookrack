@@ -8,7 +8,11 @@ authoritative, commented list of every environment variable is
 
 ## Data-root resolution order
 
-bookrack chooses its data root by precedence, highest first:
+bookrack chooses its data root from six sources on two levels. An
+**explicit target** (1–4) names a root or a library outright; a
+**default pointer** (5–6) is what a registry supplies when nothing was
+named. Any explicit target beats any default pointer; within a level,
+the order below settles ties. Highest first:
 
 1. `--data-dir <path>` flag
 2. `--library <name>` flag (looked up in the registry named by
@@ -29,18 +33,31 @@ bookrack chooses its data root by precedence, highest first:
    | Linux | `$XDG_CONFIG_HOME`, or `~/.config` if unset |
    | Windows | `%APPDATA%` (the Roaming AppData directory) |
 
-`bookrack init` writes step 6's registry file by default. When a
-path-class source (1, 3, or 4) wins while a registry `default` is also
-set, `bookrack info` and `bookrack doctor` report the eclipse so the
-shadowed default is visible rather than silently ignored.
+`bookrack init` writes step 6's registry file by default, and so does
+a daemon brought up on a path-class root that carries an identity
+manifest the registry does not know (see the registry section below).
+When a path-class source (1, 3, or 4) wins while a registry `default`
+is also set, `bookrack info` and `bookrack doctor` state both facts —
+which source selected the root, and where the registry default
+points — so a default that did not decide the root is visible rather
+than silently passed over. It is a statement, not a verdict: on a
+daemon serving the registry, an unnamed call still reaches that
+default (see [operating.md](operating.md)).
+
+A path-class root whose manifest identity the registry records at
+another path is claimed by no name: it is one library in two places,
+and `info` and `doctor` show it as unregistered rather than under the
+recorded entry. `bookrack run` refuses such a root and names both
+paths. `libraries add <name> <path>` re-registers a library that
+moved; `--new-uuid` gives a copy an identity of its own.
 
 A registry that cannot be read is fatal only to a resolution that
 needed it. A root fixed by `--data-dir`, `BOOKRACK_DATA_DIR`, or the
 portable layout never consults the registry, so an unreadable or
 malformed one does not veto it: the resolution succeeds and the
-annotations that would have come from the registry — the shadowed
-default, the library name claimed for a path-class root — are simply
-absent. A selection that does need the registry (`--library`, or
+annotations that would have come from the registry — the registry
+default the selection passed over, the library name claimed for a
+path-class root — are simply absent. A selection that does need the registry (`--library`, or
 falling through to a `default`) still fails, and it fails naming the
 registry rather than reporting that no library is configured.
 
@@ -76,7 +93,10 @@ The registry maps short names to data roots and records the machine's
 `default`. Its entries are metadata-bearing tables — `data_dir`,
 `kind`, `description`, `index_profile`, `uuid`, `created_at` — and the
 legacy bare-path form (`name = "/path"`) stays permanently readable; a
-write rewrites the file into the table form atomically. Every data root
+write rewrites the file into the table form atomically. Entries record
+absolute roots: a relative path given to a registry verb, or to
+`--data-dir`, is resolved against the working directory at the time it
+is written, never when it is read back. Every data root
 also carries a self-describing `bookrack-library.toml` manifest naming
 its stable identity and the index profile it runs under, so the registry
 is a regenerable cache over the manifests rather than the sole record of
@@ -103,11 +123,28 @@ bookrack libraries fork <name> --data-dir <p>  # clone into a sibling library
 `add` and `register` write an identity manifest to a root that lacks
 one (previewed and confirmed first, unless `--yes`); `--new-uuid`
 re-mints the identity so a copied root registers as a distinct library.
-`remove` never deletes data unless `--purge` is given, which is gated
-on a detect verdict and a typed confirmation. `scan --register` brings
-every confirmed root it finds into the registry — turning
-`scan --volumes --register` into a one-command rebuild after a
-reinstall.
+When the registry records no `default`, the entry they write becomes
+it, and the command says so. `remove` never deletes data unless
+`--purge` is given, which is gated on a detect verdict and a typed
+confirmation. `scan --register` brings every confirmed root it finds
+into the registry — turning `scan --volumes --register` into a
+one-command rebuild after a reinstall. It records entries only: the
+`default` pointer is left for `libraries default`, as it is by every
+write that merely refreshes an entry (`index-profile apply`,
+`libraries config`).
+
+The daemon is a registry writer too. `bookrack run` on a path-class
+root (`--data-dir`, `BOOKRACK_DATA_DIR`, the portable layout) that
+carries an identity manifest the registry does not know registers it
+under the manifest's name before deciding what to serve, so the daemon
+comes up serving the whole registry exactly as it would had
+`libraries add` run first; the `default` pointer is not touched, so an
+unnamed call still reaches whatever it pointed at. A root without a
+manifest, a manifest that cannot be read, or a manifest name another
+root already holds leaves the registry alone and the daemon serves
+that root by itself, saying why in its log. `bookrack status` reports
+what a session registered on a `registered_at_startup` row, and
+`daemon.status` carries it as `auto_registered`.
 
 ## Per-library settings: `config.toml`
 

@@ -30,8 +30,9 @@ use chrono::{DateTime, Utc};
 use bookrack_catalog::Catalog;
 use bookrack_config::{
     Config, EmbedConfig, LibraryEntry, LibraryIdentification, LibrarySelection, LogConfig,
-    McpConfig, ResolutionSource, SearchConfig,
+    McpConfig, ResolutionSource, RootIdentity, SearchConfig,
 };
+use bookrack_core::Problem;
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_glean::GleanParams;
@@ -346,16 +347,44 @@ impl DaemonRuntime {
         // throws that result away; resolution happens here, after the
         // lock, so the configuration the daemon serves is the one that
         // was in place when it took ownership.
-        let cfg = Arc::new(Config::resolve(&opts.selection).context("resolve configuration")?);
+        let mut cfg = Config::resolve(&opts.selection).context("resolve configuration")?;
+        // 4a. A path-class root whose manifest identity the registry
+        //     records at another path is refused before anything is
+        //     locked or opened: serving it under the registered name
+        //     would redirect the daemon to the recorded root, and
+        //     serving it anonymously would run one identity in two
+        //     places.
+        refuse_relocated_identity(&cfg)?;
+        // 4a'. A path-class root with a manifest the registry does not
+        //      know is registered under the manifest's name, then the
+        //      selection is resolved again so the name is claimed the
+        //      way any registered root's is and every consumer below
+        //      reads it off `cfg`.
+        let auto_registered: Vec<String> = match crate::auto_register::auto_register(&cfg) {
+            crate::auto_register::AutoRegistration::Registered { name } => {
+                tracing::info!(
+                    library = %name,
+                    root = %cfg.data_dir().display(),
+                    "registered the selected root under its manifest name",
+                );
+                cfg = Config::resolve(&opts.selection)
+                    .context("resolve configuration after registering the selected root")?;
+                vec![name]
+            }
+            crate::auto_register::AutoRegistration::Skipped(skip) => {
+                skip.log(cfg.data_dir());
+                Vec::new()
+            }
+        };
+        let cfg = Arc::new(cfg);
         // 4b. Decide the mount set and take every served root's lock
         //     before anything expensive comes up, so a contended root
         //     fails with no reranker spawned and no half-open handles.
         //     With the primary root selected through the registry the
         //     daemon serves every registered library; a path-class
         //     root the registry does not know (or a machine with no
-        //     registry) keeps the single-library form. Runtime
-        //     mount/unmount and auto-registration of unregistered
-        //     roots are later milestones.
+        //     registry) keeps the single-library form. The set changes
+        //     at runtime through `library.mount` / `library.unmount`.
         let primary_name = cfg.library().unwrap_or("default").to_string();
         let registry_entries = if cfg.library().is_some() {
             bookrack_config::list_libraries()
@@ -533,6 +562,7 @@ impl DaemonRuntime {
         tracing::info!(
             libraries = mounts.len(),
             default = %plan.default_name,
+            auto_registered = ?auto_registered,
             "library registry warmed up",
         );
 
@@ -745,6 +775,7 @@ impl DaemonRuntime {
             started_at_rfc3339: started_at_wall.to_rfc3339(),
             selection: selection_for_doctor,
             library_name: library_name.clone(),
+            auto_registered,
             mcp_tools,
             queue_worker_enabled: opts.spawn_queue_worker,
             tray_focus_signal: Arc::clone(&tray_focus_signal),
@@ -915,6 +946,56 @@ struct MountPlan {
     /// Whether each name resolves through the registry (`true`) or
     /// the set is the single primary selection (`false`).
     eager: bool,
+}
+
+/// Refuse bring-up on a path-class root whose manifest uuid the
+/// registry records under a name pointing at another path. A
+/// registry-class selection already names its library and is not
+/// consulted; a root the registry does not know, or knows at this
+/// path, passes.
+fn refuse_relocated_identity(cfg: &Config) -> Result<(), crate::backend_probe::PreflightRefusal> {
+    if !matches!(
+        cfg.source(),
+        ResolutionSource::DataDirFlag
+            | ResolutionSource::EnvVar
+            | ResolutionSource::PortableExeNeighbor
+    ) {
+        return Ok(());
+    }
+    match bookrack_config::identify_root(cfg.data_dir()) {
+        RootIdentity::UuidElsewhere { name, entry_root } => {
+            Err(crate::backend_probe::PreflightRefusal {
+                problem: relocated_identity_problem(cfg.data_dir(), &name, &entry_root),
+                library: name,
+            })
+        }
+        RootIdentity::Named { .. } | RootIdentity::Unregistered => Ok(()),
+    }
+}
+
+/// The three-part refusal for a root carrying a registered library's
+/// identity at a path the registry does not record: the summary names
+/// the root and the library, the detail both paths, the hint the two
+/// `libraries add` forms that resolve a move and a copy.
+fn relocated_identity_problem(root: &Path, name: &str, entry_root: &Path) -> Problem {
+    Problem::new(format!(
+        "cannot serve '{}': its manifest identifies library '{name}', which the registry \
+         places at another path",
+        root.display()
+    ))
+    .detail(format!(
+        "The manifest at '{}' carries the uuid the registry records for '{name}' at '{}'. \
+         Serving this root under that name would redirect the daemon to the registered \
+         root; serving it anonymously would run one identity in two places.",
+        root.display(),
+        entry_root.display()
+    ))
+    .hint(format!(
+        "If the library moved, re-register it with `bookrack libraries add {name} {root}`; \
+         if this is a copy, give it its own identity with `bookrack libraries add <name> \
+         {root} --new-uuid`.",
+        root = root.display()
+    ))
 }
 
 /// Decide which libraries the daemon serves. `primary_name` is the
@@ -1205,8 +1286,9 @@ pub fn library_info_context(cfg: &Config, embed_model: &str, mcp_addr: &str) -> 
         resolution_source: resolution_source_label(cfg.source()).to_string(),
         shadowed_default: cfg.shadowed_default().map(|shadowed| {
             format!(
-                "registry default '{}' is shadowed by {}",
+                "registry default '{}' ({}) was not consulted; {} selected the root",
                 shadowed.name,
+                shadowed.data_dir.display(),
                 resolution_source_label(cfg.source())
             )
         }),

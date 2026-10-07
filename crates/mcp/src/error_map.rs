@@ -14,11 +14,11 @@
 //! where the caller can no longer reach it.
 //! `scripts/error-boundary-check.sh` enforces that for this file.
 
-use bookrack_core::{Explain, Problem};
+use bookrack_core::Problem;
 use bookrack_ops::OpsError;
 use bookrack_ops::dto::UnknownFilterValue;
 use rmcp::ErrorData;
-use rmcp::model::{CallToolResult, Content, ErrorCode};
+use rmcp::model::{CallToolResult, ContentBlock, ErrorCode};
 use serde::Serialize;
 
 use crate::reference;
@@ -29,7 +29,7 @@ use crate::reference;
 pub(crate) fn respond_with<T: Serialize>(value: &T) -> Result<CallToolResult, ErrorData> {
     let json = serde_json::to_string(value)
         .map_err(|e| mcp_from_problem(ErrorCode::INTERNAL_ERROR, Problem::from_error_chain(&e)))?;
-    Ok(CallToolResult::success(vec![Content::text(json)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
 }
 
 /// Build the MCP error envelope from a rendered [`Problem`]: the
@@ -79,24 +79,22 @@ pub(crate) fn unknown_filter_value_to_mcp(unknown: &UnknownFilterValue) -> Error
     )
 }
 
-/// Map a generic [`OpsError`] to an MCP internal error.
-pub(crate) fn ops_error_to_internal(e: OpsError) -> ErrorData {
-    mcp_from_problem(ErrorCode::INTERNAL_ERROR, e.explain())
-}
-
-/// Map an [`OpsError`] from a metadata field edit to an MCP error:
-/// a rejected field name is the caller's input problem, so it surfaces
-/// as `invalid_params` (with the editable list in the message) rather
-/// than an internal error.
-pub(crate) fn ops_error_to_edit_error(e: OpsError) -> ErrorData {
-    match &e {
-        OpsError::UnknownMetadataField { .. }
-        | OpsError::UnknownContributorRole { .. }
-        | OpsError::ContributorNotFound { .. } => {
-            mcp_from_problem(ErrorCode::INVALID_PARAMS, e.explain())
-        }
-        _ => ops_error_to_internal(e),
-    }
+/// Map an [`OpsError`] onto the MCP envelope through the control
+/// plane's classifier.
+///
+/// [`bookrack_runtime::control::error_map::ops_err`] decides the code
+/// — caller input, a store this build cannot serve, a backend that
+/// did not answer, or a residual internal fault — and renders the
+/// three-part message; this function only moves the envelope across
+/// to rmcp's type. The code is not re-decided here, so a typed error
+/// takes the same code over MCP as over the control socket.
+///
+/// Tool bodies that answer a missing id with a `null` body match that
+/// variant before reaching this function; everything else funnels
+/// here.
+pub(crate) fn ops_error_to_mcp(e: OpsError) -> ErrorData {
+    let rpc = bookrack_runtime::control::error_map::ops_err(e);
+    ErrorData::new(ErrorCode(rpc.code), rpc.message, rpc.data)
 }
 
 /// Map a [`reference::ReferenceError`] to an MCP error: the
@@ -116,13 +114,15 @@ pub(crate) fn reference_error_to_mcp(e: reference::ReferenceError) -> ErrorData 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bookrack_catalog::CatalogError;
     use bookrack_embed::EmbedError;
     use bookrack_query::QueryError;
+    use bookrack_runtime::control::jsonrpc::STATE_UNUSABLE;
 
     #[test]
     fn wrapper_error_keeps_its_root_cause_on_the_wire() {
         let e = OpsError::Query(QueryError::Embed(EmbedError::Unreachable("boom".into())));
-        let data = ops_error_to_internal(e);
+        let data = ops_error_to_mcp(e);
         let wire = serde_json::to_string(&data).expect("serialize");
         assert!(wire.contains("boom"), "root cause lost: {wire}");
     }
@@ -133,12 +133,56 @@ mod tests {
             model: "test-model".into(),
             reason: "model not found".into(),
         }));
-        let err = ops_error_to_internal(e);
+        let err = ops_error_to_mcp(e);
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "{}", err.message);
         let data: bookrack_core::ProblemData =
             serde_json::from_value(err.data.expect("data slot filled")).expect("ProblemData");
         assert!(data.hint.expect("hint").contains("ollama pull test-model"));
         assert!(!data.retryable);
         assert!(err.message.contains("test-model"), "{}", err.message);
+    }
+
+    #[test]
+    fn a_store_this_build_cannot_serve_is_state_unusable_with_a_hint() {
+        let e = OpsError::Catalog(CatalogError::SchemaTooNew {
+            found: 99,
+            expected: 3,
+        });
+        let err = ops_error_to_mcp(e);
+        assert_eq!(err.code, ErrorCode(STATE_UNUSABLE), "{}", err.message);
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(err.data.expect("data slot filled")).expect("ProblemData");
+        assert!(
+            data.hint
+                .as_deref()
+                .unwrap_or("")
+                .contains("newer bookrack build"),
+            "hint: {:?}",
+            data.hint
+        );
+    }
+
+    #[test]
+    fn caller_input_variants_are_invalid_params_and_the_rest_internal() {
+        for err in [
+            OpsError::UnknownMetadataField {
+                field: "bogus".into(),
+                editable: vec![String::from("title")],
+            },
+            OpsError::UnknownContributorRole {
+                role: "bogus".into(),
+            },
+            OpsError::ContributorNotFound {
+                contributor_id: 7,
+                intake_id: 1,
+            },
+            OpsError::IntakeNotFound { intake_id: 42 },
+        ] {
+            let mapped = ops_error_to_mcp(err);
+            assert_eq!(mapped.code, ErrorCode::INVALID_PARAMS, "{}", mapped.message);
+        }
+        let mapped = ops_error_to_mcp(OpsError::SearchUnavailable);
+        assert_eq!(mapped.code, ErrorCode::INTERNAL_ERROR, "{}", mapped.message);
     }
 
     #[test]
@@ -148,7 +192,7 @@ mod tests {
             editable: vec![String::from("title"), String::from("year")],
         };
         let expected = e.to_string(); // error-boundary-check: allow
-        let data = ops_error_to_edit_error(e);
+        let data = ops_error_to_mcp(e);
         assert_eq!(data.message, expected);
     }
 }

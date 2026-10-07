@@ -50,6 +50,9 @@ indicatif.workspace = true
 anstyle.workspace = true
 
 [dev-dependencies]
+# Lay down a corpus store in a fixture library, so a verify report can
+# be about a whole library rather than one with a store missing.
+bookrack-corpus = { path = "../corpus" }
 bookrack-test-support.workspace = true
 fs2.workspace = true
 tempfile.workspace = true

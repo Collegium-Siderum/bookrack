@@ -12,10 +12,11 @@
 //!   list of any of these. `--recursive` walks directories the same
 //!   way ingest does; `--dry-run` prints coverage without writing
 //!   `reference.db`. It still records that it ran in `catalog.db` —
-//!   a `pipeline_runs` row and a `book_distill_audit` row — but only
-//!   where doing so costs the library nothing: a catalog behind this
-//!   binary's revision, or absent, is left alone rather than migrated
-//!   or created for a preview's bookkeeping.
+//!   a `pipeline_runs` row registered as `distill_dryrun` rather than
+//!   `distill_build`, and a `book_distill_audit` row stamped with that
+//!   run's id — but only where doing so costs the library nothing: a
+//!   catalog behind this binary's revision, or absent, is left alone
+//!   rather than migrated or created for a preview's bookkeeping.
 //! * `bookrack distill verify <PATH>...` — re-run distill into a
 //!   throwaway in-memory map and diff the entry set against the
 //!   persistent one. Surfaces added / removed / changed `entry_key`s
@@ -320,10 +321,17 @@ fn open_distill_pipeline_run(
         .parent()
         .and_then(|p| p.to_str())
         .map(str::to_string);
+    // A preview registers under its own name so the run registry
+    // never lists it as a build that wrote `reference.db`.
+    let command = if args.dry_run {
+        "distill_dryrun"
+    } else {
+        "distill_build"
+    };
     Ok(open_run(
         &catalog,
         &paths.catalog_path,
-        "distill_build",
+        command,
         library_root.as_deref(),
     ))
 }

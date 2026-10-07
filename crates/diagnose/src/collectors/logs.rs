@@ -13,12 +13,19 @@ use crate::Result;
 use crate::scrub::Scrubber;
 use crate::{Options, manifest::iso8601_z};
 
+use super::{NOTE_LOSSY_UTF8, NOTE_UNREADABLE, NOTE_UNWRITABLE, ReadNote};
+
 const LOG_PREFIX: &str = "bookrack.log.";
 
 /// Copy logs whose date matches one of the last `opts.days` days. The
 /// date is read from the filename suffix, not from the file
 /// timestamp, so a tarball assembled at noon and one assembled at
 /// midnight pick the same window if `now` is unchanged.
+///
+/// One file the collector cannot copy verbatim costs that file, never
+/// the bundle: the outcome is recorded in `logs/read-notes.json` and
+/// the walk continues, matching what an unreadable source directory
+/// already does.
 pub fn collect(
     cfg: &Config,
     opts: &Options,
@@ -29,6 +36,7 @@ pub fn collect(
     let logs_dst = bundle_dir.join("logs");
     std::fs::create_dir_all(&logs_dst)?;
     let cutoff_date = cutoff_date_string(now, opts.days);
+    let mut notes = Vec::new();
 
     for logs_src in super::log_source_dirs(cfg) {
         let read = match std::fs::read_dir(&logs_src) {
@@ -51,18 +59,39 @@ pub fn collect(
             if dst.exists() {
                 continue;
             }
-            scrub_file(&src, &dst, scrubber)?;
+            match scrub_file(&src, &dst, scrubber) {
+                Ok(false) => {}
+                Ok(true) => notes.push(ReadNote {
+                    file: name,
+                    state: NOTE_LOSSY_UTF8,
+                    error: None,
+                }),
+                Err((state, e)) => notes.push(ReadNote {
+                    file: name,
+                    state,
+                    error: Some(e.to_string()),
+                }),
+            }
         }
     }
+    super::write_read_notes(&logs_dst, &notes, scrubber)?;
     Ok(())
 }
 
 /// Read every line of `src`, scrub each JSON record, and write the
-/// result to `dst`. A line that fails to parse as JSON rides through
-/// as a plain string (still scrubbed) so non-JSON tail bytes (e.g.
-/// stack traces appended by a crash) do not break the collector.
-fn scrub_file(src: &Path, dst: &Path, scrubber: &Scrubber) -> Result<()> {
-    let body = std::fs::read_to_string(src)?;
+/// result to `dst`, returning whether the source decoded lossily. A
+/// line that fails to parse as JSON rides through as a plain string
+/// (still scrubbed) so non-JSON tail bytes (e.g. stack traces appended
+/// by a crash) do not break the collector, and bytes that are not
+/// valid UTF-8 at all reach that per-line path as U+FFFD rather than
+/// failing the read.
+fn scrub_file(
+    src: &Path,
+    dst: &Path,
+    scrubber: &Scrubber,
+) -> std::result::Result<bool, (&'static str, std::io::Error)> {
+    let bytes = std::fs::read(src).map_err(|e| (NOTE_UNREADABLE, e))?;
+    let (body, lossy) = super::decode_lossy(&bytes);
     let mut out = String::with_capacity(body.len());
     for line in body.lines() {
         if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) {
@@ -73,8 +102,8 @@ fn scrub_file(src: &Path, dst: &Path, scrubber: &Scrubber) -> Result<()> {
         }
         out.push('\n');
     }
-    std::fs::write(dst, out)?;
-    Ok(())
+    std::fs::write(dst, out).map_err(|e| (NOTE_UNWRITABLE, e))?;
+    Ok(lossy)
 }
 
 fn cutoff_date_string(now: SystemTime, days: u32) -> String {

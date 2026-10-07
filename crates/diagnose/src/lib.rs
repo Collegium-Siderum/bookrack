@@ -7,8 +7,10 @@
 //! and an [`Options`], it walks the data root, copies what it finds —
 //! crash reports, rolling logs, intake heads, recent tool calls,
 //! pipeline and metadata audit rows, the corpus stamps, and the
-//! vectors metadata sidecar — through the [`scrub::Scrubber`] and into
-//! a deterministic, gzip-wrapped tar archive.
+//! vectors metadata sidecar, for the book and the paper pipeline
+//! alike, plus a summary of the reference store and the daemon's
+//! queue document — through the [`scrub::Scrubber`] and into a
+//! deterministic, gzip-wrapped tar archive.
 //!
 //! Collection is opportunistic: a missing logs directory or an empty
 //! catalog table is normal, not an error. Only failures that prevent
@@ -61,6 +63,9 @@ pub enum DiagnoseError {
     /// A corpus read failed.
     #[error("corpus")]
     Corpus(#[from] bookrack_corpus::CorpusError),
+    /// A reference-store read failed.
+    #[error("refs")]
+    Refs(#[from] bookrack_refs::RefsError),
     /// JSON serialization failed.
     #[error("json")]
     Json(#[from] serde_json::Error),
@@ -153,6 +158,9 @@ pub fn collect(cfg: &Config, opts: &Options) -> Result<CollectReport> {
     collectors::catalog::collect(cfg, &since, &bundle_dir, &scrubber)?;
     collectors::corpus::collect(cfg, &bundle_dir)?;
     collectors::vectors::collect(cfg, &bundle_dir)?;
+    collectors::papers::collect(cfg, &since, &bundle_dir, &scrubber)?;
+    collectors::refs::collect(cfg, &bundle_dir, &scrubber)?;
+    collectors::queue::collect(&bundle_dir, &scrubber)?;
 
     let manifest = manifest::build(opts, &bundle_dir, now, gaps)?;
     let scrubbed = manifest.scrubbed;

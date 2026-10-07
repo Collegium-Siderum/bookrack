@@ -7,8 +7,11 @@ use std::path::PathBuf;
 
 use bookrack_core::{ItemKind, TypedIdParseError, TypedItemId};
 
+pub mod first_steps;
 #[doc(hidden)]
 pub mod help_gate;
+
+pub use first_steps::{FIRST_STEPS, FirstStep, first_step_lines};
 
 /// Renders a leaf's `Examples:` block for `#[command(after_long_help = ...)]`.
 ///
@@ -366,8 +369,8 @@ pub enum RunsAction {
         /// Cap the result to the most recent N runs. Default is no cap.
         #[arg(long, value_name = "N")]
         last: Option<usize>,
-        /// Filter to one command name (e.g. `distill_build`, `ingest`,
-        /// `dryrun`).
+        /// Filter to one command name (e.g. `distill_build`,
+        /// `distill_dryrun`, `ingest`, `dryrun`).
         #[arg(long, value_name = "NAME")]
         command: Option<String>,
     },

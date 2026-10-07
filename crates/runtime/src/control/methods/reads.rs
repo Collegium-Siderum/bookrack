@@ -124,6 +124,10 @@ pub fn status(ctx: &MethodContext) -> Value {
         "library": ctx.info_context.library_name,
         "data_dir": ctx.info_context.data_dir,
         "served": served_libraries(ctx),
+        // What bring-up registered for the selected root this session;
+        // empty when nothing was. Not persisted: a restart on the same
+        // root finds it registered and reports nothing here.
+        "auto_registered": ctx.auto_registered,
     })
 }
 
@@ -324,13 +328,13 @@ pub async fn library_info(params: &Option<Value>, ctx: &MethodContext) -> Result
     // with another's root is the one an operator cannot read. The MCP
     // address is the exception — a property of the process — and is
     // carried over from the snapshot.
+    // Routed through the shared classifier: a reference naming no
+    // defined profile is `CmdInputError::BadArgument` carrying the
+    // accepted set, which the write side already reports as caller
+    // input, and a flat `INTERNAL_ERROR` here would drop both the code
+    // and the set.
     let embed_model = crate::profile::effective_embed_config(handle.cfg())
-        .map_err(|e| {
-            RpcError::new(
-                INTERNAL_ERROR,
-                format!("resolve the library's embed configuration: {e}"),
-            )
-        })?
+        .map_err(|e| crate::control::error_map::handler_err("library.info", e))?
         .model;
     let info_context =
         crate::daemon::library_info_context(handle.cfg(), &embed_model, &ctx.info_context.mcp_addr);

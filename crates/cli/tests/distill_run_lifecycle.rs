@@ -216,12 +216,21 @@ async fn dry_run_still_registers_the_run_and_stamps_the_audit_row() {
         .expect("dry-run build");
 
     let catalog = Catalog::open(&catalog_path(tmp.path())).expect("open catalog");
+    // The preview registers under its own command name, so a `runs`
+    // listing never mistakes it for a build that wrote `reference.db`.
     let runs = catalog
-        .list_pipeline_runs(Some("distill_build"), None)
+        .list_pipeline_runs(Some("distill_dryrun"), None)
         .expect("list runs");
     assert_eq!(runs.len(), 1, "a dry run is an observation worth recording");
     let run = &runs[0];
     assert_eq!(run.status.as_deref(), Some("ok"));
+    assert!(
+        catalog
+            .list_pipeline_runs(Some("distill_build"), None)
+            .expect("list builds")
+            .is_empty(),
+        "a dry run must not register as a build",
+    );
 
     let rows = catalog
         .distill_audits_for_book("tiny")

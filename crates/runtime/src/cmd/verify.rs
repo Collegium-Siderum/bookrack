@@ -1,21 +1,49 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `bookrack verify` — per-store schema and on-disk file checks.
+//! `bookrack verify` — per-store schema and on-disk file checks. The
+//! report is built here and serialised by the `verify.run` control-plane
+//! method; nothing in this module prints.
 
 use bookrack_catalog::{Catalog, IntakeFilter};
 use bookrack_config::Config;
 use bookrack_corpus::Corpus;
 use eyre::{Context, Result};
 
-use crate::render;
-
-pub fn run(cfg: &Config) -> Result<()> {
-    let report = build_verify_report(cfg);
-    render::verify(&report);
-    if report.catalog_schema_error.is_some() || report.corpus_schema_error.is_some() {
-        eyre::bail!("one or more stores failed verification");
-    }
-    Ok(())
+/// Per-store findings the `verify.run` control-plane method returns.
+/// Every field is optional: an unverifiable store leaves its schema flag
+/// false and its error populated, and the rest skip the counts that
+/// depend on it. Every `*_error` field holds the failure's full source
+/// chain, flattened, so the report names the defect and not only the
+/// layer that noticed it.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub struct VerifyReport {
+    /// Set when the data directory has neither `catalog.db` nor
+    /// `corpus.db` — verify short-circuits in that case and reports
+    /// nothing else.
+    pub not_initialised: bool,
+    /// Set when `catalog.db` is absent while `corpus.db` exists; the
+    /// store is reported missing rather than opened into existence.
+    pub catalog_missing: bool,
+    /// Set when `corpus.db` is absent while `catalog.db` exists.
+    pub corpus_missing: bool,
+    pub catalog_schema_ok: bool,
+    pub catalog_schema_error: Option<String>,
+    pub corpus_schema_ok: bool,
+    pub corpus_schema_error: Option<String>,
+    pub intake_count: Option<u64>,
+    pub missing_intake_files: Option<Vec<i64>>,
+    /// Why the intake rows could not be read, flattened to its full
+    /// source chain. Set when `catalog.db` opened and its schema
+    /// verified but a read of the table failed, which leaves the two
+    /// counts above absent. Distinct from `intake_count` being
+    /// `Some(0)`, which is a readable catalog holding no intakes.
+    pub intake_scan_error: Option<String>,
+    pub vectors_built_at_chunk_count: Option<u64>,
+    pub vectors_churn: Option<u64>,
+    /// Why `vectors_meta.json` could not be read, flattened to its full
+    /// source chain. Distinct from all three counts being absent, which
+    /// is a library that never built an ANN index.
+    pub vectors_meta_error: Option<String>,
 }
 
 /// Collect verifiable findings for every store under `cfg`. Each
@@ -25,8 +53,8 @@ pub fn run(cfg: &Config) -> Result<()> {
 /// directory with neither `catalog.db` nor `corpus.db` is reported as
 /// `not_initialised`; one store present without the other reports the
 /// absent one as missing instead of inventing it.
-pub fn build_verify_report(cfg: &Config) -> render::VerifyReport {
-    let mut report = render::VerifyReport {
+pub fn build_verify_report(cfg: &Config) -> VerifyReport {
+    let mut report = VerifyReport {
         catalog_missing: !cfg.catalog_db().exists(),
         corpus_missing: !cfg.corpus_db().exists(),
         ..Default::default()
@@ -42,11 +70,27 @@ pub fn build_verify_report(cfg: &Config) -> render::VerifyReport {
         match Catalog::open_read_only(&cfg.catalog_db()) {
             Ok(catalog) => {
                 report.catalog_schema_ok = true;
-                report.intake_count = catalog.count_intakes().ok();
-                report.missing_intake_files = scan_intake_files(cfg, &catalog).ok();
+                // A store whose schema verifies can still fail to be
+                // read. Both probes go through the same connection, so
+                // the first reason is kept and the second is dropped
+                // rather than overwriting it.
+                match catalog.count_intakes() {
+                    Ok(count) => report.intake_count = Some(count),
+                    // The variants are wrappers, so the chain is
+                    // flattened before it crosses the RPC boundary.
+                    Err(e) => report.intake_scan_error = Some(bookrack_core::error_chain(&e)),
+                }
+                match scan_intake_files(cfg, &catalog) {
+                    Ok(missing) => report.missing_intake_files = Some(missing),
+                    Err(e) => {
+                        report.intake_scan_error.get_or_insert(format!("{e:#}"));
+                    }
+                }
             }
+            // `Verify` is a wrapper variant whose Display names the
+            // store alone; the per-table differences are its source.
             Err(e) => {
-                report.catalog_schema_error = Some(format!("{e:#}"));
+                report.catalog_schema_error = Some(bookrack_core::error_chain(&e));
             }
         }
     }
@@ -56,7 +100,7 @@ pub fn build_verify_report(cfg: &Config) -> render::VerifyReport {
                 report.corpus_schema_ok = true;
             }
             Err(e) => {
-                report.corpus_schema_error = Some(format!("{e:#}"));
+                report.corpus_schema_error = Some(bookrack_core::error_chain(&e));
             }
         }
     }
@@ -202,6 +246,110 @@ mod tests {
         );
     }
 
+    /// Zero the b-tree root page of the `intake` table and of every
+    /// index over it, leaving the schema itself untouched. Schema
+    /// verification reads `sqlite_master` and the `PRAGMA` tables, so
+    /// the store still opens and verifies; every access path to the
+    /// rows lands on a page whose type byte is not a b-tree.
+    fn detach_intake_rows(cfg: &Config) {
+        let db = cfg.catalog_db();
+        let conn =
+            bookrack_dbkit::open_production_strict_read_only(&db).expect("open for page lookup");
+        let page_size: i64 = conn
+            .pragma_query_value(None, "page_size", |row| row.get(0))
+            .expect("read page size");
+        let mut stmt = conn
+            .prepare(
+                "SELECT rootpage FROM sqlite_master WHERE tbl_name = 'intake' AND rootpage > 0",
+            )
+            .expect("prepare root page query");
+        let roots: Vec<i64> = stmt
+            .query_map([], |row| row.get(0))
+            .expect("query root pages")
+            .map(|row| row.expect("root page"))
+            .collect();
+        assert!(!roots.is_empty(), "the intake table has no b-tree to zero");
+        drop(stmt);
+        drop(conn);
+
+        let mut bytes = std::fs::read(&db).expect("read the catalog file");
+        for root in roots {
+            let start = ((root - 1) * page_size) as usize;
+            bytes[start..start + page_size as usize].fill(0);
+        }
+        std::fs::write(&db, bytes).expect("write the catalog file");
+    }
+
+    #[test]
+    fn an_unreadable_intake_table_carries_its_reason_rather_than_absent_counts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = catalog_only_root(dir.path());
+        detach_intake_rows(&cfg);
+
+        let report = build_verify_report(&cfg);
+
+        // The store opened and its schema verified: the failure is a
+        // read, not a mismatch, and the report has to say so.
+        assert!(
+            report.catalog_schema_ok,
+            "the schema did not verify, so this is not the state under test: {:?}",
+            report.catalog_schema_error
+        );
+        let reason = report
+            .intake_scan_error
+            .as_deref()
+            .expect("an unreadable intake table carries its reason");
+        // `CatalogError::Sqlite`'s own Display is the wrapper `catalog
+        // database error`; the sqlite message is what names the defect,
+        // and it only survives if the chain was flattened.
+        assert!(
+            reason.starts_with("catalog database error: "),
+            "the reason did not carry the sqlite cause: {reason}"
+        );
+        assert!(
+            report.intake_count.is_none() && report.missing_intake_files.is_none(),
+            "counts that could not be read were reported anyway: {:?} / {:?}",
+            report.intake_count,
+            report.missing_intake_files
+        );
+    }
+
+    /// Rename a column of the `intake` table so the live schema no
+    /// longer matches its `TableSpec`; the store still opens as a
+    /// database, and it is verification that refuses it.
+    fn rename_intake_column(cfg: &Config) {
+        let conn = bookrack_dbkit::open_production(&cfg.catalog_db()).expect("open for the rename");
+        conn.execute_batch("ALTER TABLE intake RENAME COLUMN stored_path TO stored_path_x")
+            .expect("rename the column");
+    }
+
+    #[test]
+    fn a_schema_mismatch_carries_the_column_differences() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = catalog_only_root(dir.path());
+        rename_intake_column(&cfg);
+
+        let report = build_verify_report(&cfg);
+
+        assert!(!report.catalog_schema_ok);
+        let reason = report
+            .catalog_schema_error
+            .as_deref()
+            .expect("a schema that does not verify carries its reason");
+        // `CatalogError::Verify`'s own Display is the wrapper `catalog
+        // schema verification failed`; the per-table differences are
+        // what name the defect, and they only survive if the chain was
+        // flattened.
+        assert!(
+            reason.starts_with("catalog schema verification failed: "),
+            "the reason did not carry the verifier's own report: {reason}"
+        );
+        assert!(
+            reason.contains("table `intake`"),
+            "the reason did not name the table that failed: {reason}"
+        );
+    }
+
     #[test]
     fn a_catalog_only_root_reports_the_corpus_missing_without_creating_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -215,6 +363,15 @@ mod tests {
         assert!(report.corpus_missing);
         assert!(!report.corpus_schema_ok);
         assert!(report.corpus_schema_error.is_none());
+        // The negative half of the read-failure contract: a catalog
+        // that reads back carries counts and no reason.
+        assert_eq!(report.intake_count, Some(0));
+        assert_eq!(report.missing_intake_files.as_deref(), Some(&[][..]));
+        assert!(
+            report.intake_scan_error.is_none(),
+            "a readable catalog reported a read failure: {:?}",
+            report.intake_scan_error
+        );
         assert_eq!(
             db_files(dir.path()),
             before,

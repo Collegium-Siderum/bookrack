@@ -68,6 +68,16 @@ pub const PLAN_TARGET_DRIFTED: i32 = -32016;
 /// overloaded. The same condition refuses bring-up with exit 2; on a
 /// live call it is retryable, so it maps to exit 4 instead.
 pub const BACKEND_UNAVAILABLE: i32 = -32017;
+/// bookrack-specific: a store the call depends on is in a state this
+/// build cannot serve — a catalog or corpus written by a newer schema
+/// or demanding a newer reader, an index whose build stamps are
+/// missing or disagree with this build, a vector sidecar naming an
+/// unknown ANN kind or a mismatched dimension. Neither caller input
+/// (`-32602`: the request was fine) nor a fault in this binary
+/// (`-32603`: there is a next step, and it is the operator's — run a
+/// newer build, rebuild the layer, reset the vectors). Not retryable
+/// as sent; exit 2.
+pub const STATE_UNUSABLE: i32 = -32018;
 
 /// One inbound JSON-RPC request.
 #[derive(Debug, Clone, Deserialize)]

@@ -189,8 +189,11 @@ pub struct NewBookDistillAudit {
     pub profile_ref: String,
     /// The version stamp of the book's parser at build time.
     pub extractor_version: String,
-    /// The `pipeline_runs.pipeline_run_id` that grouped this build, or
-    /// `None` when the writer is not running inside an opened run.
+    /// The `pipeline_runs.pipeline_run_id` of the build that judged this
+    /// book last, or `None` when the writer is not running inside an
+    /// opened run. A pointer, not membership: which books a run judged
+    /// is read from the `pipeline_run_summary` snapshot taken at its
+    /// close.
     pub pipeline_run_id: Option<String>,
     /// JSON summary of the distill catalog set (per-flag severities),
     /// or `None` when the writer could not compute one.

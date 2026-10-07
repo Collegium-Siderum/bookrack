@@ -26,7 +26,7 @@ use super::{MethodContext, input_err, run_write};
 use crate::audit_helpers::{
     load_paper_audit_data, load_paper_audit_profile, require_known_profile,
 };
-use crate::control::error_map::{registry_err, write_err};
+use crate::control::error_map::{handler_err, registry_err};
 use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 
 fn parse<T: for<'de> Deserialize<'de>>(
@@ -69,7 +69,7 @@ where
     let handle = ctx.registry.get(library).map_err(registry_err)?;
     let library_name = handle.name().to_string();
     run_write(ctx, &library_name, move || async move {
-        op(handle.ops()).map_err(|e| write_err(method, e.into()))
+        op(handle.ops()).map_err(|e| handler_err(method, e.into()))
     })
     .await
 }
@@ -131,7 +131,7 @@ pub async fn reaudit(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         let outcome = handle
             .reaudit_paper(intake_id, &profile, &data)
             .await
-            .map_err(|e| write_err("papers.metadata.reaudit", e.into()))?;
+            .map_err(|e| handler_err("papers.metadata.reaudit", e.into()))?;
         Ok(json!({
             "intake_id": outcome.intake_id,
             "verdict": outcome.verdict,

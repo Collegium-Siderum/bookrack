@@ -4,6 +4,11 @@
 //! manifest — which stays forward-compatible so an old binary tolerates a
 //! newer file — a profile uses `deny_unknown_fields`: a misspelled key in
 //! a combination rule must fail loudly, never be silently ignored.
+//!
+//! The `schema_version` gate runs the same direction as the manifest's:
+//! this binary reads its own schema and every earlier one, and refuses
+//! a file from a later one. A bump that changes the shape ships a reader
+//! for the previous schema, or a rewrite command, in the same change.
 
 use crate::{AnnSpec, EmbedSpec, IndexProfile, RerankerSpec, SCHEMA_VERSION};
 
@@ -27,10 +32,10 @@ pub enum ProfileLoadError {
         /// The formatted parse error.
         reason: String,
     },
-    /// The file declares a `schema_version` this binary does not
-    /// understand.
+    /// The file declares a `schema_version` above the one this binary
+    /// reads.
     #[error(
-        "index profile at {path} declares schema_version {found}, but this binary understands {SCHEMA_VERSION}"
+        "index profile at {path} declares schema_version {found}, newer than the {SCHEMA_VERSION} this binary reads"
     )]
     SchemaVersion {
         /// The file path or embedded label.
@@ -64,7 +69,11 @@ pub fn parse_str(toml: &str, path: &str) -> Result<IndexProfile, ProfileLoadErro
         path: path.to_string(),
         reason: e.to_string(),
     })?;
-    if file.schema_version != SCHEMA_VERSION {
+    // A file from an earlier schema is this binary's to read: a bump
+    // that changes the shape ships a reader for the previous one, or a
+    // rewrite command, in the same change (`docs/UPGRADE.md`). A file
+    // from a later schema is refused, naming both versions.
+    if file.schema_version > SCHEMA_VERSION {
         return Err(ProfileLoadError::SchemaVersion {
             path: path.to_string(),
             found: file.schema_version,
@@ -122,8 +131,23 @@ mod tests {
         }
     }
 
+    /// The loader reads its own schema and every earlier one; a bump
+    /// that changes the shape ships a reader for the previous schema in
+    /// the same change, so a file written before it still loads.
     #[test]
-    fn rejects_a_wrong_schema_version() {
+    fn a_profile_from_an_earlier_schema_still_loads() {
+        let toml = format!(
+            "schema_version = {}\nname = \"x\"\n\
+             [embed]\nbackend = \"ollama\"\nmodel = \"m\"\ndim = 8\n\
+             [ann]\nkind = \"brute-force\"\nnum_partitions = 1\nnprobes = 1\n",
+            super::SCHEMA_VERSION - 1
+        );
+        let profile = parse_str(&toml, "x").expect("an earlier schema is read");
+        assert_eq!(profile.name, "x");
+    }
+
+    #[test]
+    fn rejects_a_profile_from_a_newer_schema() {
         let toml = "schema_version = 99\nname = \"x\"\n\
                     [embed]\nbackend = \"ollama\"\nmodel = \"m\"\ndim = 8\n\
                     [ann]\nkind = \"brute-force\"\nnum_partitions = 1\nnprobes = 1\n";
@@ -132,5 +156,10 @@ mod tests {
             err,
             super::ProfileLoadError::SchemaVersion { found: 99, .. }
         ));
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("newer than"),
+            "the refusal says which direction it is: {rendered}"
+        );
     }
 }

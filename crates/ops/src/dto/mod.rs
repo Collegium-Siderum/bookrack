@@ -7,6 +7,7 @@
 //! shapes and audit-trail / pipeline-trail entries live in this crate.
 
 pub mod audit;
+pub mod categories;
 pub mod info;
 pub mod metadata_report;
 pub mod vectors_status;

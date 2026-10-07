@@ -69,9 +69,11 @@ pub async fn show_library_info<E: Embedder>(
             Ok(stamps) => (stamps, None),
             Err(e) => (CorpusStamps::default(), Some(e.to_string())),
         };
+        // `MetaIo` / `MetaParse` are wrapper variants whose Display
+        // names the sidecar alone; the IO or serde reason is the source.
         let (vectors_meta, meta_error) = match bookrack_vectors::meta::load(ops.lancedb_dir()) {
             Ok(meta) => (meta, None),
-            Err(e) => (None, Some(e.to_string())),
+            Err(e) => (None, Some(bookrack_core::error_chain(&e))),
         };
         let (current_chunks, chunks_error) = read_current_chunk_count(ops.lancedb_dir()).await;
         let vectors_error = meta_error.or(chunks_error);
@@ -140,7 +142,7 @@ async fn read_papers_info<E: Embedder>(ops: &Ops<E>) -> Option<PapersInfo> {
     };
     let (vectors_meta, meta_error) = match bookrack_vectors::meta::load(lancedb_dir) {
         Ok(meta) => (meta, None),
-        Err(e) => (None, Some(e.to_string())),
+        Err(e) => (None, Some(bookrack_core::error_chain(&e))),
     };
     let (current_chunks, chunks_error) = read_current_chunk_count(lancedb_dir).await;
     let vectors_error = meta_error.or(chunks_error);

@@ -1,10 +1,10 @@
 #!/usr/bin/env sh
 # Fail if tracked files leak local or private information.
 #
-# Rules 1-2 and 8 are generic patterns (they carry no private data) and
-# run everywhere, including CI. Rule 3 reads patterns from an optional,
-# gitignored denylist file, so private literals never enter the
-# repository; it is skipped when that file is absent (e.g. a fresh CI
+# Rules 1-2, 8, and 9 are generic patterns (they carry no private data)
+# and run everywhere, including CI. Rules 3 and 10 read patterns from an
+# optional, gitignored denylist file, so private literals never enter the
+# repository; they are skipped when that file is absent (e.g. a fresh CI
 # checkout).
 #
 # Rules 4-7 guard the same harm one layer in: the maintainer's own
@@ -124,6 +124,56 @@ if git grep -nP '\x{a7}' -- \
   echo "      path, write \"section N\" for a public spec, or escape a"
   echo "      literal as \\u{a7} (Rust) / \\u00A7 (TOML)"
   fail=1
+fi
+
+# 9. Mount-point path segments. Rule 1 covers the user roots; the label
+#    of a volume or mount is the same class of local detail and reaches a
+#    log by the same route, but sits outside the prefixes rule 1 knows.
+#    `/Volumes/`, `/mnt/`, and `/media/` are allowed only with a segment
+#    from the synthetic set, so a real disk name cannot ride in as
+#    fixture data. Neither a doc comment writing the shape
+#    (`/Volumes/<seg>/`) nor a bare prefix constant matches: in both the
+#    next character is not part of a name.
+mount_ok='/(Volumes|mnt|media)/(disk|DISK|external|stick)([^A-Za-z0-9._-]|$)'
+if git grep -nE '/(Volumes|mnt|media)/[A-Za-z0-9._-]' -- \
+  '*.rs' '*.toml' '*.md' '*.ts' '*.svelte' '*.json' '*.html' '*.css' '*.js' \
+  '*.sh' '*.yml' | grep -vE "$mount_ok"; then
+  echo "LEAK: a mount-point path names a real volume; use a synthetic"
+  echo "      segment (disk / external / stick) or write the shape as"
+  echo "      \`/Volumes/<seg>/\`"
+  fail=1
+fi
+
+# 10. The escape hatch, closed. Rules 2 and 8 let a source file carry a
+#     CJK character or a section mark as `\u{...}` / `\uXXXX`, which is
+#     also the one place a private literal sits in plain sight: the bytes
+#     are ASCII, so rule 3 never sees the word they spell. This decodes
+#     every escape in a tracked text file and runs the denylist against
+#     the decoded copy, so a denylist entry only ever needs the plain
+#     form and no one has to enumerate the four ways a string can be
+#     escaped. It does not re-apply rules 2 and 8 to the decoded text —
+#     the escape is their sanctioned outlet, and only the vocabulary
+#     behind it is in question.
+#
+#     Local-only for the same reason as rule 3, so its perl dependency
+#     is never on CI's path.
+if [ -f "$denylist" ] && command -v perl >/dev/null 2>&1; then
+  escaped=$(git grep -lE '\\u\{?[0-9a-fA-F]' -- \
+    '*.rs' '*.toml' '*.md' '*.ts' '*.svelte' '*.json' '*.html' '*.css' '*.js' || true)
+  if [ -n "$escaped" ]; then
+    hits=$(printf '%s\n' "$escaped" | xargs perl -CSD -ne '
+        $raw = $_;
+        s/\\{1,2}u\{([0-9a-fA-F]{1,6})\}/chr(hex($1))/ge;
+        s/\\{1,2}u([0-9a-fA-F]{4})/chr(hex($1))/ge;
+        print "$ARGV:$.:$_" if $_ ne $raw;
+        close ARGV if eof;
+      ' | grep -F -f "$denylist" || true)
+    if [ -n "$hits" ]; then
+      printf '%s\n' "$hits"
+      echo "LEAK: a denylisted identifier hidden behind unicode escapes"
+      fail=1
+    fi
+  fi
 fi
 
 if [ "$fail" -eq 0 ]; then

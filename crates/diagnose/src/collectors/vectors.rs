@@ -8,19 +8,24 @@ use bookrack_config::Config;
 
 use crate::Result;
 
-/// Write `<bundle>/vectors/vectors_meta.json` if the sidecar exists.
-/// A sidecar that exists but fails to load writes `open-error.json`
-/// instead of silently vanishing from the bundle; an absent sidecar
-/// is a normal state (fresh or legacy store) and writes nothing. The
-/// lancedb-itself live state (row counts, fragment list, …) is not
-/// captured here: opening the store would require the same runtime
-/// the daemon uses, and the sidecar already carries the settings a
-/// maintainer needs to reproduce the build.
+/// Write `<bundle>/vectors/vectors_meta.json` from the book vector
+/// store's sidecar. See [`collect_into`] for the three sidecar states.
 pub fn collect(cfg: &Config, bundle_dir: &Path) -> Result<()> {
-    let dst = bundle_dir.join("vectors");
-    std::fs::create_dir_all(&dst)?;
-    let lancedb_dir = cfg.lancedb_dir();
-    match bookrack_vectors::meta::load(&lancedb_dir) {
+    collect_into(&cfg.lancedb_dir(), &bundle_dir.join("vectors"))
+}
+
+/// Copy the sidecar under `lancedb_dir` into `<dst>/vectors_meta.json`
+/// if it exists. A sidecar that exists but fails to load writes
+/// `open-error.json` instead of silently vanishing from the bundle; an
+/// absent sidecar is a normal state (fresh or legacy store) and writes
+/// nothing. The lancedb-itself live state (row counts, fragment list,
+/// …) is not captured here: opening the store would require the same
+/// runtime the daemon uses, and the sidecar already carries the
+/// settings a maintainer needs to reproduce the build. The book and
+/// paper stores share one sidecar format, so both route through here.
+pub(crate) fn collect_into(lancedb_dir: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    match bookrack_vectors::meta::load(lancedb_dir) {
         Ok(Some(m)) => {
             let mut text = serde_json::to_string_pretty(&m)?;
             text.push('\n');
@@ -30,7 +35,7 @@ pub fn collect(cfg: &Config, bundle_dir: &Path) -> Result<()> {
         Err(e) => {
             tracing::warn!(error = %e, "diagnose: could not load vectors_meta.json");
             super::write_open_error(
-                &dst,
+                dst,
                 &lancedb_dir.join("vectors_meta.json"),
                 Some(&e.to_string()),
             )?;

@@ -3,8 +3,10 @@
 //! Terminal implementation of [`WizardDriver`].
 //!
 //! Reads stdin for prompts, writes progress to stdout, errors to
-//! stderr. Owns every operator-facing string of the wizard; the
-//! runner hands over structured reports only.
+//! stderr. Owns every operator-facing string of the wizard except the
+//! first-run sequence on the closing screen, which
+//! [`bookrack_cli_grammar::first_step_lines`] renders for every surface
+//! that offers it; the runner hands over structured reports only.
 //!
 //! Every one of those strings goes through [`Console`], so what the
 //! operator reads is what a test reads. Writing to the process streams
@@ -13,14 +15,16 @@
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use bookrack_embed::ProbeReport as EmbedProbeReport;
-use eyre::{Context, ContextCompat, Result};
+use bookrack_cli_grammar::first_step_lines;
+use bookrack_core::Explain;
+use eyre::{Context, Result};
 
 use super::runner::validate_unused_or_force;
 use super::{
     DataRootHint, FinalizeSummary, OllamaStep, PdfiumChoice, PdfiumInstallOutcome, PdfiumReport,
-    SmokeOutcome, WizardDriver,
+    SmokeOutcome, WizardDriver, WizardError,
 };
+use crate::backend_probe::EmbedBackendState;
 
 /// Terminal I/O the driver needs, injected so the operator-facing
 /// strings can be asserted without a TTY.
@@ -90,10 +94,7 @@ impl CliWizardDriver {
     ) -> Result<PathBuf> {
         let typed = self.console.prompt(question)?;
         let chosen = if typed.is_empty() {
-            offered.cloned().context(
-                "a data root path is required (this host has no portable layout \
-                 and no platform data directory to default to)",
-            )?
+            offered.cloned().ok_or(WizardError::NoDefaultDataRoot)?
         } else {
             PathBuf::from(typed)
         };
@@ -126,7 +127,7 @@ impl WizardDriver for CliWizardDriver {
             return Ok(abs);
         }
         if hint.non_interactive {
-            eyre::bail!("--data-dir is required in --non-interactive mode");
+            return Err(WizardError::DataRootRequired.into());
         }
         // A discovered layout outranks a suggested one: something is
         // already there, and defaulting past it would strand it.
@@ -157,7 +158,7 @@ impl WizardDriver for CliWizardDriver {
                 // what was wrong with the final answer.
                 Err(e) if attempt >= MAX_DATA_ROOT_ATTEMPTS => return Err(e),
                 Err(e) => {
-                    console.warn(&format!("      {e}"));
+                    warn_refusal(console, &e);
                     attempt += 1;
                 }
             }
@@ -224,27 +225,22 @@ impl WizardDriver for CliWizardDriver {
         let embed_model = step.embed_model;
         console.line("[3/5] Ollama daemon");
         console.line(&format!("      Probing {url} ..."));
-        if !step.report.reachable {
-            console.warn(&format!("      FAIL: Ollama is not reachable at {url}."));
-            console.warn("            Install it from https://ollama.com, run `ollama serve`,");
-            console.warn("            pull the model:");
-            console.warn(&format!("              ollama pull {embed_model}"));
-            console.warn("            then rerun `bookrack init`.");
-            eyre::bail!("Ollama unreachable");
+        match step.backend {
+            EmbedBackendState::Ready { models } => {
+                console.line(&format!(
+                    "      OK ({} model(s) pulled, {embed_model} present)",
+                    models.len(),
+                ));
+                Ok(())
+            }
+            // The FAIL line is this step's status; the remedy is the
+            // error's hint, which the CLI reporter prints once.
+            other => {
+                let refusal = WizardError::EmbedBackend(other.clone());
+                console.warn(&format!("      FAIL: {refusal}"));
+                Err(refusal.into())
+            }
         }
-        if !report_has_model(step.report, embed_model) {
-            console.warn(&format!(
-                "      FAIL: Ollama is up but {embed_model} is not pulled."
-            ));
-            console.warn(&format!("            Run:  ollama pull {embed_model}"));
-            console.warn("            then rerun `bookrack init`.");
-            eyre::bail!("embed model not pulled");
-        }
-        console.line(&format!(
-            "      OK ({} model(s) pulled, {embed_model} present)",
-            step.report.models.len(),
-        ));
-        Ok(())
     }
 
     /// Step 4: report the smoke outcome. A zero-hit search aborts —
@@ -332,14 +328,25 @@ fn print_success(console: &dyn Console, data_root: &Path) {
     console.line("");
     console.line(&format!("Data root: {}", data_root.display()));
     console.line("");
-    console.line("Try:");
-    console.line("  bookrack ingest /path/to/book.epub");
-    console.line("  bookrack query \"your question\"");
-    console.line("  bookrack-mcp          # start the MCP server on 127.0.0.1:8765");
+    console.line("Next:");
+    for line in first_step_lines() {
+        console.line(&line);
+    }
 }
 
-fn report_has_model(probe: &EmbedProbeReport, name: &str) -> bool {
-    probe.models.iter().any(|m| m == name)
+/// Print a refused answer the way the CLI reporter would, minus the
+/// detail: the summary, then the hint when the refusal is typed. An
+/// untyped failure prints as it renders.
+fn warn_refusal(console: &dyn Console, err: &eyre::Report) {
+    match err.downcast_ref::<WizardError>() {
+        Some(refusal) => {
+            console.warn(&format!("      {refusal}"));
+            if let Some(hint) = refusal.explain().data.hint {
+                console.warn(&format!("      hint: {hint}"));
+            }
+        }
+        None => console.warn(&format!("      {err}")),
+    }
 }
 
 /// Resolve a user-typed path against the current working directory.
@@ -532,6 +539,35 @@ mod tests {
         );
     }
 
+    /// A refused answer is re-asked with its way out in view: the
+    /// summary says what was wrong, the hint says what to do, and the
+    /// evidence between them stays with the reporter.
+    #[tokio::test]
+    async fn the_first_question_shows_the_hint_of_a_refused_path() {
+        let populated = tempfile::tempdir().expect("tempdir");
+        std::fs::write(populated.path().join("catalog.db"), b"fake").expect("seed catalog");
+        let empty = tempfile::tempdir().expect("tempdir");
+        let script = Script::with_answers([
+            populated.path().to_str().expect("utf-8"),
+            empty.path().to_str().expect("utf-8"),
+        ]);
+        let driver = scripted_driver(&script);
+
+        let chosen = driver
+            .step_data_root(interactive_hint(Some("/opt/state/bookrack/library")))
+            .await
+            .expect("the second answer is accepted");
+
+        assert_eq!(chosen, empty.path().to_path_buf());
+        let captured = script.captured();
+        assert!(
+            captured
+                .iter()
+                .any(|l| l.trim_start().starts_with("hint:") && l.contains("--force")),
+            "the refusal must carry its hint: {captured:?}"
+        );
+    }
+
     /// A refused path is usually a typo. Retyping it beats rerunning
     /// all five steps, which is what a bail from step 1 costs.
     #[tokio::test]
@@ -616,6 +652,212 @@ mod tests {
             script.times_rendered("      Using "),
             0,
             "a refused root must not be echoed as chosen: {:?}",
+            script.captured()
+        );
+    }
+
+    /// A finalize summary with nothing kept and a registry written: the
+    /// shape of a clean first run.
+    fn finalize_summary() -> FinalizeSummary {
+        let root = PathBuf::from("/data/library");
+        FinalizeSummary {
+            config_path: root.join("config.toml"),
+            config_kept: false,
+            manifest_path: root.join("bookrack.toml"),
+            manifest_kept: false,
+            registry: Some(PathBuf::from("/data/registry.toml")),
+            data_root: root,
+        }
+    }
+
+    /// The commands the closing screen offers, in order, with the
+    /// `# note` column stripped: everything after the ready line that
+    /// starts with the binary name.
+    fn offered_commands(captured: &[String]) -> Vec<String> {
+        let ready = captured
+            .iter()
+            .position(|line| line == "bookrack is ready.")
+            .expect("the closing screen announces readiness");
+        captured[ready + 1..]
+            .iter()
+            .map(|line| line.trim())
+            .filter(|line| line.starts_with("bookrack"))
+            .map(|line| {
+                line.split("    #")
+                    .next()
+                    .unwrap_or(line)
+                    .trim()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The closing screen is the first-run sequence and nothing else.
+    /// A suggestion outside it is one the operator cannot follow from
+    /// here: a verb the binary lacks, or a server that conflicts with
+    /// the daemon the sequence starts.
+    #[tokio::test]
+    async fn the_closing_screen_offers_exactly_the_first_steps() {
+        let script = Script::with_answers([]);
+        let driver = scripted_driver(&script);
+
+        driver
+            .step_finalize(&finalize_summary())
+            .await
+            .expect("finalize only reports");
+
+        let captured = script.captured();
+        assert_eq!(
+            offered_commands(&captured),
+            [
+                "bookrack run",
+                "bookrack ingest /path/to/book.epub",
+                "bookrack search \"your question\"",
+            ],
+            "closing screen: {captured:?}"
+        );
+        assert!(
+            captured.iter().any(|line| line == "Next:"),
+            "the list is introduced as the next steps: {captured:?}"
+        );
+        let rendered: Vec<&String> = captured
+            .iter()
+            .filter(|line| line.starts_with("  bookrack "))
+            .collect();
+        assert_eq!(
+            rendered,
+            first_step_lines().iter().collect::<Vec<_>>(),
+            "the screen renders the shared list, not a copy"
+        );
+    }
+
+    /// A PDFium search that found nothing, with every directory the
+    /// loader would have checked.
+    fn pdfium_missing(installable: bool) -> PdfiumReport {
+        PdfiumReport {
+            filename: "libpdfium.dylib",
+            found: None,
+            probed: vec![
+                PathBuf::from("/opt/bookrack/bin"),
+                PathBuf::from("/opt/bookrack/managed"),
+            ],
+            installable,
+        }
+    }
+
+    /// The step has nothing to offer when no pinned binary exists for
+    /// the platform: it says where it looked and moves on without a
+    /// question.
+    #[tokio::test]
+    async fn the_pdfium_step_continues_when_nothing_is_installable() {
+        let script = Script::with_answers([]);
+        let driver = scripted_driver(&script);
+
+        let choice = driver
+            .step_pdfium(&pdfium_missing(false))
+            .await
+            .expect("a missing library is a warning");
+
+        assert_eq!(choice, PdfiumChoice::Continue);
+        assert_eq!(
+            script.times_rendered("Download the pinned PDFium build"),
+            0,
+            "no question when nothing can be installed: {:?}",
+            script.captured()
+        );
+        assert_eq!(
+            script.times_rendered("/opt/bookrack/managed"),
+            1,
+            "every probed directory is listed: {:?}",
+            script.captured()
+        );
+    }
+
+    /// Declining the download is a valid answer: the wizard continues
+    /// and names the command that installs the library later.
+    #[tokio::test]
+    async fn the_pdfium_step_continues_when_the_download_is_declined() {
+        let script = Script::with_answers(["n"]);
+        let driver = scripted_driver(&script);
+
+        let choice = driver
+            .step_pdfium(&pdfium_missing(true))
+            .await
+            .expect("a declined download is a warning");
+
+        assert_eq!(choice, PdfiumChoice::Continue);
+        assert_eq!(script.answers_left(), 0, "the question was asked once");
+        assert_eq!(
+            script.times_rendered("doctor --install-pdfium"),
+            1,
+            "the later remedy is named: {:?}",
+            script.captured()
+        );
+    }
+
+    /// The question reads `[Y/n]`, so pressing enter accepts the
+    /// download.
+    #[tokio::test]
+    async fn an_empty_answer_to_the_download_question_installs() {
+        let script = Script::with_answers([""]);
+        let driver = scripted_driver(&script);
+
+        let choice = driver
+            .step_pdfium(&pdfium_missing(true))
+            .await
+            .expect("accepting the download is not an error");
+
+        assert_eq!(choice, PdfiumChoice::Install);
+    }
+
+    /// `--non-interactive` suppresses the download question: the step
+    /// continues without the library and without reading stdin.
+    #[tokio::test]
+    async fn a_non_interactive_run_continues_without_asking() {
+        let script = Script::with_answers([]);
+        let driver = CliWizardDriver {
+            non_interactive: true,
+            console: Box::new(ScriptedConsole(Arc::clone(&script))),
+        };
+
+        let choice = driver
+            .step_pdfium(&pdfium_missing(true))
+            .await
+            .expect("a missing library is a warning");
+
+        assert_eq!(choice, PdfiumChoice::Continue);
+        assert_eq!(
+            script.times_rendered("Download the pinned PDFium build"),
+            0,
+            "no prompt without a terminal to answer it: {:?}",
+            script.captured()
+        );
+    }
+
+    /// A download that fails is reported with its reason and does not
+    /// end the wizard: PDF ingest is what it costs, nothing more.
+    #[tokio::test]
+    async fn a_failed_install_is_reported_and_does_not_abort() {
+        let script = Script::with_answers([]);
+        let driver = scripted_driver(&script);
+
+        driver
+            .step_pdfium_install(&PdfiumInstallOutcome::Failed(
+                "archive checksum mismatch".to_string(),
+            ))
+            .await
+            .expect("a failed install is a warning");
+
+        assert_eq!(
+            script.times_rendered("archive checksum mismatch"),
+            1,
+            "the reason reaches the operator: {:?}",
+            script.captured()
+        );
+        assert_eq!(
+            script.times_rendered("doctor --install-pdfium"),
+            1,
+            "the retry command is named: {:?}",
             script.captured()
         );
     }

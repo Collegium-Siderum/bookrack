@@ -18,6 +18,7 @@ use bookrack_embed::Embedder;
 use crate::Ops;
 use crate::OpsError;
 use crate::Result;
+use crate::dto::categories::{CategoryBooks, CategoryCounts};
 use crate::dto::{
     BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, OcrPendingItem,
     OcrPendingResult, ShowTocArgs, Toc, TocNodes, TocStats, clamp_limit,
@@ -128,6 +129,31 @@ pub fn find_books<E: Embedder>(
             books,
             total,
             truncated,
+        })
+    })
+}
+
+/// The library-wide category distribution: every category with the
+/// number of books carrying it, most-used first, plus the books no
+/// category reaches. Read this before filtering `find_books` on
+/// `categories`; it is where the library's tag vocabulary can be seen.
+pub fn category_counts<E: Embedder>(ops: &Ops<E>) -> Result<CategoryCounts> {
+    record_call_sync!(ops, "library.categories", serde_json::Value::Null, {
+        let catalog = Catalog::open_read_only(ops.catalog_db())?;
+        let categories = catalog
+            .category_counts(ItemKind::Book)?
+            .into_iter()
+            .map(|c| CategoryBooks {
+                category: c.category,
+                books: c.items,
+            })
+            .collect();
+        let uncategorised = catalog.count_intakes_without_category(ItemKind::Book)?;
+        let total = catalog.count_intakes()?;
+        Ok(CategoryCounts {
+            categories,
+            uncategorised,
+            total,
         })
     })
 }

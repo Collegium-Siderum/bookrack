@@ -134,6 +134,46 @@ fn collect_runs(
     Ok(rows)
 }
 
+/// Where the `profiles:` section of `runs show` was counted.
+pub(crate) enum ProfileBuckets {
+    /// Materialised on the rollup at run close. Does not move when a
+    /// later run re-judges one of the items, so it agrees with
+    /// `n_books` / `n_papers` on the same row.
+    Snapshot(Vec<RunProfileBucket>),
+    /// Counted from the audit tables now, because the run's rollup
+    /// predates the snapshot column or was never computed. An item
+    /// re-judged since is attributed to the later run.
+    Live(Vec<RunProfileBucket>),
+}
+
+impl ProfileBuckets {
+    fn rows(&self) -> &[RunProfileBucket] {
+        match self {
+            ProfileBuckets::Snapshot(rows) | ProfileBuckets::Live(rows) => rows,
+        }
+    }
+}
+
+/// Pick the source of a run's profile buckets: the snapshot on its
+/// rollup when the rollup carries one, the live count otherwise.
+fn profile_buckets_for(
+    catalog: &Catalog,
+    summary: Option<&PipelineRunSummary>,
+    pipeline_run_id: &str,
+) -> Result<ProfileBuckets> {
+    if let Some(summary) = summary
+        && let Some(snapshot) = summary
+            .profile_buckets()
+            .context("decode the profile_buckets snapshot")?
+    {
+        return Ok(ProfileBuckets::Snapshot(snapshot));
+    }
+    let live = catalog
+        .run_profile_buckets(pipeline_run_id)
+        .context("read profile buckets")?;
+    Ok(ProfileBuckets::Live(live))
+}
+
 /// Render `runs show <id>`. The id resolves against each catalog in
 /// turn. Empty rollup (no audit rows under this run) prints the header
 /// section but omits the three histograms; that case is normal for
@@ -150,9 +190,7 @@ fn show(catalogs: &[(PathBuf, Catalog)], pipeline_run_id: &str) -> Result<()> {
         let summary = catalog
             .pipeline_run_summary(pipeline_run_id)
             .context("read pipeline_run_summary row")?;
-        let buckets = catalog
-            .run_profile_buckets(pipeline_run_id)
-            .context("read profile buckets")?;
+        let buckets = profile_buckets_for(catalog, summary.as_ref(), pipeline_run_id)?;
         let status = displayed_status(&run, path);
         println!(
             "{}",
@@ -207,7 +245,7 @@ pub(crate) fn render_run_show(
     run: &PipelineRun,
     status: &str,
     summary: Option<&PipelineRunSummary>,
-    buckets: &[RunProfileBucket],
+    buckets: &ProfileBuckets,
 ) -> Result<String> {
     let mut out = String::new();
     out.push_str(&format!("run_id:       {}\n", run.pipeline_run_id));
@@ -225,9 +263,13 @@ pub(crate) fn render_run_show(
         "library_root: {}\n",
         run.library_root.as_deref().unwrap_or("-")
     ));
-    if !buckets.is_empty() {
-        out.push_str("\nprofiles:\n");
-        for bucket in buckets {
+    let rows = buckets.rows();
+    if !rows.is_empty() {
+        out.push_str(match buckets {
+            ProfileBuckets::Snapshot(_) => "\nprofiles:\n",
+            ProfileBuckets::Live(_) => "\nprofiles (counted now, not at run close):\n",
+        });
+        for bucket in rows {
             let fingerprint = bucket.profile_fingerprint.as_deref().unwrap_or("(legacy)");
             let identity = match bucket.profile_name.as_deref() {
                 Some(name) => format!("{name} @ {fingerprint}"),
@@ -239,6 +281,13 @@ pub(crate) fn render_run_show(
                 identity = identity,
                 n = bucket.n,
             ));
+        }
+        if let ProfileBuckets::Live(_) = buckets {
+            out.push_str(
+                "  (this run's rollup predates the profile snapshot; an item re-judged \
+                 since counts under the later run, so these need not add up to \
+                 n_books / n_papers)\n",
+            );
         }
     }
     let Some(summary) = summary else {
@@ -335,6 +384,7 @@ mod tests {
                 flag_counts: "{}".to_string(),
                 coverage_summary: "{}".to_string(),
                 wall_clock_ms: Some(1_000),
+                profile_buckets: None,
                 computed_at: "2026-06-28T10:00:06Z".to_string(),
             })
             .expect("upsert summary");
@@ -454,6 +504,7 @@ mod tests {
                 flag_counts: "{}".to_string(),
                 coverage_summary: "{}".to_string(),
                 wall_clock_ms: Some(500),
+                profile_buckets: None,
                 computed_at: "2026-06-28T11:00:06Z".to_string(),
             })
             .expect("upsert summary");
@@ -472,7 +523,13 @@ mod tests {
             .pipeline_run_summary("run-b")
             .expect("read")
             .expect("present");
-        let out = render_run_show(&run, "ok", Some(&summary), &[]).expect("render");
+        let out = render_run_show(
+            &run,
+            "ok",
+            Some(&summary),
+            &ProfileBuckets::Snapshot(vec![]),
+        )
+        .expect("render");
         assert!(out.contains("run_id:       run-b"));
         assert!(out.contains("n_books:      3"));
         assert!(out.contains("\nverdict:\n"));
@@ -498,7 +555,7 @@ mod tests {
             .pipeline_run("run-c")
             .expect("read")
             .expect("present");
-        let out = render_run_show(&run, "ok", None, &[]).expect("render");
+        let out = render_run_show(&run, "ok", None, &ProfileBuckets::Live(vec![])).expect("render");
         assert!(out.contains("run_id:       run-c"));
         assert!(out.contains("no rollup recorded for this run."));
         assert!(!out.contains("verdict:"));
@@ -532,11 +589,74 @@ mod tests {
                 n: 2,
             },
         ];
-        let out = render_run_show(&run, "ok", None, &buckets).expect("render");
+        let out = render_run_show(&run, "ok", None, &ProfileBuckets::Snapshot(buckets.clone()))
+            .expect("render");
         assert!(out.contains("\nprofiles:\n"));
         assert!(out.contains("default @ 0123456789abcdef"));
         assert!(out.contains("default @ (legacy)"));
         assert!(out.contains("fedcba9876543210"));
+        assert!(
+            !out.contains("counted now"),
+            "a snapshot carries no caveat: {out}"
+        );
+
+        let out =
+            render_run_show(&run, "ok", None, &ProfileBuckets::Live(buckets)).expect("render");
+        assert!(out.contains("\nprofiles (counted now, not at run close):\n"));
+        assert!(
+            out.contains("need not add up to"),
+            "a live count says so: {out}"
+        );
+    }
+
+    #[test]
+    fn runs_show_reads_the_snapshot_and_only_counts_live_without_one() {
+        let catalog = Catalog::open_in_memory().expect("open in-memory catalog");
+        seed_run(&catalog, "run-old", "glean", "2026-06-28T13:00:00Z");
+        seed_run(&catalog, "run-new", "glean", "2026-06-28T14:00:00Z");
+        // A rollup materialised before the snapshot column: NULL.
+        seed_summary(&catalog, "run-old", 0, "{}");
+        // A rollup that carries its buckets while the audit tables hold
+        // nothing under this run any more.
+        catalog
+            .upsert_pipeline_run_summary(&NewPipelineRunSummary {
+                pipeline_run_id: "run-new".to_string(),
+                n_books: 0,
+                n_papers: 2,
+                verdict_counts: r#"{"clean":2}"#.to_string(),
+                flag_counts: "{}".to_string(),
+                coverage_summary: "{}".to_string(),
+                wall_clock_ms: Some(500),
+                profile_buckets: Some(
+                    r#"[{"kind":"paper","profile_fingerprint":"0123456789abcdef","profile_name":"default","n":2}]"#
+                        .to_string(),
+                ),
+                computed_at: "2026-06-28T14:00:06Z".to_string(),
+            })
+            .expect("upsert summary");
+
+        let old = catalog
+            .pipeline_run_summary("run-old")
+            .expect("read")
+            .expect("present");
+        match profile_buckets_for(&catalog, Some(&old), "run-old").expect("pick") {
+            ProfileBuckets::Live(rows) => assert!(rows.is_empty()),
+            ProfileBuckets::Snapshot(rows) => panic!("no snapshot to read, got {rows:?}"),
+        }
+
+        let new = catalog
+            .pipeline_run_summary("run-new")
+            .expect("read")
+            .expect("present");
+        match profile_buckets_for(&catalog, Some(&new), "run-new").expect("pick") {
+            ProfileBuckets::Snapshot(rows) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].n, 2, "the snapshot is served as written: {rows:?}");
+            }
+            ProfileBuckets::Live(rows) => {
+                panic!("the snapshot must win over the live count, got {rows:?}")
+            }
+        }
     }
 
     #[test]

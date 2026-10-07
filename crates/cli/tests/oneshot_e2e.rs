@@ -1086,6 +1086,18 @@ async fn libraries_scan_register_rebuilds_the_registry() -> Result<()> {
             "rebuilt registry missing {needle:?}: {written}",
         );
     }
+    // A bulk rebuild records entries only: which of them is the default
+    // is the operator's call afterwards, not the scan order's — and the
+    // summary says so, naming the verb that makes the choice.
+    assert!(
+        !written.contains("default = "),
+        "scan --register must not choose a default: {written}",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("bookrack libraries default"),
+        "scan --register should name the verb that sets a default: {stdout}",
+    );
     // The rebuilt registry serves `libraries list` again: both roots
     // show up under their manifest names, closing the recovery loop.
     let list = tokio::process::Command::from(

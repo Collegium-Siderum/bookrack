@@ -24,6 +24,377 @@ release workflow extracts the matching section verbatim from this file.
   the translation store's canonical location beside the other
   per-library databases; no new environment knob.
 
+- **A daemon brought up on an unregistered root with an identity
+  manifest registers it and serves the registry.** `bookrack run
+  --data-dir <root>` (or the data-root variable, or the portable
+  layout) on a root the registry did not know served that root alone,
+  anonymously, however complete its manifest. Bring-up now records the
+  root under its manifest name, leaves the `default` pointer as it
+  was, and comes up serving every registered library, as it would had
+  `libraries add` run first. A root with no manifest, an unreadable
+  manifest, or a name another root already holds is still served
+  alone, with the reason in the daemon log. `daemon.status` reports
+  the names a session registered as `auto_registered`, and
+  `bookrack status` shows them on a `registered_at_startup` row; both
+  are empty on the next start, which finds the entry in place.
+
+- **`-32018 STATE_UNUSABLE`: a store this build cannot serve has its
+  own error code.** A catalog or corpus written by a newer schema or
+  demanding a newer reader, an index without build stamps or with
+  stamps that disagree with this build, and a vector sidecar naming an
+  unknown ANN kind or a mismatched dimension all answered `-32603`,
+  which tells a client to report a bug, and the CLI exited 1 on them —
+  while every one of them has a next step that is the operator's to
+  take. Those nine conditions now answer `-32018`, bare or through any
+  pipeline wrapper, with the step in `error.data.hint`: run a newer
+  build, `bookrack corpus rebuild`, `bookrack vectors reset`,
+  `bookrack vectors rebuild`, or `bookrack stamps reconcile`. The CLI
+  exits 2 on the code, as it does for caller input, through a variant
+  of its own that keeps the hint. `docs/control-plane.md` adds the
+  code to the list, the write-class mapping, and the exit-code table.
+
+- **`bookrack diagnose` bundles now cover the paper stores, the
+  reference store, and the queue document.** A bundle carried the book
+  pipeline's three stores and nothing else, so a fault in the paper
+  catalog, a `reference.db` from another schema, or a queue document
+  the daemon refuses to start on left no trace in it. The paper
+  catalog, corpus, and vector sidecar now land under `papers/` in the
+  same shapes as their book-side sections; `refs/summary.json` records
+  each distilled book's build provenance — schema, parser, build time,
+  intake, entry and warning counts — and the entry and overlay totals,
+  without any bibliographic column; `queue/queue.json` is the daemon's
+  queue document re-serialised through the scrubber, so job paths are
+  redacted like every other path. A store that is missing or cannot be
+  opened records that in `open-error.json`, as the book sections
+  already did; a queue document from a newer binary is reported as
+  refused, with both versions named, rather than as malformed.
+
+- **`library.categories`: the library-wide category distribution.** A
+  new control-plane method and MCP tool return every category tag with
+  the number of books carrying it, most-used first, plus the books no
+  tag reaches and the registry total. It is the browse entry the
+  `categories` filter of `library.find_books` lacked: that filter asked
+  the caller to name a tag without any way to see which tags the
+  library carries, and a library nobody has tagged answered every such
+  call with an empty page that read like "no such books". The
+  distribution shows the vocabulary before the filter is used, and an
+  untagged library reports itself as one — every book under
+  `uncategorised`. Reachable from the CLI as `bookrack rpc call
+  library.categories`; `find_books`'s tool description now points at
+  it.
+
+### Changed
+
+- **An index-profile file from an earlier schema still loads.** The
+  loader refused any `schema_version` other than its own, so the first
+  bump of that constant would have rejected every user-written profile
+  in both directions, with no migration to run. It now reads its own
+  schema and every earlier one, the way the library manifest does, and
+  refuses only a file from a later one, naming both versions. A bump
+  that changes the shape ships a reader for the previous schema in the
+  same change; `docs/UPGRADE.md` carries the row.
+
+- **`bookrack --help` opens with the first run.** The trailer named
+  `run`, `rpc list`, and `doctor` but never `bookrack init`, the step
+  everything else assumes. It now says what `init` does and follows it
+  with the same three-command sequence the wizard's closing screen
+  prints, rendered from the same list, so the two surfaces cannot
+  drift apart in wording.
+
+- **`doctor` and `library.info` state what happened to a registry
+  default a path-class selection passed over.** The data-root row
+  called the default "shadowed by" the flag or variable, which on a
+  daemon serving the whole registry is not so: an unnamed call still
+  reaches that default. Both surfaces now say which source selected
+  the root and where the default points; the row keeps its remedy.
+
+- **`bookrack runs show` reads its `profiles:` section from the run's
+  rollup instead of re-counting the audit tables.** The rollup row a
+  run materialises at close (`n_books`, `n_papers`, the histograms)
+  never moved, but the profile buckets beside it were counted live on
+  every `show`. Both audit tables hold one projection row per item,
+  rewritten by whichever run judges the item last, so after a
+  `glean --force` or a per-item re-audit the buckets of the earlier run
+  lost rows while its `n_papers` did not, and the two disagreed on the
+  same screen. `compute_run_summary` now stores the buckets as a JSON
+  column on `pipeline_run_summary`, and `runs show` renders that
+  snapshot. Rollups materialised before this build carry no snapshot;
+  for those the command still counts live and labels the section
+  `profiles (counted now, not at run close)` with a note that the
+  numbers need not add up. `pipeline_run_id` on an audit row is
+  documented as the pointer to the pass that judged the item last, not
+  as run membership. Catalog schema advances to `user_version` 17.
+
+- **`bookrack distill build --dry-run` registers its run as
+  `distill_dryrun`.** A preview used to open a `pipeline_runs` row under
+  `distill_build`, so `bookrack runs list` showed a rehearsal and a
+  build that wrote `reference.db` as the same command, and a
+  `--command distill_build` filter counted both. The preview now
+  carries its own name, matching `dryrun` and `papers_dryrun`; it still
+  writes its `book_distill_audit` rows, and `runs show` still renders
+  them. Existing rows keep the name they were written under.
+
+- **`bookrack verify` now judges its report, and prints it for a
+  reader.** Since 0.4.0 the command fetched the report over the control
+  plane, printed it as JSON, and exited 0 whatever it said — a catalog
+  whose schema failed verification and a healthy one returned the same
+  code, so the exit-code table gave scripts nothing to branch on, and
+  the renderer that used to draw the report for a person was never
+  called. The command now renders the report as text (the raw result
+  stays available under `--json`) and exits `1` when a finding says the
+  library is damaged: a store that does not verify or cannot be read
+  (`catalog_schema_error`, `corpus_schema_error`, `intake_scan_error`),
+  an unreadable vector sidecar (`vectors_meta_error`), one store missing
+  while the other is present, or an intake row whose file is gone
+  (`missing_intake_files`). An uninitialised root, a library that never
+  built its vector index, and any amount of churn exit `0`: not built
+  is not broken. The report is drawn before the exit code is set, so
+  the exit code adds no line of its own. Scripts that parsed the
+  default output as JSON pass `--json`. The exit-code table in
+  `docs/control-plane.md` gains the source.
+
+### Fixed
+
+- **`bookrack init` reports a refusal as one line with a hint, at
+  exit 2.** The wizard's refusals — `--non-interactive` without
+  `--data-dir`, a data root inside the application bundle, a path that
+  is not a directory, a root that already holds a library, Ollama
+  unreachable or the model not pulled — were the one family of
+  predictable failures the binary printed as a cause chain at exit 1.
+  They are now typed, carry the same summary / detail / hint the other
+  refusals do, and classify like them: `--json` gets the structured
+  object, and the Ollama cases use the daemon preflight's own wording,
+  so the two surfaces cannot disagree about the same host.
+
+- **The setup wizard's closing screen offers commands that can be
+  followed.** `bookrack init` closed on three suggestions of which none
+  worked as written: `bookrack query`, a verb the binary does not
+  carry; `bookrack ingest`, with no word that it needs a running
+  daemon; and `bookrack-mcp`, which cannot run beside the `bookrack
+  run` the README asks for. The screen now ends on the first-run
+  sequence in the order it has to run: `bookrack run` in one terminal,
+  `bookrack ingest` in another, then `bookrack search`. The sequence is
+  one list in the grammar crate, and a test parses every step against
+  the binary, so a step naming a verb the surface has dropped fails the
+  build rather than the operator.
+
+- **`bookrack query` is answered with `bookrack search`.** The typed
+  name fell through to clap's similarity tip, which offered `verify`
+  and `queue`; it now points at the verb that does what the word asks,
+  as the other common read names already do.
+
+- **A data root carrying a registered library's identity at another
+  path is refused, not followed.** Resolving `--data-dir` or
+  `BOOKRACK_DATA_DIR` matched the root's manifest uuid against the
+  registry and claimed the entry's name whatever path the entry
+  recorded, so `bookrack run --data-dir <copy>` came up serving the
+  registered root instead of the one named, and `info` and `doctor`
+  reported the copy under the original's name. Such a root now stays
+  anonymous on every local surface, and `bookrack run` refuses it
+  before opening anything, naming both paths and the two
+  `libraries add` forms that resolve a move and a copy. A root at the
+  path its entry records is claimed as before.
+
+- **Refreshing a registry entry no longer chooses the default
+  library.** Every registry entry write set the `default` pointer when
+  none was recorded, so after `libraries remove` cleared it, the next
+  `index-profile apply`, `libraries config` edit, or `libraries scan
+  --register` picked a default on the operator's behalf without saying
+  so — the scan by whichever root its walk reached first. Those writes
+  now record the entry alone, and a scan that leaves the registry
+  without a default says so and names `libraries default`.
+  `libraries add`, `libraries register`,
+  `libraries fork`, and `bookrack init` still make a first library the
+  default when none is set, as before, and `libraries add` still says
+  so.
+
+- **Registry entries record absolute data roots.** `libraries add`,
+  `libraries register`, `libraries scan --register`, and
+  `index-profile apply` wrote the path they were given, so a root
+  typed as `./lib` was recorded as `./lib` and resolved against
+  whatever directory the next invocation happened to run from. A
+  relative path is now joined to the working directory once, where
+  the data root is resolved, and the registry writer refuses a
+  relative root outright; `libraries fork` resolves a relative
+  `--data-dir` against the operator's working directory before
+  sending it to the daemon, where it was rejected. The lock file,
+  `daemon.status.data_dir`, and every reported path carry the same
+  absolute form.
+
+- **MCP tools classify their failures the way the control plane
+  does.** Every tool mapped an ops error to `-32603` unless a hand-
+  written arm picked it out, so a write against an unknown intake, a
+  store written by a newer schema, an embedding model the backend does
+  not hold, and a vector-store refusal of a build parameter all told an
+  agent to report a bug. The tools now hand the typed error to the
+  shared mapping layer: those conditions answer `-32602` or `-32018`
+  with the detail and hint the control plane carries, and a condition
+  takes the same code on both surfaces. An id that resolves to nothing
+  is still a `null` body. `docs/control-plane.md` states the rule in
+  the MCP tool surface section.
+
+- **The `library.*` read proxies classify their failures the way the
+  write handlers do.** Each read proxy hand-picked its error code and
+  defaulted to `-32603`, so a condition the write side reported as
+  caller input — an `index_profile` reference naming no defined
+  profile, an embedding model the backend does not hold, a vector-store
+  refusal of a build parameter — came back from `library.info`,
+  `library.search`, and the other read methods as an internal error,
+  with the detail and hint the write side carries dropped. The proxies
+  now route through the shared mapping layer: those conditions answer
+  `-32602` with their detail and hint, a store this build cannot serve
+  answers `-32018`, and a node addressed with the wrong read shape
+  keeps its `-32602`. An id that resolves to nothing is still a `null`
+  body. `docs/control-plane.md` renames the mapping section to cover
+  both classes.
+
+- **A store refusing caller input is reported as caller input through
+  every pipeline wrapper.** The write-class error mapping recognised
+  the ops, ingest, and glean wrappers but classified only their own
+  variants; a vector-store, catalog, or corpus refusal those wrappers
+  carried fell to the wrapper's residual `-32603`, and the same
+  refusal raised bare by a command fell to the residual channel. An
+  IvfPq build missing `num_sub_vectors`, an ANN build asked of the
+  brute-force kind, a quantization too coarse for the embedding
+  dimension, a non-positive intake id, and a derived text re-pointed at
+  another source now answer `-32602` whether bare or wrapped, and each
+  carries its next step in `error.data.hint`. Store faults keep
+  `-32603`; their summary no longer leads with the wrapper's own text
+  (`catalog error: `), since the leaf is rendered from its own chain.
+  `docs/control-plane.md` lists the five under the write-class mapping.
+
+- **`library.info` now says why `vectors_meta.json` could not be read.**
+  The `vectors_error` field of the book and paper sections carried
+  only the outer message, `vectors_meta parse error` or `vectors_meta
+  IO error`, while the parser's or the filesystem's own reason was the
+  error's source and was dropped. Both now carry the flattened chain,
+  the same way `bookrack verify`'s `vectors_meta_error` already did.
+
+- **A node whose parent lies in another book is rejected at the write
+  boundary.** The corpus checked that a node's own id sat in its book's
+  partition but never looked at its `parent_id`, so a parent edge into
+  another book was accepted. That column cascades on delete: removing
+  the other book would have taken this book's subtree with it, silently.
+  No shipped ingest path builds such an edge; the check closes the gap
+  for the ones that follow, with the same `InvalidNode` error the
+  partition rule already raises.
+
+- **`bookrack verify` now says which table and column a schema
+  mismatch is in.** `catalog_schema_error` and `corpus_schema_error`
+  carried only the outer message, `catalog schema verification failed`,
+  while the verifier's per-table report — the table, each column or
+  index that differs, and what the build expected — was the error's
+  source and was dropped. Both fields now carry the flattened chain,
+  the same way `intake_scan_error` and `vectors_meta_error` already
+  did.
+
+- **An OCR product that opens with a UTF-8 byte-order mark is no longer
+  rejected as having content before its first page marker.** The
+  marker scan only recognised a marker at offset 0 or right after a
+  newline, so the three BOM bytes many Windows text tools and OCR
+  post-processing scripts prepend pushed the first marker off its
+  anchor. The scan then took the next marker as the first and reported
+  the whole first page — a well-formed marker line included — as
+  `content before the first page marker`. In a `page_*.md` directory a
+  BOM at the head of a later file was worse: that page's marker went
+  unrecognised and its text folded into the previous page, which the
+  page-count check then reported as a missing page. A leading BOM is
+  now dropped ahead of the frontmatter fence, a marker preceded only by
+  byte-order marks on its line is anchored, and the mark itself lands
+  in no page's body. The canonical text the intake's `source_sha256`
+  is computed over is unchanged, so an already registered product
+  keeps its identity.
+
+- **A distilled entry whose anchor opens with a CJK character no longer
+  overwrites its neighbours.** The `split_at_first_cjk` stage cut the
+  anchor at its first CJK character and kept the part in front as the
+  headword, so an anchor with nothing in front — a pure-CJK entry in a
+  latin-headword book, or one whose latin head the OCR lost — produced
+  an empty headword and an empty `entry_key`. Every such entry in a
+  book then landed on the same `(book_slug, entry_key)` row, each write
+  replacing the last, while the run reported the full split count. The
+  stage now keeps the whole anchor as the headword and stamps the new
+  `anchor_without_latin_head` quality flag (severity `warn`), so the
+  entry survives with a key of its own and `reference_lookup` can
+  filter it by severity. As a floor under every stage, `reference.db`
+  refuses an entry with an empty key outright instead of letting it
+  into the conflict clause; a `distill build` that produces one now
+  fails with the book and headword named.
+
+- **`bookrack verify` now says why a catalog it could open could not be
+  read.** The intake count and the missing-file scan were both taken
+  with `.ok()`, so a store whose schema verified but whose rows could
+  not be read dropped the two counts and the reason for them together:
+  the report showed a pair of absent fields and nothing else, which a
+  reader cannot tell from a check that was never run. The report now
+  carries `intake_scan_error` — the cause chain, flattened — whenever
+  either read fails, and the counts it feeds stay absent. A catalog
+  that reads back is unchanged.
+
+- **One damaged log file no longer costs the whole diagnose bundle.**
+  `bookrack diagnose` read each log file and crash report as UTF-8 and
+  propagated a decode failure out of the collector, so a single file
+  holding invalid bytes ended the run with `stream did not contain
+  valid UTF-8` and produced no bundle at all. This landed on the worst
+  possible class of file: a process killed mid-write leaves a
+  half-written record at the tail of exactly the log or crash report
+  the bundle is being assembled to explain. Both collectors now decode
+  lossily and treat a per-file failure the way an unreadable source
+  directory was already treated — the file is skipped, the rest of the
+  bundle is written.
+
+  Nothing degrades silently. A section that could not copy a file
+  verbatim writes `<section>/read-notes.json` naming each one and its
+  state: `lossy-utf8` (in the bundle, decoded with substitutions),
+  `unreadable`, or `unwritable` (absent from the bundle). A section
+  with nothing to report writes no such file.
+
+  The scrubber changed with it, which moves the bundle's
+  `schema_version` from 3 to 4. Rule 5 hashes runs of two or more CJK
+  characters, so the U+FFFD a lossy decode leaves behind would have
+  split a redacted run into single characters the rule passes
+  through — the damaged file would have carried a book title into the
+  bundle in the clear. A U+FFFD inside a run now continues it, and is
+  excluded from the hashed span so a damaged run and a clean one
+  produce the same token. See `docs/UPGRADE.md` for what the bump
+  means to a reader of an older bundle.
+
+- **A malformed OCR page marker is rejected instead of quietly costing a
+  page.** The marker scan looked for the `(sheet ` and `) -->` parts of
+  `<!-- page <label> (sheet <n>) -->` anywhere after the marker's
+  opening, not just on the marker's own line. A marker missing one of
+  them therefore borrowed the part from a marker further down the text:
+  the page it headed vanished from the extraction, and if its body
+  happened to quote a marker inline, that quoted marker's sheet number
+  was paired with text belonging to the page before it — a citation
+  pointing at the wrong page. Both searches are now bounded to the
+  marker's line, which is the assumption the scan already made when it
+  refused to recognise a marker quoted mid-line, and the error names the
+  offending line.
+
+  Ingest's coverage check caught the plain missing-page case as `OCR
+  product is missing pages`, so the usual symptom was a re-OCR that
+  changed nothing; with `--allow-partial`, or an explicit expected page
+  count, nothing caught it.
+
+### Security
+
+- **deps: `rmcp` moves from 1.7.0 to 3.5.0, clearing
+  GHSA-9pj6-vhgr-3mwh.** The advisory (high) is a session-table leak in
+  the streamable-HTTP server transport: a well-formed JSON-RPC `POST`
+  that is not an `initialize` request allocated a session before the
+  body was validated and never released it, so every such request grew
+  the daemon's memory for the life of the process. The `/mcp` endpoint
+  hosts exactly that transport with the default session manager; it
+  binds to loopback by default, so the reachable callers were local
+  processes and browser pages. The other advisories cleared by the same
+  range concern the client transports and OAuth, neither of which the
+  daemon enables. The wire format a legacy client sees is unchanged:
+  `initialize` and `mcp-session-id` sessions remain the default path,
+  and clients that negotiate protocol version 2026-07-28 are served
+  statelessly, one handler per request, as the new specification
+  requires.
+
 ## [0.11.0] - 2026-08-08
 
 ### Added

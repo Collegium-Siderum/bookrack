@@ -372,7 +372,7 @@ mod tests {
              [publishers]\n\
              whitelist = [\"Acme University Press\"]\n\
              [watermarks]\n\
-             cjk_tokens = [\"\\u638C\\u4E0A\\u4E66\\u82D1\"]\n",
+             cjk_tokens = [\"\\u7532\\u4E59\\u4E19\\u4E01\"]\n",
         );
         let loaded = AuditData::load_from(dir.path()).unwrap();
         assert_eq!(loaded.publisher_whitelist, vec!["Acme University Press"]);

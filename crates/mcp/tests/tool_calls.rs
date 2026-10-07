@@ -12,9 +12,10 @@
 //!   is the JSON body;
 //! * `library.show_book` reads an unknown intake as a `null` body
 //!   rather than an error;
-//! * an unknown `library` selector, a caller-input edit fault, and a
-//!   malformed `kind` all surface as `invalid_params`, while an
-//!   environmental fault surfaces as `internal_error`;
+//! * an unknown `library` selector, a caller-input edit fault, a
+//!   write against an unknown intake, and a malformed `kind` all
+//!   surface as `invalid_params`, while an environmental fault
+//!   surfaces as `internal_error`;
 //! * every recorded tool-call row carries `source = "mcp"` even
 //!   though the shared `Ops` was built for another surface — the
 //!   `call_tool` caller override the audit trail depends on.
@@ -298,6 +299,36 @@ async fn metadata_set_with_an_unknown_field_is_invalid_params() {
     assert!(
         data.message.contains("not_a_field"),
         "the message must name the rejected field: {}",
+        data.message
+    );
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+#[tokio::test]
+async fn a_write_tool_against_an_unknown_intake_is_invalid_params() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+
+    // No tool arm special-cases this id, so the refusal reaches the
+    // shared classifier and must come back as the caller's input.
+    let err = client
+        .call_tool(call(
+            "library.metadata.approve",
+            serde_json::json!({
+                "library": "fixture",
+                "intake_id": 999_999,
+                "reason": "contract test",
+            }),
+        ))
+        .await
+        .expect_err("approving an unknown intake must be rejected");
+    let data = rpc_error(err);
+    assert_eq!(data.code, ErrorCode::INVALID_PARAMS, "{}", data.message);
+    assert!(
+        data.message.contains("999999"),
+        "the message must name the rejected id: {}",
         data.message
     );
 

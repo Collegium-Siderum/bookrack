@@ -16,12 +16,13 @@
 use std::path::PathBuf;
 
 use bookrack_control_client::ControlError;
-use bookrack_core::{Problem, ProblemData};
+use bookrack_core::{Explain, Problem, ProblemData};
 use bookrack_runtime::control::jsonrpc::{
     BACKEND_UNAVAILABLE, BUSY, CONFIRMATION_REQUIRED, INTERNAL_ERROR, INVALID_LIBRARY,
     INVALID_PARAMS, INVALID_REQUEST, JOB_NOT_FOUND, METHOD_NOT_FOUND, NOT_READY, PARSE_ERROR,
-    PLAN_KIND_MISMATCH, PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND, PLAN_TARGET_DRIFTED,
+    PLAN_KIND_MISMATCH, PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND, PLAN_TARGET_DRIFTED, STATE_UNUSABLE,
 };
+use bookrack_runtime::wizard::WizardError;
 use serde_json::Value;
 
 /// Predictable, operator-facing failures the CLI emits.
@@ -73,6 +74,15 @@ pub enum BookrackCliError {
     #[error("doctor: at least one check failed; see the table above")]
     DoctorUnhealthy,
 
+    /// `bookrack verify` judged at least one finding in the report as
+    /// damage: a store that could not be read or verified, one of the
+    /// two stores missing while the other is there, or an intake whose
+    /// file is gone. The verify renderer already drew the report before
+    /// the binary returned; the reporter only needs to set a non-zero
+    /// exit code.
+    #[error("verify: at least one store or file check failed; see the report above")]
+    VerifyUnhealthy,
+
     /// Daemon rejected the call as a user-input failure: bad params,
     /// unknown library, unknown job/plan id, missing confirmation
     /// token, or an unknown RPC method (typo or unsupported by this
@@ -99,6 +109,20 @@ pub enum BookrackCliError {
     /// `data`, and would drop the hint that names the repair.
     #[error("rpc error {code}: {message}")]
     RpcBackendUnavailable {
+        code: i32,
+        message: String,
+        /// See [`BookrackCliError::RpcUserError`].
+        data: Option<Value>,
+    },
+
+    /// A store the call depends on is in a state this build cannot
+    /// serve — a schema or reader stamp from another build, missing or
+    /// drifted index stamps, a vector sidecar it cannot read. Exits 2
+    /// like caller input, because the call will not succeed resent and
+    /// the operator has a step to take, but stays its own variant:
+    /// `RpcUserError` says the request was wrong, and here it was not.
+    #[error("rpc error {code}: {message}")]
+    RpcStateUnusable {
         code: i32,
         message: String,
         /// See [`BookrackCliError::RpcUserError`].
@@ -214,6 +238,16 @@ pub enum BookrackCliError {
     #[error("{}", .problem.summary)]
     FilterOffItsSide { problem: Problem },
 
+    /// `bookrack init` refused on the operator's input or the host:
+    /// `--non-interactive` without `--data-dir`, a data root inside the
+    /// application bundle, a path that is not a directory, a root that
+    /// already holds a library without `--force`, or an embed backend
+    /// that is unreachable or lacks the model. Each is decided before
+    /// anything is written. Operator input, not a bug: exit 2, and the
+    /// reporter draws the three parts.
+    #[error("{}", .problem.summary)]
+    InitRefused { problem: Problem },
+
     /// `libraries detect <path>` determined the path is not a confirmed
     /// or probable bookrack data root — a plain not-a-library verdict or
     /// an unreadable manifest. The renderer already printed the verdict;
@@ -230,8 +264,8 @@ impl BookrackCliError {
             Self::DaemonNotRunning | Self::DaemonUnreachable { .. } => 2,
             Self::StaleSessionLock { .. } => 3,
             Self::SessionLockUnreadable { .. } => 1,
-            Self::DoctorUnhealthy => 1,
-            Self::RpcUserError { .. } => 2,
+            Self::DoctorUnhealthy | Self::VerifyUnhealthy => 1,
+            Self::RpcUserError { .. } | Self::RpcStateUnusable { .. } => 2,
             Self::RpcBusy { .. } | Self::RpcBackendUnavailable { .. } => 4,
             Self::RpcInternal { .. } => 1,
             Self::IngestPartialFailure { .. } => 5,
@@ -242,7 +276,8 @@ impl BookrackCliError {
             | Self::RootNotRoutable { .. }
             | Self::PreflightRefused { .. }
             | Self::ItemIdUnusable { .. }
-            | Self::FilterOffItsSide { .. } => 2,
+            | Self::FilterOffItsSide { .. }
+            | Self::InitRefused { .. } => 2,
             Self::DetectNegative(_) => 1,
         }
     }
@@ -253,7 +288,10 @@ impl BookrackCliError {
     pub fn is_self_reported(&self) -> bool {
         matches!(
             self,
-            Self::DoctorUnhealthy | Self::IngestPartialFailure { .. } | Self::DetectNegative(_)
+            Self::DoctorUnhealthy
+                | Self::VerifyUnhealthy
+                | Self::IngestPartialFailure { .. }
+                | Self::DetectNegative(_)
         )
     }
 
@@ -284,6 +322,11 @@ impl BookrackCliError {
                 message,
                 data,
             },
+            STATE_UNUSABLE => Self::RpcStateUnusable {
+                code,
+                message,
+                data,
+            },
             PARSE_ERROR | INVALID_REQUEST | INTERNAL_ERROR => Self::RpcInternal {
                 code,
                 message,
@@ -308,12 +351,14 @@ impl BookrackCliError {
         let data = match self {
             Self::RpcUserError { data, .. }
             | Self::RpcInternal { data, .. }
-            | Self::RpcBackendUnavailable { data, .. } => data.as_ref()?,
+            | Self::RpcBackendUnavailable { data, .. }
+            | Self::RpcStateUnusable { data, .. } => data.as_ref()?,
             Self::LibraryNotRoutable { problem }
             | Self::RootNotRoutable { problem }
             | Self::PreflightRefused { problem }
             | Self::ItemIdUnusable { problem }
-            | Self::FilterOffItsSide { problem } => {
+            | Self::FilterOffItsSide { problem }
+            | Self::InitRefused { problem } => {
                 return Some(problem.data.clone());
             }
             Self::RpcParamsInvalid { detail, .. } => {
@@ -356,9 +401,10 @@ pub enum CliReportCause<'a> {
     /// A typed `BookrackCliError` was found in the chain; use it
     /// verbatim.
     Cli(&'a BookrackCliError),
-    /// A `ControlError::Rpc` from the control client was found in the
-    /// chain; this owned variant carries the classification.
-    Rpc(BookrackCliError),
+    /// A typed error from another crate was found in the chain — a
+    /// JSON-RPC error from the control client, or a wizard refusal —
+    /// and classified into an owned `BookrackCliError`.
+    Classified(BookrackCliError),
 }
 
 impl CliReportCause<'_> {
@@ -367,13 +413,13 @@ impl CliReportCause<'_> {
     pub fn as_cli(&self) -> &BookrackCliError {
         match self {
             Self::Cli(e) => e,
-            Self::Rpc(e) => e,
+            Self::Classified(e) => e,
         }
     }
 }
 
-/// Walk an `eyre::Report` chain for a typed CLI error or an unwrapped
-/// JSON-RPC error from the control client.
+/// Walk an `eyre::Report` chain for a typed CLI error, an unwrapped
+/// JSON-RPC error from the control client, or a wizard refusal.
 pub fn classify_eyre(err: &eyre::Report) -> Option<CliReportCause<'_>> {
     for cause in err.chain() {
         if let Some(cli_err) = cause.downcast_ref::<BookrackCliError>() {
@@ -385,11 +431,16 @@ pub fn classify_eyre(err: &eyre::Report) -> Option<CliReportCause<'_>> {
             data,
         }) = cause.downcast_ref::<ControlError>()
         {
-            return Some(CliReportCause::Rpc(BookrackCliError::from_rpc(
+            return Some(CliReportCause::Classified(BookrackCliError::from_rpc(
                 *code,
                 message.clone(),
                 data.clone(),
             )));
+        }
+        if let Some(refusal) = cause.downcast_ref::<WizardError>() {
+            return Some(CliReportCause::Classified(BookrackCliError::InitRefused {
+                problem: refusal.explain(),
+            }));
         }
     }
     None
@@ -532,6 +583,19 @@ mod tests {
         assert!(!BookrackCliError::DaemonNotRunning.is_self_reported());
     }
 
+    /// The verify renderer draws the whole report before this variant
+    /// is raised, so the reporter printing its one-line form would put
+    /// a `bookrack: …` line under a report that already said it.
+    #[test]
+    fn verify_unhealthy_exits_one_and_is_self_reported() {
+        let err = BookrackCliError::VerifyUnhealthy;
+        assert_eq!(err.exit_code(), 1);
+        assert!(
+            err.is_self_reported(),
+            "the report is the failure surface; the reporter must stay quiet"
+        );
+    }
+
     #[test]
     fn ingest_partial_failure_uses_exit_five_and_is_self_reported() {
         let err = BookrackCliError::IngestPartialFailure {
@@ -649,6 +713,35 @@ mod tests {
         }
     }
 
+    /// An unusable store exits 2 like caller input — the operator has a
+    /// step to take and the call will not succeed resent — but through
+    /// its own variant: `RpcUserError` says the request was wrong, and
+    /// here it was not. The `data` slot has to survive, since the hint
+    /// is the whole difference between this and "internal error".
+    #[test]
+    fn from_rpc_classifies_an_unusable_state_as_exit_two_and_keeps_its_data() {
+        let err = BookrackCliError::from_rpc(
+            STATE_UNUSABLE,
+            "catalog schema is newer than this build".into(),
+            Some(serde_json::json!({
+                "hint": "Run a newer bookrack build.",
+                "retryable": false,
+            })),
+        );
+        assert!(
+            matches!(err, BookrackCliError::RpcStateUnusable { .. }),
+            "{err:?}"
+        );
+        assert_eq!(err.exit_code(), 2);
+        let data = err
+            .problem_data()
+            .expect("the hint must survive classification");
+        assert!(
+            data.hint
+                .is_some_and(|h| h.contains("newer bookrack build"))
+        );
+    }
+
     /// An unusable external backend exits 4 like a busy daemon, but
     /// through its own variant, because the `data` slot has to survive:
     /// the hint that names the repair is what separates this from an
@@ -753,6 +846,31 @@ mod tests {
             Some(serde_json::json!(["not", "an", "object"])),
         );
         assert!(junk.problem_data().is_none());
+    }
+
+    /// The wizard's refusals are typed in the runtime crate and reach
+    /// `main` through `init::run`'s eyre chain; they classify like a
+    /// typed CLI error, so the reporter draws the three parts and the
+    /// binary exits 2 rather than printing a cause chain at exit 1.
+    #[test]
+    fn classify_eyre_finds_a_wizard_refusal_through_context_wrappers() {
+        let err = eyre::Report::new(WizardError::DataRootRequired).wrap_err("init");
+        let cause = classify_eyre(&err).expect("a wizard refusal must classify");
+        let cli_err = cause.as_cli();
+        assert!(
+            matches!(cli_err, BookrackCliError::InitRefused { .. }),
+            "unexpected variant: {cli_err:?}"
+        );
+        assert_eq!(cli_err.exit_code(), 2);
+        assert!(
+            !cli_err.is_self_reported(),
+            "the wizard draws no failure surface"
+        );
+        let data = cli_err.problem_data().expect("a refusal carries its parts");
+        assert!(
+            data.hint.is_some_and(|h| h.contains("--data-dir")),
+            "the hint names the flag"
+        );
     }
 
     #[test]

@@ -849,7 +849,7 @@ mod tests {
         // CJK ideographs are alphabetic, so the alpha-ratio gate
         // passes. The literal here is embedded as `\u{...}` escapes so
         // this source file carries no raw CJK bytes.
-        let cjk = "\u{878D}\u{5408}\u{65F6}\u{7A7A}\u{57DF}\u{7279}\u{5F81}";
+        let cjk = "\u{7532}\u{4E59}\u{4E19}\u{4E01}";
         assert_eq!(sniff_title(Some(cjk)), Some(cjk.to_string()));
     }
 

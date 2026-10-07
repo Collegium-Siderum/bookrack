@@ -155,6 +155,10 @@ pub fn extract_from_text(
     source_pdf: Option<&Path>,
     source_pdf_sha256: Option<&str>,
 ) -> Result<Extraction, ExtractError> {
+    // A byte-order mark is an encoding artefact, not content: it is
+    // dropped before the frontmatter fence is matched so that both
+    // `---` and the first marker are seen at the start of their line.
+    let text = text.strip_prefix(BOM).unwrap_or(text);
     let body = strip_frontmatter(text);
     let pages = scan_pages(body)?;
     let blocks = blocks_from_pages(&pages);
@@ -221,16 +225,27 @@ struct Page {
 const MARKER_PREFIX: &str = "<!-- page ";
 const MARKER_INFIX: &str = " (sheet ";
 const MARKER_SUFFIX: &str = ") -->";
+const BOM: char = '\u{feff}';
 
-/// Find the next line-anchored `MARKER_PREFIX` at or after `from`. A
-/// marker is only recognised at the start of a line (offset 0, or right
-/// after a newline — which also covers the `\n` of a CRLF pair), so the
-/// literal string quoted in body prose is not mistaken for a page break.
+/// Byte offset where the line containing `pos` starts: 0, or the byte
+/// right after the nearest preceding newline.
+fn line_start(text: &str, pos: usize) -> usize {
+    text[..pos].rfind('\n').map_or(0, |nl| nl + 1)
+}
+
+/// Find the next line-anchored `MARKER_PREFIX` at or after `from`,
+/// returning the offset of the prefix itself. A marker is only
+/// recognised at the start of a line (offset 0, or right after a
+/// newline — which also covers the `\n` of a CRLF pair), so the literal
+/// string quoted in body prose is not mistaken for a page break. A run
+/// of byte-order marks between the line start and the prefix does not
+/// break the anchor: a directory product joins per-file text, and each
+/// file may open with one.
 fn find_marker(text: &str, from: usize) -> Option<usize> {
     let mut search = from;
     while let Some(rel) = text[search..].find(MARKER_PREFIX) {
         let pos = search + rel;
-        if pos == 0 || text.as_bytes()[pos - 1] == b'\n' {
+        if text[line_start(text, pos)..pos].chars().all(|c| c == BOM) {
             return Some(pos);
         }
         search = pos + MARKER_PREFIX.len();
@@ -240,13 +255,18 @@ fn find_marker(text: &str, from: usize) -> Option<usize> {
 
 /// Walk the body after frontmatter removal, splitting it into one
 /// `Page` per line-anchored `<!-- page <label> (sheet <n>) -->` marker.
+/// Byte-order marks ahead of a marker on its own line count as neither
+/// prelude nor body.
+/// All three marker parts must sit on one line: a marker missing the
+/// infix or the suffix is rejected as a malformed package, never
+/// completed from a marker further down the text.
 fn scan_pages(text: &str) -> Result<Vec<Page>, ExtractError> {
     let Some(first) = find_marker(text, 0) else {
         return Err(ExtractError::MalformedPackage {
             detail: "no page markers found".into(),
         });
     };
-    let prelude = text[..first].trim();
+    let prelude = text[..line_start(text, first)].trim();
     if !prelude.is_empty() {
         let head: String = prelude.chars().take(40).collect();
         return Err(ExtractError::MalformedPackage {
@@ -258,15 +278,23 @@ fn scan_pages(text: &str) -> Result<Vec<Page>, ExtractError> {
     let mut cursor = first;
     while let Some(abs_prefix) = find_marker(text, cursor) {
         let after_prefix = abs_prefix + MARKER_PREFIX.len();
-        let Some(infix_off) = text[after_prefix..].find(MARKER_INFIX) else {
+        // A marker occupies one line, the same assumption `find_marker`
+        // anchors on. Both remaining parts are searched inside that line
+        // only, so a marker missing one of them cannot take it from a
+        // later marker — or from one quoted in the body it heads.
+        let line_end = text[after_prefix..]
+            .find('\n')
+            .map_or(text.len(), |rel| after_prefix + rel);
+        let marker_line = text[abs_prefix..line_end].trim_end();
+        let Some(infix_off) = text[after_prefix..line_end].find(MARKER_INFIX) else {
             return Err(ExtractError::MalformedPackage {
-                detail: "marker missing `(sheet ` infix".into(),
+                detail: format!("marker missing `(sheet ` infix: {marker_line:?}"),
             });
         };
         let after_infix = after_prefix + infix_off + MARKER_INFIX.len();
-        let Some(suffix_off) = text[after_infix..].find(MARKER_SUFFIX) else {
+        let Some(suffix_off) = text[after_infix..line_end].find(MARKER_SUFFIX) else {
             return Err(ExtractError::MalformedPackage {
-                detail: "marker missing `) -->` suffix".into(),
+                detail: format!("marker missing `) -->` suffix: {marker_line:?}"),
             });
         };
         let sheet_str = text[after_infix..after_infix + suffix_off].trim();
@@ -276,7 +304,10 @@ fn scan_pages(text: &str) -> Result<Vec<Page>, ExtractError> {
                 detail: format!("marker sheet number not an integer: {sheet_str:?}"),
             })?;
         let body_start = after_infix + suffix_off + MARKER_SUFFIX.len();
-        let body_end = find_marker(text, body_start).unwrap_or(text.len());
+        // The body ends where the next marker's line starts, so a
+        // byte-order mark ahead of that marker belongs to neither page.
+        let body_end =
+            find_marker(text, body_start).map_or(text.len(), |next| line_start(text, next));
         out.push(Page {
             sheet,
             body: text[body_start..body_end].to_string(),
@@ -418,6 +449,43 @@ third page body
     }
 
     #[test]
+    fn extract_from_text_accepts_a_leading_bom() {
+        let text = "\u{feff}<!-- page 1 (sheet 1) -->\n\nalpha\n";
+        let extraction = extract_from_text(text, None, None).expect("a BOM is not content");
+        assert_eq!(extraction.blocks.len(), 1);
+        assert_eq!(extraction.blocks[0].text, "alpha");
+    }
+
+    #[test]
+    fn extract_from_text_strips_frontmatter_behind_a_leading_bom() {
+        let text = "\u{feff}---\nschema: 1\n---\n<!-- page 1 (sheet 1) -->\n\nalpha\n";
+        let extraction = extract_from_text(text, None, None).expect("frontmatter behind a BOM");
+        assert_eq!(extraction.blocks.len(), 1);
+        assert_eq!(extraction.blocks[0].text, "alpha");
+    }
+
+    #[test]
+    fn scan_pages_anchors_a_marker_behind_a_bom_and_keeps_it_out_of_the_body() {
+        // A directory product joins per-file text, so a BOM can sit at
+        // the head of any page's line, not only at offset 0.
+        let text =
+            "<!-- page 1 (sheet 1) -->\n\nalpha\n\n\u{feff}<!-- page 2 (sheet 2) -->\n\nbeta\n";
+        let pages = scan_pages(text).expect("scan");
+        assert_eq!(pages.len(), 2, "the marker behind the BOM must open a page");
+        assert_eq!(pages[1].sheet, 2);
+        assert!(
+            !pages[0].body.contains("beta"),
+            "page two's body must not fold into page one"
+        );
+        assert!(
+            !pages[0].body.contains('\u{feff}'),
+            "the BOM must not remain in page one's body: {:?}",
+            pages[0].body
+        );
+        assert!(pages[1].body.contains("beta"));
+    }
+
+    #[test]
     fn scan_pages_rejects_a_malformed_marker() {
         let text = "<!-- page 1 (sheet abc) -->\n\nbody\n";
         let err = scan_pages(text).expect_err("must reject non-integer sheet");
@@ -460,6 +528,102 @@ second page body
         assert_eq!(pages[1].sheet, 2);
         assert!(pages[0].body.contains("first"));
         assert!(pages[1].body.contains("second"));
+    }
+
+    #[test]
+    fn scan_pages_rejects_a_marker_missing_its_sheet_infix() {
+        let text = "\
+<!-- page 1 (sheet 1) -->
+
+first page body
+
+<!-- page 2 -->
+
+second page body
+
+<!-- page 3 (sheet 3) -->
+
+third page body
+";
+        let outcome = scan_pages(text);
+        assert!(
+            matches!(&outcome, Err(ExtractError::MalformedPackage { .. })),
+            "a marker missing its `(sheet ` infix must be rejected, not swallow \
+             the page body it heads: {outcome:?}",
+        );
+    }
+
+    #[test]
+    fn scan_pages_rejects_a_malformed_marker_ahead_of_a_quoted_one() {
+        let text = "\
+<!-- page 1 (sheet 1) -->
+
+first page body
+
+<!-- page 2 -->
+
+The token <!-- page 9 (sheet 9) --> is written inline here.
+
+<!-- page 3 (sheet 3) -->
+
+third page body
+";
+        let outcome = scan_pages(text);
+        assert!(
+            matches!(&outcome, Err(ExtractError::MalformedPackage { .. })),
+            "a malformed marker must not take its sheet number from a marker \
+             quoted inside the body it heads, which pairs a fabricated page \
+             number with another page's text: {outcome:?}",
+        );
+    }
+
+    #[test]
+    fn scan_pages_rejects_a_marker_missing_its_suffix() {
+        let text = "\
+<!-- page 1 (sheet 1) -->
+
+first page body
+
+<!-- page 2 (sheet 2
+
+second page body
+
+<!-- page 3 (sheet 3) -->
+
+third page body
+";
+        let err = scan_pages(text).expect_err("must reject a marker missing its suffix");
+        let ExtractError::MalformedPackage { detail } = err else {
+            panic!("expected MalformedPackage, got {err:?}");
+        };
+        assert!(
+            detail.contains("suffix"),
+            "the diagnostic must name the missing `) -->` suffix rather than \
+             blame the sheet number it read across the following lines: {detail}",
+        );
+    }
+
+    #[test]
+    fn scan_pages_keeps_each_page_body_with_its_own_sheet() {
+        let text = "\
+<!-- page 1 (sheet 1) -->
+
+alpha
+
+<!-- page ii (sheet 2) -->
+
+beta
+
+<!-- page 3 (sheet 3) -->
+
+gamma
+";
+        let pages = scan_pages(text).expect("scan");
+        let pairs: Vec<(u32, &str)> = pages
+            .iter()
+            .map(|page| (page.sheet, page.body.trim()))
+            .collect();
+        assert_eq!(pairs, vec![(1, "alpha"), (2, "beta"), (3, "gamma")]);
     }
 
     #[test]

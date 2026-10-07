@@ -248,7 +248,7 @@ fn seed_audited_paper(data_root: &std::path::Path) -> Result<i64> {
             given: Some("Alex".to_string()),
             orcid: None,
         }],
-        doi: Some("10.18653/v1/n19-1423".to_string()),
+        doi: Some("10.5555/synthetic.0001".to_string()),
         arxiv_id: None,
         issn: None,
         container_title: Some("Journal of Synthetic Results".to_string()),

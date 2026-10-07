@@ -160,7 +160,25 @@ fn compose_card(
         }
         card["library"]["served"] = served;
     }
+    // And for what bring-up registered: a row only on the session that
+    // did it, since the next start finds the entry already there.
+    if let Some(registered) = registered_at_startup(status) {
+        card["library"]["registered_at_startup"] = Value::String(registered);
+    }
     card
+}
+
+/// The names bring-up registered for the selected root, joined for one
+/// row; `None` when it registered nothing or the daemon predates the
+/// field.
+fn registered_at_startup(status: &Value) -> Option<String> {
+    let names: Vec<&str> = status
+        .get("auto_registered")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    (!names.is_empty()).then(|| names.join(", "))
 }
 
 /// The `served` set when this daemon holds more than one library, else
@@ -644,6 +662,52 @@ mod tests {
         assert_eq!(
             human["library"]["served"]["beta"], "/data/beta (primary)",
             "{human}",
+        );
+    }
+
+    /// What bring-up registered gets a row of its own, joined for the
+    /// table, and only when there is something to say: an empty list
+    /// and a daemon that predates the field both leave the row out.
+    #[test]
+    fn a_session_that_registered_the_root_says_so_and_a_quiet_one_does_not() {
+        let base = json!({
+            "library": "gamma",
+            "data_dir": "/data/gamma",
+            "served": [
+                { "name": "alpha", "data_dir": "/data/alpha", "default": true, "primary": false },
+                { "name": "gamma", "data_dir": "/data/gamma", "default": false, "primary": true },
+            ],
+        });
+        let card_for = |status: &Value| {
+            compose_card(
+                Path::new("/run/bookrack.tty.lock"),
+                &lock_info(None),
+                &json!({ "version": "0.1.0" }),
+                status,
+                &json!({}),
+            )
+        };
+
+        let mut registered = base.clone();
+        registered["auto_registered"] = json!(["gamma"]);
+        let card = card_for(&registered);
+        assert_eq!(
+            card["library"]["registered_at_startup"], "gamma",
+            "the row names what this session registered: {card}",
+        );
+
+        let mut quiet = base.clone();
+        quiet["auto_registered"] = json!([]);
+        let card = card_for(&quiet);
+        assert!(
+            card["library"].get("registered_at_startup").is_none(),
+            "nothing registered, no row: {card}",
+        );
+
+        let card = card_for(&base);
+        assert!(
+            card["library"].get("registered_at_startup").is_none(),
+            "a daemon without the field gets no row: {card}",
         );
     }
 

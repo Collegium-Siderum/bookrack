@@ -19,6 +19,7 @@ mod common;
 use std::path::Path;
 
 use bookrack_catalog::{Catalog, NewIntake, NewItemState};
+use bookrack_config::{LibraryKind, ManifestIdentitySeed, set_manifest_index_profile};
 use bookrack_core::{ItemKind, PartitionIdx};
 use eyre::{Result, eyre};
 use serde_json::{Value, json};
@@ -1103,6 +1104,85 @@ async fn fork_validation_failures_are_caller_input() -> Result<()> {
                 "library.fork with {what} must say which check failed: {resp}"
             );
         }
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
+/// The `library.*` read proxies route a failure through the same
+/// classifier the write handlers use, so a condition the write side
+/// reports as caller input is caller input on the read side too, with
+/// the same detail and hint. The condition exercised is an
+/// `index_profile` reference naming no defined profile: the write side
+/// already answers it `-32602` with the accepted set, and `library.info`
+/// resolves the same reference on every call. It used to be `-32603`
+/// there, with the accepted set dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_proxies_route_failures_through_the_shared_classifier() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    seed_intake(
+        &data_root.path().join("catalog.db"),
+        ItemKind::Book,
+        "sha-book",
+    )?;
+    bookrack_corpus::Corpus::open(&data_root.path().join("corpus.db"))?;
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+    let root = data_root.path().to_path_buf();
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        // The profile reference is re-read from the manifest on every
+        // call, so a name written after bring-up reaches `library.info`
+        // without a restart. A name outside the defined set is the same
+        // `CmdInputError::BadArgument` the write side answers `-32602`
+        // with, carrying the accepted set.
+        set_manifest_index_profile(
+            &root,
+            Some("no-such-profile"),
+            ManifestIdentitySeed {
+                name: "default",
+                kind: LibraryKind::Test,
+                description: None,
+            },
+        )?;
+        let resp = call(&mut w, &mut reader, 1, "library.info", json!({})).await?;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(INVALID_PARAMS),
+            "library.info must report an undefined profile as caller input: {resp}"
+        );
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no-such-profile"),
+            "the refused value must be named: {resp}"
+        );
+        assert!(
+            !resp["error"]["data"]["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "the accepted set must reach the wire in detail: {resp}"
+        );
 
         send(
             &mut w,

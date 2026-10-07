@@ -834,7 +834,7 @@ mod tests {
     fn partition_body_around_match_walks_past_a_skipped_inner_value() {
         // "<surname>" precedes "[Japanese]"; only the latter is a
         // country tag.
-        let body = "\u{5343}\u{6D66}\u{3008}\u{59D3}\u{3009}[\u{65E5}]";
+        let body = "\u{7532}\u{4E59}\u{3008}\u{59D3}\u{3009}[\u{65E5}]";
         let stage = || {
             partition_body_around_match(
                 PatternRef::BracketedTag {
@@ -849,11 +849,11 @@ mod tests {
             )
             .expect("compile head_split_by")
         };
-        let out = run(stage(), vec![split("Chiura", body)]);
+        let out = run(stage(), vec![split("Sample", body)]);
         assert_eq!(out[0].payload.get("country").unwrap(), "\u{65E5}");
         assert_eq!(
             out[0].payload.get("chinese_name").unwrap(),
-            "\u{5343}\u{6D66}\u{3008}\u{59D3}\u{3009}",
+            "\u{7532}\u{4E59}\u{3008}\u{59D3}\u{3009}",
             "the skipped tag stays in the head rather than being cut out"
         );
     }
@@ -862,7 +862,7 @@ mod tests {
     /// declared opt-in and not a change of the default rule.
     #[test]
     fn partition_body_around_match_takes_the_leftmost_match_without_a_skip_list() {
-        let body = "\u{5343}\u{6D66}\u{3008}\u{59D3}\u{3009}[\u{65E5}]";
+        let body = "\u{7532}\u{4E59}\u{3008}\u{59D3}\u{3009}[\u{65E5}]";
         let out = run(
             partition_body_around_match(
                 PatternRef::BracketedTag {
@@ -876,7 +876,7 @@ mod tests {
                 vec![],
             )
             .expect("compile head_split_by"),
-            vec![split("Chiura", body)],
+            vec![split("Sample", body)],
         );
         assert_eq!(out[0].payload.get("country").unwrap(), "\u{59D3}");
     }
@@ -885,7 +885,7 @@ mod tests {
     /// entry passes through with its body intact.
     #[test]
     fn partition_body_around_match_skipping_every_candidate_is_no_match() {
-        let body = "\u{5343}\u{6D66}\u{3008}\u{59D3}\u{3009}";
+        let body = "\u{7532}\u{4E59}\u{3008}\u{59D3}\u{3009}";
         let out = run(
             partition_body_around_match(
                 PatternRef::BracketedTag {
@@ -899,7 +899,7 @@ mod tests {
                 vec!["\u{59D3}".to_string()],
             )
             .expect("compile head_split_by"),
-            vec![split("Chiura", body)],
+            vec![split("Sample", body)],
         );
         assert!(out[0].payload.is_empty());
         assert_eq!(out[0].body, body);

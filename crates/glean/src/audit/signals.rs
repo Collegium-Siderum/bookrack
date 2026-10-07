@@ -669,7 +669,7 @@ mod csl_type_tests {
                 given: Some("Alex".to_string()),
                 orcid: None,
             }],
-            doi: Some("10.18653/v1/n19-1423".to_string()),
+            doi: Some("10.5555/synthetic.0001".to_string()),
             arxiv_id: None,
             issn: None,
             container_title: Some("Journal of Synthetic Results".to_string()),
@@ -887,10 +887,10 @@ mod tests {
 
     #[test]
     fn doi_regex_matches_crossref_canonical_form_case_insensitively() {
-        assert!(DOI_RE.is_match("10.18653/v1/n19-1423"));
-        assert!(DOI_RE.is_match("10.1128/AEM.02591-07"));
+        assert!(DOI_RE.is_match("10.5555/v1/a00-0000"));
+        assert!(DOI_RE.is_match("10.5555/ABC.00000-00"));
         assert!(!DOI_RE.is_match("not-a-doi"));
-        assert!(!DOI_RE.is_match("10.18653"));
+        assert!(!DOI_RE.is_match("10.5555"));
     }
 
     #[test]
@@ -1031,7 +1031,7 @@ mod tests {
         let mut attrs = NewPublicationAttrs::new(intake.intake().intake_id, ItemKind::Paper);
         attrs.title = Some("A Study of Synthetic Test Corpora".to_string());
         attrs.year = Some("2020".to_string());
-        attrs.doi = Some("10.18653/v1/n19-1423".to_string());
+        attrs.doi = Some("10.5555/synthetic.0001".to_string());
         attrs.publisher = publisher.map(str::to_string);
         catalog.upsert_publication_attrs(&attrs).expect("upsert");
         catalog

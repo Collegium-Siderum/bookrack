@@ -537,7 +537,7 @@ stages = [
     fn embedded_flag_summary_is_byte_stable_and_name_sorted() {
         assert_eq!(
             Catalogs::embedded_flag_summary(),
-            r#"[{"name":"anchor_glued_with_body","severity":"warn"},{"name":"low_ocr_confidence","severity":"warn"},{"name":"pair_mismatch","severity":"warn"},{"name":"redirect_loop","severity":"error"},{"name":"spliced_from_orphan","severity":"info"},{"name":"verified_by_user","severity":"ok"}]"#,
+            r#"[{"name":"anchor_glued_with_body","severity":"warn"},{"name":"anchor_without_latin_head","severity":"warn"},{"name":"low_ocr_confidence","severity":"warn"},{"name":"pair_mismatch","severity":"warn"},{"name":"redirect_loop","severity":"error"},{"name":"spliced_from_orphan","severity":"info"},{"name":"verified_by_user","severity":"ok"}]"#,
         );
     }
 

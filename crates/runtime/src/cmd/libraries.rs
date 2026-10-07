@@ -11,8 +11,8 @@
 use std::path::{Path, PathBuf};
 
 use bookrack_config::{
-    Config, LibraryEntryFields, LibraryKind, load_manifest, new_manifest, upsert_library_entry,
-    write_manifest,
+    Config, LibraryEntryFields, LibraryKind, load_manifest, new_manifest,
+    upsert_library_entry_claiming_default, write_manifest,
 };
 use eyre::{Context, ContextCompat, Result, bail};
 
@@ -164,7 +164,7 @@ where
         created_at: manifest.created_at.clone(),
         uuid: Some(manifest.uuid.clone()),
     };
-    upsert_library_entry(registry_path, new_name, &entry)
+    upsert_library_entry_claiming_default(registry_path, new_name, &entry)
         .with_context(|| format!("register '{}' in {}", new_name, registry_path.display()))?;
 
     println!();
@@ -185,6 +185,9 @@ fn validate_inputs(
     if new_name.trim().is_empty() {
         return Err(refused("new library name must not be empty", None));
     }
+    // The target arrives over the control socket, where a relative path
+    // has no working directory to resolve against; the client resolves
+    // it before sending.
     if !target.is_absolute() {
         return Err(refused(
             format!("--data-dir must be an absolute path: {}", target.display()),
@@ -350,6 +353,8 @@ fn is_cross_filesystem(e: &std::io::Error) -> bool {
 mod tests {
     use super::*;
     use std::fs;
+
+    use bookrack_config::upsert_library_entry;
 
     fn touch(path: &Path, content: &[u8]) {
         if let Some(parent) = path.parent() {

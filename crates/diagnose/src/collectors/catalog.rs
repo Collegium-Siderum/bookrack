@@ -22,22 +22,38 @@ pub(crate) const RECENT_ROW_CAP: u32 = 1000;
 pub(crate) const INTAKE_HEAD_CAP: u32 = 50;
 
 /// Write `<bundle>/catalog/{intakes-head,tool-calls,pipeline-audit,
-/// metadata-audit}.json`. A catalog.db that is missing or fails to
-/// open writes `open-error.json` in place of the four payload files;
-/// empty tables write an empty JSON array.
+/// metadata-audit}.json` from the book catalog. See [`collect_into`]
+/// for what a missing or unopenable store writes instead.
 pub fn collect(cfg: &Config, since_ts: &str, bundle_dir: &Path, scrubber: &Scrubber) -> Result<()> {
-    let dst = bundle_dir.join("catalog");
-    std::fs::create_dir_all(&dst)?;
+    collect_into(
+        &cfg.catalog_db(),
+        &bundle_dir.join("catalog"),
+        since_ts,
+        scrubber,
+    )
+}
 
-    let catalog_db = cfg.catalog_db();
+/// Snapshot the catalog at `catalog_db` into `dst`: the four payload
+/// files when it opens, `open-error.json` in their place when it is
+/// missing or fails to open. Empty tables write an empty JSON array.
+/// The book and paper catalogs share one schema, so both sides route
+/// through here.
+pub(crate) fn collect_into(
+    catalog_db: &Path,
+    dst: &Path,
+    since_ts: &str,
+    scrubber: &Scrubber,
+) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+
     if !catalog_db.exists() {
-        return super::write_open_error(&dst, &catalog_db, None);
+        return super::write_open_error(dst, catalog_db, None);
     }
-    let catalog = match Catalog::open_read_only(&catalog_db) {
+    let catalog = match Catalog::open_read_only(catalog_db) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "diagnose: could not open catalog read-only");
-            return super::write_open_error(&dst, &catalog_db, Some(&e.to_string()));
+            return super::write_open_error(dst, catalog_db, Some(&e.to_string()));
         }
     };
 
