@@ -45,6 +45,17 @@ release workflow extracts the matching section verbatim from this file.
   itself. The reply lists the term's renderings afterwards, and every
   call leaves one audit row.
 
+- **translate: prompt skeletons and the dispatcher brief.** The crate
+  ships four translator skeletons, one per task mode (draft, review)
+  and prompt kind (with glossary, clean), and the brief that drives the
+  book loop: plan, work the pending units one agent session each, apply
+  the review tier at the end of a unit, and stop when the token budget
+  for a chapter or the book is spent. The skeletons are English, with
+  the ten rules of the prompt contract as fixed headings; a translation
+  prompt is written in its target language, so the dispatcher's first
+  task for a language is to render them into it under the library's
+  data root, where a person may edit the rendering.
+
 - **translate: new crate with the `translate.db` schema.** The
   translation working store arrives as a schema-only foundation:
   seven tables (immutable units, mutable segments, the two-layer

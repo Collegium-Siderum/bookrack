@@ -49,6 +49,7 @@ pub mod injection;
 pub mod meta;
 pub mod migrate;
 pub mod pending;
+pub mod prompts;
 pub mod segmentation;
 pub mod segments;
 pub mod units;
