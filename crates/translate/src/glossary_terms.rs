@@ -11,6 +11,8 @@
 
 use bookrack_dbkit::{ColumnSpec, TableSpec};
 
+use crate::{Translate, TranslateResult};
+
 /// The single source of truth for the `glossary_terms` table's schema.
 /// The frozen baseline DDL in [`crate::migrate`] is rendered from this
 /// spec; `verify_all` pins the two together on every open.
@@ -38,3 +40,261 @@ pub(crate) const SPEC: TableSpec = TableSpec {
     table_checks: &[],
     indexes: &[],
 };
+
+/// One `glossary_terms` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TermRow {
+    pub term_id: i64,
+    pub scope: String,
+    pub scope_ref: Option<String>,
+    pub source_lang: String,
+    pub source_term: String,
+    pub source_norm: String,
+    pub term_kind: String,
+    pub primary_choice_id: Option<i64>,
+}
+
+/// A glossary term found in a segment's source text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TermMatch {
+    pub term: TermRow,
+    /// Half-open char range of the first occurrence in the source text.
+    pub span_in_source: (usize, usize),
+}
+
+/// A char that continues a word for boundary purposes: alphanumeric
+/// and outside the CJK blocks, which have no word boundaries to
+/// respect. Accented Latin letters count as word chars, so a term
+/// does not match inside a word that merely starts or ends with one.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() && (c as u32) < 0x2E80
+}
+
+/// Case-fold one char to a single char so a folded text keeps a 1:1
+/// index mapping with the original. The few chars whose lower-case
+/// form is longer than one char fold to its first char.
+fn fold(c: char) -> char {
+    c.to_lowercase().next().unwrap_or(c)
+}
+
+/// First occurrence of `term` in `text` as a half-open char range, or
+/// `None`. Both are compared case-folded; where the term's edge char is
+/// a word char, the adjacent text char must not be one.
+pub(crate) fn find_term(text: &[char], term: &[char]) -> Option<(usize, usize)> {
+    if term.is_empty() || term.len() > text.len() {
+        return None;
+    }
+    let edge_start = is_word_char(term[0]);
+    let edge_end = is_word_char(term[term.len() - 1]);
+    (0..=text.len() - term.len()).find_map(|at| {
+        let end = at + term.len();
+        if text[at..end] != *term {
+            return None;
+        }
+        if edge_start && at > 0 && is_word_char(text[at - 1]) {
+            return None;
+        }
+        if edge_end && end < text.len() && is_word_char(text[end]) {
+            return None;
+        }
+        Some((at, end))
+    })
+}
+
+impl Translate {
+    /// Scan `source_text` for glossary terms visible to `intake_id`
+    /// and return first-occurrence matches, ordered by position.
+    ///
+    /// Visible terms are the book's own (`scope = 'book'` with the
+    /// intake id as `scope_ref`), the library's, and every authority's.
+    /// Terms sharing a `source_norm` collapse to the most specific
+    /// scope, book over library over authority. Matching is a
+    /// case-folded char-level substring scan; where a term's edge char
+    /// is alphanumeric and not CJK, the adjacent text char must not be
+    /// one either, so `art` does not hit inside `particular` and a term
+    /// does not hit inside an accented word, while CJK neighbours never
+    /// block a hit. The source language is not filtered on.
+    pub fn match_terms(
+        &self,
+        intake_id: i64,
+        source_text: &str,
+    ) -> TranslateResult<Vec<TermMatch>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT term_id, scope, scope_ref, source_lang, source_term, source_norm, \
+                    term_kind, primary_choice_id \
+             FROM glossary_terms \
+             WHERE (scope = 'book' AND scope_ref = ?1) OR scope IN ('library', 'authority') \
+             ORDER BY CASE scope WHEN 'book' THEN 0 WHEN 'library' THEN 1 ELSE 2 END, term_id",
+        )?;
+        let rows = stmt.query_map([intake_id.to_string()], |row| {
+            Ok(TermRow {
+                term_id: row.get(0)?,
+                scope: row.get(1)?,
+                scope_ref: row.get(2)?,
+                source_lang: row.get(3)?,
+                source_term: row.get(4)?,
+                source_norm: row.get(5)?,
+                term_kind: row.get(6)?,
+                primary_choice_id: row.get(7)?,
+            })
+        })?;
+
+        let text: Vec<char> = source_text.chars().map(fold).collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut matches = Vec::new();
+        for row in rows {
+            let term = row?;
+            if !seen.insert(term.source_norm.clone()) {
+                continue;
+            }
+            let needle: Vec<char> = term.source_term.chars().map(fold).collect();
+            if let Some(span_in_source) = find_term(&text, &needle) {
+                matches.push(TermMatch {
+                    term,
+                    span_in_source,
+                });
+            }
+        }
+        matches.sort_by_key(|m| (m.span_in_source.0, m.term.term_id));
+        Ok(matches)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::seed;
+
+    fn span(text: &str, term: &str) -> Option<(usize, usize)> {
+        let text: Vec<char> = text.chars().map(fold).collect();
+        let term: Vec<char> = term.chars().map(fold).collect();
+        find_term(&text, &term)
+    }
+
+    #[test]
+    fn a_word_edge_does_not_match_inside_a_longer_word() {
+        assert_eq!(span("a particular case", "art"), None);
+        assert_eq!(span("the art of war", "art"), Some((4, 7)));
+        assert_eq!(span("the objet a is", "objet a"), Some((4, 11)));
+    }
+
+    #[test]
+    fn accented_latin_neighbours_block_a_hit() {
+        assert_eq!(span("Lacan's \u{c9}crits", "crits"), None);
+        assert_eq!(span("das \u{fc}ber-Ich", "ber"), None);
+        assert_eq!(span("\u{c9}crits", "\u{e9}crits"), Some((0, 6)));
+    }
+
+    #[test]
+    fn matching_folds_case_including_accented_letters() {
+        assert_eq!(span("DASEIN", "Dasein"), Some((0, 6)));
+        assert_eq!(span("\u{c9}CRITS", "\u{e9}crits"), Some((0, 6)));
+    }
+
+    #[test]
+    fn spans_count_chars_not_bytes_and_report_the_first_occurrence() {
+        // Two multi-byte chars precede the first hit.
+        assert_eq!(span("\u{e9}\u{e9} art art", "art"), Some((3, 6)));
+    }
+
+    #[test]
+    fn cjk_neighbours_never_block_a_hit() {
+        // Term: two ideographs; text: the same two inside a run of ideographs.
+        let text = "\u{4e3b}\u{4f53}\u{6027}\u{7684}";
+        assert_eq!(span(text, "\u{4f53}\u{6027}"), Some((1, 3)));
+        // A Latin term directly against ideographs still hits.
+        assert_eq!(span("\u{4e3b}Dasein\u{7684}", "Dasein"), Some((1, 7)));
+    }
+
+    #[test]
+    fn an_empty_term_never_matches() {
+        assert_eq!(span("anything", ""), None);
+    }
+
+    #[test]
+    fn visible_terms_are_the_books_own_the_librarys_and_every_authoritys() {
+        let t = seed::fresh();
+        let mine = seed::term(&t, "book", Some("1"), "de", "Dasein", "dasein", "term");
+        seed::term(&t, "book", Some("2"), "de", "Sorge", "sorge", "term");
+        let lib = seed::term(&t, "library", None, "de", "Angst", "angst", "term");
+        let auth = seed::term(
+            &t,
+            "authority",
+            Some("lexicon"),
+            "de",
+            "Welt",
+            "welt",
+            "term",
+        );
+
+        let ids: Vec<i64> = t
+            .match_terms(1, "Dasein, Sorge, Angst, Welt")
+            .expect("match")
+            .iter()
+            .map(|m| m.term.term_id)
+            .collect();
+        assert_eq!(ids, vec![mine, lib, auth]);
+    }
+
+    #[test]
+    fn terms_sharing_a_norm_collapse_to_the_most_specific_scope() {
+        let t = seed::fresh();
+        seed::term(
+            &t,
+            "authority",
+            Some("lexicon"),
+            "de",
+            "Dasein",
+            "dasein",
+            "term",
+        );
+        seed::term(&t, "library", None, "de", "Dasein", "dasein", "term");
+        let book = seed::term(&t, "book", Some("1"), "de", "Dasein", "dasein", "term");
+
+        let matches = t.match_terms(1, "Dasein").expect("match");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].term.term_id, book);
+        assert_eq!(matches[0].term.scope, "book");
+    }
+
+    #[test]
+    fn matches_come_back_in_text_order_with_every_column() {
+        let t = seed::fresh();
+        let later = seed::term(&t, "library", None, "de", "Sorge", "sorge", "proper_noun");
+        let earlier = seed::term(&t, "book", Some("1"), "de", "Dasein", "dasein", "term");
+        seed::set_primary(&t, earlier, 77);
+
+        let matches = t.match_terms(1, "Dasein und Sorge").expect("match");
+        assert_eq!(
+            matches,
+            vec![
+                TermMatch {
+                    term: TermRow {
+                        term_id: earlier,
+                        scope: "book".into(),
+                        scope_ref: Some("1".into()),
+                        source_lang: "de".into(),
+                        source_term: "Dasein".into(),
+                        source_norm: "dasein".into(),
+                        term_kind: "term".into(),
+                        primary_choice_id: Some(77),
+                    },
+                    span_in_source: (0, 6),
+                },
+                TermMatch {
+                    term: TermRow {
+                        term_id: later,
+                        scope: "library".into(),
+                        scope_ref: None,
+                        source_lang: "de".into(),
+                        source_term: "Sorge".into(),
+                        source_norm: "sorge".into(),
+                        term_kind: "proper_noun".into(),
+                        primary_choice_id: None,
+                    },
+                    span_in_source: (11, 16),
+                },
+            ]
+        );
+    }
+}

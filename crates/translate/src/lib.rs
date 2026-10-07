@@ -45,6 +45,7 @@ use bookrack_dbkit::{OpenDecision, READER_VERSION, TableSpec, reader_version_dec
 pub mod audit;
 pub mod glossary_terms;
 pub mod glossary_translations;
+pub mod injection;
 pub mod meta;
 pub mod migrate;
 pub mod pending;
@@ -145,6 +146,14 @@ pub enum TranslateError {
     /// The live schema does not match the table specs.
     #[error("translate schema verification failed")]
     Verify(#[source] bookrack_dbkit::VerifyError),
+
+    /// An injection profile name outside the closed set this build
+    /// knows.
+    #[error("unknown injection profile {name:?}")]
+    UnknownProfile {
+        /// The name as the caller gave it.
+        name: String,
+    },
 }
 
 impl Explain for TranslateError {
@@ -218,6 +227,19 @@ impl Explain for TranslateError {
                         "Restore translate.db from a backup, or report the failure if nothing \
                          but bookrack has written the store.",
                     )
+            }
+
+            TranslateError::UnknownProfile { name } => {
+                Problem::new(format!("cannot apply unknown injection profile \"{name}\""))
+                    .detail(format!(
+                        "The profiles this build knows are {}.",
+                        injection::PROFILES
+                            .iter()
+                            .map(|p| format!("\"{p}\""))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                    .hint("Pass one of the known profile names, or omit the override to use the unit's own profile.")
             }
 
             TranslateError::Verify(source) => {
@@ -461,6 +483,59 @@ pub(crate) mod seed {
                 |row| row.get(0),
             )
             .expect("insert segment")
+    }
+
+    pub(crate) fn term(
+        t: &Translate,
+        scope: &str,
+        scope_ref: Option<&str>,
+        source_lang: &str,
+        source_term: &str,
+        source_norm: &str,
+        term_kind: &str,
+    ) -> i64 {
+        t.conn
+            .query_row(
+                "INSERT INTO glossary_terms (scope, scope_ref, source_lang, source_term, \
+                 source_norm, term_kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING term_id",
+                rusqlite::params![
+                    scope,
+                    scope_ref,
+                    source_lang,
+                    source_term,
+                    source_norm,
+                    term_kind
+                ],
+                |row| row.get(0),
+            )
+            .expect("insert term")
+    }
+
+    pub(crate) fn translation(
+        t: &Translate,
+        term_id: i64,
+        target_lang: &str,
+        target_term: Option<&str>,
+        status: &str,
+    ) -> i64 {
+        t.conn
+            .query_row(
+                "INSERT INTO glossary_translations (term_id, target_lang, target_term, status, \
+                 proposed_at) VALUES (?1, ?2, ?3, ?4, '2026-01-01T00:00:00Z') \
+                 RETURNING translation_id",
+                rusqlite::params![term_id, target_lang, target_term, status],
+                |row| row.get(0),
+            )
+            .expect("insert translation")
+    }
+
+    pub(crate) fn set_primary(t: &Translate, term_id: i64, translation_id: i64) {
+        t.conn
+            .execute(
+                "UPDATE glossary_terms SET primary_choice_id = ?1 WHERE term_id = ?2",
+                rusqlite::params![translation_id, term_id],
+            )
+            .expect("set primary");
     }
 
     pub(crate) fn witness(t: &Translate, unit_id: i64, witness_intake_id: i64, role: &str) -> i64 {
@@ -738,6 +813,25 @@ mod tests {
         );
         let hint = problem.data.hint.as_deref().expect("hint");
         assert!(hint.contains("writing"), "hint: {hint}");
+        assert!(!problem.data.retryable);
+    }
+
+    #[test]
+    fn an_unknown_profile_explains_the_name_and_lists_the_known_ones() {
+        let problem = TranslateError::UnknownProfile {
+            name: "verbose".into(),
+        }
+        .explain();
+        assert!(
+            problem.summary.contains("\"verbose\""),
+            "summary: {}",
+            problem.summary
+        );
+        let detail = problem.data.detail.as_deref().expect("detail");
+        for known in injection::PROFILES {
+            assert!(detail.contains(known), "detail: {detail}");
+        }
+        assert!(problem.data.hint.is_some(), "{problem:?}");
         assert!(!problem.data.retryable);
     }
 

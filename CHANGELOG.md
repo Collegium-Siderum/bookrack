@@ -29,6 +29,19 @@ release workflow extracts the matching section verbatim from this file.
   of creating or migrating it, and a probing variant reports a library
   that has never been translated into as having no translation data.
 
+- **translate: glossary hit resolution with injection profiles.**
+  A segment's source text is scanned for the glossary terms visible to
+  its book (the book's own, the library's, and every authority's, most
+  specific scope winning), each hit resolved through the
+  `prose` / `default` / `academic` matrix to an injection mode and
+  joined to its active and candidate renderings for the target
+  language, with the primary choice held apart from the alternatives.
+  Matching is case-folded and respects word edges in any non-CJK
+  script, so a term does not hit inside a longer or accented word
+  while CJK neighbours never block a hit. Hits that the profile does
+  not inject are dropped from the package; an unknown profile name is
+  refused with the known names listed.
+
 - **config: `translate.db` path helper.** The data-root layout gains
   the translation store's canonical location beside the other
   per-library databases; no new environment knob.
