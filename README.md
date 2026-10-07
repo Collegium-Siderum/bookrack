@@ -165,9 +165,12 @@ claude mcp add --transport http bookrack http://127.0.0.1:8765/mcp
 claude mcp add --transport http --scope user bookrack http://127.0.0.1:8765/mcp
 ```
 
-**Cursor, Claude Desktop, Cline, Continue, others** — TBD. Streamable-
-HTTP MCP support varies by client and version; community pointers
-welcome via issues.
+**Other clients** — the server speaks streamable-HTTP and nothing else:
+`bookrack run` and `bookrack-mcp` serve `http://127.0.0.1:8765/mcp`, and
+there is no stdio mode. A client that connects to HTTP MCP servers
+takes that URL the way Claude Code does above; a client that only
+launches stdio servers needs a stdio-to-HTTP bridge in front of it.
+Pointers for specific clients are welcome via issues.
 
 ## Other ways to install
 
@@ -182,12 +185,30 @@ every book, index, and log under it goes with it, so the wizard
 refuses a data root anywhere inside `Bookrack.app`. Pick one outside
 the bundle and let the pointer `init` writes find it.
 
-**From source** — Rust 1.95.0, edition 2024. Clone the repo and
-build:
+**From source** — Rust 1.95.0 (edition 2024), and on the build host:
+
+- `protoc`, the Protocol Buffers compiler: a build dependency of the
+  vector store with no bundled fallback. Debian and Ubuntu package it
+  as `protobuf-compiler`; otherwise a release zip from
+  protocolbuffers/protobuf on `PATH`.
+- a C compiler, for the vendored SQLite and TLS libraries.
+
+Clone the repo and build the two binaries:
 
 ```
 cargo build --release -p bookrack-cli -p bookrack-mcp
 ```
+
+The two `-p` flags are not optional: a bare `cargo build` also builds
+the desktop shell, which needs the WebKitGTK, GTK and AppIndicator
+development packages on Linux. The binaries land in `target/release/`.
+
+Two limits of a source build. It is not portable across CPU
+generations: the vector library compiles with `-march=native`, so run
+the result on the machine that built it, or one with the same
+instruction set. And `cargo test` is not how the suite runs: it needs
+`cargo-nextest` (`cargo install cargo-nextest --locked`), because every
+test gets its own process.
 
 Set `BOOKRACK_PDFIUM_LIB` to a directory holding the platform's
 PDFium library (see
