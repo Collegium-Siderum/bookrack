@@ -7,8 +7,11 @@
 //! function opens the paper catalog read-only per call; without a
 //! configured papers backend every function returns
 //! [`OpsError::PapersBackendNotConfigured`] before opening anything.
+//! A library whose paper catalog has not been created yet reads as
+//! holding no papers: listings return an empty page and per-paper
+//! reads report the intake as unknown.
 
-use bookrack_catalog::{Catalog, IntakeFilter, MatchLayer};
+use bookrack_catalog::{IntakeFilter, MatchLayer};
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
@@ -21,6 +24,7 @@ use crate::dto::{
     ShowTocArgs, Toc, TocNodes, TocStats, clamp_limit,
 };
 use crate::reads::books::toc_call_args;
+use crate::reads::open_papers_catalog;
 use crate::recorder::record_call_sync;
 
 /// List papers in catalog order, paginated.
@@ -60,11 +64,14 @@ pub fn find_papers<E: Embedder>(
         "offset": offset,
     });
     record_call_sync!(ops, "library.find_papers", args, {
-        let papers_db = ops
-            .papers_catalog_db()
-            .ok_or(OpsError::PapersBackendNotConfigured)?;
+        let Some(catalog) = open_papers_catalog(ops)? else {
+            return Ok(ListPapersResult {
+                papers: Vec::new(),
+                total: 0,
+                truncated: false,
+            });
+        };
         let (effective_limit, _) = clamp_limit(limit);
-        let catalog = Catalog::open_read_only(papers_db)?;
         let language_refs: Vec<&str> = filter.language.iter().map(String::as_str).collect();
         let catalog_filter = IntakeFilter {
             kind: ItemKind::Paper,
@@ -134,13 +141,12 @@ pub fn show_paper<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<PaperDeta
         "library.show_paper",
         serde_json::json!({ "intake_id": intake_id }),
         {
-            let papers_db = ops
-                .papers_catalog_db()
-                .ok_or(OpsError::PapersBackendNotConfigured)?;
             let corpus_db = ops
                 .papers_corpus_db()
                 .ok_or(OpsError::PapersBackendNotConfigured)?;
-            let catalog = Catalog::open_read_only(papers_db)?;
+            let Some(catalog) = open_papers_catalog(ops)? else {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            };
             let Some(intake) = catalog.intake_by_id(intake_id)? else {
                 return Err(OpsError::IntakeNotFound { intake_id });
             };
@@ -194,13 +200,12 @@ pub fn show_paper_toc<E: Embedder>(
         "library.show_paper_toc",
         toc_call_args(intake_id, args),
         {
-            let papers_db = ops
-                .papers_catalog_db()
-                .ok_or(OpsError::PapersBackendNotConfigured)?;
             let corpus_db = ops
                 .papers_corpus_db()
                 .ok_or(OpsError::PapersBackendNotConfigured)?;
-            let catalog = Catalog::open_read_only(papers_db)?;
+            let Some(catalog) = open_papers_catalog(ops)? else {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            };
             if catalog.intake_by_id(intake_id)?.is_none() {
                 return Err(OpsError::IntakeNotFound { intake_id });
             }
@@ -242,10 +247,9 @@ pub fn export_csl<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<bookrack_
         "papers.export_csl",
         serde_json::json!({ "intake_id": intake_id }),
         {
-            let papers_db = ops
-                .papers_catalog_db()
-                .ok_or(OpsError::PapersBackendNotConfigured)?;
-            let catalog = Catalog::open_read_only(papers_db)?;
+            let Some(catalog) = open_papers_catalog(ops)? else {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            };
             if catalog.intake_by_id(intake_id)?.is_none() {
                 return Err(OpsError::IntakeNotFound { intake_id });
             }
@@ -276,10 +280,9 @@ pub fn fetch_source<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<PaperSo
         "papers.fetch_source",
         serde_json::json!({ "intake_id": intake_id }),
         {
-            let papers_db = ops
-                .papers_catalog_db()
-                .ok_or(OpsError::PapersBackendNotConfigured)?;
-            let catalog = Catalog::open_read_only(papers_db)?;
+            let Some(catalog) = open_papers_catalog(ops)? else {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            };
             let Some(intake) = catalog.intake_by_id(intake_id)? else {
                 return Err(OpsError::IntakeNotFound { intake_id });
             };

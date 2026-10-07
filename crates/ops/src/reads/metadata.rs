@@ -2,8 +2,6 @@
 
 //! Read ops over the metadata audit trail and the review queue.
 
-use std::path::Path;
-
 use bookrack_catalog::{Catalog, IntakeFilter, STATUS_ACKNOWLEDGED, STATUS_PENDING};
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::Corpus;
@@ -160,7 +158,7 @@ pub fn list_metadata<E: Embedder>(
                 ..IntakeFilter::default()
             };
             list_metadata_inner(
-                ops.catalog_db(),
+                &Catalog::open_read_only(ops.catalog_db())?,
                 ItemKind::Book,
                 catalog_filter,
                 limit,
@@ -187,7 +185,7 @@ pub fn list_pending_reviews<E: Embedder>(
         serde_json::json!({ "limit": limit, "offset": offset }),
         {
             list_metadata_inner(
-                ops.catalog_db(),
+                &Catalog::open_read_only(ops.catalog_db())?,
                 ItemKind::Book,
                 needs_review_filter(),
                 limit,
@@ -198,15 +196,15 @@ pub fn list_pending_reviews<E: Embedder>(
 }
 
 /// Shared body of the paginated metadata listings, over whichever
-/// catalog and item kind the caller names. Pulled out so the public
-/// entry points stay thin and the filter shape and the pipeline are
-/// the only things that differ between them.
+/// catalog handle and item kind the caller passes. Pulled out so the
+/// public entry points stay thin and the filter shape and the pipeline
+/// are the only things that differ between them.
 ///
 /// The row shape carries nothing pipeline-specific, so one body serves
 /// both sides; what a caller must get right is pairing the catalog
 /// with the kind stored in it.
 pub(crate) fn list_metadata_inner(
-    catalog_db: &Path,
+    catalog: &Catalog,
     kind: ItemKind,
     filter: IntakeFilter<'_>,
     limit: u32,
@@ -221,7 +219,6 @@ pub(crate) fn list_metadata_inner(
     // rows against this pipeline's catalog, which is an empty page
     // rather than an error.
     let filter = IntakeFilter { kind, ..filter };
-    let catalog = Catalog::open_read_only(catalog_db)?;
     let (intakes, total) = catalog.find_intakes_page(&filter, effective_limit, offset)?;
     let intake_ids: Vec<i64> = intakes.iter().map(|i| i.intake_id).collect();
     let effective = catalog.effective_publication_attrs_for_intakes(&intake_ids, kind)?;
@@ -269,21 +266,20 @@ pub fn show_audit_trail<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<Vec
         ops,
         "library.show_audit_trail",
         serde_json::json!({ "intake_id": intake_id }),
-        { show_audit_trail_inner(ops.catalog_db(), intake_id) }
+        { show_audit_trail_inner(&Catalog::open_read_only(ops.catalog_db())?, intake_id) }
     )
 }
 
-/// Shared body of the audit-trail read, over whichever catalog the
-/// caller names.
+/// Shared body of the audit-trail read, over whichever catalog handle
+/// the caller passes.
 ///
 /// `metadata_audit` has no scope column — each pipeline's rows live in
-/// its own catalog — so the catalog path is the whole of what differs
+/// its own catalog — so the catalog handle is the whole of what differs
 /// between the two sides.
 pub(crate) fn show_audit_trail_inner(
-    catalog_db: &Path,
+    catalog: &Catalog,
     intake_id: i64,
 ) -> Result<Vec<AuditTrailEntry>> {
-    let catalog = Catalog::open_read_only(catalog_db)?;
     let node_id = PartitionIdx::new(intake_id).root().get();
     let rows = catalog.metadata_audit_for_node(node_id)?;
     if rows.is_empty() && catalog.intake_by_id(intake_id)?.is_none() {
