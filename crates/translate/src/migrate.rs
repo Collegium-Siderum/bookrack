@@ -18,6 +18,7 @@ use rusqlite_migration::{M, Migrations};
 
 /// The target `user_version` of `translate.db`. Bumps in lockstep with
 /// the migration vector.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const TARGET_VERSION: i64 = 1;
 
 /// `M[0]` — the frozen baseline schema. Immutable: never edit this

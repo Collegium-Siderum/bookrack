@@ -56,6 +56,7 @@ pub use migrate::TARGET_VERSION;
 /// The schema revision this build writes, mirrored into
 /// `translate_meta` for audit. `user_version`, not this, decides
 /// whether a database can be opened.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const SCHEMA_VERSION: u32 = TARGET_VERSION as u32;
 
 /// `translate_meta` key under which [`SCHEMA_VERSION`] is mirrored.
@@ -63,6 +64,7 @@ const SCHEMA_VERSION_KEY: &str = "schema_version";
 
 /// The minimum reader version a binary must speak to interpret this
 /// store's data, stamped into `translate_meta` at open.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const MIN_READER_VERSION: u32 = 1;
 
 /// `translate_meta` key under which [`MIN_READER_VERSION`] is recorded.
