@@ -147,8 +147,12 @@ are still being hardened for production use.
    MCP server; `library.search` queries both stores at once unless a
    `kind` switch narrows it.
 
-   For a headless deployment — systemd unit, Windows service — run
-   `bookrack-mcp` instead; see the [operating guide](docs/operating.md#the-daemon).
+   For a headless deployment, run `bookrack-mcp` instead: the same
+   endpoint as a plain foreground process, with `--with-queue-worker`
+   when it should also run ingest jobs. bookrack ships no service
+   definition; running it under systemd, launchd or a Windows service
+   is set up by the operator. See the
+   [operating guide](docs/operating.md#the-daemon).
 
 ## Connecting an MCP client
 

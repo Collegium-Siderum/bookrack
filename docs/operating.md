@@ -55,8 +55,10 @@ which unmounting refuses — `bookrack quit`. The root is released once
 any call still using that library finishes, so a purge racing a long
 read may need a second attempt. Read-only commands take neither.
 
-For a headless deployment — a systemd unit, a Windows service — run
-`bookrack-mcp` instead. It serves the same MCP endpoint, and takes
+For a headless deployment, run `bookrack-mcp` instead: a foreground
+process bookrack ships no service definition for, so running it under
+systemd, launchd or a Windows service is the operator's setup. It
+serves the same MCP endpoint, and takes
 `--with-queue-worker` when it should also process ingest jobs; without
 that flag the queue-bound write methods short-circuit rather than
 enqueue work no one will run. `bookrack run` and `bookrack-mcp` are
