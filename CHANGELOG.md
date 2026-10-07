@@ -23,6 +23,18 @@ release workflow extracts the matching section verbatim from this file.
   paragraphs can be merged or a long one split differently. Every call
   is one transaction and one audit row, attributed to the MCP caller.
 
+- **mcp: `translate.propose`, `translate.seal` and `translate.import`.**
+  A segment is translated in three recorded stages, draft, reflection
+  and final, each a `translate.propose` call checked against the
+  version the caller fetched, so two writers cannot silently overwrite
+  one another. `translate.seal` locks a proposed segment's final text,
+  stamping where it came from (derived from the segment's history
+  unless stated) and, when a person approved it, attributing the audit
+  row to them. `translate.import` fills a unit's empty segments with an
+  existing translation in one all-or-nothing batch; the filled
+  segments read as review work. Every call leaves one audit row with
+  the caller's rationale and token cost.
+
 - **translate: new crate with the `translate.db` schema.** The
   translation working store arrives as a schema-only foundation:
   seven tables (immutable units, mutable segments, the two-layer

@@ -926,7 +926,7 @@ buckets below; adding, renaming, or removing a tool fails that test
 until the list is updated, which is the point at which the version
 discipline (a tool-surface change is a minor bump) applies.
 
-Thirteen of the tools write:
+Sixteen of the tools write:
 
 - `library.metadata.set` / `library.metadata.clear` — add or remove an
   override on one bibliographic field.
@@ -942,6 +942,14 @@ Thirteen of the tools write:
   unit with new spans. Each call is one transaction and one
   `translate_audit` row. `plan` is the one path that creates
   `translate.db`; the translate read tools keep probing for it.
+- `translate.propose` / `translate.seal` / `translate.import` — record
+  one stage of a translation on a segment, lock a proposed segment's
+  final text, and fill a unit's empty segments with an existing
+  translation. The two segment writes take the `current_version` the
+  caller fetched and refuse a segment that has moved on; `seal` derives
+  `source_kind` from the segment's history unless told, and
+  `actor_kind_override: "human"` attributes the audit row to a person.
+  An import is all or nothing.
 - `session.shutdown` — stop the daemon.
 
 Every write tool runs attributed to `Caller::mcp()`, so its audit rows

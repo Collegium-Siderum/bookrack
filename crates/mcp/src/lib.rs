@@ -2178,6 +2178,78 @@ impl BookrackServer {
             .map_err(translate_error_to_mcp)?;
         respond_with(&result)
     }
+
+    /// Record one stage of a proposal on a segment.
+    #[tool(
+        name = "translate.propose",
+        description = "Record one stage of a translation on a segment: `draft` with `text`, \
+                       `reflection` with `notes` (free text or a review-note JSON array, plus \
+                       an optional revised `text`), or `final` with `text`, which moves the \
+                       segment to proposed. Pass the `current_version` from \
+                       translate.fetch_segment as `expected_version`; a segment that has moved \
+                       on refuses the write. `rationale` is required and lands on the audit \
+                       row with `cost_tokens`."
+    )]
+    async fn translate_propose(
+        &self,
+        Parameters(args): Parameters<translate_write::TranslateProposeArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (translate, _corpus, caller, now) = self.translate_write_stores(&args.library)?;
+        let ctx = translate_write::WriteContext {
+            caller: &caller,
+            now: &now,
+        };
+        let result = translate_write::propose_logic(&translate, &ctx, &args)
+            .map_err(translate_error_to_mcp)?;
+        respond_with(&result)
+    }
+
+    /// Lock a proposed segment's final text.
+    #[tool(
+        name = "translate.seal",
+        description = "Lock the final text of a proposed segment. `source_kind` names where the \
+                       text came from (`human`, `llm-draft`, `llm-reflected`, `edited`, \
+                       `imported`) and is derived from the segment's history when absent; \
+                       `actor_kind_override: \"human\"` records that a person approved it. \
+                       Pass the `current_version` as `expected_version`. Records one audit row \
+                       carrying `rationale` and `cost_tokens`."
+    )]
+    async fn translate_seal(
+        &self,
+        Parameters(args): Parameters<translate_write::TranslateSealArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (translate, _corpus, caller, now) = self.translate_write_stores(&args.library)?;
+        let ctx = translate_write::WriteContext {
+            caller: &caller,
+            now: &now,
+        };
+        let result =
+            translate_write::seal_logic(&translate, &ctx, &args).map_err(translate_error_to_mcp)?;
+        respond_with(&result)
+    }
+
+    /// Fill a unit's empty segments with an existing translation.
+    #[tool(
+        name = "translate.import",
+        description = "Fill the empty draft segments of one unit (`unit_id`) with an existing \
+                       translation, one `fills` entry per segment, aligned by the caller. \
+                       Each filled segment becomes proposed with `source_kind: imported` and \
+                       reads as review work. All or nothing: a segment that already carries \
+                       text refuses the whole batch. Records one audit row carrying `reason`."
+    )]
+    async fn translate_import(
+        &self,
+        Parameters(args): Parameters<translate_write::TranslateImportArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (translate, _corpus, caller, now) = self.translate_write_stores(&args.library)?;
+        let ctx = translate_write::WriteContext {
+            caller: &caller,
+            now: &now,
+        };
+        let result = translate_write::import_logic(&translate, &ctx, &args)
+            .map_err(translate_error_to_mcp)?;
+        respond_with(&result)
+    }
 }
 
 #[tool_handler(router = self.tool_router)]

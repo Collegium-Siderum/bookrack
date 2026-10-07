@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The write face of the translation store behind the `translate.*`
-//! MCP tools: planning a book's units and segments, and re-slicing the
-//! virgin segments of one unit.
+//! MCP tools: planning a book's units and segments, re-slicing the
+//! virgin segments of one unit, the three-stage proposal, the seal,
+//! and the import of an existing translation.
 //!
 //! Every write is one call, one SQLite transaction and one audit row.
 //! The tools open the store through the writable door, so a plan is
@@ -11,12 +12,15 @@
 
 use std::collections::{HashMap, HashSet};
 
+use bookrack_catalog::ActorKind;
 use bookrack_core::{NodeId, PartitionIdx};
 use bookrack_corpus::{Corpus, Node};
 use bookrack_ops::Caller;
 use bookrack_translate::audit::{AuditSubject, NewAudit};
 use bookrack_translate::segmentation::{Script, Triage, script_of, split_at_sentences, triage};
-use bookrack_translate::segments::{NewSegment, span_sha256_hex};
+use bookrack_translate::segments::{
+    NewSegment, ProposeStage, SOURCE_KIND_IMPORTED, SegmentRow, span_sha256_hex,
+};
 use bookrack_translate::units::NewUnit;
 use bookrack_translate::witnesses::NewWitness;
 use bookrack_translate::{Translate, TranslateError};
@@ -726,11 +730,302 @@ pub(crate) fn resegment_logic(
     })?)
 }
 
+// ---------------------------------------------------------------------------
+// translate.propose / translate.seal / translate.import
+// ---------------------------------------------------------------------------
+
+/// The stage names `translate.propose` accepts.
+pub const STAGES: &[&str] = &["draft", "reflection", "final"];
+
+/// The one actor kind a seal may claim on behalf of someone else.
+const ACTOR_OVERRIDES: &[&str] = &["human"];
+
+/// Arguments for `translate.propose`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TranslateProposeArgs {
+    /// The library to write. Required.
+    pub library: String,
+    pub segment_id: i64,
+    /// The `current_version` the caller fetched; the write is refused
+    /// when the row has moved on.
+    pub expected_version: i64,
+    /// `draft`, `reflection` or `final`.
+    pub stage: String,
+    /// The draft or final text; a revised draft at the reflection stage.
+    pub text: Option<String>,
+    /// The reflection: free notes or a review-note JSON array.
+    pub notes: Option<String>,
+    /// Why this text, recorded on the audit row. Required.
+    pub rationale: String,
+    /// Tokens this stage cost, for the budget sum.
+    pub cost_tokens: Option<i64>,
+}
+
+/// Arguments for `translate.seal`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TranslateSealArgs {
+    /// The library to write. Required.
+    pub library: String,
+    pub segment_id: i64,
+    pub expected_version: i64,
+    /// `human`, `llm-draft`, `llm-reflected`, `edited` or `imported`;
+    /// derived from the segment's history when absent.
+    pub source_kind: Option<String>,
+    /// `human` when a person approved the text; the audit row is then
+    /// attributed to them.
+    pub actor_kind_override: Option<String>,
+    pub rationale: Option<String>,
+    pub cost_tokens: Option<i64>,
+}
+
+/// Arguments for `translate.import`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TranslateImportArgs {
+    /// The library to write. Required.
+    pub library: String,
+    pub unit_id: i64,
+    pub fills: Vec<ImportFill>,
+    /// Always `imported`; stated so the caller says what it is doing.
+    pub source_kind: String,
+    pub reason: Option<String>,
+}
+
+/// One existing translation, aligned by the caller to one segment.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ImportFill {
+    pub segment_id: i64,
+    pub text: String,
+}
+
+/// What a segment write left behind.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SegmentReceipt {
+    pub segment_id: i64,
+    pub unit_id: i64,
+    pub status: String,
+    pub version: i64,
+    pub source_kind: Option<String>,
+    pub sealed_at: Option<String>,
+    /// The audit row the write appended.
+    pub audit_id: i64,
+}
+
+impl SegmentReceipt {
+    fn from_row(row: &SegmentRow, audit_id: i64) -> SegmentReceipt {
+        SegmentReceipt {
+            segment_id: row.segment_id,
+            unit_id: row.unit_id,
+            status: row.status.clone(),
+            version: row.version,
+            source_kind: row.source_kind.clone(),
+            sealed_at: row.sealed_at.clone(),
+            audit_id,
+        }
+    }
+}
+
+/// Reply of `translate.import`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TranslateImportResult {
+    pub unit_id: i64,
+    pub filled: Vec<SegmentReceipt>,
+    pub audit_id: i64,
+}
+
+fn require_text(what: &str, value: &str) -> ToolResult<()> {
+    if value.trim().is_empty() {
+        return Err(TranslateToolError::InvalidArgument(format!(
+            "`{what}` is empty"
+        )));
+    }
+    Ok(())
+}
+
+fn args_payload<T: Serialize>(args: &T) -> serde_json::Value {
+    serde_json::json!({ "args": serde_json::to_value(args).unwrap_or(serde_json::Value::Null) })
+}
+
+/// Record one stage of a proposal on a segment.
+pub(crate) fn propose_logic(
+    translate: &Translate,
+    ctx: &WriteContext<'_>,
+    args: &TranslateProposeArgs,
+) -> ToolResult<SegmentReceipt> {
+    require_text("rationale", &args.rationale)?;
+    let stage = match args.stage.as_str() {
+        "draft" => ProposeStage::Draft,
+        "reflection" => ProposeStage::Reflection,
+        "final" => ProposeStage::Final,
+        other => {
+            return Err(TranslateError::UnknownValue {
+                what: "stage",
+                value: other.to_owned(),
+                known: STAGES,
+            }
+            .into());
+        }
+    };
+    if stage == ProposeStage::Reflection
+        && let Some(notes) = args.notes.as_deref()
+        && serde_json::from_str::<serde_json::Value>(notes).is_err()
+    {
+        return Err(TranslateToolError::InvalidArgument(
+            "`notes` is not valid JSON".to_owned(),
+        ));
+    }
+    let payload = args_payload(args);
+    Ok(translate.transaction(|translate| {
+        let row = translate.apply_propose(
+            args.segment_id,
+            args.expected_version,
+            stage,
+            args.text.as_deref(),
+            args.notes.as_deref(),
+        )?;
+        let audit_id = translate.append_audit(&ctx.audit(
+            AuditSubject::Segment(row.segment_id),
+            stage.action(),
+            Some(&args.rationale),
+            &payload,
+            args.cost_tokens,
+        ))?;
+        Ok(SegmentReceipt::from_row(&row, audit_id))
+    })?)
+}
+
+/// Where the translation-memory index will take a sealed segment. The
+/// index arrives with a later milestone; until then a seal emits
+/// nothing beyond its row.
+fn emit_tm_row(_sealed: &SegmentRow) {}
+
+/// Lock a proposed segment's final text.
+pub(crate) fn seal_logic(
+    translate: &Translate,
+    ctx: &WriteContext<'_>,
+    args: &TranslateSealArgs,
+) -> ToolResult<SegmentReceipt> {
+    let actor_kind = match args.actor_kind_override.as_deref() {
+        None => ctx.caller.actor_kind,
+        Some("human") => ActorKind::Human,
+        Some(other) => {
+            return Err(TranslateError::UnknownValue {
+                what: "actor_kind_override",
+                value: other.to_owned(),
+                known: ACTOR_OVERRIDES,
+            }
+            .into());
+        }
+    };
+    let row = translate
+        .segment(args.segment_id)?
+        .ok_or(TranslateError::UnknownSegment {
+            segment_id: args.segment_id,
+        })?;
+    // Derivation, when the caller does not say: a person's approval is
+    // `human`; a reviewed import is `edited`; a drafted text is
+    // `llm-reflected` when a reflection was recorded, `llm-draft`
+    // otherwise.
+    let source_kind = match args.source_kind.as_deref() {
+        Some(kind) => kind,
+        None if actor_kind == ActorKind::Human => "human",
+        None if row.task_mode() == "review" => "edited",
+        None if row.reflection_notes.is_some() => "llm-reflected",
+        None => "llm-draft",
+    };
+    let payload = args_payload(args);
+    Ok(translate.transaction(|translate| {
+        let sealed =
+            translate.seal_segment(args.segment_id, args.expected_version, source_kind, ctx.now)?;
+        emit_tm_row(&sealed);
+        let mut audit = ctx.audit(
+            AuditSubject::Segment(sealed.segment_id),
+            "seal",
+            args.rationale.as_deref(),
+            &payload,
+            args.cost_tokens,
+        );
+        audit.actor_kind = actor_kind;
+        let audit_id = translate.append_audit(&audit)?;
+        Ok(SegmentReceipt::from_row(&sealed, audit_id))
+    })?)
+}
+
+/// Fill the empty draft segments of one unit with an existing
+/// translation, all or nothing.
+pub(crate) fn import_logic(
+    translate: &Translate,
+    ctx: &WriteContext<'_>,
+    args: &TranslateImportArgs,
+) -> ToolResult<TranslateImportResult> {
+    if args.source_kind != SOURCE_KIND_IMPORTED {
+        return Err(TranslateError::UnknownValue {
+            what: "source_kind",
+            value: args.source_kind.clone(),
+            known: &[SOURCE_KIND_IMPORTED],
+        }
+        .into());
+    }
+    if args.fills.is_empty() {
+        return Err(TranslateToolError::InvalidArgument(
+            "`fills` is empty".to_owned(),
+        ));
+    }
+    if translate.unit(args.unit_id)?.is_none() {
+        return Err(TranslateError::UnknownUnit {
+            unit_id: args.unit_id,
+        }
+        .into());
+    }
+    for fill in &args.fills {
+        if fill.text.trim().is_empty() {
+            return Err(TranslateToolError::InvalidArgument(format!(
+                "the fill for segment {} has empty text",
+                fill.segment_id
+            )));
+        }
+        let row = translate
+            .segment(fill.segment_id)?
+            .ok_or(TranslateError::UnknownSegment {
+                segment_id: fill.segment_id,
+            })?;
+        if row.unit_id != args.unit_id {
+            return Err(TranslateToolError::InvalidArgument(format!(
+                "segment {} belongs to unit {}, not unit {}",
+                fill.segment_id, row.unit_id, args.unit_id
+            )));
+        }
+    }
+    let payload = serde_json::json!({
+        "args": serde_json::to_value(args).unwrap_or(serde_json::Value::Null),
+        "segments": args.fills.iter().map(|f| f.segment_id).collect::<Vec<_>>(),
+    });
+    Ok(translate.transaction(|translate| {
+        let mut rows = Vec::new();
+        for fill in &args.fills {
+            rows.push(translate.import_fill(fill.segment_id, &fill.text)?);
+        }
+        let audit_id = translate.append_audit(&ctx.audit(
+            AuditSubject::None,
+            "import",
+            args.reason.as_deref(),
+            &payload,
+            None,
+        ))?;
+        Ok(TranslateImportResult {
+            unit_id: args.unit_id,
+            filled: rows
+                .iter()
+                .map(|row| SegmentReceipt::from_row(row, audit_id))
+                .collect(),
+            audit_id,
+        })
+    })?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bookrack_corpus::{NewNode, NodeType};
-    use bookrack_translate::segments::ProposeStage;
 
     const LONG: &str = "Erster Satz. Zweiter Satz. Dritter Satz.";
     const POEM: &str = "Zeile eins. Zeile zwei.";
@@ -1348,6 +1643,401 @@ mod tests {
                 TranslateToolError::Translate(TranslateError::UnknownUnit { unit_id: 404 })
             ),
             "{err:?}"
+        );
+    }
+
+    fn propose_args(segment_id: i64, version: i64, stage: &str) -> TranslateProposeArgs {
+        TranslateProposeArgs {
+            library: "lab".into(),
+            segment_id,
+            expected_version: version,
+            stage: stage.into(),
+            text: Some(format!("{stage} text")),
+            notes: None,
+            rationale: "because".into(),
+            cost_tokens: Some(10),
+        }
+    }
+
+    fn seal_args(segment_id: i64, version: i64) -> TranslateSealArgs {
+        TranslateSealArgs {
+            library: "lab".into(),
+            segment_id,
+            expected_version: version,
+            source_kind: None,
+            actor_kind_override: None,
+            rationale: None,
+            cost_tokens: Some(3),
+        }
+    }
+
+    fn audit_rows(translate: &Translate, segment_id: i64) -> Vec<(String, String, Option<i64>)> {
+        translate
+            .audit_for_segment(segment_id)
+            .expect("audit")
+            .into_iter()
+            .map(|r| (r.action, r.actor_kind, r.cost_tokens))
+            .collect()
+    }
+
+    #[test]
+    fn a_proposal_walks_three_stages_and_each_leaves_an_audit_row() {
+        let fx = Fixture::new();
+        let planned = fx.plan(&fx.plan_args()).expect("plan");
+        let id = planned.segments[0].segment_id;
+        let translate = fx.store();
+
+        let r = propose_logic(&translate, &fx.ctx(), &propose_args(id, 1, "draft")).expect("draft");
+        assert_eq!((r.status.as_str(), r.version), ("draft", 2));
+        let mut reflection = propose_args(id, 2, "reflection");
+        reflection.text = None;
+        reflection.notes = Some("[{\"verdict\":\"pass\"}]".into());
+        let r = propose_logic(&translate, &fx.ctx(), &reflection).expect("reflection");
+        assert_eq!((r.status.as_str(), r.version), ("draft", 3));
+        let r = propose_logic(&translate, &fx.ctx(), &propose_args(id, 3, "final")).expect("final");
+        assert_eq!(
+            (r.status.as_str(), r.version, r.source_kind),
+            ("proposed", 4, None)
+        );
+
+        let row = translate.segment(id).expect("read").expect("row");
+        assert_eq!(
+            (
+                row.draft_text.as_deref(),
+                row.reflection_notes.as_deref(),
+                row.final_text.as_deref()
+            ),
+            (
+                Some("draft text"),
+                Some("[{\"verdict\":\"pass\"}]"),
+                Some("final text")
+            )
+        );
+        assert_eq!(
+            audit_rows(&translate, id),
+            vec![
+                ("propose_draft".into(), "llm".into(), Some(10)),
+                ("propose_reflection".into(), "llm".into(), Some(10)),
+                ("propose_final".into(), "llm".into(), Some(10)),
+            ]
+        );
+        let last = translate
+            .audit_for_segment(id)
+            .expect("audit")
+            .pop()
+            .expect("row");
+        assert_eq!(
+            (last.actor_detail.as_deref(), last.reason.as_deref()),
+            (Some("mcp"), Some("because"))
+        );
+        assert!(
+            last.payload_json
+                .as_deref()
+                .is_some_and(|p| p.contains("final text"))
+        );
+        assert_eq!(translate.sum_cost_tokens(1, "zh").expect("sum"), 30);
+    }
+
+    #[test]
+    fn a_proposal_is_refused_for_a_stale_version_an_unknown_stage_or_bad_arguments() {
+        let fx = Fixture::new();
+        let planned = fx.plan(&fx.plan_args()).expect("plan");
+        let id = planned.segments[0].segment_id;
+        let translate = fx.store();
+        propose_logic(&translate, &fx.ctx(), &propose_args(id, 1, "draft")).expect("draft");
+
+        let err =
+            propose_logic(&translate, &fx.ctx(), &propose_args(id, 1, "draft")).expect_err("stale");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(TranslateError::VersionConflict {
+                    expected: 1,
+                    current: 2,
+                    ..
+                })
+            ),
+            "{err:?}"
+        );
+        let err = propose_logic(&translate, &fx.ctx(), &propose_args(id, 2, "polish"))
+            .expect_err("stage");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(TranslateError::UnknownValue { what: "stage", .. })
+            ),
+            "{err:?}"
+        );
+        let mut empty = propose_args(id, 2, "draft");
+        empty.rationale = "  ".into();
+        let err = propose_logic(&translate, &fx.ctx(), &empty).expect_err("rationale");
+        assert!(
+            matches!(err, TranslateToolError::InvalidArgument(ref m) if m.contains("rationale")),
+            "{err:?}"
+        );
+        let mut bad_notes = propose_args(id, 2, "reflection");
+        bad_notes.notes = Some("not json".into());
+        let err = propose_logic(&translate, &fx.ctx(), &bad_notes).expect_err("notes");
+        assert!(
+            matches!(err, TranslateToolError::InvalidArgument(ref m) if m.contains("JSON")),
+            "{err:?}"
+        );
+        let err = propose_logic(&translate, &fx.ctx(), &propose_args(404, 1, "draft"))
+            .expect_err("unknown");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(TranslateError::UnknownSegment { segment_id: 404 })
+            ),
+            "{err:?}"
+        );
+
+        assert_eq!(
+            audit_rows(&translate, id).len(),
+            1,
+            "a refused write leaves no audit row"
+        );
+        assert_eq!(
+            translate.segment(id).expect("read").expect("row").version,
+            2
+        );
+    }
+
+    #[test]
+    fn a_seal_derives_the_source_kind_and_takes_a_human_override() {
+        let fx = Fixture::new();
+        let planned = fx.plan(&fx.plan_args()).expect("plan");
+        let translate = fx.store();
+        let [a, b, c, d, _] = planned
+            .segments
+            .iter()
+            .map(|s| s.segment_id)
+            .collect::<Vec<_>>()[..]
+        else {
+            panic!("five segments")
+        };
+
+        // Not yet proposed: refused, nothing recorded.
+        let err = seal_logic(&translate, &fx.ctx(), &seal_args(a, 1)).expect_err("draft");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(TranslateError::WrongStatus { .. })
+            ),
+            "{err:?}"
+        );
+
+        // Draft then final, no reflection: llm-draft.
+        propose_logic(&translate, &fx.ctx(), &propose_args(a, 1, "draft")).expect("draft");
+        propose_logic(&translate, &fx.ctx(), &propose_args(a, 2, "final")).expect("final");
+        let r = seal_logic(&translate, &fx.ctx(), &seal_args(a, 3)).expect("seal");
+        assert_eq!(
+            (
+                r.status.as_str(),
+                r.source_kind.as_deref(),
+                r.sealed_at.as_deref(),
+                r.version
+            ),
+            ("sealed", Some("llm-draft"), Some("2026-01-01T00:00:00Z"), 4)
+        );
+        assert_eq!(
+            audit_rows(&translate, a).last().cloned(),
+            Some(("seal".into(), "llm".into(), Some(3)))
+        );
+
+        // With a reflection: llm-reflected.
+        propose_logic(&translate, &fx.ctx(), &propose_args(b, 1, "draft")).expect("draft");
+        let mut reflection = propose_args(b, 2, "reflection");
+        reflection.notes = Some("\"thought\"".into());
+        propose_logic(&translate, &fx.ctx(), &reflection).expect("reflection");
+        propose_logic(&translate, &fx.ctx(), &propose_args(b, 3, "final")).expect("final");
+        let r = seal_logic(&translate, &fx.ctx(), &seal_args(b, 4)).expect("seal");
+        assert_eq!(r.source_kind.as_deref(), Some("llm-reflected"));
+
+        // A person approving: human, and the audit row says so.
+        propose_logic(&translate, &fx.ctx(), &propose_args(c, 1, "final")).expect("final");
+        let mut human = seal_args(c, 2);
+        human.actor_kind_override = Some("human".into());
+        human.rationale = Some("approved on review".into());
+        let r = seal_logic(&translate, &fx.ctx(), &human).expect("seal");
+        assert_eq!(r.source_kind.as_deref(), Some("human"));
+        let last = translate
+            .audit_for_segment(c)
+            .expect("audit")
+            .pop()
+            .expect("row");
+        assert_eq!(
+            (
+                last.actor_kind.as_str(),
+                last.actor_detail.as_deref(),
+                last.reason.as_deref()
+            ),
+            ("human", Some("mcp"), Some("approved on review"))
+        );
+
+        // An explicit kind wins; an unknown one or override is refused.
+        propose_logic(&translate, &fx.ctx(), &propose_args(d, 1, "final")).expect("final");
+        let mut explicit = seal_args(d, 2);
+        explicit.source_kind = Some("robot".into());
+        let err = seal_logic(&translate, &fx.ctx(), &explicit).expect_err("kind");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(TranslateError::UnknownValue {
+                    what: "source_kind",
+                    ..
+                })
+            ),
+            "{err:?}"
+        );
+        let mut bad_override = seal_args(d, 2);
+        bad_override.actor_kind_override = Some("import".into());
+        let err = seal_logic(&translate, &fx.ctx(), &bad_override).expect_err("override");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(TranslateError::UnknownValue {
+                    what: "actor_kind_override",
+                    ..
+                })
+            ),
+            "{err:?}"
+        );
+        explicit.source_kind = Some("edited".into());
+        let r = seal_logic(&translate, &fx.ctx(), &explicit).expect("seal");
+        assert_eq!(r.source_kind.as_deref(), Some("edited"));
+
+        // The read side sees the sealed segment in the unit's history.
+        let catalogs = crate::reference::catalogs().expect("catalogs");
+        let package = crate::translate::fetch_segment_logic(
+            Some(&translate),
+            &fx.corpus,
+            None,
+            catalogs,
+            &crate::translate::TranslateFetchSegmentArgs {
+                library: None,
+                segment_id: planned.segments[4].segment_id,
+                injection_profile: None,
+                neighbors: None,
+            },
+        )
+        .expect("fetch")
+        .expect("package");
+        assert_eq!(package.current_status, "draft");
+        let sealed_ids: Vec<i64> = package
+            .history_in_unit
+            .iter()
+            .map(|p| p.segment_id)
+            .collect();
+        assert_eq!(
+            sealed_ids,
+            vec![d],
+            "the other sealed segments sit in other units"
+        );
+    }
+
+    #[test]
+    fn an_import_fills_a_unit_all_or_nothing_and_reads_as_review_work() {
+        let fx = Fixture::new();
+        let planned = fx.plan(&fx.plan_args()).expect("plan");
+        let unit_b = planned.units[2].unit_id;
+        let in_b: Vec<i64> = planned
+            .segments
+            .iter()
+            .filter(|s| s.unit_id == unit_b)
+            .map(|s| s.segment_id)
+            .collect();
+        let translate = fx.store();
+        let fills = |texts: &[(i64, &str)]| {
+            texts
+                .iter()
+                .map(|(segment_id, text)| ImportFill {
+                    segment_id: *segment_id,
+                    text: (*text).to_owned(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let args = |fills: Vec<ImportFill>, kind: &str| TranslateImportArgs {
+            library: "lab".into(),
+            unit_id: unit_b,
+            fills,
+            source_kind: kind.into(),
+            reason: Some("from the 1999 edition".into()),
+        };
+
+        let err = import_logic(
+            &translate,
+            &fx.ctx(),
+            &args(fills(&[(in_b[0], "x")]), "human"),
+        )
+        .expect_err("kind");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(TranslateError::UnknownValue {
+                    what: "source_kind",
+                    ..
+                })
+            ),
+            "{err:?}"
+        );
+        let foreign = planned.segments[0].segment_id;
+        let err = import_logic(
+            &translate,
+            &fx.ctx(),
+            &args(fills(&[(foreign, "x")]), "imported"),
+        )
+        .expect_err("unit");
+        assert!(
+            matches!(err, TranslateToolError::InvalidArgument(ref m) if m.contains("belongs to unit")),
+            "{err:?}"
+        );
+
+        // One segment already drafted: the whole batch is refused.
+        propose_logic(&translate, &fx.ctx(), &propose_args(in_b[1], 1, "draft")).expect("draft");
+        let err = import_logic(
+            &translate,
+            &fx.ctx(),
+            &args(fills(&[(in_b[0], "five"), (in_b[1], "six")]), "imported"),
+        )
+        .expect_err("batch");
+        assert!(
+            matches!(err, TranslateToolError::Translate(TranslateError::NotEmpty { segment_id }) if segment_id == in_b[1]),
+            "{err:?}"
+        );
+        let untouched = translate.segment(in_b[0]).expect("read").expect("row");
+        assert_eq!(
+            (untouched.status.as_str(), untouched.final_text),
+            ("draft", None)
+        );
+
+        let result = import_logic(
+            &translate,
+            &fx.ctx(),
+            &args(fills(&[(in_b[0], "five")]), "imported"),
+        )
+        .expect("import");
+        assert_eq!(result.filled.len(), 1);
+        let r = &result.filled[0];
+        assert_eq!(
+            (
+                r.status.as_str(),
+                r.source_kind.as_deref(),
+                r.version,
+                r.audit_id
+            ),
+            ("proposed", Some("imported"), 2, result.audit_id)
+        );
+        let row = translate.segment(in_b[0]).expect("read").expect("row");
+        assert_eq!(
+            (row.task_mode(), row.final_text.as_deref()),
+            ("review", Some("five"))
+        );
+        let reviewed = seal_logic(&translate, &fx.ctx(), &seal_args(in_b[0], 2)).expect("seal");
+        assert_eq!(
+            reviewed.source_kind.as_deref(),
+            Some("edited"),
+            "a reviewed import seals as edited"
         );
     }
 }

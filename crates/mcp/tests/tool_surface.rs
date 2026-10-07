@@ -74,8 +74,11 @@ const WRITE_TOOLS: &[&str] = &[
     "library.metadata.void",
     "reference.overlay_set",
     "session.shutdown",
+    "translate.import",
     "translate.plan",
+    "translate.propose",
     "translate.resegment",
+    "translate.seal",
 ];
 
 fn published() -> BTreeSet<String> {
@@ -119,7 +122,7 @@ fn the_published_tool_set_is_exactly_the_documented_read_and_write_buckets() {
 }
 
 #[test]
-fn the_write_bucket_holds_thirteen_tools() {
+fn the_write_bucket_holds_sixteen_tools() {
     // `docs/control-plane.md` states the count in prose; pin it so the
     // prose cannot drift silently past a bucket edit that happens to
     // keep the union test green.
@@ -129,8 +132,8 @@ fn the_write_bucket_holds_thirteen_tools() {
         .filter(|name| actual.contains(**name))
         .count();
     assert_eq!(
-        write_count, 13,
-        "docs/control-plane.md documents thirteen MCP write tools"
+        write_count, 16,
+        "docs/control-plane.md documents sixteen MCP write tools"
     );
 }
 
