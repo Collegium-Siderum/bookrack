@@ -926,7 +926,7 @@ buckets below; adding, renaming, or removing a tool fails that test
 until the list is updated, which is the point at which the version
 discipline (a tool-surface change is a minor bump) applies.
 
-Sixteen of the tools write:
+Seventeen of the tools write:
 
 - `library.metadata.set` / `library.metadata.clear` — add or remove an
   override on one bibliographic field.
@@ -950,6 +950,11 @@ Sixteen of the tools write:
   `source_kind` from the segment's history unless told, and
   `actor_kind_override: "human"` attributes the audit row to a person.
   An import is all or nothing.
+- `translate.glossary_propose` — record a new source term with its
+  first rendering, add a candidate rendering to a term, or change a
+  term's primary rendering. A term already on the same key or an
+  identical rendering already recorded is named in the reply rather
+  than refused; the audit row is written either way.
 - `session.shutdown` — stop the daemon.
 
 Every write tool runs attributed to `Caller::mcp()`, so its audit rows

@@ -2250,6 +2250,35 @@ impl BookrackServer {
             .map_err(translate_error_to_mcp)?;
         respond_with(&result)
     }
+
+    /// Propose a glossary term, rendering or primary choice.
+    #[tool(
+        name = "translate.glossary_propose",
+        description = "Propose to the glossary. `mode: create_term` records a new source term \
+                       (`scope`, `scope_ref`, `source_lang`, `source_term`, `term_kind`) with \
+                       its first rendering into `target_lang` (`target_term`, absent for a \
+                       do-not-translate verdict; `faction`, `translator`, `citation`, \
+                       `authority_ref`), made active and primary; a term already on that key is \
+                       named as `existing_term_id` instead. `mode: add_translation` adds a \
+                       candidate rendering to `term_id`; an identical one already recorded is \
+                       named as `existing_translation_id`. `mode: set_primary` makes \
+                       `translation_id` the primary rendering of `term_id`. The reply lists \
+                       the term's renderings afterwards. `rationale` is required and lands on \
+                       the audit row."
+    )]
+    async fn translate_glossary_propose(
+        &self,
+        Parameters(args): Parameters<translate_write::TranslateGlossaryProposeArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (translate, _corpus, caller, now) = self.translate_write_stores(&args.library)?;
+        let ctx = translate_write::WriteContext {
+            caller: &caller,
+            now: &now,
+        };
+        let result = translate_write::glossary_propose_logic(&translate, &ctx, &args)
+            .map_err(translate_error_to_mcp)?;
+        respond_with(&result)
+    }
 }
 
 #[tool_handler(router = self.tool_router)]

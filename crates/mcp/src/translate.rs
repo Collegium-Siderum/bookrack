@@ -481,7 +481,7 @@ fn start_position(
 
 /// Split `refs://<slug>#<key>` at the first `#`. Anything else is not
 /// a reference and yields `None`.
-fn parse_authority_ref(uri: &str) -> Option<(String, String)> {
+pub(crate) fn parse_authority_ref(uri: &str) -> Option<(String, String)> {
     let rest = uri.strip_prefix("refs://")?;
     let (slug, key) = rest.split_once('#')?;
     if slug.is_empty() || key.is_empty() {

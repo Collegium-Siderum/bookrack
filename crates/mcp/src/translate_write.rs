@@ -3,7 +3,7 @@
 //! The write face of the translation store behind the `translate.*`
 //! MCP tools: planning a book's units and segments, re-slicing the
 //! virgin segments of one unit, the three-stage proposal, the seal,
-//! and the import of an existing translation.
+//! the import of an existing translation, and the glossary proposals.
 //!
 //! Every write is one call, one SQLite transaction and one audit row.
 //! The tools open the store through the writable door, so a plan is
@@ -17,6 +17,8 @@ use bookrack_core::{NodeId, PartitionIdx};
 use bookrack_corpus::{Corpus, Node};
 use bookrack_ops::Caller;
 use bookrack_translate::audit::{AuditSubject, NewAudit};
+use bookrack_translate::glossary_terms::NewTerm;
+use bookrack_translate::glossary_translations::NewTranslation;
 use bookrack_translate::segmentation::{Script, Triage, script_of, split_at_sentences, triage};
 use bookrack_translate::segments::{
     NewSegment, ProposeStage, SOURCE_KIND_IMPORTED, SegmentRow, span_sha256_hex,
@@ -28,7 +30,10 @@ use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::translate::{SpanRef, ToolResult, TranslateToolError, WitnessPtr, span_text};
+use crate::translate::{
+    SpanRef, ToolResult, TranslateToolError, TranslationChoice, WitnessPtr, parse_authority_ref,
+    span_text,
+};
 
 /// Escape threshold for a leaf in a Latin-script text, in chars.
 // setting: translate.plan.max_chars_latin
@@ -1017,6 +1022,314 @@ pub(crate) fn import_logic(
                 .iter()
                 .map(|row| SegmentReceipt::from_row(row, audit_id))
                 .collect(),
+            audit_id,
+        })
+    })?)
+}
+
+// ---------------------------------------------------------------------------
+// translate.glossary_propose
+// ---------------------------------------------------------------------------
+
+/// The modes `translate.glossary_propose` accepts.
+pub const GLOSSARY_MODES: &[&str] = &["create_term", "add_translation", "set_primary"];
+
+/// Arguments for `translate.glossary_propose`. Which fields apply
+/// depends on `mode`; the unused ones are ignored.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TranslateGlossaryProposeArgs {
+    /// The library to write. Required.
+    pub library: String,
+    /// `create_term`, `add_translation` or `set_primary`.
+    pub mode: String,
+    /// create_term: `authority`, `library` or `book`.
+    pub scope: Option<String>,
+    /// create_term: the intake id for a book-scoped term, the reference
+    /// book slug for an authority-scoped one, absent for the library.
+    pub scope_ref: Option<String>,
+    /// create_term.
+    pub source_lang: Option<String>,
+    /// create_term.
+    pub source_term: Option<String>,
+    /// create_term: `term`, `proper_noun`, `do_not_translate` or
+    /// `common_knowledge`.
+    pub term_kind: Option<String>,
+    /// add_translation, set_primary.
+    pub term_id: Option<i64>,
+    /// create_term, add_translation.
+    pub target_lang: Option<String>,
+    /// create_term, add_translation: the rendering; absent records a
+    /// do-not-translate verdict.
+    pub target_term: Option<String>,
+    /// set_primary.
+    pub translation_id: Option<i64>,
+    pub faction: Option<String>,
+    pub translator: Option<String>,
+    pub citation: Option<String>,
+    /// `refs://<book_slug>#<entry_key>`; stored, never resolved here.
+    pub authority_ref: Option<String>,
+    /// Why, recorded on the audit row and the rendering. Required.
+    pub rationale: String,
+}
+
+/// Reply of `translate.glossary_propose`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TranslateGlossaryProposeResult {
+    pub mode: String,
+    pub term_id: i64,
+    /// The rendering this call inserted or made primary.
+    pub translation_id: Option<i64>,
+    /// create_term on a key that already exists: the term that holds it.
+    pub existing_term_id: Option<i64>,
+    /// add_translation of a rendering already recorded: that row.
+    pub existing_translation_id: Option<i64>,
+    /// The active and candidate renderings of the term into the target
+    /// language after this call.
+    pub renderings: Vec<TranslationChoice>,
+    pub audit_id: i64,
+}
+
+fn required<'a>(
+    args: &'a TranslateGlossaryProposeArgs,
+    field: &str,
+    value: Option<&'a str>,
+) -> ToolResult<&'a str> {
+    match value {
+        Some(v) if !v.trim().is_empty() => Ok(v),
+        _ => Err(TranslateToolError::InvalidArgument(format!(
+            "`{field}` is required for mode `{}`",
+            args.mode
+        ))),
+    }
+}
+
+fn required_id(
+    args: &TranslateGlossaryProposeArgs,
+    field: &str,
+    value: Option<i64>,
+) -> ToolResult<i64> {
+    value.ok_or_else(|| {
+        TranslateToolError::InvalidArgument(format!(
+            "`{field}` is required for mode `{}`",
+            args.mode
+        ))
+    })
+}
+
+/// The rendering a glossary proposal records, borrowing its fields
+/// from the arguments.
+fn new_rendering<'a>(
+    args: &'a TranslateGlossaryProposeArgs,
+    now: &'a str,
+    term_id: i64,
+    target_lang: &'a str,
+    status: &'a str,
+) -> NewTranslation<'a> {
+    NewTranslation {
+        term_id,
+        target_lang,
+        target_term: args.target_term.as_deref(),
+        faction: args.faction.as_deref(),
+        translator: args.translator.as_deref(),
+        citation: args.citation.as_deref(),
+        rationale: Some(&args.rationale),
+        status,
+        authority_ref: args.authority_ref.as_deref(),
+        proposed_at: now,
+    }
+}
+
+/// The validated shape of one glossary proposal.
+enum GlossaryMode<'a> {
+    Create {
+        scope: &'a str,
+        source_lang: &'a str,
+        source_term: &'a str,
+        term_kind: &'a str,
+        target_lang: &'a str,
+    },
+    Add {
+        term_id: i64,
+        target_lang: &'a str,
+    },
+    SetPrimary {
+        term_id: i64,
+        translation_id: i64,
+    },
+}
+
+impl<'a> GlossaryMode<'a> {
+    fn parse(args: &'a TranslateGlossaryProposeArgs) -> ToolResult<GlossaryMode<'a>> {
+        Ok(match args.mode.as_str() {
+            "create_term" => GlossaryMode::Create {
+                scope: required(args, "scope", args.scope.as_deref())?,
+                source_lang: required(args, "source_lang", args.source_lang.as_deref())?,
+                source_term: required(args, "source_term", args.source_term.as_deref())?,
+                term_kind: required(args, "term_kind", args.term_kind.as_deref())?,
+                target_lang: required(args, "target_lang", args.target_lang.as_deref())?,
+            },
+            "add_translation" => GlossaryMode::Add {
+                term_id: required_id(args, "term_id", args.term_id)?,
+                target_lang: required(args, "target_lang", args.target_lang.as_deref())?,
+            },
+            "set_primary" => GlossaryMode::SetPrimary {
+                term_id: required_id(args, "term_id", args.term_id)?,
+                translation_id: required_id(args, "translation_id", args.translation_id)?,
+            },
+            other => {
+                return Err(TranslateError::UnknownValue {
+                    what: "mode",
+                    value: other.to_owned(),
+                    known: GLOSSARY_MODES,
+                }
+                .into());
+            }
+        })
+    }
+}
+
+/// Propose to the glossary: a new term with its first rendering, a
+/// further rendering of a known term, or a change of primary rendering.
+/// Collisions are answers, not errors: an existing term on the same key
+/// or an existing identical rendering is named in the reply.
+pub(crate) fn glossary_propose_logic(
+    translate: &Translate,
+    ctx: &WriteContext<'_>,
+    args: &TranslateGlossaryProposeArgs,
+) -> ToolResult<TranslateGlossaryProposeResult> {
+    require_text("rationale", &args.rationale)?;
+    let mode = GlossaryMode::parse(args)?;
+    if let Some(uri) = args.authority_ref.as_deref()
+        && parse_authority_ref(uri).is_none()
+    {
+        return Err(TranslateToolError::InvalidArgument(format!(
+            "`authority_ref` {uri:?} is not of the form refs://<book_slug>#<entry_key>"
+        )));
+    }
+    let payload = args_payload(args);
+
+    Ok(translate.transaction(|translate| {
+        let mut existing_term_id = None;
+        let mut existing_translation_id = None;
+        let (term_id, translation_id, target_lang, action, subject) = match mode {
+            GlossaryMode::Create {
+                scope,
+                source_lang,
+                source_term,
+                term_kind,
+                target_lang,
+            } => match translate.insert_term(&NewTerm {
+                scope,
+                scope_ref: args.scope_ref.as_deref(),
+                source_lang,
+                source_term,
+                term_kind,
+            })? {
+                Ok(term_id) => {
+                    let translation_id = translate.insert_translation(&new_rendering(
+                        args,
+                        ctx.now,
+                        term_id,
+                        target_lang,
+                        "active",
+                    ))?;
+                    translate.set_primary(term_id, translation_id)?;
+                    (
+                        term_id,
+                        Some(translation_id),
+                        target_lang.to_owned(),
+                        "term_create",
+                        AuditSubject::Term(term_id),
+                    )
+                }
+                Err(existing) => {
+                    existing_term_id = Some(existing);
+                    (
+                        existing,
+                        None,
+                        target_lang.to_owned(),
+                        "term_create",
+                        AuditSubject::Term(existing),
+                    )
+                }
+            },
+            GlossaryMode::Add {
+                term_id,
+                target_lang,
+            } => match translate.find_translation(
+                term_id,
+                target_lang,
+                args.target_term.as_deref(),
+            )? {
+                Some(existing) => {
+                    existing_translation_id = Some(existing.translation_id);
+                    (
+                        term_id,
+                        None,
+                        target_lang.to_owned(),
+                        "translation_add",
+                        AuditSubject::Translation(existing.translation_id),
+                    )
+                }
+                None => {
+                    if translate.term(term_id)?.is_none() {
+                        return Err(TranslateError::UnknownTerm { term_id });
+                    }
+                    let translation_id = translate.insert_translation(&new_rendering(
+                        args,
+                        ctx.now,
+                        term_id,
+                        target_lang,
+                        "candidate",
+                    ))?;
+                    (
+                        term_id,
+                        Some(translation_id),
+                        target_lang.to_owned(),
+                        "translation_add",
+                        AuditSubject::Translation(translation_id),
+                    )
+                }
+            },
+            GlossaryMode::SetPrimary {
+                term_id,
+                translation_id,
+            } => {
+                translate.set_primary(term_id, translation_id)?;
+                let row = translate.translation(translation_id)?.ok_or(
+                    TranslateError::UnknownTranslation {
+                        term_id,
+                        translation_id,
+                    },
+                )?;
+                (
+                    term_id,
+                    Some(translation_id),
+                    args.target_lang.clone().unwrap_or(row.target_lang),
+                    "set_primary",
+                    AuditSubject::Translation(translation_id),
+                )
+            }
+        };
+        let audit_id = translate.append_audit(&ctx.audit(
+            subject,
+            action,
+            Some(&args.rationale),
+            &payload,
+            None,
+        ))?;
+        let renderings = translate
+            .renderings_for_term(term_id, &target_lang)?
+            .into_iter()
+            .map(TranslationChoice::from)
+            .collect();
+        Ok(TranslateGlossaryProposeResult {
+            mode: args.mode.clone(),
+            term_id,
+            translation_id,
+            existing_term_id,
+            existing_translation_id,
+            renderings,
             audit_id,
         })
     })?)
@@ -2039,5 +2352,260 @@ mod tests {
             Some("edited"),
             "a reviewed import seals as edited"
         );
+    }
+
+    fn glossary_args(mode: &str) -> TranslateGlossaryProposeArgs {
+        TranslateGlossaryProposeArgs {
+            library: "lab".into(),
+            mode: mode.into(),
+            scope: Some("book".into()),
+            scope_ref: Some("1".into()),
+            source_lang: Some("de".into()),
+            source_term: Some("Ungeziefer".into()),
+            term_kind: Some("term".into()),
+            term_id: None,
+            target_lang: Some("zh".into()),
+            target_term: Some("UNGEZIEFER-A".into()),
+            translation_id: None,
+            faction: Some("faction-a".into()),
+            translator: None,
+            citation: None,
+            authority_ref: Some("refs://dict#ungeziefer".into()),
+            rationale: "first rendering".into(),
+        }
+    }
+
+    #[test]
+    fn glossary_propose_creates_adds_and_switches_primary_and_the_read_side_sees_it() {
+        let fx = Fixture::new();
+        let translate = fx.store();
+        let ctx = fx.ctx();
+
+        let created = glossary_propose_logic(&translate, &ctx, &glossary_args("create_term"))
+            .expect("create");
+        let first = created.translation_id.expect("rendering");
+        assert_eq!(
+            (created.existing_term_id, created.renderings.len()),
+            (None, 1)
+        );
+        assert_eq!(
+            (
+                created.renderings[0].status.as_str(),
+                created.renderings[0].translation_id
+            ),
+            ("active", first)
+        );
+        let term = translate.term(created.term_id).expect("read").expect("row");
+        assert_eq!(
+            (term.source_norm.as_str(), term.primary_choice_id),
+            ("ungeziefer", Some(first))
+        );
+        let row = translate.translation(first).expect("read").expect("row");
+        assert_eq!(
+            (
+                row.rationale.as_deref(),
+                row.authority_ref.as_deref(),
+                row.proposed_at.as_str()
+            ),
+            (
+                Some("first rendering"),
+                Some("refs://dict#ungeziefer"),
+                "2026-01-01T00:00:00Z"
+            )
+        );
+
+        // The same key again: the existing term is named, nothing is added.
+        let mut again = glossary_args("create_term");
+        again.source_term = Some("UNGEZIEFER ".into());
+        again.target_term = Some("UNGEZIEFER-B".into());
+        let collided = glossary_propose_logic(&translate, &ctx, &again).expect("collision");
+        assert_eq!(
+            (
+                collided.term_id,
+                collided.existing_term_id,
+                collided.translation_id
+            ),
+            (created.term_id, Some(created.term_id), None)
+        );
+        assert_eq!(
+            collided.renderings.len(),
+            1,
+            "a collision adds no rendering"
+        );
+
+        // Add a candidate; adding it twice names the first.
+        let mut add = glossary_args("add_translation");
+        add.term_id = Some(created.term_id);
+        add.target_term = Some("UNGEZIEFER-B".into());
+        add.rationale = "a rival rendering".into();
+        let added = glossary_propose_logic(&translate, &ctx, &add).expect("add");
+        let second = added.translation_id.expect("rendering");
+        assert_eq!(
+            added
+                .renderings
+                .iter()
+                .map(|r| r.status.as_str())
+                .collect::<Vec<_>>(),
+            vec!["active", "candidate"]
+        );
+        let dup = glossary_propose_logic(&translate, &ctx, &add).expect("dup");
+        assert_eq!(
+            (dup.translation_id, dup.existing_translation_id),
+            (None, Some(second))
+        );
+        assert_eq!(dup.renderings.len(), 2);
+
+        // Switch primary: the candidate becomes active and primary.
+        let mut switch = glossary_args("set_primary");
+        switch.term_id = Some(created.term_id);
+        switch.translation_id = Some(second);
+        switch.target_lang = None;
+        let switched = glossary_propose_logic(&translate, &ctx, &switch).expect("switch");
+        assert_eq!(switched.translation_id, Some(second));
+        assert_eq!(
+            translate
+                .term(created.term_id)
+                .expect("read")
+                .expect("row")
+                .primary_choice_id,
+            Some(second)
+        );
+        assert!(switched.renderings.iter().all(|r| r.status == "active"));
+
+        // Three writes, three audit rows on their own subjects.
+        let conn = rusqlite::Connection::open(&fx.translate_db).expect("plain connection");
+        let mut stmt = conn
+            .prepare("SELECT action, term_id, translation_id, reason FROM translate_audit ORDER BY audit_id")
+            .expect("prepare");
+        type AuditLine = (String, Option<i64>, Option<i64>, Option<String>);
+        let rows: Vec<AuditLine> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "term_create".into(),
+                    Some(created.term_id),
+                    None,
+                    Some("first rendering".into())
+                ),
+                (
+                    "term_create".into(),
+                    Some(created.term_id),
+                    None,
+                    Some("first rendering".into())
+                ),
+                (
+                    "translation_add".into(),
+                    None,
+                    Some(second),
+                    Some("a rival rendering".into())
+                ),
+                (
+                    "translation_add".into(),
+                    None,
+                    Some(second),
+                    Some("a rival rendering".into())
+                ),
+                (
+                    "set_primary".into(),
+                    None,
+                    Some(second),
+                    Some("first rendering".into())
+                ),
+            ]
+        );
+
+        // The read side matches the term in a text of the book.
+        let hits = translate
+            .match_terms(1, "Ein Ungeziefer im Zimmer.")
+            .expect("match");
+        assert_eq!(
+            hits.iter().map(|h| h.term.term_id).collect::<Vec<_>>(),
+            vec![created.term_id]
+        );
+    }
+
+    #[test]
+    fn glossary_propose_refuses_bad_modes_missing_fields_and_malformed_references() {
+        let fx = Fixture::new();
+        let translate = fx.store();
+        let ctx = fx.ctx();
+
+        let err =
+            glossary_propose_logic(&translate, &ctx, &glossary_args("rename")).expect_err("mode");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(TranslateError::UnknownValue { what: "mode", .. })
+            ),
+            "{err:?}"
+        );
+        let mut no_term = glossary_args("create_term");
+        no_term.source_term = None;
+        let err = glossary_propose_logic(&translate, &ctx, &no_term).expect_err("field");
+        assert!(
+            matches!(err, TranslateToolError::InvalidArgument(ref m) if m.contains("source_term")),
+            "{err:?}"
+        );
+        let mut bad_ref = glossary_args("create_term");
+        bad_ref.authority_ref = Some("dict/ungeziefer".into());
+        let err = glossary_propose_logic(&translate, &ctx, &bad_ref).expect_err("ref");
+        assert!(
+            matches!(err, TranslateToolError::InvalidArgument(ref m) if m.contains("authority_ref")),
+            "{err:?}"
+        );
+        let mut no_reason = glossary_args("create_term");
+        no_reason.rationale = String::new();
+        let err = glossary_propose_logic(&translate, &ctx, &no_reason).expect_err("rationale");
+        assert!(
+            matches!(err, TranslateToolError::InvalidArgument(_)),
+            "{err:?}"
+        );
+        let mut bad_kind = glossary_args("create_term");
+        bad_kind.term_kind = Some("verb".into());
+        let err = glossary_propose_logic(&translate, &ctx, &bad_kind).expect_err("kind");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(TranslateError::UnknownValue {
+                    what: "term_kind",
+                    ..
+                })
+            ),
+            "{err:?}"
+        );
+
+        let mut orphan = glossary_args("add_translation");
+        orphan.term_id = Some(404);
+        let err = glossary_propose_logic(&translate, &ctx, &orphan).expect_err("term");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(TranslateError::UnknownTerm { term_id: 404 })
+            ),
+            "{err:?}"
+        );
+        let mut no_id = glossary_args("set_primary");
+        no_id.term_id = Some(1);
+        let err = glossary_propose_logic(&translate, &ctx, &no_id).expect_err("translation_id");
+        assert!(
+            matches!(err, TranslateToolError::InvalidArgument(ref m) if m.contains("translation_id")),
+            "{err:?}"
+        );
+
+        assert_eq!(
+            translate.term(1).expect("read"),
+            None,
+            "refusals write nothing"
+        );
+        let conn = rusqlite::Connection::open(&fx.translate_db).expect("plain connection");
+        let audits: i64 = conn
+            .query_row("SELECT COUNT(*) FROM translate_audit", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(audits, 0);
     }
 }

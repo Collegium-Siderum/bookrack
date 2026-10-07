@@ -35,6 +35,16 @@ release workflow extracts the matching section verbatim from this file.
   segments read as review work. Every call leaves one audit row with
   the caller's rationale and token cost.
 
+- **mcp: `translate.glossary_propose`.** The glossary takes proposals
+  over MCP in three modes: a new source term with its first rendering,
+  made active and primary; a further candidate rendering of a known
+  term; and a change of primary rendering, which activates the chosen
+  one and leaves the previous one on record. A term already on the same
+  key, or an identical rendering already recorded, is named in the
+  reply instead of refused, so an agent can resolve the collision
+  itself. The reply lists the term's renderings afterwards, and every
+  call leaves one audit row.
+
 - **translate: new crate with the `translate.db` schema.** The
   translation working store arrives as a schema-only foundation:
   seven tables (immutable units, mutable segments, the two-layer
