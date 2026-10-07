@@ -16,6 +16,19 @@ use rusqlite::OptionalExtension;
 
 use crate::{Translate, TranslateResult};
 
+/// One unit to insert. `unit_order` is the document-order position of
+/// the unit's first leaf; `source_outline` is the heading path from the
+/// book root down to the unit's node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewUnit<'a> {
+    pub intake_id: i64,
+    pub target_lang: &'a str,
+    pub node_id: i64,
+    pub unit_order: i64,
+    pub source_outline: Option<&'a str>,
+    pub injection_profile: &'a str,
+}
+
 /// The single source of truth for the `translate_units` table's schema.
 /// The frozen baseline DDL in [`crate::migrate`] is rendered from this
 /// spec; `verify_all` pins the two together on every open.
@@ -88,8 +101,53 @@ impl Translate {
     }
 }
 
+impl Translate {
+    /// Insert a unit, or find the one already on `(intake_id,
+    /// target_lang, node_id)`. An existing unit keeps its order,
+    /// outline and profile; the flag says whether this call inserted.
+    pub fn ensure_unit(&self, u: &NewUnit<'_>) -> TranslateResult<(i64, bool)> {
+        let inserted: Option<i64> = self
+            .conn
+            .query_row(
+                "INSERT OR IGNORE INTO translate_units (intake_id, target_lang, node_id, \
+                 unit_order, source_outline, injection_profile) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                 RETURNING unit_id",
+                rusqlite::params![
+                    u.intake_id,
+                    u.target_lang,
+                    u.node_id,
+                    u.unit_order,
+                    u.source_outline,
+                    u.injection_profile,
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = inserted {
+            return Ok((id, true));
+        }
+        let existing: i64 = self.conn.query_row(
+            "SELECT unit_id FROM translate_units WHERE intake_id = ?1 AND target_lang = ?2 \
+             AND node_id = ?3",
+            rusqlite::params![u.intake_id, u.target_lang, u.node_id],
+            |row| row.get(0),
+        )?;
+        Ok((existing, false))
+    }
+
+    /// Every unit of `(intake_id, target_lang)` in `unit_order`.
+    pub fn units_for(&self, intake_id: i64, target_lang: &str) -> TranslateResult<Vec<UnitRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{SELECT_UNIT} WHERE intake_id = ?1 AND target_lang = ?2 ORDER BY unit_order, unit_id"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![intake_id, target_lang], read_unit)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::seed;
 
     #[test]
@@ -127,5 +185,62 @@ mod tests {
     fn an_unknown_unit_reads_as_none() {
         let t = seed::fresh();
         assert_eq!(t.unit(404).expect("read"), None);
+    }
+
+    #[test]
+    fn ensure_unit_inserts_once_and_keeps_the_existing_row_as_it_was() {
+        let t = seed::fresh();
+        let first = NewUnit {
+            intake_id: 1,
+            target_lang: "zh",
+            node_id: 40,
+            unit_order: 3,
+            source_outline: Some("A Book > Chapter One"),
+            injection_profile: "academic",
+        };
+        let (id, inserted) = t.ensure_unit(&first).expect("insert");
+        assert!(inserted);
+        let again = NewUnit {
+            unit_order: 9,
+            source_outline: None,
+            injection_profile: "prose",
+            ..first.clone()
+        };
+        let (same, inserted) = t.ensure_unit(&again).expect("repeat");
+        assert!(!inserted);
+        assert_eq!(same, id);
+        let row = t.unit(id).expect("read").expect("row");
+        assert_eq!(
+            (
+                row.unit_order,
+                row.source_outline.as_deref(),
+                row.injection_profile.as_str()
+            ),
+            (3, Some("A Book > Chapter One"), "academic")
+        );
+        let (other, inserted) = t
+            .ensure_unit(&NewUnit {
+                target_lang: "fr",
+                ..first
+            })
+            .expect("other lang");
+        assert!(inserted);
+        assert_ne!(other, id);
+    }
+
+    #[test]
+    fn units_for_lists_one_scope_in_unit_order() {
+        let t = seed::fresh();
+        let later = seed::unit(&t, 1, "zh", 12, 5);
+        let first = seed::unit(&t, 1, "zh", 10, 0);
+        seed::unit(&t, 1, "fr", 10, 0);
+        seed::unit(&t, 2, "zh", 20, 0);
+        let ids: Vec<i64> = t
+            .units_for(1, "zh")
+            .expect("read")
+            .iter()
+            .map(|u| u.unit_id)
+            .collect();
+        assert_eq!(ids, vec![first, later]);
     }
 }

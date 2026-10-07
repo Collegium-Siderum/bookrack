@@ -12,7 +12,20 @@
 
 use bookrack_dbkit::{ColumnSpec, ForeignKey, OnDelete, TableSpec};
 
-use crate::{Translate, TranslateResult};
+use crate::{Translate, TranslateError, TranslateResult};
+
+/// Every `role` a witness may carry.
+pub const ROLES: &[&str] = &["alt_source", "translation_witness", "prior_translation"];
+
+/// One witness to anchor on a unit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewWitness<'a> {
+    pub witness_intake_id: i64,
+    pub witness_node_id: i64,
+    pub lang: &'a str,
+    pub role: &'a str,
+    pub note: Option<&'a str>,
+}
 
 /// The single source of truth for the `translate_unit_witnesses`
 /// table's schema. The frozen baseline DDL in [`crate::migrate`] is
@@ -78,8 +91,44 @@ impl Translate {
     }
 }
 
+impl Translate {
+    /// Anchor a witness on `unit_id`, replacing the row for the same
+    /// witness book if there is one. The unit must exist and the role
+    /// must be one of [`ROLES`].
+    pub fn put_witness(&self, unit_id: i64, w: &NewWitness<'_>) -> TranslateResult<i64> {
+        if self.unit(unit_id)?.is_none() {
+            return Err(TranslateError::UnknownUnit { unit_id });
+        }
+        if !ROLES.contains(&w.role) {
+            return Err(TranslateError::UnknownValue {
+                what: "role",
+                value: w.role.to_owned(),
+                known: ROLES,
+            });
+        }
+        Ok(self.conn.query_row(
+            "INSERT INTO translate_unit_witnesses (unit_id, witness_intake_id, witness_node_id, \
+             lang, role, note) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(unit_id, witness_intake_id) DO UPDATE SET \
+             witness_node_id = excluded.witness_node_id, lang = excluded.lang, \
+             role = excluded.role, note = excluded.note \
+             RETURNING witness_id",
+            rusqlite::params![
+                unit_id,
+                w.witness_intake_id,
+                w.witness_node_id,
+                w.lang,
+                w.role,
+                w.note
+            ],
+            |row| row.get(0),
+        )?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::seed;
 
     #[test]
@@ -115,5 +164,60 @@ mod tests {
         let unit_id = seed::unit(&t, 1, "zh", 10, 0);
         assert!(t.witnesses_for_unit(unit_id).expect("read").is_empty());
         assert!(t.witnesses_for_unit(404).expect("read").is_empty());
+    }
+
+    #[test]
+    fn put_witness_upserts_per_witness_book_and_checks_unit_and_role() {
+        let t = seed::fresh();
+        let unit_id = seed::unit(&t, 1, "zh", 10, 0);
+        let first = NewWitness {
+            witness_intake_id: 5,
+            witness_node_id: 70,
+            lang: "en",
+            role: "alt_source",
+            note: None,
+        };
+        let id = t.put_witness(unit_id, &first).expect("insert");
+        let same = t
+            .put_witness(
+                unit_id,
+                &NewWitness {
+                    witness_node_id: 71,
+                    role: "prior_translation",
+                    note: Some("1999 edition"),
+                    ..first
+                },
+            )
+            .expect("replace");
+        assert_eq!(same, id, "the same witness book keeps its row");
+        let rows = t.witnesses_for_unit(unit_id).expect("read");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (
+                rows[0].witness_node_id,
+                rows[0].role.as_str(),
+                rows[0].note.as_deref()
+            ),
+            (71, "prior_translation", Some("1999 edition"))
+        );
+
+        let err = t
+            .put_witness(
+                unit_id,
+                &NewWitness {
+                    role: "bystander",
+                    ..first
+                },
+            )
+            .expect_err("role");
+        assert!(
+            matches!(err, TranslateError::UnknownValue { what: "role", .. }),
+            "{err:?}"
+        );
+        let err = t.put_witness(404, &first).expect_err("unit");
+        assert!(
+            matches!(err, TranslateError::UnknownUnit { unit_id: 404 }),
+            "{err:?}"
+        );
     }
 }

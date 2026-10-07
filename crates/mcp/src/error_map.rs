@@ -123,10 +123,23 @@ pub(crate) fn translate_error_to_mcp(e: TranslateToolError) -> ErrorData {
     use bookrack_runtime::control::jsonrpc::STATE_UNUSABLE;
     use bookrack_translate::TranslateError;
     let code = match &e {
+        // A write refused against the segment's current state is the
+        // caller's to correct by fetching again; the store itself is
+        // fine, so none of these is a state-unusable code.
         TranslateToolError::InvalidArgument(_)
-        | TranslateToolError::Translate(TranslateError::UnknownProfile { .. }) => {
-            ErrorCode::INVALID_PARAMS
-        }
+        | TranslateToolError::Translate(
+            TranslateError::UnknownProfile { .. }
+            | TranslateError::VersionConflict { .. }
+            | TranslateError::WrongStatus { .. }
+            | TranslateError::NotVirgin { .. }
+            | TranslateError::NotEmpty { .. }
+            | TranslateError::MissingField { .. }
+            | TranslateError::UnknownSegment { .. }
+            | TranslateError::UnknownUnit { .. }
+            | TranslateError::UnknownTerm { .. }
+            | TranslateError::UnknownTranslation { .. }
+            | TranslateError::UnknownValue { .. },
+        ) => ErrorCode::INVALID_PARAMS,
         TranslateToolError::Translate(
             TranslateError::SchemaTooNew { .. }
             | TranslateError::SchemaTooOld { .. }
@@ -245,6 +258,16 @@ mod tests {
             "{}",
             invalid.message
         );
+
+        let stale = translate_error_to_mcp(TranslateToolError::Translate(
+            TranslateError::VersionConflict {
+                segment_id: 7,
+                expected: 1,
+                current: 2,
+            },
+        ));
+        assert_eq!(stale.code, ErrorCode::INVALID_PARAMS, "{}", stale.message);
+        assert!(stale.message.contains("segment 7"), "{}", stale.message);
 
         let profile = translate_error_to_mcp(TranslateToolError::Translate(
             TranslateError::UnknownProfile {

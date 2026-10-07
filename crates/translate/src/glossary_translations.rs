@@ -11,7 +11,52 @@
 
 use bookrack_dbkit::{ColumnSpec, ForeignKey, IndexSpec, OnDelete, TableSpec};
 
-use crate::{Translate, TranslateResult};
+use rusqlite::OptionalExtension;
+
+use crate::{Translate, TranslateError, TranslateResult};
+
+/// Every `status` a rendering may carry.
+pub const TRANSLATION_STATUSES: &[&str] = &["candidate", "active", "retired", "rejected"];
+
+/// One rendering to insert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTranslation<'a> {
+    pub term_id: i64,
+    pub target_lang: &'a str,
+    /// `None` records a do-not-translate verdict.
+    pub target_term: Option<&'a str>,
+    pub faction: Option<&'a str>,
+    pub translator: Option<&'a str>,
+    pub citation: Option<&'a str>,
+    pub rationale: Option<&'a str>,
+    /// One of [`TRANSLATION_STATUSES`].
+    pub status: &'a str,
+    pub authority_ref: Option<&'a str>,
+    /// RFC 3339 UTC, stamped by the caller.
+    pub proposed_at: &'a str,
+}
+
+const SELECT_TRANSLATION: &str = "SELECT translation_id, term_id, target_lang, target_term, \
+     faction, translator, citation, rationale, status, authority_ref, proposed_at, approved_at, \
+     version FROM glossary_translations";
+
+fn read_translation(row: &rusqlite::Row<'_>) -> rusqlite::Result<TranslationRow> {
+    Ok(TranslationRow {
+        translation_id: row.get(0)?,
+        term_id: row.get(1)?,
+        target_lang: row.get(2)?,
+        target_term: row.get(3)?,
+        faction: row.get(4)?,
+        translator: row.get(5)?,
+        citation: row.get(6)?,
+        rationale: row.get(7)?,
+        status: row.get(8)?,
+        authority_ref: row.get(9)?,
+        proposed_at: row.get(10)?,
+        approved_at: row.get(11)?,
+        version: row.get(12)?,
+    })
+}
 
 /// The single source of truth for the `glossary_translations` table's
 /// schema. The frozen baseline DDL in [`crate::migrate`] is rendered
@@ -131,6 +176,106 @@ impl Translate {
     }
 }
 
+impl Translate {
+    /// The rendering with `translation_id`, or `None`.
+    pub fn translation(&self, translation_id: i64) -> TranslateResult<Option<TranslationRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("{SELECT_TRANSLATION} WHERE translation_id = ?1"),
+                [translation_id],
+                read_translation,
+            )
+            .optional()?)
+    }
+
+    /// The rendering of `term_id` into `target_lang` that reads
+    /// `target_term`, in any status, or `None`. `None` as the term
+    /// finds a recorded do-not-translate verdict.
+    pub fn find_translation(
+        &self,
+        term_id: i64,
+        target_lang: &str,
+        target_term: Option<&str>,
+    ) -> TranslateResult<Option<TranslationRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "{SELECT_TRANSLATION} WHERE term_id = ?1 AND target_lang = ?2 \
+                     AND target_term IS ?3 ORDER BY translation_id LIMIT 1"
+                ),
+                rusqlite::params![term_id, target_lang, target_term],
+                read_translation,
+            )
+            .optional()?)
+    }
+
+    /// Insert a rendering. The term must exist and the status must be
+    /// one of [`TRANSLATION_STATUSES`]; `authority_ref` is stored as
+    /// given, never resolved.
+    pub fn insert_translation(&self, tr: &NewTranslation<'_>) -> TranslateResult<i64> {
+        if self.term(tr.term_id)?.is_none() {
+            return Err(TranslateError::UnknownTerm {
+                term_id: tr.term_id,
+            });
+        }
+        if !TRANSLATION_STATUSES.contains(&tr.status) {
+            return Err(TranslateError::UnknownValue {
+                what: "status",
+                value: tr.status.to_owned(),
+                known: TRANSLATION_STATUSES,
+            });
+        }
+        Ok(self.conn.query_row(
+            "INSERT INTO glossary_translations (term_id, target_lang, target_term, faction, \
+             translator, citation, rationale, status, authority_ref, proposed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) RETURNING translation_id",
+            rusqlite::params![
+                tr.term_id,
+                tr.target_lang,
+                tr.target_term,
+                tr.faction,
+                tr.translator,
+                tr.citation,
+                tr.rationale,
+                tr.status,
+                tr.authority_ref,
+                tr.proposed_at,
+            ],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Make `translation_id` the primary rendering of `term_id`. The
+    /// rendering must belong to the term and be active or a candidate;
+    /// it becomes active, and the previous primary keeps its status.
+    pub fn set_primary(&self, term_id: i64, translation_id: i64) -> TranslateResult<()> {
+        if self.term(term_id)?.is_none() {
+            return Err(TranslateError::UnknownTerm { term_id });
+        }
+        let eligible = self.translation(translation_id)?.is_some_and(|r| {
+            r.term_id == term_id && (r.status == "active" || r.status == "candidate")
+        });
+        if !eligible {
+            return Err(TranslateError::UnknownTranslation {
+                term_id,
+                translation_id,
+            });
+        }
+        self.conn.execute(
+            "UPDATE glossary_translations SET status = 'active', version = version + 1 \
+             WHERE translation_id = ?1 AND status <> 'active'",
+            [translation_id],
+        )?;
+        self.conn.execute(
+            "UPDATE glossary_terms SET primary_choice_id = ?1 WHERE term_id = ?2",
+            rusqlite::params![translation_id, term_id],
+        )?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +359,148 @@ mod tests {
                 approved_at: Some("2026-02-02T00:00:00Z".into()),
                 version: 3,
             }]
+        );
+    }
+
+    fn new_translation(
+        term_id: i64,
+        target_term: Option<&'static str>,
+        status: &'static str,
+    ) -> NewTranslation<'static> {
+        NewTranslation {
+            term_id,
+            target_lang: "zh",
+            target_term,
+            faction: Some("faction-a"),
+            translator: None,
+            citation: None,
+            rationale: Some("why"),
+            status,
+            authority_ref: Some("refs://dict#entry"),
+            proposed_at: "2026-01-01T00:00:00Z",
+        }
+    }
+
+    #[test]
+    fn an_inserted_rendering_reads_back_and_is_found_by_its_text() {
+        let t = seed::fresh();
+        let term_id = seed::term(&t, "library", None, "de", "Traum", "traum", "term");
+        let id = t
+            .insert_translation(&new_translation(term_id, Some("TRAUM-A"), "candidate"))
+            .expect("insert");
+        let row = t.translation(id).expect("read").expect("row");
+        assert_eq!(
+            (
+                row.target_term.as_deref(),
+                row.faction.as_deref(),
+                row.status.as_str(),
+                row.authority_ref.as_deref(),
+                row.version
+            ),
+            (
+                Some("TRAUM-A"),
+                Some("faction-a"),
+                "candidate",
+                Some("refs://dict#entry"),
+                1
+            )
+        );
+        assert_eq!(
+            t.find_translation(term_id, "zh", Some("TRAUM-A"))
+                .expect("find")
+                .map(|r| r.translation_id),
+            Some(id)
+        );
+        assert_eq!(
+            t.find_translation(term_id, "zh", Some("other"))
+                .expect("find"),
+            None
+        );
+        assert_eq!(
+            t.find_translation(term_id, "fr", Some("TRAUM-A"))
+                .expect("find"),
+            None
+        );
+
+        let keep = t
+            .insert_translation(&new_translation(term_id, None, "candidate"))
+            .expect("do-not-translate");
+        assert_eq!(
+            t.find_translation(term_id, "zh", None)
+                .expect("find")
+                .map(|r| r.translation_id),
+            Some(keep)
+        );
+    }
+
+    #[test]
+    fn a_rendering_needs_an_existing_term_and_a_known_status() {
+        let t = seed::fresh();
+        let err = t
+            .insert_translation(&new_translation(404, Some("x"), "candidate"))
+            .expect_err("term");
+        assert!(
+            matches!(err, TranslateError::UnknownTerm { term_id: 404 }),
+            "{err:?}"
+        );
+        let term_id = seed::term(&t, "library", None, "de", "Traum", "traum", "term");
+        let err = t
+            .insert_translation(&new_translation(term_id, Some("x"), "maybe"))
+            .expect_err("status");
+        assert!(
+            matches!(err, TranslateError::UnknownValue { what: "status", .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn set_primary_activates_the_chosen_rendering_and_checks_ownership() {
+        let t = seed::fresh();
+        let term_id = seed::term(&t, "library", None, "de", "Traum", "traum", "term");
+        let other_term = seed::term(&t, "library", None, "de", "Raum", "raum", "term");
+        let first = seed::translation(&t, term_id, "zh", Some("A"), "active");
+        seed::set_primary(&t, term_id, first);
+        let second = seed::translation(&t, term_id, "zh", Some("B"), "candidate");
+        let retired = seed::translation(&t, term_id, "zh", Some("C"), "retired");
+        let foreign = seed::translation(&t, other_term, "zh", Some("D"), "active");
+
+        t.set_primary(term_id, second).expect("switch");
+        let term = t.term(term_id).expect("read").expect("row");
+        assert_eq!(term.primary_choice_id, Some(second));
+        let second_row = t.translation(second).expect("read").expect("row");
+        assert_eq!(
+            (second_row.status.as_str(), second_row.version),
+            ("active", 2)
+        );
+        let first_row = t.translation(first).expect("read").expect("row");
+        assert_eq!(
+            (first_row.status.as_str(), first_row.version),
+            ("active", 1),
+            "the old primary is left as it was"
+        );
+
+        for (candidate, what) in [
+            (retired, "retired"),
+            (foreign, "another term's"),
+            (404, "unknown"),
+        ] {
+            let err = t.set_primary(term_id, candidate).expect_err(what);
+            assert!(
+                matches!(err, TranslateError::UnknownTranslation { translation_id, .. } if translation_id == candidate),
+                "{what}: {err:?}"
+            );
+        }
+        assert_eq!(
+            t.term(term_id)
+                .expect("read")
+                .expect("row")
+                .primary_choice_id,
+            Some(second)
+        );
+        let err = t.set_primary(404, second).expect_err("term");
+        assert!(
+            matches!(err, TranslateError::UnknownTerm { term_id: 404 }),
+            "{err:?}"
         );
     }
 }

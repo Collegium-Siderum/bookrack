@@ -10,8 +10,29 @@
 //! competing renderings coexist long-term.
 
 use bookrack_dbkit::{ColumnSpec, TableSpec};
+use rusqlite::OptionalExtension;
 
-use crate::{Translate, TranslateResult};
+use crate::{Translate, TranslateError, TranslateResult};
+
+/// Every `scope` a term may carry.
+pub const SCOPES: &[&str] = &["authority", "library", "book"];
+/// Every `term_kind` a term may carry.
+pub const TERM_KINDS: &[&str] = &[
+    "term",
+    "proper_noun",
+    "do_not_translate",
+    "common_knowledge",
+];
+
+/// One term to insert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTerm<'a> {
+    pub scope: &'a str,
+    pub scope_ref: Option<&'a str>,
+    pub source_lang: &'a str,
+    pub source_term: &'a str,
+    pub term_kind: &'a str,
+}
 
 /// The single source of truth for the `glossary_terms` table's schema.
 /// The frozen baseline DDL in [`crate::migrate`] is rendered from this
@@ -73,8 +94,28 @@ fn is_word_char(c: char) -> bool {
 /// Case-fold one char to a single char so a folded text keeps a 1:1
 /// index mapping with the original. The few chars whose lower-case
 /// form is longer than one char fold to its first char.
-fn fold(c: char) -> char {
+pub(crate) fn fold(c: char) -> char {
     c.to_lowercase().next().unwrap_or(c)
+}
+
+/// The identity key of a source term: trimmed, inner whitespace runs
+/// collapsed to one space, every char folded the way the matcher folds
+/// text. A term therefore always matches its own key.
+pub fn source_norm(source_term: &str) -> String {
+    let mut out = String::with_capacity(source_term.len());
+    let mut pending_space = false;
+    for c in source_term.trim().chars() {
+        if c.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(fold(c));
+    }
+    out
 }
 
 /// First occurrence of `term` in `text` as a half-open char range, or
@@ -158,6 +199,87 @@ impl Translate {
         matches.sort_by_key(|m| (m.span_in_source.0, m.term.term_id));
         Ok(matches)
     }
+}
+
+impl Translate {
+    /// The term with `term_id`, or `None`.
+    pub fn term(&self, term_id: i64) -> TranslateResult<Option<TermRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT term_id, scope, scope_ref, source_lang, source_term, source_norm, \
+                 term_kind, primary_choice_id FROM glossary_terms WHERE term_id = ?1",
+                [term_id],
+                read_term,
+            )
+            .optional()?)
+    }
+
+    /// Insert a term. `Ok(Ok(id))` when inserted; `Ok(Err(existing))`
+    /// when a term with the same `(source_lang, source_norm, scope,
+    /// scope_ref)` is already there, naming it. The key is compared
+    /// with `IS`, so two library-scoped terms (whose `scope_ref` is
+    /// NULL) collide the way the schema intends. Scope and kind must
+    /// come from [`SCOPES`] and [`TERM_KINDS`].
+    pub fn insert_term(&self, t: &NewTerm<'_>) -> TranslateResult<Result<i64, i64>> {
+        if !SCOPES.contains(&t.scope) {
+            return Err(TranslateError::UnknownValue {
+                what: "scope",
+                value: t.scope.to_owned(),
+                known: SCOPES,
+            });
+        }
+        if !TERM_KINDS.contains(&t.term_kind) {
+            return Err(TranslateError::UnknownValue {
+                what: "term_kind",
+                value: t.term_kind.to_owned(),
+                known: TERM_KINDS,
+            });
+        }
+        let norm = source_norm(t.source_term);
+        // The key is checked here rather than left to the UNIQUE index:
+        // `scope_ref` is NULL for library-scoped terms, and SQLite treats
+        // NULLs in a unique index as distinct from one another.
+        let existing: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT term_id FROM glossary_terms WHERE source_lang = ?1 AND source_norm = ?2 \
+                 AND scope = ?3 AND scope_ref IS ?4",
+                rusqlite::params![t.source_lang, norm, t.scope, t.scope_ref],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = existing {
+            return Ok(Err(id));
+        }
+        let id: i64 = self.conn.query_row(
+            "INSERT INTO glossary_terms (scope, scope_ref, source_lang, source_term, \
+             source_norm, term_kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING term_id",
+            rusqlite::params![
+                t.scope,
+                t.scope_ref,
+                t.source_lang,
+                t.source_term,
+                norm,
+                t.term_kind
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(Ok(id))
+    }
+}
+
+fn read_term(row: &rusqlite::Row<'_>) -> rusqlite::Result<TermRow> {
+    Ok(TermRow {
+        term_id: row.get(0)?,
+        scope: row.get(1)?,
+        scope_ref: row.get(2)?,
+        source_lang: row.get(3)?,
+        source_term: row.get(4)?,
+        source_norm: row.get(5)?,
+        term_kind: row.get(6)?,
+        primary_choice_id: row.get(7)?,
+    })
 }
 
 #[cfg(test)]
@@ -295,6 +417,113 @@ mod tests {
                     span_in_source: (11, 16),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn source_norm_trims_collapses_whitespace_and_folds_case() {
+        assert_eq!(source_norm("  Objet   petit\ta "), "objet petit a");
+        assert_eq!(source_norm("Dasein"), "dasein");
+        assert_eq!(source_norm("\u{c9}crits"), "\u{e9}crits");
+    }
+
+    #[test]
+    fn a_created_term_matches_itself_in_a_text() {
+        let t = seed::fresh();
+        let id = t
+            .insert_term(&NewTerm {
+                scope: "book",
+                scope_ref: Some("1"),
+                source_lang: "de",
+                source_term: "Das Ding",
+                term_kind: "term",
+            })
+            .expect("insert")
+            .expect("new");
+        let row = t.term(id).expect("read").expect("row");
+        assert_eq!(
+            (row.source_term.as_str(), row.source_norm.as_str()),
+            ("Das Ding", "das ding")
+        );
+        let matches = t
+            .match_terms(1, "Hier ist das Ding selbst.")
+            .expect("match");
+        assert_eq!(
+            matches.iter().map(|m| m.term.term_id).collect::<Vec<_>>(),
+            vec![id]
+        );
+    }
+
+    #[test]
+    fn inserting_a_term_on_an_existing_key_names_the_existing_row_instead_of_failing() {
+        let t = seed::fresh();
+        let first = NewTerm {
+            scope: "library",
+            scope_ref: None,
+            source_lang: "de",
+            source_term: "Traum",
+            term_kind: "term",
+        };
+        let id = t.insert_term(&first).expect("insert").expect("new");
+        let again = t
+            .insert_term(&NewTerm {
+                source_term: " TRAUM ",
+                term_kind: "proper_noun",
+                ..first
+            })
+            .expect("repeat");
+        assert_eq!(again, Err(id), "same key folds to the same row");
+        let other_scope = t
+            .insert_term(&NewTerm {
+                scope: "book",
+                scope_ref: Some("1"),
+                ..first
+            })
+            .expect("other scope")
+            .expect("new");
+        assert_ne!(other_scope, id);
+    }
+
+    #[test]
+    fn scope_and_kind_outside_the_vocabularies_are_refused() {
+        let t = seed::fresh();
+        let good = NewTerm {
+            scope: "library",
+            scope_ref: None,
+            source_lang: "de",
+            source_term: "Traum",
+            term_kind: "term",
+        };
+        let err = t
+            .insert_term(&NewTerm {
+                scope: "planet",
+                ..good
+            })
+            .expect_err("scope");
+        assert!(
+            matches!(err, TranslateError::UnknownValue { what: "scope", .. }),
+            "{err:?}"
+        );
+        let err = t
+            .insert_term(&NewTerm {
+                term_kind: "verb",
+                ..good
+            })
+            .expect_err("kind");
+        assert!(
+            matches!(
+                err,
+                TranslateError::UnknownValue {
+                    what: "term_kind",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(
+            t.term(1).expect("read"),
+            None,
+            "a refused insert leaves no row"
         );
     }
 }

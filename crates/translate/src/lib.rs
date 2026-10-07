@@ -154,7 +154,98 @@ pub enum TranslateError {
         /// The name as the caller gave it.
         name: String,
     },
+
+    /// A write named a segment version that is no longer current.
+    #[error("segment {segment_id} is at version {current}, the write expected {expected}")]
+    VersionConflict {
+        /// The segment the write addressed.
+        segment_id: i64,
+        /// The version the caller expected to act on.
+        expected: i64,
+        /// The version the row actually carries.
+        current: i64,
+    },
+
+    /// A write found a segment in a status it does not apply to.
+    #[error("segment {segment_id} is {status}, the write needs {wanted}")]
+    WrongStatus {
+        /// The segment the write addressed.
+        segment_id: i64,
+        /// The status the row carries.
+        status: String,
+        /// The status the write applies to.
+        wanted: &'static str,
+    },
+
+    /// A re-slice touched a segment that already carries work.
+    #[error("segment {segment_id} is not virgin")]
+    NotVirgin {
+        /// The segment carrying work.
+        segment_id: i64,
+    },
+
+    /// An import found text already recorded on the segment.
+    #[error("segment {segment_id} already carries text")]
+    NotEmpty {
+        /// The segment with text.
+        segment_id: i64,
+    },
+
+    /// A write stage was given without the field it records.
+    #[error("{stage} needs `{field}`")]
+    MissingField {
+        /// The write stage, as the caller names it.
+        stage: &'static str,
+        /// The argument that was absent.
+        field: &'static str,
+    },
+
+    /// A write named a segment that does not exist.
+    #[error("segment {segment_id} does not exist")]
+    UnknownSegment {
+        /// The id as the caller gave it.
+        segment_id: i64,
+    },
+
+    /// A write named a unit that does not exist.
+    #[error("unit {unit_id} does not exist")]
+    UnknownUnit {
+        /// The id as the caller gave it.
+        unit_id: i64,
+    },
+
+    /// A glossary write named a term that does not exist.
+    #[error("glossary term {term_id} does not exist")]
+    UnknownTerm {
+        /// The id as the caller gave it.
+        term_id: i64,
+    },
+
+    /// A glossary write named a rendering that does not exist, or that
+    /// belongs to another term.
+    #[error("glossary translation {translation_id} is not a rendering of term {term_id}")]
+    UnknownTranslation {
+        /// The term the caller named.
+        term_id: i64,
+        /// The rendering the caller named.
+        translation_id: i64,
+    },
+
+    /// A value outside one of the store's closed vocabularies.
+    #[error("unknown {what} {value:?}")]
+    UnknownValue {
+        /// Which vocabulary: `status`, `source_kind`, `role`, ...
+        what: &'static str,
+        /// The value as the caller gave it.
+        value: String,
+        /// The values the vocabulary admits.
+        known: &'static [&'static str],
+    },
 }
+
+/// The next step every refused segment write shares.
+const REFETCH_HINT: &str = "Fetch the segment again with translate.fetch_segment and retry against its current \
+     version and status.";
 
 impl Explain for TranslateError {
     fn explain(&self) -> Problem {
@@ -240,6 +331,90 @@ impl Explain for TranslateError {
                             .join(", ")
                     ))
                     .hint("Pass one of the known profile names, or omit the override to use the unit's own profile.")
+            }
+
+            TranslateError::VersionConflict {
+                segment_id,
+                expected,
+                current,
+            } => Problem::new(format!(
+                "cannot write segment {segment_id}: it has changed since it was fetched"
+            ))
+            .detail(format!(
+                "The write expected version {expected}; the row is at version {current}."
+            ))
+            .hint(REFETCH_HINT),
+
+            TranslateError::WrongStatus {
+                segment_id,
+                status,
+                wanted,
+            } => Problem::new(format!("cannot write segment {segment_id}: it is {status}"))
+                .detail(format!("This write applies to a segment that is {wanted}."))
+                .hint(REFETCH_HINT),
+
+            TranslateError::NotVirgin { segment_id } => {
+                Problem::new(format!("cannot re-slice segment {segment_id}: it carries work"))
+                    .detail(
+                        "Only a segment that was never proposed, imported or re-sliced can be \
+                         replaced: status draft, version 1, no text recorded.",
+                    )
+                    .hint("Leave that segment in place and re-slice the virgin ones around it.")
+            }
+
+            TranslateError::NotEmpty { segment_id } => {
+                Problem::new(format!("cannot import into segment {segment_id}: it carries text"))
+                    .detail("An import fills only a draft segment with no text recorded.")
+                    .hint(REFETCH_HINT)
+            }
+
+            TranslateError::MissingField { stage, field } => {
+                Problem::new(format!("cannot record {stage}: `{field}` is missing"))
+                    .detail(format!("The {stage} stage records `{field}` and nothing else."))
+                    .hint(format!("Pass `{field}` with the {stage} write."))
+            }
+
+            TranslateError::UnknownSegment { segment_id } => {
+                Problem::new(format!("cannot write segment {segment_id}: no such segment"))
+                    .detail("No row in the translation store carries that segment id.")
+                    .hint("Take segment ids from translate.list_pending or translate.plan.")
+            }
+
+            TranslateError::UnknownUnit { unit_id } => {
+                Problem::new(format!("cannot write unit {unit_id}: no such unit"))
+                    .detail("No row in the translation store carries that unit id.")
+                    .hint("Take unit ids from translate.list_pending or translate.plan.")
+            }
+
+            TranslateError::UnknownTerm { term_id } => {
+                Problem::new(format!("cannot write glossary term {term_id}: no such term"))
+                    .detail("No row in the glossary carries that term id.")
+                    .hint("Take term ids from translate.fetch_segment's glossary hits or from create_term.")
+            }
+
+            TranslateError::UnknownTranslation {
+                term_id,
+                translation_id,
+            } => Problem::new(format!(
+                "cannot set translation {translation_id} as primary: it is not a rendering of \
+                 term {term_id}"
+            ))
+            .detail(
+                "The rendering must exist, belong to the term, and be active or a candidate.",
+            )
+            .hint("Take translation ids from the renderings the glossary write returned."),
+
+            TranslateError::UnknownValue { what, value, known } => {
+                Problem::new(format!("cannot apply unknown {what} {value:?}"))
+                    .detail(format!(
+                        "The values this build knows are {}.",
+                        known
+                            .iter()
+                            .map(|k| format!("\"{k}\""))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                    .hint(format!("Pass one of the known {what} values."))
             }
 
             TranslateError::Verify(source) => {
@@ -331,6 +506,29 @@ impl Translate {
             return Ok(None);
         }
         Translate::open_read_only(path).map(Some)
+    }
+
+    /// Run `f` inside one SQLite transaction: committed when it returns
+    /// `Ok`, rolled back when it returns `Err`.
+    ///
+    /// Every write surface of the store is one call, one transaction,
+    /// one audit row; the rollback is what keeps a refused write from
+    /// leaving half of that behind.
+    pub fn transaction<T>(
+        &self,
+        f: impl FnOnce(&Translate) -> TranslateResult<T>,
+    ) -> TranslateResult<T> {
+        let tx = self.conn.unchecked_transaction()?;
+        match f(self) {
+            Ok(value) => {
+                tx.commit()?;
+                Ok(value)
+            }
+            Err(e) => {
+                tx.rollback()?;
+                Err(e)
+            }
+        }
     }
 
     /// Migrate the schema to the current revision and return a handle.
@@ -951,5 +1149,78 @@ mod tests {
         let hint = problem.data.hint.as_deref().expect("hint");
         assert!(hint.contains("backup"), "hint: {hint}");
         assert!(!problem.data.retryable);
+    }
+
+    #[test]
+    fn write_refusals_name_the_segment_and_point_at_a_refetch() {
+        let refused = [
+            TranslateError::VersionConflict {
+                segment_id: 7,
+                expected: 1,
+                current: 3,
+            },
+            TranslateError::WrongStatus {
+                segment_id: 7,
+                status: "sealed".into(),
+                wanted: "draft or proposed",
+            },
+            TranslateError::NotEmpty { segment_id: 7 },
+        ];
+        for err in refused {
+            let problem = err.explain();
+            assert!(problem.summary.contains("segment 7"), "{}", problem.summary);
+            assert!(!problem.summary.ends_with('.'), "{}", problem.summary);
+            assert!(
+                problem
+                    .data
+                    .hint
+                    .as_deref()
+                    .is_some_and(|h| h.contains("fetch_segment")),
+                "{problem:?}"
+            );
+            assert!(!problem.data.retryable);
+        }
+
+        let problem = TranslateError::UnknownValue {
+            what: "source_kind",
+            value: "robot".into(),
+            known: &["human", "llm-draft"],
+        }
+        .explain();
+        assert_eq!(
+            problem.summary,
+            "cannot apply unknown source_kind \"robot\""
+        );
+        assert!(
+            problem
+                .data
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("\"llm-draft\"")),
+            "{problem:?}"
+        );
+    }
+
+    #[test]
+    fn a_transaction_rolls_back_when_the_closure_fails() {
+        let t = fresh();
+        let result = t.transaction(|t| {
+            seed::unit(t, 1, "zh", 10, 0);
+            Err::<(), _>(TranslateError::UnknownUnit { unit_id: 404 })
+        });
+        assert!(matches!(
+            result,
+            Err(TranslateError::UnknownUnit { unit_id: 404 })
+        ));
+        let units: i64 = t
+            .conn
+            .query_row("SELECT COUNT(*) FROM translate_units", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(units, 0, "a failed transaction must leave nothing behind");
+
+        let unit_id = t
+            .transaction(|t| Ok(seed::unit(t, 1, "zh", 10, 0)))
+            .expect("commit");
+        assert_eq!(t.unit(unit_id).expect("read").map(|u| u.node_id), Some(10));
     }
 }
