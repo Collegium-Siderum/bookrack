@@ -195,6 +195,47 @@ PDFium library (see
 for the pinned version and per-platform download). Without it, PDF
 ingest is unavailable but EPUB and TXT still work.
 
+## Uninstall
+
+bookrack writes to more places than the directory it was extracted
+into, and the registry is the only record of where the libraries are,
+so the order matters.
+
+1. **Find the libraries before touching anything.** `bookrack libraries
+   list` prints every registered data root. `bookrack config effective
+   --json` prints every other location below as this machine resolves
+   it, including the directories the managed native dependencies were
+   installed into. Then stop the daemon: `bookrack quit`.
+2. **Delete the libraries you do not want to keep**: `bookrack
+   libraries remove <name> --purge` deletes a root after a typed
+   confirmation. A root you keep stays a library — a later install
+   finds it with `bookrack libraries scan` and registers it again. Two
+   things a root can leave outside itself: catalog snapshots, when
+   `BOOKRACK_BACKUP_DIR` points elsewhere, and a `bookrack-data/`
+   directory beside the binary in a portable layout.
+3. **Delete the per-user state.** With no `BOOKRACK_*` directory
+   variable set:
+
+   | Platform | Registry and index profiles | Daemon state, logs, PDFium, llama-server, reranker models | Runtime directory |
+   | --- | --- | --- | --- |
+   | macOS | `~/Library/Application Support/bookrack/` | the same directory | `~/Library/Caches/bookrack/` |
+   | Linux | `~/.config/bookrack/` | `~/.local/share/bookrack/` | `$XDG_RUNTIME_DIR/bookrack/`, else `~/.cache/bookrack/` |
+   | Windows | `%APPDATA%\bookrack\` | the same directory | `%LOCALAPPDATA%\bookrack\` |
+
+   `$XDG_CONFIG_HOME` and `$XDG_DATA_HOME` move the Linux paths;
+   `BOOKRACK_REGISTRY`, `BOOKRACK_DAEMON_STATE_DIR` and
+   `BOOKRACK_RUNTIME_DIR` move any platform's, and the `config
+   effective --json` output from step 1 is what applies.
+4. **Delete the extracted directory** — the `Bookrack.app` bundle on
+   macOS, the directory the archive unpacked into elsewhere.
+5. **Remove the MCP client's entry.** For Claude Code: `claude mcp
+   remove bookrack`, with `--scope user` if it was registered that
+   way. Other clients keep theirs in their own configuration.
+
+Ollama and the models it pulled are a separate product; `ollama rm
+qwen3-embedding:0.6b` removes the embedding model if nothing else on
+the machine uses it.
+
 ## Features
 
 - **Books and papers, side by side** — books and academic papers in
@@ -237,7 +278,7 @@ ingest is unavailable but EPUB and TXT still work.
 | --- | --- |
 | [Operating](docs/operating.md) | the daemon, ingesting, the queue, the OCR worklist, the status card, health checks, observability |
 | [Configuration](docs/configuration.md) | data-root resolution, the library registry, `config.toml`, index profiles, the audit profile |
-| [Upgrading](docs/UPGRADE.md) | the bump-to-refresh matrix and switching the embedding model |
+| [Upgrading](docs/UPGRADE.md) | installing a new build, the bump-to-refresh matrix, downgrading, switching the embedding model |
 | [Control plane](docs/control-plane.md) | the JSON-RPC surface behind the CLI and MCP |
 
 ## Troubleshooting

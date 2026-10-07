@@ -6,6 +6,36 @@ library, keep working. Some upgrades require derived content to be
 rebuilt before search returns correct results. This document is the
 runbook for the cases that need action.
 
+## Installing a new build
+
+A release is an archive of binaries, not an installer: upgrading is
+extracting the new one and using it in place of the old. Nothing the
+binary needs to find is stored beside it — the registry under the
+platform config directory names the data roots, the daemon's own state
+and the managed native libraries live under the platform data
+directory, and an MCP client holds a URL — so none of them move.
+
+1. Stop the daemon: `bookrack quit`.
+2. Extract the new archive beside the old directory — on macOS a new
+   `Bookrack.app`, on Linux and Windows a new directory — and clear the
+   quarantine or SmartScreen tag as on first install.
+3. From the new directory, run `bookrack doctor`. It opens every store
+   through its read-only door, so nothing is migrated by the check, and
+   it reports which PDFium library will be used: the one the archive
+   bundles beside the executable is searched before the per-user copy
+   `doctor --install-pdfium` manages, so an older managed copy does not
+   shadow it.
+4. Start it: `bookrack run`. The first open of each catalog migrates it
+   forward, after taking the snapshot described under *Downgrading*.
+   The release notes name any row of the matrix below that applies.
+5. Delete the old directory. The one thing that does live beside a
+   binary is a portable layout, `bookrack-data/` next to it: move the
+   directory beside the new binary first, then update the registry
+   entry `init` wrote for it, which still names the old path —
+   `bookrack libraries remove <name>` forgets the entry without touching
+   data, and `bookrack libraries register <new path>` records the new
+   one under the name in its manifest.
+
 ## Compatibility model in one paragraph
 
 Each on-disk store records the build parameters of the data it holds:
