@@ -127,6 +127,7 @@ pub(crate) fn translate_error_to_mcp(e: TranslateToolError) -> ErrorData {
         // caller's to correct by fetching again; the store itself is
         // fine, so none of these is a state-unusable code.
         TranslateToolError::InvalidArgument(_)
+        | TranslateToolError::SpanOutOfUnit { .. }
         | TranslateToolError::Translate(
             TranslateError::UnknownProfile { .. }
             | TranslateError::VersionConflict { .. }

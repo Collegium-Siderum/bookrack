@@ -22,6 +22,7 @@ use bookrack_ops::dto::{BookFilter, MetadataFilter, PaperFilter, parse_statuses}
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, OpsError, SearchOptions, reads, with_caller_override, writes};
+use bookrack_translate::Translate;
 use eyre::WrapErr;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -34,6 +35,7 @@ use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
 mod error_map;
 mod reference;
 mod translate;
+mod translate_write;
 use error_map::{
     invalid_params_err, ops_error_to_mcp, reference_error_to_mcp, respond_with,
     translate_error_to_mcp, unknown_filter_value_to_mcp,
@@ -2100,6 +2102,82 @@ impl BookrackServer {
             .map_err(translate_error_to_mcp)?;
         respond_with(&result)
     }
+
+    // ----- translation write surface -----
+
+    /// Open the translation store for writing and the corpus for
+    /// reading, with the caller and timestamp every write stamps.
+    fn translate_write_stores(
+        &self,
+        library: &str,
+    ) -> Result<(Translate, bookrack_corpus::Corpus, Caller, String), ErrorData> {
+        let handle = self.resolve_handle(Some(library))?;
+        let ops = handle.ops();
+        let translate = Translate::open(&ops.translate_db_path())
+            .map_err(|e| translate_error_to_mcp(e.into()))?;
+        let corpus = bookrack_corpus::Corpus::open_read_only(ops.corpus_db())
+            .map_err(|e| translate_error_to_mcp(e.into()))?;
+        Ok((
+            translate,
+            corpus,
+            ops.effective_caller(),
+            chrono::Utc::now().to_rfc3339(),
+        ))
+    }
+
+    /// Plan one book's units and segments for one target language.
+    #[tool(
+        name = "translate.plan",
+        description = "Plan the translation of one book (`intake_id`) into `target_lang`: one \
+                       unit per chapter or section that directly holds text, one segment per \
+                       paragraph, heading, footnote or caption; quotations and poems stay \
+                       whole; formulas, code and tables are skipped and listed with the reason. \
+                       A paragraph longer than the threshold (`max_chars`; by default 1200 \
+                       chars for Latin and 600 for CJK text) is cut at sentence boundaries. \
+                       `chapter_node_id` narrows the plan to one subtree; `witnesses` anchors \
+                       other books on the planned units. Idempotent: existing units and \
+                       segments come back marked `existed` and are never re-sliced. Creates the \
+                       translation store when the library has none. Records one audit row \
+                       carrying `reason`."
+    )]
+    async fn translate_plan(
+        &self,
+        Parameters(args): Parameters<translate_write::TranslatePlanArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (translate, corpus, caller, now) = self.translate_write_stores(&args.library)?;
+        let ctx = translate_write::WriteContext {
+            caller: &caller,
+            now: &now,
+        };
+        let result = translate_write::plan_logic(&translate, &corpus, &ctx, &args)
+            .map_err(translate_error_to_mcp)?;
+        respond_with(&result)
+    }
+
+    /// Replace the virgin segments of one unit with new spans.
+    #[tool(
+        name = "translate.resegment",
+        description = "Replace the virgin segments of one unit (`unit_id`), those never \
+                       proposed, imported or re-sliced, with `new_spans`: each a start leaf \
+                       and char offset and an end leaf and char offset over the unit's own \
+                       leaves, start inclusive and end exclusive. Merge adjacent short \
+                       paragraphs into one span, or split one differently. Segments that carry \
+                       work stay and no new span may touch their leaves. Records one audit \
+                       row carrying `reason`."
+    )]
+    async fn translate_resegment(
+        &self,
+        Parameters(args): Parameters<translate_write::TranslateResegmentArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (translate, corpus, caller, now) = self.translate_write_stores(&args.library)?;
+        let ctx = translate_write::WriteContext {
+            caller: &caller,
+            now: &now,
+        };
+        let result = translate_write::resegment_logic(&translate, &corpus, &ctx, &args)
+            .map_err(translate_error_to_mcp)?;
+        respond_with(&result)
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -2339,6 +2417,12 @@ bookrack_core::fixed_settings! {
     "translate.tm_limit_max" = translate::MAX_TM_LIMIT,
         "most translation-memory hits a caller may ask for",
         acts on "translate.tm_search";
+    "translate.plan.max_chars_latin" = translate_write::MAX_CHARS_LATIN,
+        "chars a Latin-script leaf may hold before a plan cuts it at sentence boundaries",
+        acts on "translate.plan";
+    "translate.plan.max_chars_cjk" = translate_write::MAX_CHARS_CJK,
+        "chars a CJK-script leaf may hold before a plan cuts it at sentence boundaries",
+        acts on "translate.plan";
 }
 
 /// Enumerate every MCP tool the live server exposes. Calls into the

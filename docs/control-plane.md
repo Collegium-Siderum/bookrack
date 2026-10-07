@@ -926,7 +926,7 @@ buckets below; adding, renaming, or removing a tool fails that test
 until the list is updated, which is the point at which the version
 discipline (a tool-surface change is a minor bump) applies.
 
-Eleven of the tools write:
+Thirteen of the tools write:
 
 - `library.metadata.set` / `library.metadata.clear` — add or remove an
   override on one bibliographic field.
@@ -937,6 +937,11 @@ Eleven of the tools write:
 - `library.metadata.ack` / `library.metadata.approve` /
   `library.metadata.reject` — move the review row.
 - `reference.overlay_set` — layer a user edit on a reference entry.
+- `translate.plan` / `translate.resegment` — plan one book's units and
+  segments for a target language, and replace the virgin segments of one
+  unit with new spans. Each call is one transaction and one
+  `translate_audit` row. `plan` is the one path that creates
+  `translate.db`; the translate read tools keep probing for it.
 - `session.shutdown` — stop the daemon.
 
 Every write tool runs attributed to `Caller::mcp()`, so its audit rows

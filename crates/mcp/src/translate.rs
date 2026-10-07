@@ -164,8 +164,9 @@ impl From<GlossaryHitRow> for GlossaryHit {
     }
 }
 
-/// Where a translation-memory hit sits in the corpus.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+/// A four-part span into the corpus: start leaf and char offset, end
+/// leaf and char offset, start inclusive and end exclusive.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SpanRef {
     pub start_node_id: i64,
     pub start_char_offset: i64,
@@ -344,6 +345,15 @@ pub enum TranslateToolError {
         /// The unit id it names.
         unit_id: i64,
     },
+
+    /// A re-slice named a span the unit's leaves do not admit.
+    #[error("span does not fit unit {unit_id}: {reason}")]
+    SpanOutOfUnit {
+        /// The unit being re-sliced.
+        unit_id: i64,
+        /// What is wrong with the span.
+        reason: &'static str,
+    },
 }
 
 impl Explain for TranslateToolError {
@@ -376,11 +386,20 @@ impl Explain for TranslateToolError {
                  store's foreign keys should make that impossible."
             ))
             .hint("Report this with the library name; the translation store needs repair."),
+            TranslateToolError::SpanOutOfUnit { unit_id, reason } => {
+                Problem::new(format!("cannot re-slice unit {unit_id}: {reason}"))
+                    .detail(
+                        "Every span must start and end on a leaf of the unit, in chars, start \
+                         inclusive and end exclusive, run forwards, stay clear of segments that \
+                         carry work, and not overlap another span.",
+                    )
+                    .hint("Take the unit's leaves and offsets from translate.fetch_segment or library.show_toc.")
+            }
         }
     }
 }
 
-type ToolResult<T> = Result<T, TranslateToolError>;
+pub(crate) type ToolResult<T> = Result<T, TranslateToolError>;
 
 // ---------------------------------------------------------------------------
 // Store probing
@@ -409,7 +428,7 @@ pub(crate) fn probe_refs(path: &Path) -> ToolResult<Option<Refs>> {
 /// Slice the text a segment spans out of its run of leaves, chars
 /// counted per leaf, start inclusive and end exclusive, leaves joined
 /// by a blank line.
-fn span_text(leaves: &[Node], start_char_offset: i64, end_char_offset: i64) -> String {
+pub(crate) fn span_text(leaves: &[Node], start_char_offset: i64, end_char_offset: i64) -> String {
     let start = usize::try_from(start_char_offset).unwrap_or(0);
     let end = usize::try_from(end_char_offset).unwrap_or(0);
     let last = leaves.len().saturating_sub(1);
