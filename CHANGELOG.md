@@ -193,6 +193,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **Paper-side reads on a library that has not gleaned yet answer
+  instead of failing.** The paper catalog is created by the first
+  glean, so a library that has only ingested books has none; the paper
+  reads opened it read-only and surfaced the SQLite open failure as an
+  internal error. That took down `bookrack list` in its default scope,
+  `bookrack stats`, every `papers` read, and the MCP `library.stats` /
+  `library.list_papers` family. Those reads now probe for the catalog
+  first: listings return an empty page, stats count zero papers in
+  every status, and a per-paper read reports the intake as unknown.
+  Nothing is created on disk by looking.
+
 - **`bookrack init` reports a refusal as one line with a hint, at
   exit 2.** The wizard's refusals — `--non-interactive` without
   `--data-dir`, a data root inside the application bundle, a path that

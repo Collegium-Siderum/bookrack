@@ -280,6 +280,20 @@ impl Catalog {
         Ok(catalog)
     }
 
+    /// Probe for a catalog at `path` and open it read-only.
+    ///
+    /// A pipeline's catalog is created by that pipeline's first write,
+    /// so a library may legitimately have no file at `path` yet.
+    /// `Ok(None)` when there is no file there; otherwise exactly
+    /// [`Catalog::open_read_only`], so a file that exists but cannot be
+    /// read still reports its reason. The probe touches nothing on disk.
+    pub fn try_open_read_only(path: &Path) -> Result<Option<Catalog>> {
+        if !path.is_file() {
+            return Ok(None);
+        }
+        Catalog::open_read_only(path).map(Some)
+    }
+
     /// Whether this handle was opened read-only.
     ///
     /// `true` only for handles produced by [`Catalog::open_read_only`].
@@ -720,6 +734,38 @@ mod tests {
             "expected a SQLite open failure, got {err:?}"
         );
         assert!(!path.exists(), "read-only open must not create catalog.db");
+    }
+
+    #[test]
+    fn try_open_read_only_reports_a_missing_file_as_absent_without_creating_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("catalog.db");
+
+        let opened = Catalog::try_open_read_only(&path).expect("a missing file is not an error");
+        assert!(opened.is_none(), "missing file must probe as absent");
+        assert!(!path.exists(), "the probe must not create catalog.db");
+    }
+
+    #[test]
+    fn try_open_read_only_opens_an_existing_file_read_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("catalog.db");
+        drop(Catalog::open(&path).expect("seed"));
+
+        let opened = Catalog::try_open_read_only(&path).expect("open");
+        assert!(opened.is_some_and(|c| c.is_read_only()));
+    }
+
+    #[test]
+    fn try_open_read_only_still_refuses_an_unmigrated_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("catalog.db");
+        std::fs::write(&path, b"").expect("seed an uninitialised file");
+
+        let Err(err) = Catalog::try_open_read_only(&path) else {
+            panic!("an unmigrated file must report its reason, not probe as absent")
+        };
+        assert!(matches!(err, CatalogError::Verify(_)), "{err:?}");
     }
 
     #[test]

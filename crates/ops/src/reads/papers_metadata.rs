@@ -8,8 +8,12 @@
 //! catalog — while the per-field report is its own function, because
 //! the two pipelines audit different fields and their report types
 //! have no common shape.
+//!
+//! A library whose paper catalog has not been created yet reads as
+//! holding no papers: the listings return an empty page and the
+//! per-paper reads report the intake as unknown.
 
-use bookrack_catalog::{Catalog, IntakeFilter};
+use bookrack_catalog::IntakeFilter;
 use bookrack_core::ItemKind;
 use bookrack_embed::Embedder;
 
@@ -20,6 +24,7 @@ use crate::dto::MetadataFilter;
 use crate::dto::audit::AuditTrailEntry;
 use crate::dto::metadata_report::{MetadataListPage, PaperMetadataAuditReport};
 use crate::reads::metadata::{list_metadata_inner, needs_review_filter, show_audit_trail_inner};
+use crate::reads::open_papers_catalog;
 use crate::recorder::record_call_sync;
 
 /// Recompute the metadata plausibility audit for one paper from its
@@ -42,10 +47,9 @@ pub fn show_paper_metadata_report<E: Embedder>(
         "library.show_paper_metadata_report",
         serde_json::json!({ "intake_id": intake_id }),
         {
-            let papers_db = ops
-                .papers_catalog_db()
-                .ok_or(OpsError::PapersBackendNotConfigured)?;
-            let catalog = Catalog::open_read_only(papers_db)?;
+            let Some(catalog) = open_papers_catalog(ops)? else {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            };
             let report = bookrack_glean::reaudit::build_report(
                 &catalog,
                 intake_id,
@@ -91,10 +95,10 @@ pub fn show_paper_audit_trail<E: Embedder>(
         "library.show_paper_audit_trail",
         serde_json::json!({ "intake_id": intake_id }),
         {
-            let papers_db = ops
-                .papers_catalog_db()
-                .ok_or(OpsError::PapersBackendNotConfigured)?;
-            show_audit_trail_inner(papers_db, intake_id)
+            let Some(catalog) = open_papers_catalog(ops)? else {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            };
+            show_audit_trail_inner(&catalog, intake_id)
         }
     )
 }
@@ -124,9 +128,9 @@ pub fn list_paper_metadata<E: Embedder>(
             "offset": offset,
         }),
         {
-            let papers_db = ops
-                .papers_catalog_db()
-                .ok_or(OpsError::PapersBackendNotConfigured)?;
+            let Some(catalog) = open_papers_catalog(ops)? else {
+                return Ok(empty_page());
+            };
             let confidence_in: Vec<&str> =
                 filter.confidence_in.iter().map(String::as_str).collect();
             let review_status_in: Vec<&str> =
@@ -137,7 +141,7 @@ pub fn list_paper_metadata<E: Embedder>(
                 review_status_in: review_status_in.as_slice(),
                 ..IntakeFilter::default()
             };
-            list_metadata_inner(papers_db, ItemKind::Paper, catalog_filter, limit, offset)
+            list_metadata_inner(&catalog, ItemKind::Paper, catalog_filter, limit, offset)
         }
     )
 }
@@ -159,11 +163,11 @@ pub fn list_paper_pending_reviews<E: Embedder>(
         "library.list_paper_pending_reviews",
         serde_json::json!({ "limit": limit, "offset": offset }),
         {
-            let papers_db = ops
-                .papers_catalog_db()
-                .ok_or(OpsError::PapersBackendNotConfigured)?;
+            let Some(catalog) = open_papers_catalog(ops)? else {
+                return Ok(empty_page());
+            };
             list_metadata_inner(
-                papers_db,
+                &catalog,
                 ItemKind::Paper,
                 needs_review_filter(),
                 limit,
@@ -171,4 +175,13 @@ pub fn list_paper_pending_reviews<E: Embedder>(
             )
         }
     )
+}
+
+/// The page a listing returns before any paper catalog exists.
+fn empty_page() -> MetadataListPage {
+    MetadataListPage {
+        rows: Vec::new(),
+        total: 0,
+        truncated: false,
+    }
 }

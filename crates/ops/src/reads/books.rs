@@ -321,17 +321,22 @@ pub fn show_stats<E: Embedder>(ops: &Ops<E>) -> Result<LibraryStats> {
 /// Optional paper-side aggregate section that piggybacks on
 /// [`show_stats`]. Returns `None` when the calling `Ops` was built
 /// without a papers backend; otherwise opens the paper catalog
-/// read-only and counts intake rows per coarse lifecycle status.
+/// read-only and counts intake rows per coarse lifecycle status. A
+/// paper catalog not yet created counts zero in every status, so the
+/// section keeps its shape on a library that has only ingested books.
 fn papers_stats_if_configured<E: Embedder>(
     ops: &Ops<E>,
 ) -> Result<Option<bookrack_query::dto::PapersStats>> {
     let Some(papers_db) = ops.papers_catalog_db() else {
         return Ok(None);
     };
-    let papers = Catalog::open_read_only(papers_db)?;
+    let papers = Catalog::try_open_read_only(papers_db)?;
     let mut intake_counts_by_status = BTreeMap::new();
     for status in IntakeStatus::ALL {
-        let n = papers.count_intakes_by_status(std::slice::from_ref(&status))?;
+        let n = match &papers {
+            Some(catalog) => catalog.count_intakes_by_status(std::slice::from_ref(&status))?,
+            None => 0,
+        };
         intake_counts_by_status.insert(status.as_str().to_string(), n);
     }
     Ok(Some(bookrack_query::dto::PapersStats {

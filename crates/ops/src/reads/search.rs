@@ -230,11 +230,11 @@ pub async fn search_in_paper<E: Embedder>(
         let papers_library = ops
             .papers_library()
             .ok_or(OpsError::PapersBackendNotConfigured)?;
-        let papers_catalog_db = ops
-            .papers_catalog_db()
-            .ok_or(OpsError::PapersBackendNotConfigured)?;
-        let catalog = Catalog::open_read_only(papers_catalog_db)?;
-        if catalog.intake_by_id(intake_id)?.is_none() {
+        let known = match crate::reads::open_papers_catalog(ops)? {
+            Some(catalog) => catalog.intake_by_id(intake_id)?.is_some(),
+            None => false,
+        };
+        if !known {
             return Err(OpsError::IntakeNotFound { intake_id });
         }
         match ops.rerank_stage() {
