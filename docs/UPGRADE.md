@@ -184,7 +184,55 @@ one embedding pass per book.
 The matrix above describes moving forward. Going back is not a
 supported operation: a store whose schema was rolled forward in place
 refuses an older binary, and this document has no command that reverses
-a migration. Treat the snapshot a migration takes as the way back.
+a migration. What there is instead is the snapshot a catalog migration
+takes before it runs, and the derived stores, which an older binary
+rebuilds from the intake store.
+
+### What an older binary refuses
+
+Each store checks its own stamp when it is opened, and refuses rather
+than reads:
+
+| Store | Refused when | How it shows |
+|---|---|---|
+| `catalog.db`, `papers_catalog.db` | `user_version` is above the binary's target | `catalog schema version newer than this binary` |
+| every SQLite store and the vector sidecar | `min_reader_version` is above the binary's `READER_VERSION` | `ReaderTooOld` |
+| `corpus.db`, `papers_corpus.db` | `schema_version` differs from the binary's, in either direction | a schema mismatch; `bookrack corpus rebuild` writes the binary's own |
+| `reference.db` | `user_version` is above the binary's target | a read refuses it |
+| `bookrack-library.toml` | `format_version` is above the binary's | the root is not recognised as a library |
+| `queue.json` | `schema_version` is above the binary's | the daemon starts nothing, naming both versions |
+| an index-profile file | `schema_version` is above the binary's | the profile does not load, naming both versions |
+
+### The snapshot a migration takes
+
+Before a catalog migration runs on a database that already holds rows,
+the binary writes a complete copy of it with `VACUUM INTO` into the
+backup directory: `BOOKRACK_BACKUP_DIR`, or `<data root>/backup/` when
+that is unset — `bookrack doctor` reports which. The copy is named
+`<stem>-<timestamp>-from-v<N>.bak`, where `<stem>` is `catalog` or
+`papers_catalog` and `<N>` the schema it was migrated from, and the
+five newest per stem are kept. A fresh or empty database takes no
+snapshot, and nothing else is snapshotted: the corpus, the vector store
+and the reference store are derived, and the way back for them is a
+rebuild.
+
+### Going back
+
+1. Stop the daemon with `bookrack quit`, so no writer holds a store.
+2. For each catalog the newer binary migrated, move `catalog.db` aside
+   together with `catalog.db-wal` and `catalog.db-shm`, and copy the
+   snapshot whose `from-v<N>` matches the older binary's schema to
+   `catalog.db`. The two siblings go too: a write-ahead log left beside
+   a restored copy is replayed over it on the next open. Repeat for
+   `papers_catalog.db`.
+3. Anything ingested after the snapshot was taken is not known to the
+   restored catalog; ingest those sources again.
+4. Run the older binary's `bookrack doctor`. A corpus or vector store it
+   refuses is rebuilt with `bookrack corpus rebuild` and `bookrack
+   vectors rebuild` (and the `bookrack papers` forms); `reference.db`
+   with `bookrack distill build <path>` per book.
+
+### The queue document
 
 The queue document is the one piece of state that outlives a data root
 swap — it spans libraries, so it lives in the daemon state directory
