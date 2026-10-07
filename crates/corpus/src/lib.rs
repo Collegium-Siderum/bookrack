@@ -109,6 +109,20 @@ pub enum CorpusError {
         reason: &'static str,
     },
 
+    /// A leaf run was asked for between two nodes that do not bound
+    /// one: a node is missing or is not a leaf with a document-order
+    /// position, the two belong to different books, the end precedes
+    /// the start, or the run is longer than the caller's cap.
+    #[error("no leaf run from {start} to {end}: {reason}")]
+    InvalidLeafRun {
+        /// The node the run was to start at.
+        start: i64,
+        /// The node the run was to end at.
+        end: i64,
+        /// What rule the pair broke.
+        reason: &'static str,
+    },
+
     /// A recorded index-build stamp differs from this binary's
     /// expectation — a different embedding model or a bumped algorithm
     /// version. The store is rebuildable, so the resolution is to rebuild

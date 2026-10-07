@@ -860,7 +860,7 @@ impl Config {
     /// audit (source of truth for translation work; never rebuilt from
     /// other stores).
     pub fn translate_db(&self) -> PathBuf {
-        self.data_dir.join("translate.db")
+        translate_db_in(&self.data_dir)
     }
 
     /// SQLite database for the distilled reference store, opened by
@@ -941,6 +941,13 @@ fn backup_dir_from(data_dir: &Path, override_dir: Option<String>) -> PathBuf {
 /// through it.
 pub fn reference_db_in(data_dir: &Path) -> PathBuf {
     data_dir.join("reference.db")
+}
+
+/// The translation store under `data_dir`. The single definition of
+/// that file's name and location: [`Config::translate_db`] and callers
+/// that hold a data root without a `Config` both route through it.
+pub fn translate_db_in(data_dir: &Path) -> PathBuf {
+    data_dir.join("translate.db")
 }
 
 /// Directory for daemon-scoped state that spans libraries: the ingest

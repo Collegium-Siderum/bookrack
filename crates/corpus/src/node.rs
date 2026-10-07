@@ -682,6 +682,53 @@ impl Corpus {
         )
     }
 
+    /// Fetch the contiguous run of leaves from `start` to `end`
+    /// inclusive, in document order.
+    ///
+    /// Both ids must name leaves of the same book with `start` not
+    /// after `end`; a single id at both ends yields that one leaf. The
+    /// run may be at most `cap` leaves long. Any other pair, and a run
+    /// longer than `cap`, is [`CorpusError::InvalidLeafRun`]; the cap
+    /// is the caller's own budget, so overflowing it is reported rather
+    /// than truncated.
+    pub fn leaves_between(&self, start: NodeId, end: NodeId, cap: usize) -> Result<Vec<Node>> {
+        let invalid = |reason: &'static str| CorpusError::InvalidLeafRun {
+            start: start.get(),
+            end: end.get(),
+            reason,
+        };
+        let leaf_position = |node_id: NodeId, which: &'static str| -> Result<(NodeId, i64)> {
+            let Some(node) = self.get_node(node_id)? else {
+                return Err(invalid(if which == "start" {
+                    "start node does not exist"
+                } else {
+                    "end node does not exist"
+                }));
+            };
+            match node.toc_lo {
+                Some(lo) if !node.node_type.is_organizing() => Ok((node.book_root_id, lo)),
+                _ => Err(invalid(if which == "start" {
+                    "start node is not a leaf"
+                } else {
+                    "end node is not a leaf"
+                })),
+            }
+        };
+        let (start_root, lo) = leaf_position(start, "start")?;
+        let (end_root, hi) = leaf_position(end, "end")?;
+        if start_root != end_root {
+            return Err(invalid("start and end belong to different books"));
+        }
+        if lo > hi {
+            return Err(invalid("end precedes start"));
+        }
+        let run = self.leaves_in_doc_span(start_root, lo, hi, cap.saturating_add(1))?;
+        if run.len() > cap {
+            return Err(invalid("run is longer than the cap"));
+        }
+        Ok(run)
+    }
+
     /// Set or clear a node's expression link. Returns whether a node
     /// with that id existed.
     pub fn set_expression_id(&self, node_id: NodeId, expression_id: Option<i64>) -> Result<bool> {
@@ -1414,6 +1461,128 @@ mod tests {
         let got = corpus.leaves_in_doc_span(root, 0, 4, 2).expect("span");
         let got_ids: Vec<NodeId> = got.iter().map(|n| n.node_id).collect();
         assert_eq!(got_ids, leaves[0..=1], "the cap keeps the earliest rows");
+    }
+
+    #[test]
+    fn leaves_between_the_same_leaf_is_that_one_leaf() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (_root, leaves) = seed_doc_span_book(&mut corpus);
+        let got = corpus
+            .leaves_between(leaves[2], leaves[2], 10)
+            .expect("run");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].node_id, leaves[2]);
+    }
+
+    #[test]
+    fn leaves_between_returns_the_run_in_document_order_across_leaf_kinds() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (_root, leaves) = seed_doc_span_book(&mut corpus);
+        let got = corpus
+            .leaves_between(leaves[1], leaves[4], 10)
+            .expect("run");
+        let got_ids: Vec<NodeId> = got.iter().map(|n| n.node_id).collect();
+        assert_eq!(got_ids, leaves[1..=4]);
+        assert!(
+            got.iter().any(|n| n.node_type == NodeType::Table),
+            "a structural leaf inside the run is part of it: {got:?}"
+        );
+    }
+
+    #[test]
+    fn leaves_between_refuses_an_inverted_pair() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (_root, leaves) = seed_doc_span_book(&mut corpus);
+        let err = corpus
+            .leaves_between(leaves[3], leaves[1], 10)
+            .expect_err("inverted");
+        assert!(
+            matches!(err, CorpusError::InvalidLeafRun { reason, .. } if reason.contains("precedes")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn leaves_between_refuses_an_organizing_or_missing_endpoint() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (root, leaves) = seed_doc_span_book(&mut corpus);
+        let chapter = corpus
+            .children(root)
+            .expect("children")
+            .into_iter()
+            .next()
+            .expect("chapter")
+            .node_id;
+
+        let err = corpus
+            .leaves_between(chapter, leaves[1], 10)
+            .expect_err("organizing start");
+        assert!(
+            matches!(err, CorpusError::InvalidLeafRun { reason, .. } if reason == "start node is not a leaf"),
+            "{err:?}"
+        );
+        let err = corpus
+            .leaves_between(leaves[1], chapter, 10)
+            .expect_err("organizing end");
+        assert!(
+            matches!(err, CorpusError::InvalidLeafRun { reason, .. } if reason == "end node is not a leaf"),
+            "{err:?}"
+        );
+        let err = corpus
+            .leaves_between(NodeId::new(999_999_999), leaves[1], 10)
+            .expect_err("missing start");
+        assert!(
+            matches!(err, CorpusError::InvalidLeafRun { reason, .. } if reason == "start node does not exist"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn leaves_between_refuses_endpoints_from_different_books() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (_root, leaves) = seed_doc_span_book(&mut corpus);
+        let (idx, other_root) = seed_book(&mut corpus, 2);
+        let other_leaf = corpus.allocate_node_ids(idx, 1).expect("ids")[0];
+        corpus
+            .insert_node(
+                &NewNode::child(
+                    other_leaf,
+                    other_root,
+                    other_root,
+                    0,
+                    1,
+                    NodeType::Paragraph,
+                )
+                .text("elsewhere")
+                .text_stats(9, 1)
+                .toc_span(0, 0),
+            )
+            .expect("leaf");
+
+        let err = corpus
+            .leaves_between(leaves[0], other_leaf, 10)
+            .expect_err("cross-book");
+        assert!(
+            matches!(err, CorpusError::InvalidLeafRun { reason, .. } if reason.contains("different books")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn leaves_between_refuses_a_run_longer_than_the_cap_instead_of_truncating() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (_root, leaves) = seed_doc_span_book(&mut corpus);
+        let err = corpus
+            .leaves_between(leaves[0], leaves[4], 4)
+            .expect_err("over cap");
+        assert!(
+            matches!(err, CorpusError::InvalidLeafRun { reason, .. } if reason.contains("cap")),
+            "{err:?}"
+        );
+        let got = corpus
+            .leaves_between(leaves[0], leaves[4], 5)
+            .expect("at cap");
+        assert_eq!(got.len(), 5);
     }
 
     #[test]

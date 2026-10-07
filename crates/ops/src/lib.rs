@@ -368,7 +368,9 @@ impl<E: Embedder> Ops<E> {
         self.papers_paths.as_ref().map(|p| p.papers_dir.as_path())
     }
 
-    pub(crate) fn corpus_db(&self) -> &Path {
+    /// Path of the corpus database. The in-crate readers open it per
+    /// call, and so does the MCP `translate.*` read surface.
+    pub fn corpus_db(&self) -> &Path {
         &self.corpus_db
     }
 
@@ -400,6 +402,15 @@ impl<E: Embedder> Ops<E> {
     pub fn reference_db_path(&self) -> PathBuf {
         let data_root = self.catalog_db.parent().unwrap_or_else(|| Path::new(""));
         bookrack_config::reference_db_in(data_root)
+    }
+
+    /// Path of the translation store, derived from the data root that
+    /// hosts the catalog. The `translate` crate opens this path on
+    /// every MCP `translate.*` call; no warm handle is held because
+    /// the read surface is stateless across requests.
+    pub fn translate_db_path(&self) -> PathBuf {
+        let data_root = self.catalog_db.parent().unwrap_or_else(|| Path::new(""));
+        bookrack_config::translate_db_in(data_root)
     }
 
     /// Borrow the warm embedder, if this `Ops` was built with a library.
