@@ -15,8 +15,10 @@
 
 use std::path::PathBuf;
 
-use bookrack_embed::ProbeReport as EmbedProbeReport;
+use bookrack_core::{Explain, Problem};
 use eyre::Result;
+
+use crate::backend_probe::EmbedBackendState;
 
 mod cli_driver;
 mod runner;
@@ -91,12 +93,79 @@ pub enum PdfiumInstallOutcome {
     Failed(String),
 }
 
-/// Step 3 inputs. `report` is the existing embed probe; `embed_model`
-/// is the name the runner intends to record into `config.toml`.
+/// Step 3 inputs. `backend` is the embed backend's state as the daemon's
+/// own preflight judges it; `embed_model` is the name the runner intends
+/// to record into `config.toml`.
 pub struct OllamaStep<'a> {
     pub url: &'a str,
     pub embed_model: &'a str,
-    pub report: &'a EmbedProbeReport,
+    pub backend: &'a EmbedBackendState,
+}
+
+/// A refusal the wizard makes on the operator's input or the host.
+/// Each has a next step, so the CLI reports it as one line with a hint
+/// and exits 2, where a failure without one keeps its cause chain.
+///
+/// `Display` is the summary alone; the detail and the hint come from
+/// [`Explain`], so a surface that re-asks a question can print the
+/// summary and the hint without the evidence between them.
+#[derive(Debug, thiserror::Error)]
+pub enum WizardError {
+    /// `--non-interactive` without `--data-dir`: there is no prompt to
+    /// get the root from.
+    #[error("cannot choose a data root without a prompt")]
+    DataRootRequired,
+    /// An empty answer on a host that offers no default: no portable
+    /// layout beside the binary and no platform data directory.
+    #[error("a data root path is required")]
+    NoDefaultDataRoot,
+    /// The root sits inside a macOS application bundle, which an upgrade
+    /// replaces wholesale.
+    #[error("cannot use a data root inside the application bundle at {}", .bundle.display())]
+    DataRootInsideBundle { path: PathBuf, bundle: PathBuf },
+    /// The path exists and is not a directory.
+    #[error("cannot use {} as a data root: not a directory", .path.display())]
+    DataRootNotADirectory { path: PathBuf },
+    /// The root already holds a `catalog.db` and `--force` was not
+    /// given.
+    #[error("{} is already a bookrack data root", .path.display())]
+    DataRootInUse { path: PathBuf },
+    /// The embed backend is unreachable, lacks the model, or did not
+    /// answer as Ollama; the state carries its own wording.
+    #[error("{}", .0.explain().summary)]
+    EmbedBackend(EmbedBackendState),
+}
+
+impl Explain for WizardError {
+    fn explain(&self) -> Problem {
+        match self {
+            Self::DataRootRequired => Problem::new(self.to_string())
+                .detail(
+                    "--non-interactive skips every prompt, including the one for the data root.",
+                )
+                .hint("Pass --data-dir <path>, or run without --non-interactive."),
+            Self::NoDefaultDataRoot => Problem::new(self.to_string())
+                .detail(
+                    "This host has no portable layout beside the binary and no platform \
+                     data directory to default to.",
+                )
+                .hint("Type a path, or pass --data-dir <path>."),
+            Self::DataRootInsideBundle { path, bundle } => Problem::new(self.to_string())
+                .detail(format!(
+                    "{} is inside {}; upgrading replaces the whole bundle, and every book, \
+                     index, and log under it goes with it.",
+                    path.display(),
+                    bundle.display()
+                ))
+                .hint("Pick a data root outside the bundle."),
+            Self::DataRootNotADirectory { .. } => Problem::new(self.to_string())
+                .hint("Pick a directory, or a path that does not exist yet."),
+            Self::DataRootInUse { .. } => Problem::new(self.to_string())
+                .detail("catalog.db is present.")
+                .hint("Pass --force to adopt the library there, or pick another root."),
+            Self::EmbedBackend(state) => state.explain(),
+        }
+    }
 }
 
 /// Result of step 4. `Skipped` carries the `--no-smoke` decision so
@@ -142,8 +211,10 @@ pub trait WizardDriver: Send + Sync {
     /// install leaves PDF ingest unavailable, nothing worse.
     async fn step_pdfium_install(&self, outcome: &PdfiumInstallOutcome) -> Result<()>;
 
-    /// Step 3: present the Ollama probe. Driver decides whether to
-    /// abort on unreachable / missing model.
+    /// Step 3: present the embed backend's state. A terminal driver
+    /// aborts on anything but `Ready`, returning
+    /// [`WizardError::EmbedBackend`] so the refusal carries the state's
+    /// own hint.
     async fn step_ollama(&self, step: &OllamaStep<'_>) -> Result<()>;
 
     /// Step 4: present the smoke outcome. Driver decides abort vs

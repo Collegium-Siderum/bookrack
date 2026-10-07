@@ -141,6 +141,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **`bookrack init` reports a refusal as one line with a hint, at
+  exit 2.** The wizard's refusals — `--non-interactive` without
+  `--data-dir`, a data root inside the application bundle, a path that
+  is not a directory, a root that already holds a library, Ollama
+  unreachable or the model not pulled — were the one family of
+  predictable failures the binary printed as a cause chain at exit 1.
+  They are now typed, carry the same summary / detail / hint the other
+  refusals do, and classify like them: `--json` gets the structured
+  object, and the Ollama cases use the daemon preflight's own wording,
+  so the two surfaces cannot disagree about the same host.
+
 - **The setup wizard's closing screen offers commands that can be
   followed.** `bookrack init` closed on three suggestions of which none
   worked as written: `bookrack query`, a verb the binary does not

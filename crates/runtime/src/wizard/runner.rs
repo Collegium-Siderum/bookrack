@@ -18,7 +18,7 @@ use bookrack_config::{
 };
 
 use bookrack_corpus::Corpus;
-use bookrack_embed::{OllamaEmbedClient, probe_ollama};
+use bookrack_embed::OllamaEmbedClient;
 use bookrack_ingest::{IngestParams, ingest_book};
 use bookrack_ops::{Caller, Ops, SearchOptions, reads};
 use bookrack_query::Library;
@@ -26,8 +26,9 @@ use eyre::{Context, Result};
 
 use super::{
     DataRootHint, FinalizeSummary, OllamaStep, PdfiumChoice, PdfiumInstallOutcome, PdfiumReport,
-    SmokeOutcome, SmokeReport, WizardDriver,
+    SmokeOutcome, SmokeReport, WizardDriver, WizardError,
 };
+use crate::backend_probe::check_embed_backend;
 
 /// Synthetic fixture the smoke step ingests. Carries a unique marker
 /// token so a query for it is guaranteed to hit this very chunk.
@@ -87,12 +88,12 @@ impl Wizard {
         }
 
         let (url, embed_model) = resolve_ollama_target();
-        let report = probe_ollama(&url).await.context("probe Ollama")?;
+        let backend = check_embed_backend(&url, &embed_model).await;
         driver
             .step_ollama(&OllamaStep {
                 url: &url,
                 embed_model: &embed_model,
-                report: &report,
+                backend: &backend,
             })
             .await?;
 
@@ -174,25 +175,22 @@ pub(crate) fn enclosing_app_bundle(path: &Path) -> Option<PathBuf> {
 /// says the operator accepts an existing library at the root, which is
 /// a different statement from accepting that the root disappears on the
 /// next upgrade.
-pub(super) fn validate_unused_or_force(path: &Path, force: bool) -> Result<()> {
+pub(super) fn validate_unused_or_force(path: &Path, force: bool) -> Result<(), WizardError> {
     if let Some(bundle) = enclosing_app_bundle(path) {
-        eyre::bail!(
-            "{} is inside the application bundle {}; upgrading replaces the \
-             whole bundle, and every book, index, and log under it goes with \
-             it -- pick a data root outside the bundle",
-            path.display(),
-            bundle.display(),
-        );
+        return Err(WizardError::DataRootInsideBundle {
+            path: path.to_path_buf(),
+            bundle,
+        });
     }
     if path.exists() && !path.is_dir() {
-        eyre::bail!("{} exists but is not a directory", path.display());
+        return Err(WizardError::DataRootNotADirectory {
+            path: path.to_path_buf(),
+        });
     }
     if path.join("catalog.db").exists() && !force {
-        eyre::bail!(
-            "{} looks like an existing bookrack data root (catalog.db present); \
-             pass --force to use it",
-            path.display(),
-        );
+        return Err(WizardError::DataRootInUse {
+            path: path.to_path_buf(),
+        });
     }
     Ok(())
 }
@@ -381,6 +379,7 @@ fn write_default_registry(data_root: &Path, manifest: &LibraryManifest) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bookrack_core::Explain;
 
     #[test]
     fn smoke_fixture_contains_the_query_marker() {
@@ -404,16 +403,23 @@ mod tests {
         validate_unused_or_force(&target, false).expect("missing dir is fine");
     }
 
+    /// The refusal is typed, so the CLI can draw it as summary, detail
+    /// and hint; the way out lives in the hint, not in the summary.
     #[test]
     fn validate_unused_or_force_refuses_populated_root_without_force() {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(tmp.path().join("catalog.db"), b"fake").expect("seed catalog");
         let err = validate_unused_or_force(tmp.path(), false).expect_err("should refuse");
-        let rendered = format!("{err}");
         assert!(
-            rendered.contains("--force"),
-            "missing --force hint: {rendered}"
+            matches!(err, WizardError::DataRootInUse { .. }),
+            "unexpected variant: {err:?}"
         );
+        let hint = err
+            .explain()
+            .data
+            .hint
+            .expect("a refusal says what to do next");
+        assert!(hint.contains("--force"), "missing --force hint: {hint}");
     }
 
     #[test]
@@ -468,14 +474,23 @@ mod tests {
     fn validate_unused_or_force_refuses_a_path_inside_an_app_bundle() {
         let path = Path::new("/Applications/Bookrack.app/Contents/Resources/bookrack-data");
         let err = validate_unused_or_force(path, false).expect_err("should refuse");
+        assert!(
+            matches!(err, WizardError::DataRootInsideBundle { .. }),
+            "unexpected variant: {err:?}"
+        );
         let rendered = format!("{err}");
         assert!(
             rendered.contains("/Applications/Bookrack.app"),
             "refusal must name the bundle: {rendered}"
         );
+        let hint = err
+            .explain()
+            .data
+            .hint
+            .expect("a refusal says what to do next");
         assert!(
-            rendered.contains("outside the bundle"),
-            "refusal must give the way out: {rendered}"
+            hint.contains("outside the bundle"),
+            "refusal must give the way out: {hint}"
         );
     }
 

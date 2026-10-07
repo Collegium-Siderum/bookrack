@@ -16,14 +16,15 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use bookrack_cli_grammar::first_step_lines;
-use bookrack_embed::ProbeReport as EmbedProbeReport;
-use eyre::{Context, ContextCompat, Result};
+use bookrack_core::Explain;
+use eyre::{Context, Result};
 
 use super::runner::validate_unused_or_force;
 use super::{
     DataRootHint, FinalizeSummary, OllamaStep, PdfiumChoice, PdfiumInstallOutcome, PdfiumReport,
-    SmokeOutcome, WizardDriver,
+    SmokeOutcome, WizardDriver, WizardError,
 };
+use crate::backend_probe::EmbedBackendState;
 
 /// Terminal I/O the driver needs, injected so the operator-facing
 /// strings can be asserted without a TTY.
@@ -93,10 +94,7 @@ impl CliWizardDriver {
     ) -> Result<PathBuf> {
         let typed = self.console.prompt(question)?;
         let chosen = if typed.is_empty() {
-            offered.cloned().context(
-                "a data root path is required (this host has no portable layout \
-                 and no platform data directory to default to)",
-            )?
+            offered.cloned().ok_or(WizardError::NoDefaultDataRoot)?
         } else {
             PathBuf::from(typed)
         };
@@ -129,7 +127,7 @@ impl WizardDriver for CliWizardDriver {
             return Ok(abs);
         }
         if hint.non_interactive {
-            eyre::bail!("--data-dir is required in --non-interactive mode");
+            return Err(WizardError::DataRootRequired.into());
         }
         // A discovered layout outranks a suggested one: something is
         // already there, and defaulting past it would strand it.
@@ -160,7 +158,7 @@ impl WizardDriver for CliWizardDriver {
                 // what was wrong with the final answer.
                 Err(e) if attempt >= MAX_DATA_ROOT_ATTEMPTS => return Err(e),
                 Err(e) => {
-                    console.warn(&format!("      {e}"));
+                    warn_refusal(console, &e);
                     attempt += 1;
                 }
             }
@@ -227,27 +225,22 @@ impl WizardDriver for CliWizardDriver {
         let embed_model = step.embed_model;
         console.line("[3/5] Ollama daemon");
         console.line(&format!("      Probing {url} ..."));
-        if !step.report.reachable {
-            console.warn(&format!("      FAIL: Ollama is not reachable at {url}."));
-            console.warn("            Install it from https://ollama.com, run `ollama serve`,");
-            console.warn("            pull the model:");
-            console.warn(&format!("              ollama pull {embed_model}"));
-            console.warn("            then rerun `bookrack init`.");
-            eyre::bail!("Ollama unreachable");
+        match step.backend {
+            EmbedBackendState::Ready { models } => {
+                console.line(&format!(
+                    "      OK ({} model(s) pulled, {embed_model} present)",
+                    models.len(),
+                ));
+                Ok(())
+            }
+            // The FAIL line is this step's status; the remedy is the
+            // error's hint, which the CLI reporter prints once.
+            other => {
+                let refusal = WizardError::EmbedBackend(other.clone());
+                console.warn(&format!("      FAIL: {refusal}"));
+                Err(refusal.into())
+            }
         }
-        if !report_has_model(step.report, embed_model) {
-            console.warn(&format!(
-                "      FAIL: Ollama is up but {embed_model} is not pulled."
-            ));
-            console.warn(&format!("            Run:  ollama pull {embed_model}"));
-            console.warn("            then rerun `bookrack init`.");
-            eyre::bail!("embed model not pulled");
-        }
-        console.line(&format!(
-            "      OK ({} model(s) pulled, {embed_model} present)",
-            step.report.models.len(),
-        ));
-        Ok(())
     }
 
     /// Step 4: report the smoke outcome. A zero-hit search aborts —
@@ -341,8 +334,19 @@ fn print_success(console: &dyn Console, data_root: &Path) {
     }
 }
 
-fn report_has_model(probe: &EmbedProbeReport, name: &str) -> bool {
-    probe.models.iter().any(|m| m == name)
+/// Print a refused answer the way the CLI reporter would, minus the
+/// detail: the summary, then the hint when the refusal is typed. An
+/// untyped failure prints as it renders.
+fn warn_refusal(console: &dyn Console, err: &eyre::Report) {
+    match err.downcast_ref::<WizardError>() {
+        Some(refusal) => {
+            console.warn(&format!("      {refusal}"));
+            if let Some(hint) = refusal.explain().data.hint {
+                console.warn(&format!("      hint: {hint}"));
+            }
+        }
+        None => console.warn(&format!("      {err}")),
+    }
 }
 
 /// Resolve a user-typed path against the current working directory.
@@ -532,6 +536,35 @@ mod tests {
             0,
             "a prompt without a default must not offer one: {:?}",
             script.captured()
+        );
+    }
+
+    /// A refused answer is re-asked with its way out in view: the
+    /// summary says what was wrong, the hint says what to do, and the
+    /// evidence between them stays with the reporter.
+    #[tokio::test]
+    async fn the_first_question_shows_the_hint_of_a_refused_path() {
+        let populated = tempfile::tempdir().expect("tempdir");
+        std::fs::write(populated.path().join("catalog.db"), b"fake").expect("seed catalog");
+        let empty = tempfile::tempdir().expect("tempdir");
+        let script = Script::with_answers([
+            populated.path().to_str().expect("utf-8"),
+            empty.path().to_str().expect("utf-8"),
+        ]);
+        let driver = scripted_driver(&script);
+
+        let chosen = driver
+            .step_data_root(interactive_hint(Some("/opt/state/bookrack/library")))
+            .await
+            .expect("the second answer is accepted");
+
+        assert_eq!(chosen, empty.path().to_path_buf());
+        let captured = script.captured();
+        assert!(
+            captured
+                .iter()
+                .any(|l| l.trim_start().starts_with("hint:") && l.contains("--force")),
+            "the refusal must carry its hint: {captured:?}"
         );
     }
 

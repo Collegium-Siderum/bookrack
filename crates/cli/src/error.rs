@@ -16,12 +16,13 @@
 use std::path::PathBuf;
 
 use bookrack_control_client::ControlError;
-use bookrack_core::{Problem, ProblemData};
+use bookrack_core::{Explain, Problem, ProblemData};
 use bookrack_runtime::control::jsonrpc::{
     BACKEND_UNAVAILABLE, BUSY, CONFIRMATION_REQUIRED, INTERNAL_ERROR, INVALID_LIBRARY,
     INVALID_PARAMS, INVALID_REQUEST, JOB_NOT_FOUND, METHOD_NOT_FOUND, NOT_READY, PARSE_ERROR,
     PLAN_KIND_MISMATCH, PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND, PLAN_TARGET_DRIFTED, STATE_UNUSABLE,
 };
+use bookrack_runtime::wizard::WizardError;
 use serde_json::Value;
 
 /// Predictable, operator-facing failures the CLI emits.
@@ -237,6 +238,16 @@ pub enum BookrackCliError {
     #[error("{}", .problem.summary)]
     FilterOffItsSide { problem: Problem },
 
+    /// `bookrack init` refused on the operator's input or the host:
+    /// `--non-interactive` without `--data-dir`, a data root inside the
+    /// application bundle, a path that is not a directory, a root that
+    /// already holds a library without `--force`, or an embed backend
+    /// that is unreachable or lacks the model. Each is decided before
+    /// anything is written. Operator input, not a bug: exit 2, and the
+    /// reporter draws the three parts.
+    #[error("{}", .problem.summary)]
+    InitRefused { problem: Problem },
+
     /// `libraries detect <path>` determined the path is not a confirmed
     /// or probable bookrack data root — a plain not-a-library verdict or
     /// an unreadable manifest. The renderer already printed the verdict;
@@ -265,7 +276,8 @@ impl BookrackCliError {
             | Self::RootNotRoutable { .. }
             | Self::PreflightRefused { .. }
             | Self::ItemIdUnusable { .. }
-            | Self::FilterOffItsSide { .. } => 2,
+            | Self::FilterOffItsSide { .. }
+            | Self::InitRefused { .. } => 2,
             Self::DetectNegative(_) => 1,
         }
     }
@@ -345,7 +357,8 @@ impl BookrackCliError {
             | Self::RootNotRoutable { problem }
             | Self::PreflightRefused { problem }
             | Self::ItemIdUnusable { problem }
-            | Self::FilterOffItsSide { problem } => {
+            | Self::FilterOffItsSide { problem }
+            | Self::InitRefused { problem } => {
                 return Some(problem.data.clone());
             }
             Self::RpcParamsInvalid { detail, .. } => {
@@ -388,9 +401,10 @@ pub enum CliReportCause<'a> {
     /// A typed `BookrackCliError` was found in the chain; use it
     /// verbatim.
     Cli(&'a BookrackCliError),
-    /// A `ControlError::Rpc` from the control client was found in the
-    /// chain; this owned variant carries the classification.
-    Rpc(BookrackCliError),
+    /// A typed error from another crate was found in the chain — a
+    /// JSON-RPC error from the control client, or a wizard refusal —
+    /// and classified into an owned `BookrackCliError`.
+    Classified(BookrackCliError),
 }
 
 impl CliReportCause<'_> {
@@ -399,13 +413,13 @@ impl CliReportCause<'_> {
     pub fn as_cli(&self) -> &BookrackCliError {
         match self {
             Self::Cli(e) => e,
-            Self::Rpc(e) => e,
+            Self::Classified(e) => e,
         }
     }
 }
 
-/// Walk an `eyre::Report` chain for a typed CLI error or an unwrapped
-/// JSON-RPC error from the control client.
+/// Walk an `eyre::Report` chain for a typed CLI error, an unwrapped
+/// JSON-RPC error from the control client, or a wizard refusal.
 pub fn classify_eyre(err: &eyre::Report) -> Option<CliReportCause<'_>> {
     for cause in err.chain() {
         if let Some(cli_err) = cause.downcast_ref::<BookrackCliError>() {
@@ -417,11 +431,16 @@ pub fn classify_eyre(err: &eyre::Report) -> Option<CliReportCause<'_>> {
             data,
         }) = cause.downcast_ref::<ControlError>()
         {
-            return Some(CliReportCause::Rpc(BookrackCliError::from_rpc(
+            return Some(CliReportCause::Classified(BookrackCliError::from_rpc(
                 *code,
                 message.clone(),
                 data.clone(),
             )));
+        }
+        if let Some(refusal) = cause.downcast_ref::<WizardError>() {
+            return Some(CliReportCause::Classified(BookrackCliError::InitRefused {
+                problem: refusal.explain(),
+            }));
         }
     }
     None
@@ -827,6 +846,31 @@ mod tests {
             Some(serde_json::json!(["not", "an", "object"])),
         );
         assert!(junk.problem_data().is_none());
+    }
+
+    /// The wizard's refusals are typed in the runtime crate and reach
+    /// `main` through `init::run`'s eyre chain; they classify like a
+    /// typed CLI error, so the reporter draws the three parts and the
+    /// binary exits 2 rather than printing a cause chain at exit 1.
+    #[test]
+    fn classify_eyre_finds_a_wizard_refusal_through_context_wrappers() {
+        let err = eyre::Report::new(WizardError::DataRootRequired).wrap_err("init");
+        let cause = classify_eyre(&err).expect("a wizard refusal must classify");
+        let cli_err = cause.as_cli();
+        assert!(
+            matches!(cli_err, BookrackCliError::InitRefused { .. }),
+            "unexpected variant: {cli_err:?}"
+        );
+        assert_eq!(cli_err.exit_code(), 2);
+        assert!(
+            !cli_err.is_self_reported(),
+            "the wizard draws no failure surface"
+        );
+        let data = cli_err.problem_data().expect("a refusal carries its parts");
+        assert!(
+            data.hint.is_some_and(|h| h.contains("--data-dir")),
+            "the hint names the flag"
+        );
     }
 
     #[test]

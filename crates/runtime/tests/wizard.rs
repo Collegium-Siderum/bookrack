@@ -3,9 +3,9 @@
 //! Wizard runner integration tests, driven through a mock driver.
 //!
 //! Both tests pass `no_smoke = true`, so the only network touchpoint
-//! is step 3's `probe_ollama`, which resolves to a `reachable = false`
-//! report (never an `Err`) when no daemon listens — the mock driver
-//! accepts either outcome, keeping the tests deterministic offline.
+//! is step 3's embed-backend check, which resolves to an `Unreachable`
+//! state (never an `Err`) when no daemon listens — the mock driver
+//! accepts any state, keeping the tests deterministic offline.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
