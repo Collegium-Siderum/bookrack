@@ -39,6 +39,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
+use bookrack_core::{Explain, Problem, error_chain};
 use bookrack_dbkit::{OpenDecision, READER_VERSION, TableSpec, reader_version_decision};
 
 pub mod audit;
@@ -80,6 +81,10 @@ const SPECS: &[&TableSpec] = &[
 ];
 
 /// Errors from opening, migrating, or querying `translate.db`.
+///
+/// `Display` stays a single in-chain line per variant; the three-part
+/// wording a front end shows is assembled in the [`Explain`] impl, so
+/// a wrapper variant never reaches a process boundary as its own text.
 #[derive(Debug, thiserror::Error)]
 pub enum TranslateError {
     /// The underlying SQLite layer reported an error.
@@ -121,6 +126,79 @@ pub enum TranslateError {
     /// The live schema does not match the table specs.
     #[error("translate schema verification failed")]
     Verify(#[source] bookrack_dbkit::VerifyError),
+}
+
+impl Explain for TranslateError {
+    fn explain(&self) -> Problem {
+        match self {
+            // A busy or locked store clears once the other writer is
+            // done, so that case is past tense and retryable; any other
+            // engine failure is reported as it stands.
+            TranslateError::Sqlite(source) => {
+                let locked = matches!(
+                    source,
+                    rusqlite::Error::SqliteFailure(code, _)
+                        if matches!(
+                            code.code,
+                            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                        )
+                );
+                let detail = format!("SQLite reported: {}.", error_chain(source));
+                if locked {
+                    Problem::new("could not access the translation store: it is locked")
+                        .detail(detail)
+                        .hint("Another process is writing the store; retry once it has finished.")
+                        .retryable(true)
+                } else {
+                    Problem::new("translation store operation failed").detail(detail)
+                }
+            }
+
+            TranslateError::SchemaTooNew { found, expected } => Problem::new(
+                "cannot open a translation store written by a newer version of bookrack",
+            )
+            .detail(format!(
+                "The store is at schema version {found}; this build understands up to {expected}."
+            ))
+            .hint(format!(
+                "Run a newer bookrack build (this one reads translation schemas up to \
+                 v{expected}), or restore the store from a backup this build wrote."
+            )),
+
+            TranslateError::ReaderTooOld { required, current } => {
+                Problem::new("cannot read a translation store that requires a newer reader")
+                    .detail(format!(
+                        "The store requires reader version {required}; this build reads up to \
+                         {current}."
+                    ))
+                    .hint(format!(
+                        "Run a bookrack build at reader version v{required} or newer."
+                    ))
+            }
+
+            TranslateError::Migrate(source) => {
+                Problem::new("could not migrate the translation store to this build's schema")
+                    .detail(format!(
+                        "The migration failed: {}. Each step runs in its own transaction, so \
+                         the store keeps the schema it had.",
+                        error_chain(source)
+                    ))
+                    .hint(
+                        "Restore translate.db from a backup, or report the failure if nothing \
+                         but bookrack has written the store.",
+                    )
+            }
+
+            TranslateError::Verify(source) => {
+                Problem::new("translation store schema does not match this build")
+                    .detail(error_chain(source))
+                    .hint(
+                        "Restore translate.db from a backup written by this build; a store \
+                         whose tables were altered outside bookrack cannot be repaired in place.",
+                    )
+            }
+        }
+    }
 }
 
 /// The crate's `Result` alias.
@@ -393,5 +471,123 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.to_string().contains("FOREIGN KEY"), "{err}");
+    }
+
+    #[test]
+    fn a_newer_schema_explains_both_versions_and_names_the_newer_build() {
+        let problem = TranslateError::SchemaTooNew {
+            found: 7,
+            expected: 3,
+        }
+        .explain();
+        assert!(
+            problem.summary.contains("newer version"),
+            "summary: {}",
+            problem.summary
+        );
+        let detail = problem.data.detail.as_deref().expect("detail");
+        assert!(
+            detail.contains("version 7") && detail.contains("up to 3"),
+            "detail: {detail}"
+        );
+        let hint = problem.data.hint.as_deref().expect("hint");
+        assert!(
+            hint.contains("newer bookrack build") && hint.contains("v3"),
+            "hint: {hint}"
+        );
+        assert!(!problem.data.retryable);
+    }
+
+    #[test]
+    fn a_reader_stamp_above_this_build_explains_the_required_reader() {
+        let problem = TranslateError::ReaderTooOld {
+            required: 4,
+            current: 1,
+        }
+        .explain();
+        assert!(
+            problem.summary.contains("newer reader"),
+            "summary: {}",
+            problem.summary
+        );
+        let detail = problem.data.detail.as_deref().expect("detail");
+        assert!(
+            detail.contains("version 4") && detail.contains("up to 1"),
+            "detail: {detail}"
+        );
+        let hint = problem.data.hint.as_deref().expect("hint");
+        assert!(hint.contains("v4 or newer"), "hint: {hint}");
+        assert!(!problem.data.retryable);
+    }
+
+    #[test]
+    fn a_locked_store_is_retryable_and_any_other_engine_failure_is_not() {
+        let locked = TranslateError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        ))
+        .explain();
+        assert!(locked.data.retryable, "{locked:?}");
+        assert!(
+            locked.summary.contains("locked"),
+            "summary: {}",
+            locked.summary
+        );
+        assert!(locked.data.hint.is_some(), "{locked:?}");
+
+        let other = TranslateError::Sqlite(rusqlite::Error::QueryReturnedNoRows).explain();
+        assert!(!other.data.retryable, "{other:?}");
+        assert!(
+            !other.summary.contains("locked"),
+            "summary: {}",
+            other.summary
+        );
+        let detail = other.data.detail.as_deref().expect("detail");
+        assert!(
+            detail.contains("Query returned no rows"),
+            "detail: {detail}"
+        );
+    }
+
+    #[test]
+    fn a_failed_migration_explains_the_cause_and_says_the_store_is_unchanged() {
+        let problem =
+            TranslateError::Migrate(rusqlite_migration::Error::Hook("hook refused".into()))
+                .explain();
+        assert!(
+            problem.summary.starts_with("could not migrate"),
+            "summary: {}",
+            problem.summary
+        );
+        let detail = problem.data.detail.as_deref().expect("detail");
+        assert!(
+            detail.contains("hook refused") && detail.contains("transaction"),
+            "detail: {detail}"
+        );
+        assert!(problem.data.hint.is_some(), "{problem:?}");
+        assert!(!problem.data.retryable);
+    }
+
+    #[test]
+    fn a_schema_mismatch_explains_the_table_and_the_differing_column() {
+        let mismatch = bookrack_dbkit::SchemaMismatch {
+            table: "translate_units".into(),
+            diffs: vec!["missing column `unit_order`".into()],
+        };
+        let problem =
+            TranslateError::Verify(bookrack_dbkit::VerifyError::Mismatch(mismatch)).explain();
+        assert!(
+            problem.summary.contains("does not match"),
+            "summary: {}",
+            problem.summary
+        );
+        let detail = problem.data.detail.as_deref().expect("detail");
+        assert!(
+            detail.contains("translate_units") && detail.contains("unit_order"),
+            "detail: {detail}"
+        );
+        let hint = problem.data.hint.as_deref().expect("hint");
+        assert!(hint.contains("backup"), "hint: {hint}");
+        assert!(!problem.data.retryable);
     }
 }
