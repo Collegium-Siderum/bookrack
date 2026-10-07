@@ -71,6 +71,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **An index-profile file from an earlier schema still loads.** The
+  loader refused any `schema_version` other than its own, so the first
+  bump of that constant would have rejected every user-written profile
+  in both directions, with no migration to run. It now reads its own
+  schema and every earlier one, the way the library manifest does, and
+  refuses only a file from a later one, naming both versions. A bump
+  that changes the shape ships a reader for the previous schema in the
+  same change; `docs/UPGRADE.md` carries the row.
+
 - **`bookrack --help` opens with the first run.** The trailer named
   `run`, `rpc list`, and `doctor` but never `bookrack init`, the step
   everything else assumes. It now says what `init` does and follows it

@@ -43,6 +43,7 @@ earlier ones already happened.
 | A `bookrack-distill` stage's behaviour, or a book's `parser.stages` | that book's `parser_version` (declared in its `book.toml`, bumped by hand) | the book's distilled entries in `reference.db` | `bookrack distill verify <path>` to see the diff, then `bookrack distill build <path>` |
 | `rusqlite`, `lancedb` | engine-level | normally none — upstream guarantees backward compatibility for reads | open the library |
 | Workspace `READER_VERSION` (manual bump) | per-store `min_reader_version` on next write | none on its own — a guard against older binaries | open the library |
+| `bookrack_index_profile::SCHEMA_VERSION` (manual bump) | the `schema_version` field of every profile file under `<config_dir>/bookrack/index-profiles/` | none — profile files are read, not derived | nothing for the operator: the bump ships with a reader for the previous schema, or a rewrite command, in the same change; a file above the binary's version is refused, naming both |
 
 For every row whose stale layers are `chunks → vectors` — a chunking or
 normalization version bump, or an embedding-model / vector-width change
