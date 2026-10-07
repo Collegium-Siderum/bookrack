@@ -22,6 +22,11 @@ bookrack-refs.workspace = true
 # quality-flag catalog used by `reference.lookup`'s `min_severity`
 # filter.
 bookrack-distill.workspace = true
+# The translation working store, opened read-only on every
+# `translate.*` call.
+bookrack-translate.workspace = true
+# Leaf-run reads behind `translate.fetch_segment`'s source text.
+bookrack-corpus = { path = "../corpus" }
 # RFC 3339 timestamps stamped on the `edited_at` overlay column.
 chrono.workspace = true
 # `#[derive(thiserror::Error)]` on the `reference` module's error
@@ -45,3 +50,6 @@ tracing.workspace = true
 # Tempdir-backed catalog fixtures for the handler-level tool-call
 # tests, which drive `serve` through a real streamable-HTTP client.
 tempfile.workspace = true
+# Seeds translation-store rows over a plain connection in the
+# `translate.*` tool tests; the crate exposes no write surface yet.
+rusqlite.workspace = true

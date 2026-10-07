@@ -6,9 +6,9 @@
 //! The server is a thin shell. It holds the warm [`LibraryRegistry`]
 //! behind an `Arc` and routes every tool call through it — the
 //! tool's `library` selector picks the target handle, or falls back
-//! to the registry's current default when absent. The crate depends
-//! only on `bookrack-ops`, never on the database crates behind it, so
-//! a schema change downstream leaves it untouched.
+//! to the registry's current default when absent. The library read and
+//! write tools reach the stores through `bookrack-ops`; the reference
+//! and translation tools open their own stores read-only per call.
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -33,9 +33,10 @@ use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
 
 mod error_map;
 mod reference;
+mod translate;
 use error_map::{
     invalid_params_err, ops_error_to_mcp, reference_error_to_mcp, respond_with,
-    unknown_filter_value_to_mcp,
+    translate_error_to_mcp, unknown_filter_value_to_mcp,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -2018,6 +2019,87 @@ impl BookrackServer {
             .map_err(reference_error_to_mcp)?;
         respond_with(&receipt)
     }
+
+    // ----- translation read surface -----
+
+    /// The full package a translation prompt for one segment needs.
+    #[tool(
+        name = "translate.fetch_segment",
+        description = "Fetch everything a translation prompt for one segment needs: the \
+                       source text, the unit outline, neighbouring segments, the texts \
+                       already recorded, witness pointers, the sealed history of the \
+                       unit, glossary hits under the effective injection profile with \
+                       the reference entries they cite, and whether to use the glossary \
+                       or the clean prompt. Pass a segment_id from \
+                       translate.list_pending; `injection_profile` overrides the unit's \
+                       profile for this call only; `neighbors` (0..=5, default 1) is \
+                       the number of adjacent segments on each side. Returns null when \
+                       no such segment exists or the library has no translation data."
+    )]
+    async fn translate_fetch_segment(
+        &self,
+        Parameters(args): Parameters<translate::TranslateFetchSegmentArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let ops = handle.ops();
+        let translate_store =
+            translate::probe_translate(&ops.translate_db_path()).map_err(translate_error_to_mcp)?;
+        let corpus = bookrack_corpus::Corpus::open_read_only(ops.corpus_db())
+            .map_err(|e| translate_error_to_mcp(e.into()))?;
+        let refs =
+            translate::probe_refs(&ops.reference_db_path()).map_err(translate_error_to_mcp)?;
+        let catalogs = reference::catalogs().map_err(reference_error_to_mcp)?;
+        let package = translate::fetch_segment_logic(
+            translate_store.as_ref(),
+            &corpus,
+            refs.as_ref(),
+            catalogs,
+            &args,
+        )
+        .map_err(translate_error_to_mcp)?;
+        respond_with(&package)
+    }
+
+    /// Translation-memory search. The index arrives with a later
+    /// milestone; the argument and reply shapes are fixed now.
+    #[tool(
+        name = "translate.tm_search",
+        description = "Search the translation memory for segments whose source resembles \
+                       `text`, confined to one book with `intake_id_scope`; `limit` is \
+                       clamped to 1..=50 (default 10). The index arrives with the \
+                       translation-memory milestone; until then every valid query \
+                       returns an empty hits list."
+    )]
+    async fn translate_tm_search(
+        &self,
+        Parameters(args): Parameters<translate::TranslateTmSearchArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let _handle = self.resolve_handle(args.library.as_deref())?;
+        let result = translate::tm_search_logic(&args).map_err(translate_error_to_mcp)?;
+        respond_with(&result)
+    }
+
+    /// Units of one book and target language that still carry
+    /// unsealed segments.
+    #[tool(
+        name = "translate.list_pending",
+        description = "List the units of one book (`intake_id`) and target language that \
+                       still carry draft or proposed segments, in unit order, each with \
+                       its pending segment ids and counts, plus totals over the whole \
+                       book. An empty list means the translation is complete; a library \
+                       with no translation data answers an empty list with zero totals."
+    )]
+    async fn translate_list_pending(
+        &self,
+        Parameters(args): Parameters<translate::TranslateListPendingArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let translate_store = translate::probe_translate(&handle.ops().translate_db_path())
+            .map_err(translate_error_to_mcp)?;
+        let result = translate::list_pending_logic(translate_store.as_ref(), &args)
+            .map_err(translate_error_to_mcp)?;
+        respond_with(&result)
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -2042,7 +2124,10 @@ impl ServerHandler for BookrackServer {
              search across the whole library), `library.search_in_book` (vector \
              search confined to one book). Curation tools also write: the \
              `library.metadata.*` family edits a book's bibliographic record and \
-             review status, and `reference.overlay_set` edits a reference entry."
+             review status, and `reference.overlay_set` edits a reference entry. The \
+             `translate.*` tools read the translation store: `translate.list_pending` \
+             (what is left to translate), `translate.fetch_segment` (the package for \
+             one segment), `translate.tm_search` (translation memory)."
                     .to_string(),
             )
     }
@@ -2242,6 +2327,18 @@ bookrack_core::fixed_settings! {
     "mcp.queue_status_recent" = SESSION_QUEUE_STATUS_RECENT,
         "recent jobs one queue-status answer carries alongside the counts",
         acts on "session.queue_status";
+    "translate.neighbors_default" = translate::DEFAULT_NEIGHBORS,
+        "neighbouring segments on each side of a fetched one when the caller does not say",
+        acts on "translate.fetch_segment";
+    "translate.neighbors_max" = translate::MAX_NEIGHBORS,
+        "most neighbouring segments a caller may ask for on each side",
+        acts on "translate.fetch_segment";
+    "translate.tm_limit_default" = translate::DEFAULT_TM_LIMIT,
+        "translation-memory hits returned when the caller does not say",
+        acts on "translate.tm_search";
+    "translate.tm_limit_max" = translate::MAX_TM_LIMIT,
+        "most translation-memory hits a caller may ask for",
+        acts on "translate.tm_search";
 }
 
 /// Enumerate every MCP tool the live server exposes. Calls into the

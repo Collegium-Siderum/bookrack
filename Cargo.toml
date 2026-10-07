@@ -152,6 +152,10 @@ bookrack-index-profile = { path = "crates/index-profile" }
 # distill, mcp, and cli crates downstream consume the same surface
 # (the `Refs` handle and the `reference.db` migration target version).
 bookrack-refs = { path = "crates/refs" }
+# The translation working store. Pinned at the workspace level so the
+# mcp crate and the later CLI surface consume the same `Translate`
+# handle and schema target version.
+bookrack-translate = { path = "crates/translate" }
 # The distill pipeline. Pinned at the workspace level so the cli and
 # mcp crates downstream consume the same `Pipeline` / `Stage` /
 # `ParseError` surface. Phase 3 ships the framework only.

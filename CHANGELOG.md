@@ -42,6 +42,22 @@ release workflow extracts the matching section verbatim from this file.
   not inject are dropped from the package; an unknown profile name is
   refused with the known names listed.
 
+- **mcp: three `translate.*` read tools.** `translate.list_pending`
+  lists the units of one book and target language that still carry
+  draft or proposed segments, with their pending segment ids and
+  totals over the whole book. `translate.fetch_segment` assembles the
+  package a translation prompt for one segment needs: the source text
+  read from the corpus and checked against the segment's recorded
+  fingerprint, neighbouring segments, the texts already recorded,
+  witness pointers, the sealed history of the unit, glossary hits
+  under the effective injection profile (overridable per call) with
+  the reference entries they cite, and whether to use the glossary or
+  the clean prompt. `translate.tm_search` fixes the translation-memory
+  contract ahead of its index and answers every valid query with no
+  hits. All three open the stores read-only per call and never create
+  one: a library that has never been translated into reads as having
+  no translation data.
+
 - **config: `translate.db` path helper.** The data-root layout gains
   the translation store's canonical location beside the other
   per-library databases; no new environment knob.

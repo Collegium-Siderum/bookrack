@@ -896,6 +896,25 @@ defined profile, or an embedding model the backend does not hold is
 - `library.list_ocr_pending` — scan sources still awaiting OCR: every
   `needs_ocr` intake anchor with no successfully-processed OCR product
   derived from it. Peer of the CLI `bookrack intake list-ocr-pending`.
+- `translate.list_pending` / `translate.fetch_segment` /
+  `translate.tm_search` — the read face of the translation store.
+  `list_pending` names the units of one book and target language that
+  still carry draft or proposed segments, with their pending segment
+  ids and totals over the whole book; an empty list is the loop's
+  exit. `fetch_segment` assembles the package a translation prompt
+  for one segment needs: the source text read from the corpus and
+  checked against the segment's recorded fingerprint, the neighbouring
+  segments, the texts already recorded, witness pointers, the sealed
+  history of the unit, the glossary hits under the effective injection
+  profile with the reference entries they cite, and whether to use the
+  glossary or the clean prompt. `tm_search` fixes the
+  translation-memory contract ahead of its index and answers every
+  valid query with no hits. None of the three creates a store: a
+  library that has never been translated into answers `null` from
+  `fetch_segment` and an empty list from `list_pending`, and
+  reference citations resolve to nothing when there is no
+  `reference.db`. The stores are opened read-only per call; a
+  translation store this build cannot read is `-32018`.
 
 ## MCP tool surface
 

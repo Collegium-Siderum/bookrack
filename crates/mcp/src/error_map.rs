@@ -14,7 +14,7 @@
 //! where the caller can no longer reach it.
 //! `scripts/error-boundary-check.sh` enforces that for this file.
 
-use bookrack_core::Problem;
+use bookrack_core::{Explain, Problem};
 use bookrack_ops::OpsError;
 use bookrack_ops::dto::UnknownFilterValue;
 use rmcp::ErrorData;
@@ -22,6 +22,7 @@ use rmcp::model::{CallToolResult, ContentBlock, ErrorCode};
 use serde::Serialize;
 
 use crate::reference;
+use crate::translate::TranslateToolError;
 
 /// Encode `value` to a JSON string and wrap it as the body of a successful
 /// tool response. Centralises serialization so every tool returns the same
@@ -111,6 +112,37 @@ pub(crate) fn reference_error_to_mcp(e: reference::ReferenceError) -> ErrorData 
     }
 }
 
+/// Map a [`TranslateToolError`] onto the MCP envelope. Caller input
+/// — an argument that describes no query, an unknown injection
+/// profile — is `invalid_params`; a translation store this build
+/// cannot serve is the control plane's state-unusable code, as it is
+/// for the catalog and corpus; everything else, including a corpus or
+/// reference store that failed to open and a drifted source text, is
+/// `internal_error`. Wording comes from the error's own [`Explain`].
+pub(crate) fn translate_error_to_mcp(e: TranslateToolError) -> ErrorData {
+    use bookrack_runtime::control::jsonrpc::STATE_UNUSABLE;
+    use bookrack_translate::TranslateError;
+    let code = match &e {
+        TranslateToolError::InvalidArgument(_)
+        | TranslateToolError::Translate(TranslateError::UnknownProfile { .. }) => {
+            ErrorCode::INVALID_PARAMS
+        }
+        TranslateToolError::Translate(
+            TranslateError::SchemaTooNew { .. }
+            | TranslateError::SchemaTooOld { .. }
+            | TranslateError::ReaderTooOld { .. }
+            | TranslateError::Verify(_),
+        ) => ErrorCode(STATE_UNUSABLE),
+        TranslateToolError::Translate(TranslateError::Sqlite(_) | TranslateError::Migrate(_))
+        | TranslateToolError::Corpus(_)
+        | TranslateToolError::Refs(_)
+        | TranslateToolError::Reference(_)
+        | TranslateToolError::SourceDrift { .. }
+        | TranslateToolError::BrokenUnitLink { .. } => ErrorCode::INTERNAL_ERROR,
+    };
+    mcp_from_problem(code, e.explain())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +226,71 @@ mod tests {
         let expected = e.to_string(); // error-boundary-check: allow
         let data = ops_error_to_mcp(e);
         assert_eq!(data.message, expected);
+    }
+
+    #[test]
+    fn translate_errors_take_the_code_their_class_prescribes() {
+        use bookrack_translate::TranslateError;
+        let invalid = translate_error_to_mcp(TranslateToolError::InvalidArgument(
+            "`text` is empty".into(),
+        ));
+        assert_eq!(
+            invalid.code,
+            ErrorCode::INVALID_PARAMS,
+            "{}",
+            invalid.message
+        );
+        assert!(
+            invalid.message.contains("`text` is empty"),
+            "{}",
+            invalid.message
+        );
+
+        let profile = translate_error_to_mcp(TranslateToolError::Translate(
+            TranslateError::UnknownProfile {
+                name: "verbose".into(),
+            },
+        ));
+        assert_eq!(
+            profile.code,
+            ErrorCode::INVALID_PARAMS,
+            "{}",
+            profile.message
+        );
+        assert!(profile.message.contains("verbose"), "{}", profile.message);
+
+        let unusable = translate_error_to_mcp(TranslateToolError::Translate(
+            TranslateError::SchemaTooNew {
+                found: 9,
+                expected: 1,
+            },
+        ));
+        assert_eq!(
+            unusable.code,
+            ErrorCode(STATE_UNUSABLE),
+            "{}",
+            unusable.message
+        );
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(unusable.data.expect("data slot filled")).expect("ProblemData");
+        assert!(data.hint.is_some(), "a refused store names the way out");
+
+        let drift = translate_error_to_mcp(TranslateToolError::SourceDrift { segment_id: 7 });
+        assert_eq!(drift.code, ErrorCode::INTERNAL_ERROR, "{}", drift.message);
+        assert!(drift.message.contains("segment 7"), "{}", drift.message);
+
+        let corpus = translate_error_to_mcp(TranslateToolError::Corpus(
+            bookrack_corpus::CorpusError::InvalidLeafRun {
+                start: 1,
+                end: 2,
+                reason: "end precedes start",
+            },
+        ));
+        assert_eq!(corpus.code, ErrorCode::INTERNAL_ERROR, "{}", corpus.message);
+        assert!(
+            corpus.message.contains("end precedes start"),
+            "root cause lost: {}",
+            corpus.message
+        );
     }
 }

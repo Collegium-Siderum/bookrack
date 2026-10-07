@@ -56,6 +56,9 @@ const READ_TOOLS: &[&str] = &[
     "session.info",
     "session.logs_tail",
     "session.queue_status",
+    "translate.fetch_segment",
+    "translate.list_pending",
+    "translate.tm_search",
 ];
 
 /// Tools that mutate persistent state or the daemon's lifecycle.
