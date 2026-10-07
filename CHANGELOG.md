@@ -20,6 +20,15 @@ release workflow extracts the matching section verbatim from this file.
   table specs, and enforces the reader-version stamp. Read and write
   surfaces land in later milestones.
 
+- **translate: read model and pending-work aggregation.** The store
+  gains typed readers for units, segments, and witness pointers, the
+  server-side task-mode inference (imported text not yet sealed is
+  reviewed, everything else drafted), the canonical span fingerprint,
+  and a per-book, per-language pending-work listing with totals. A
+  read-only open refuses a missing, unmigrated, or newer file instead
+  of creating or migrating it, and a probing variant reports a library
+  that has never been translated into as having no translation data.
+
 - **config: `translate.db` path helper.** The data-root layout gains
   the translation store's canonical location beside the other
   per-library databases; no new environment knob.

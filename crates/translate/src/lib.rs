@@ -47,6 +47,7 @@ pub mod glossary_terms;
 pub mod glossary_translations;
 pub mod meta;
 pub mod migrate;
+pub mod pending;
 pub mod segments;
 pub mod units;
 pub mod witnesses;
@@ -105,6 +106,22 @@ pub enum TranslateError {
         /// `user_version` recorded in the opened database.
         found: i64,
         /// Highest schema version this binary defines.
+        expected: i64,
+    },
+
+    /// The database has not reached this build's schema revision and
+    /// the open is read-only, so the migration that would bring it
+    /// forward cannot run. A read-only probe of a file left at an
+    /// earlier `user_version` reports this rather than querying tables
+    /// that may not exist.
+    #[error(
+        "translate schema is older than this build: database is at v{found}, \
+         this build reads v{expected}"
+    )]
+    SchemaTooOld {
+        /// `user_version` recorded in the opened database.
+        found: i64,
+        /// Schema version this binary reads.
         expected: i64,
     },
 
@@ -167,6 +184,18 @@ impl Explain for TranslateError {
                  v{expected}), or restore the store from a backup this build wrote."
             )),
 
+            TranslateError::SchemaTooOld { found, expected } => {
+                Problem::new("cannot read a translation store that has not been migrated")
+                    .detail(format!(
+                        "The store is at schema version {found}; this build reads version \
+                         {expected}, and a read-only open does not migrate."
+                    ))
+                    .hint(
+                        "Open the store for writing once with this build; the writing path \
+                         brings the schema forward.",
+                    )
+            }
+
             TranslateError::ReaderTooOld { required, current } => {
                 Problem::new("cannot read a translation store that requires a newer reader")
                     .detail(format!(
@@ -207,6 +236,7 @@ impl Explain for TranslateError {
 pub type TranslateResult<T> = Result<T, TranslateError>;
 
 /// The translation-store handle.
+#[derive(Debug)]
 pub struct Translate {
     conn: Connection,
 }
@@ -222,6 +252,63 @@ impl Translate {
     /// database vanishes when the handle is dropped.
     pub fn open_in_memory() -> TranslateResult<Translate> {
         Translate::from_connection(Connection::open_in_memory()?)
+    }
+
+    /// Open `translate.db` at `path` for reading without creating it
+    /// and without writing through the connection.
+    ///
+    /// Mirrors the corpus read-only door: the strict read-only flags
+    /// block writes and refuse a missing file rather than materialize
+    /// an empty schema, and no migration runs. `user_version` is
+    /// checked in both directions — [`TranslateError::SchemaTooNew`]
+    /// for a file this build cannot read, [`TranslateError::SchemaTooOld`]
+    /// for one the writing path has not yet brought to
+    /// [`TARGET_VERSION`] — then the live schema is verified against the
+    /// table specs and the reader-version stamp is enforced. Nothing is
+    /// seeded or mirrored: the writable [`Translate::open`] is the only
+    /// path that stamps.
+    pub fn open_read_only(path: &Path) -> TranslateResult<Translate> {
+        let conn = bookrack_dbkit::open_production_strict_read_only(path)?;
+        let found: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if found > TARGET_VERSION {
+            return Err(TranslateError::SchemaTooNew {
+                found,
+                expected: TARGET_VERSION,
+            });
+        }
+        if found < TARGET_VERSION {
+            return Err(TranslateError::SchemaTooOld {
+                found,
+                expected: TARGET_VERSION,
+            });
+        }
+        bookrack_dbkit::verify_all(&conn, SPECS).map_err(TranslateError::Verify)?;
+        let translate = Translate { conn };
+        let stored = translate
+            .meta_get(MIN_READER_VERSION_KEY)?
+            .and_then(|s| s.parse::<u32>().ok());
+        if let OpenDecision::Refuse { .. } = reader_version_decision(stored) {
+            return Err(TranslateError::ReaderTooOld {
+                required: stored.expect("Refuse implies a stamp was present"),
+                current: READER_VERSION,
+            });
+        }
+        Ok(translate)
+    }
+
+    /// Probe for a `translate.db` at `path` and open it read-only.
+    ///
+    /// A library that has never been translated into has no
+    /// `translate.db`; readers treat that as "no translation data"
+    /// rather than as an error. `Ok(None)` when there is no file at
+    /// `path`; otherwise exactly [`Translate::open_read_only`], so a
+    /// file that exists but cannot be read still reports its reason.
+    /// The probe itself touches nothing on disk.
+    pub fn try_open_read_only(path: &Path) -> TranslateResult<Option<Translate>> {
+        if !path.is_file() {
+            return Ok(None);
+        }
+        Translate::open_read_only(path).map(Some)
     }
 
     /// Migrate the schema to the current revision and return a handle.
@@ -317,23 +404,87 @@ fn decide(current: i64) -> OpenDecision {
     }
 }
 
+/// Row-seeding helpers shared by the per-module read-model tests.
+/// Each writes through plain SQL so a test exercises the read path
+/// alone.
+#[cfg(test)]
+pub(crate) mod seed {
+    use super::Translate;
+
+    pub(crate) fn fresh() -> Translate {
+        Translate::open_in_memory().expect("open in-memory translate")
+    }
+
+    pub(crate) fn unit(
+        t: &Translate,
+        intake_id: i64,
+        target_lang: &str,
+        node_id: i64,
+        unit_order: i64,
+    ) -> i64 {
+        t.conn
+            .query_row(
+                "INSERT INTO translate_units (intake_id, target_lang, node_id, unit_order) \
+                 VALUES (?1, ?2, ?3, ?4) RETURNING unit_id",
+                rusqlite::params![intake_id, target_lang, node_id, unit_order],
+                |row| row.get(0),
+            )
+            .expect("insert unit")
+    }
+
+    /// A segment spanning `(node, start)..(node, end)` with the given
+    /// status and no text columns set.
+    pub(crate) fn segment(
+        t: &Translate,
+        unit_id: i64,
+        node: i64,
+        start: i64,
+        end: i64,
+        status: &str,
+    ) -> i64 {
+        segment_in(t, unit_id, (node, start), (node, end), status)
+    }
+
+    pub(crate) fn segment_in(
+        t: &Translate,
+        unit_id: i64,
+        from: (i64, i64),
+        to: (i64, i64),
+        status: &str,
+    ) -> i64 {
+        t.conn
+            .query_row(
+                "INSERT INTO translate_segments (unit_id, start_node_id, start_char_offset, \
+                 end_node_id, end_char_offset, source_text_sha, status) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'sha', ?6) RETURNING segment_id",
+                rusqlite::params![unit_id, from.0, from.1, to.0, to.1, status],
+                |row| row.get(0),
+            )
+            .expect("insert segment")
+    }
+
+    pub(crate) fn witness(t: &Translate, unit_id: i64, witness_intake_id: i64, role: &str) -> i64 {
+        t.conn
+            .query_row(
+                "INSERT INTO translate_unit_witnesses (unit_id, witness_intake_id, \
+                 witness_node_id, lang, role) VALUES (?1, ?2, 7, 'en', ?3) RETURNING witness_id",
+                rusqlite::params![unit_id, witness_intake_id, role],
+                |row| row.get(0),
+            )
+            .expect("insert witness")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn fresh() -> Translate {
-        Translate::open_in_memory().expect("open in-memory translate")
+        seed::fresh()
     }
 
     fn insert_unit(t: &Translate, intake_id: i64, node_id: i64) -> i64 {
-        t.conn
-            .query_row(
-                "INSERT INTO translate_units (intake_id, target_lang, node_id, unit_order) \
-                 VALUES (?1, 'zh', ?2, 0) RETURNING unit_id",
-                rusqlite::params![intake_id, node_id],
-                |row| row.get(0),
-            )
-            .expect("insert unit")
+        seed::unit(t, intake_id, "zh", node_id, 0)
     }
 
     #[test]
@@ -473,6 +624,121 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.to_string().contains("FOREIGN KEY"), "{err}");
+    }
+
+    #[test]
+    fn a_probe_for_a_missing_store_reports_none_and_leaves_the_directory_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("translate.db");
+        let probed = Translate::try_open_read_only(&path).expect("probe");
+        assert!(probed.is_none());
+        assert!(!path.exists(), "a probe must not materialize the store");
+        assert!(
+            std::fs::read_dir(dir.path())
+                .expect("read dir")
+                .next()
+                .is_none(),
+            "a probe must leave the directory untouched"
+        );
+    }
+
+    #[test]
+    fn a_read_only_open_of_a_missing_store_fails_without_creating_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("translate.db");
+        let err = Translate::open_read_only(&path).expect_err("missing file must not open");
+        assert!(matches!(err, TranslateError::Sqlite(_)), "{err:?}");
+        assert!(!path.exists(), "a refused open must not create the store");
+    }
+
+    #[test]
+    fn a_read_only_reopen_serves_rows_the_writable_open_stored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("translate.db");
+        let unit_id = {
+            let t = Translate::open(&path).expect("writable open");
+            insert_unit(&t, 1, 10)
+        };
+        let ro = Translate::try_open_read_only(&path)
+            .expect("probe")
+            .expect("store exists");
+        let row = ro.unit(unit_id).expect("read").expect("row");
+        assert_eq!(row.intake_id, 1);
+        assert_eq!(row.node_id, 10);
+    }
+
+    #[test]
+    fn a_read_only_open_refuses_a_newer_schema() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("translate.db");
+        {
+            let t = Translate::open(&path).expect("first open");
+            t.conn
+                .pragma_update(None, "user_version", 99)
+                .expect("bump user_version");
+        }
+        let err = Translate::open_read_only(&path).expect_err("must refuse");
+        assert!(
+            matches!(err, TranslateError::SchemaTooNew { found: 99, .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_read_only_open_refuses_an_unmigrated_file_instead_of_migrating_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("translate.db");
+        // An empty SQLite file: created, never migrated.
+        drop(Connection::open(&path).expect("create empty file"));
+        let err = Translate::open_read_only(&path).expect_err("must refuse");
+        assert!(
+            matches!(err, TranslateError::SchemaTooOld { found: 0, expected } if expected == TARGET_VERSION),
+            "{err:?}"
+        );
+        let version: i64 = Connection::open(&path)
+            .expect("reopen")
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read user_version");
+        assert_eq!(version, 0, "a read-only open must not migrate");
+    }
+
+    #[test]
+    fn a_read_only_open_refuses_a_reader_stamp_above_this_build() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("translate.db");
+        let too_new = READER_VERSION + 1;
+        {
+            let t = Translate::open(&path).expect("first open");
+            t.meta_set(MIN_READER_VERSION_KEY, &too_new.to_string())
+                .expect("raise the stamp");
+        }
+        let err = Translate::open_read_only(&path).expect_err("must refuse");
+        assert!(
+            matches!(err, TranslateError::ReaderTooOld { required, .. } if required == too_new),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn an_unmigrated_store_explains_that_a_writing_open_migrates() {
+        let problem = TranslateError::SchemaTooOld {
+            found: 0,
+            expected: 1,
+        }
+        .explain();
+        assert!(
+            problem.summary.contains("not been migrated"),
+            "summary: {}",
+            problem.summary
+        );
+        let detail = problem.data.detail.as_deref().expect("detail");
+        assert!(
+            detail.contains("version 0") && detail.contains("version 1"),
+            "detail: {detail}"
+        );
+        let hint = problem.data.hint.as_deref().expect("hint");
+        assert!(hint.contains("writing"), "hint: {hint}");
+        assert!(!problem.data.retryable);
     }
 
     #[test]

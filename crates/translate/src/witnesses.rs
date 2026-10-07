@@ -12,6 +12,8 @@
 
 use bookrack_dbkit::{ColumnSpec, ForeignKey, OnDelete, TableSpec};
 
+use crate::{Translate, TranslateResult};
+
 /// The single source of truth for the `translate_unit_witnesses`
 /// table's schema. The frozen baseline DDL in [`crate::migrate`] is
 /// rendered from this spec; `verify_all` pins the two together on
@@ -43,3 +45,75 @@ pub(crate) const SPEC: TableSpec = TableSpec {
     table_checks: &[],
     indexes: &[],
 };
+
+/// One `translate_unit_witnesses` row: a pointer to the witness text,
+/// never the text itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WitnessRow {
+    pub witness_intake_id: i64,
+    pub witness_node_id: i64,
+    pub lang: String,
+    pub role: String,
+    pub note: Option<String>,
+}
+
+impl Translate {
+    /// Every witness anchored on `unit_id`, in insertion order; empty
+    /// for a unit without witnesses or an unknown unit.
+    pub fn witnesses_for_unit(&self, unit_id: i64) -> TranslateResult<Vec<WitnessRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT witness_intake_id, witness_node_id, lang, role, note \
+             FROM translate_unit_witnesses WHERE unit_id = ?1 ORDER BY witness_id",
+        )?;
+        let rows = stmt.query_map([unit_id], |row| {
+            Ok(WitnessRow {
+                witness_intake_id: row.get(0)?,
+                witness_node_id: row.get(1)?,
+                lang: row.get(2)?,
+                role: row.get(3)?,
+                note: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::seed;
+
+    #[test]
+    fn witnesses_read_back_every_column_in_insertion_order() {
+        let t = seed::fresh();
+        let unit_id = seed::unit(&t, 1, "zh", 10, 0);
+        let other = seed::unit(&t, 1, "zh", 11, 1);
+        seed::witness(&t, unit_id, 5, "alt_source");
+        let second = seed::witness(&t, unit_id, 6, "prior_translation");
+        seed::witness(&t, other, 9, "translation_witness");
+        t.conn
+            .execute(
+                "UPDATE translate_unit_witnesses SET note = 'second edition' WHERE witness_id = ?1",
+                [second],
+            )
+            .expect("update");
+
+        let rows = t.witnesses_for_unit(unit_id).expect("read");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].witness_intake_id, 5);
+        assert_eq!(rows[0].witness_node_id, 7);
+        assert_eq!(rows[0].lang, "en");
+        assert_eq!(rows[0].role, "alt_source");
+        assert_eq!(rows[0].note, None);
+        assert_eq!(rows[1].witness_intake_id, 6);
+        assert_eq!(rows[1].role, "prior_translation");
+        assert_eq!(rows[1].note.as_deref(), Some("second edition"));
+    }
+
+    #[test]
+    fn a_unit_without_witnesses_reads_as_empty() {
+        let t = seed::fresh();
+        let unit_id = seed::unit(&t, 1, "zh", 10, 0);
+        assert!(t.witnesses_for_unit(unit_id).expect("read").is_empty());
+        assert!(t.witnesses_for_unit(404).expect("read").is_empty());
+    }
+}
