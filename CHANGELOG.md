@@ -141,6 +141,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A running daemon stops returning the rows of a removed book.**
+  The vector store handle the daemon keeps warm for search was opened
+  on a LanceDB connection that never checked for versions committed by
+  other connections, so `remove`, `vectors rebuild`, and every other
+  command that writes the store through its own handle left the search
+  path reading the table as it stood at startup. Status reads, which
+  open a fresh handle per call, reported the removal while search kept
+  serving the removed book's chunks with an empty breadcrumb, and only
+  an unmount and mount of the library brought the two into agreement.
+  The store now opens its connection with a zero read-consistency
+  interval, so every read resolves the latest on-disk version first.
+
 - **Paper-side reads on a library that has not gleaned yet answer
   instead of failing.** The paper catalog is created by the first
   glean, so a library that has only ingested books has none; the paper
