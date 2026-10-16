@@ -34,7 +34,7 @@ use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
 mod error_map;
 mod reference;
 use error_map::{
-    invalid_params_err, ops_error_to_mcp, reference_error_to_mcp, respond_with,
+    invalid_params_err, ops_error_to_mcp, reference_error_to_mcp, report_to_mcp, respond_with,
     unknown_filter_value_to_mcp,
 };
 use serde::{Deserialize, Serialize};
@@ -763,10 +763,11 @@ pub struct BookrackServer {
 #[tool_router(router = tool_router)]
 impl BookrackServer {
     /// Build a handler over the given library registry. `info_context`
-    /// carries the static facts (data dir, library name, ollama url,
-    /// embed model, MCP address) needed to fill `library.info` and
-    /// `session.info` without re-reading the process environment on
-    /// every call. `started_at` stamps the daemon's birth so
+    /// is the bring-up snapshot of the daemon's process-level facts
+    /// (MCP address, data root and ollama url of the library it came up
+    /// on) that `session.info` reports; `library.info` takes only the
+    /// MCP address from it and builds the rest from the selected
+    /// library's handle. `started_at` stamps the daemon's birth so
     /// `session.info` can report uptime. `log_stream` is the shared
     /// in-process log fan-out the `session.logs_tail` tool reads its
     /// ring-buffer snapshot from. `queue_state` is the shared snapshot
@@ -1575,7 +1576,16 @@ impl BookrackServer {
         Parameters(args): Parameters<LibraryOnlyArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
-        let ctx = self.info_context.clone();
+        // The card's identity comes from the library the handle names,
+        // not from the bring-up snapshot: the counts below are this
+        // handle's, and the two halves of one card describe one root.
+        // The MCP address is a property of the process and is carried
+        // over from the snapshot.
+        let ctx = bookrack_runtime::daemon::library_info_context_for(
+            handle.cfg(),
+            &self.info_context.mcp_addr,
+        )
+        .map_err(|e| report_to_mcp("library.info", e))?;
         let info = reads::info::show_library_info(handle.ops(), ctx)
             .await
             .map_err(ops_error_to_mcp)?;

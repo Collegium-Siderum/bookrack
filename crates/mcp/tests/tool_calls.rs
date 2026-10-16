@@ -18,14 +18,21 @@
 //!   surfaces as `internal_error`;
 //! * every recorded tool-call row carries `source = "mcp"` even
 //!   though the shared `Ops` was built for another surface — the
-//!   `call_tool` caller override the audit trail depends on.
+//!   `call_tool` caller override the audit trail depends on;
+//! * `library.info` for a selected library reports that library's
+//!   root and name, not the ones of the library the daemon came up
+//!   on.
+//!
+//! The registry carries two libraries on two roots so a card whose
+//! identity and counts came from different libraries is observable.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bookrack_catalog::{Catalog, IntakeStatus, NewIntake};
-use bookrack_config::Config;
+use bookrack_config::{Config, LibrarySelection};
 use bookrack_core::ItemKind;
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
@@ -33,6 +40,7 @@ use bookrack_obs::LogStreamHandle;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, Ops};
+use bookrack_test_support::{ProcessEnv, process_env};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ErrorCode, JsonObject};
 use rmcp::service::{RoleClient, RunningService, ServiceError};
@@ -43,7 +51,11 @@ use tokio::time::timeout;
 
 struct Fixture {
     _tmp: tempfile::TempDir,
-    catalog_db: std::path::PathBuf,
+    /// Root of the default library, `fixture`.
+    root: PathBuf,
+    /// Root of the second registered library, `second`.
+    second_root: PathBuf,
+    catalog_db: PathBuf,
     intake_id: i64,
     addr: SocketAddr,
     shutdown_tx: broadcast::Sender<()>,
@@ -51,12 +63,39 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// Seed a one-book catalog, boot `serve` on an ephemeral port, and
-    /// wait until the listener accepts.
+    /// Seed a one-book catalog under the default library's root, add an
+    /// empty second library on its own root, boot `serve` on an
+    /// ephemeral port, and wait until the listener accepts.
     async fn start() -> Fixture {
+        // Both libraries resolve through the sandbox registry, as the
+        // daemon's do, so each configuration carries its own name and
+        // root; the sandbox also keeps the status card's registry read
+        // off the machine running the tests.
+        let sandbox = process_env(ProcessEnv::isolated());
         let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().to_path_buf();
+        let root = tmp.path().join("fixture-root");
+        let second_root = tmp.path().join("second-root");
+        for dir in [&root, &second_root] {
+            std::fs::create_dir_all(dir).expect("library root");
+        }
+        let (cfg, second_cfg) = {
+            // The registry is one file per process: write and resolve
+            // under a lock so concurrent fixtures see their own entries.
+            static REGISTRY: Mutex<()> = Mutex::new(());
+            let _guard = REGISTRY.lock().expect("registry lock");
+            sandbox.write_registry_entries(
+                Some("fixture"),
+                &[
+                    ("fixture", root.as_path()),
+                    ("second", second_root.as_path()),
+                ],
+            );
+            (resolve("fixture"), resolve("second"))
+        };
         let catalog_db = root.join("catalog.db");
+        // An empty catalog, so the second library is a real root rather
+        // than a bare directory.
+        Catalog::open(&second_root.join("catalog.db")).expect("open second catalog");
         let intake_id = {
             let mut catalog = Catalog::open(&catalog_db).expect("open catalog");
             catalog
@@ -69,28 +108,20 @@ impl Fixture {
                 .intake_id
         };
 
-        // Deliberately a CLI-surface Ops: the `source = "mcp"`
-        // assertion can then only pass through the `call_tool`
-        // caller override.
-        // The configuration names the same root the catalog above was
-        // opened under, so the handle's two halves are one library's.
-        let cfg = Arc::new(Config::new(root.clone(), "http://127.0.0.1:1".to_string()));
-        let ops = Ops::<OllamaEmbedClient>::catalog_only(
-            cfg.corpus_db(),
-            cfg.catalog_db(),
-            &cfg.lancedb_dir(),
-            cfg.books_dir(),
-            cfg.backup_dir(),
-            Caller::cli(),
-        );
-        let registry = LibraryRegistry::single(LibraryHandle::new("fixture", cfg, ops));
+        let registry = LibraryRegistry::from_handles(
+            [handle("fixture", cfg), handle("second", second_cfg)],
+            "fixture",
+        )
+        .expect("two-library registry");
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
 
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(4);
+        // The bring-up snapshot names the default library, as the
+        // daemon's does.
         let info_context = LibraryInfoContext {
-            data_dir: "unused".to_string(),
+            data_dir: root.display().to_string(),
             library_name: Some("fixture".to_string()),
             resolution_source: "test fixture".to_string(),
             shadowed_default: None,
@@ -127,6 +158,8 @@ impl Fixture {
 
         Fixture {
             _tmp: tmp,
+            root,
+            second_root,
             catalog_db,
             intake_id,
             addr,
@@ -160,6 +193,35 @@ impl Fixture {
         let _ = self.shutdown_tx.send(());
         let _ = timeout(Duration::from_secs(5), self.server).await;
     }
+}
+
+/// Resolve the registry library `name` the way the daemon does for
+/// each library it serves.
+fn resolve(name: &str) -> Arc<Config> {
+    Arc::new(
+        Config::resolve(&LibrarySelection {
+            data_dir: None,
+            library: Some(name.to_string()),
+        })
+        .expect("resolve a registered library"),
+    )
+}
+
+/// A library handle over `cfg`. Deliberately a CLI-surface Ops: the
+/// `source = "mcp"` assertion can then only pass through the
+/// `call_tool` caller override. The configuration names the same root
+/// the catalog was opened under, so the handle's two halves are one
+/// library's.
+fn handle(name: &str, cfg: Arc<Config>) -> Arc<LibraryHandle<OllamaEmbedClient>> {
+    let ops = Ops::<OllamaEmbedClient>::catalog_only(
+        cfg.corpus_db(),
+        cfg.catalog_db(),
+        &cfg.lancedb_dir(),
+        cfg.books_dir(),
+        cfg.backup_dir(),
+        Caller::cli(),
+    );
+    LibraryHandle::new(name, cfg, ops)
 }
 
 /// A tool call: `name` with a JSON-object argument payload.
@@ -270,6 +332,51 @@ async fn an_unknown_library_selector_is_invalid_params() {
         data.message.contains("no-such-library"),
         "the message must name the rejected selector: {}",
         data.message
+    );
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+/// `library.info { library }` reports the identity of the library it
+/// was asked about. The counts on the card come from the selected
+/// handle, so a card whose root and name came from the bring-up
+/// snapshot would describe two libraries at once.
+#[tokio::test]
+async fn library_info_reports_the_selected_librarys_identity() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+
+    let result = client
+        .call_tool(call(
+            "library.info",
+            serde_json::json!({ "library": "second" }),
+        ))
+        .await
+        .expect("library.info for the second library");
+    let body = body_json(&result);
+    assert_eq!(
+        body["library_name"].as_str(),
+        Some("second"),
+        "the card names another library: {body}"
+    );
+    assert_eq!(
+        body["data_dir"].as_str(),
+        Some(fx.second_root.display().to_string().as_str()),
+        "the card reports another library's root: {body}"
+    );
+
+    // Without a selector the card describes the default library.
+    let result = client
+        .call_tool(call("library.info", serde_json::json!({})))
+        .await
+        .expect("library.info for the default library");
+    let body = body_json(&result);
+    assert_eq!(body["library_name"].as_str(), Some("fixture"), "{body}");
+    assert_eq!(
+        body["data_dir"].as_str(),
+        Some(fx.root.display().to_string().as_str()),
+        "{body}"
     );
 
     let _ = client.cancel().await;

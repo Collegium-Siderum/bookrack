@@ -45,3 +45,6 @@ tracing.workspace = true
 # Tempdir-backed catalog fixtures for the handler-level tool-call
 # tests, which drive `serve` through a real streamable-HTTP client.
 tempfile.workspace = true
+# Redirects the test binary's environment into a sandbox, so the
+# status card's registry read never reaches the machine's own.
+bookrack-test-support.workspace = true

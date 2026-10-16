@@ -141,6 +141,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **The MCP `library.info` card describes the library it was asked
+  about.** With several libraries served, a call carrying `library`
+  took its counts from the selected library but its identity
+  (`data_dir`, `library_name`, `resolution_source`,
+  `embed_model_configured` and the registry-identification fields)
+  from a snapshot of the library the daemon came up on, so one card
+  paired one library's counts with another's root. The MCP tool now
+  builds the card's identity from the selected library, as the
+  control-plane method already did; only the MCP listener address, a
+  property of the process, still comes from the snapshot.
+
 - **A running daemon stops returning the rows of a removed book.**
   The vector store handle the daemon keeps warm for search was opened
   on a LanceDB connection that never checked for versions committed by
