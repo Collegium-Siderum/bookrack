@@ -3,8 +3,8 @@
 //! The three-part diagnostic every front end renders.
 //!
 //! Modelled on PostgreSQL's primary / detail / hint split. A flat
-//! string has to serve four consumers at once — the CLI's one-line
-//! report, `--json`, the desktop shell, an agent over MCP — and ends
+//! string has to serve three consumers at once — the CLI's one-line
+//! report, `--json`, an agent over MCP — and ends
 //! up serving none of them: it is either too terse to act on or too
 //! noisy to lay out. Splitting the message lets each consumer take
 //! the parts it can show.
@@ -37,8 +37,6 @@ use crate::error_chain;
 /// summary stays in `message`, and so a client can read them back
 /// with one `from_value` instead of picking keys by hand.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct ProblemData {
     /// Implementation-level evidence for the summary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,8 +66,6 @@ pub struct ProblemData {
 /// three — so `--json` output and the wire `data` object share one
 /// shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct Problem {
     /// One line naming what failed.
     pub summary: String,

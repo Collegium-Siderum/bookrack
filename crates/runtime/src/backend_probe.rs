@@ -86,8 +86,7 @@ impl EmbedBackendState {
 /// Carries the rendered [`Problem`] rather than a flat string so the
 /// CLI can hand it to the same three-part reporter every other
 /// classified failure goes through. `Display` stays a self-sufficient
-/// single line for the log and for the desktop shell, which has no
-/// exit code to set.
+/// single line for the log.
 #[derive(Debug, thiserror::Error)]
 #[error("library '{library}': {}", .problem.summary)]
 pub struct PreflightRefusal {

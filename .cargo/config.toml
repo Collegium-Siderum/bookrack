@@ -5,15 +5,5 @@
 # include is marked optional, so a checkout without the file (CI, a
 # fresh clone) loads this tracked configuration alone. The tracked file
 # only carries cross-workspace settings.
-#
-# `TS_RS_EXPORT_DIR` reroutes every `#[ts(export, export_to = "...")]`
-# in the workspace under `target/ts-generated/`, a gitignored path
-# outside `crates/` so the `crates/*` member glob never meets a
-# directory the generator created. `relative = true` resolves the path
-# against this file's directory, i.e. the workspace root, so the
-# setting works on any contributor's machine.
 
 include = [{ path = "config.local.toml", optional = true }]
-
-[env]
-TS_RS_EXPORT_DIR = { value = "target/ts-generated", relative = true }

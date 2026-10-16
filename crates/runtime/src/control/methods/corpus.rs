@@ -13,8 +13,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-#[cfg(test)]
-use ts_rs::TS;
 
 use super::{MethodContext, require_yes, run_write};
 use crate::cmd::corpus;
@@ -23,8 +21,6 @@ use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::control::plan_registry::PlanId;
 
 #[derive(Debug, Default, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct CorpusRebuildParams {
     #[serde(default)]
     include_vectors: bool,
@@ -45,7 +41,6 @@ pub struct CorpusRebuildParams {
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 

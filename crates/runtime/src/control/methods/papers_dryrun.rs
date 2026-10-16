@@ -8,8 +8,6 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::Value;
-#[cfg(test)]
-use ts_rs::TS;
 
 use super::{MethodContext, run_write};
 use crate::cmd::papers_dryrun;
@@ -17,13 +15,9 @@ use crate::control::error_map::{handler_err, registry_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct PapersDryrunParams {
-    #[cfg_attr(test, ts(type = "string"))]
     path: PathBuf,
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     out: Option<PathBuf>,
     #[serde(default)]
     no_chunk: bool,
@@ -31,7 +25,6 @@ pub struct PapersDryrunParams {
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 

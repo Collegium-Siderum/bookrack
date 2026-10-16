@@ -5,8 +5,6 @@
 
 use serde::Deserialize;
 use serde_json::Value;
-#[cfg(test)]
-use ts_rs::TS;
 
 use super::super::jsonrpc::RpcError;
 use super::MethodContext;
@@ -40,14 +38,11 @@ pub async fn run(library: Option<&str>, ctx: &MethodContext) -> Result<Value, Rp
 
 /// Which library to verify.
 #[derive(Debug, Default, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct VerifyParams {
     /// The library this call acts on. Absent means the registry's
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 

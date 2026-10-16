@@ -11,8 +11,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-#[cfg(test)]
-use ts_rs::TS;
 
 use super::{MethodContext, require_yes, run_write};
 use crate::cmd::vectors;
@@ -21,8 +19,6 @@ use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::control::plan_registry::PlanId;
 
 #[derive(Debug, Default, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct VectorsRebuildParams {
     #[serde(default)]
     kind: Option<String>,
@@ -40,7 +36,6 @@ pub struct VectorsRebuildParams {
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
@@ -69,8 +64,6 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct VectorsReembedParams {
     #[serde(default)]
     book: Option<i64>,
@@ -89,7 +82,6 @@ pub struct VectorsReembedParams {
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
@@ -191,8 +183,6 @@ async fn reembed_execute_from_plan(
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct VectorsResetParams {
     #[serde(default)]
     yes: bool,
@@ -202,7 +192,6 @@ pub struct VectorsResetParams {
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
@@ -224,8 +213,6 @@ pub async fn reset(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct VectorsDropParams {
     #[serde(default)]
     yes: bool,
@@ -233,7 +220,6 @@ pub struct VectorsDropParams {
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 

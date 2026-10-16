@@ -78,4 +78,3 @@ bookrack-core = { path = "../core" }
 bookrack-corpus = { path = "../corpus" }
 bookrack-test-support.workspace = true
 tempfile.workspace = true
-ts-rs.workspace = true

@@ -8,18 +8,13 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-#[cfg(test)]
-use ts_rs::TS;
 
 use super::super::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use super::MethodContext;
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct DiagnoseRunParams {
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     pub out: Option<PathBuf>,
     #[serde(default = "default_days")]
     pub days: u32,

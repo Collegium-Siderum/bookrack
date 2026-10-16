@@ -1,24 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `daemon.methods` and `daemon.mcp_tools` — runtime reflection for
-//! `bookrack rpc list` and any future GUI surface that wants to
-//! enumerate what is callable on this daemon.
+//! `bookrack rpc list` and any client that wants to enumerate what is
+//! callable on this daemon.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-#[cfg(test)]
-use ts_rs::TS;
 
 use super::MethodContext;
 
 /// One row in the `daemon.methods` response.
 #[derive(Debug, Clone, Serialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MethodSignature {
-    #[cfg_attr(test, ts(type = "string"))]
     pub name: &'static str,
-    #[cfg_attr(test, ts(type = "string"))]
     pub kind: &'static str,
     /// `true` iff the runtime routes the method through the persistent
     /// queue worker. Headless `bookrack-mcp` profiles without
@@ -31,12 +25,10 @@ pub struct MethodSignature {
     /// answers about the daemon or about every library at once, so a
     /// selection naming one library cannot be honoured and a client
     /// must refuse rather than drop it.
-    #[cfg_attr(test, ts(type = "string"))]
     pub selection: &'static str,
     /// The params key that names the library, for `selection ==
     /// "routed"`. `"library"` everywhere but `library.info`, whose own
     /// `name` parameter predates the shared spelling.
-    #[cfg_attr(test, ts(type = "string | null"))]
     pub library_key: Option<&'static str>,
 }
 
@@ -44,32 +36,9 @@ pub struct MethodSignature {
 /// startup from the live MCP server so the runtime crate does not
 /// take a direct dependency on rmcp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct McpToolInfo {
     pub name: String,
     pub description: String,
-}
-
-/// Closed enumeration of every control-plane method routed by
-/// [`super::dispatch`]. Exported as a TypeScript literal union so the
-/// webview's `ControlClient` can type its method names against the
-/// Rust-side registry with no hand maintenance. `current()` mirrors
-/// the runtime [`super::REGISTRY`] verbatim.
-#[cfg(test)]
-#[derive(Debug, Clone, Serialize, TS)]
-#[ts(export, export_to = "./")]
-pub struct MethodCatalog {
-    pub names: Vec<String>,
-}
-
-#[cfg(test)]
-impl MethodCatalog {
-    pub fn current() -> Self {
-        Self {
-            names: super::REGISTRY.iter().map(|m| m.name.to_string()).collect(),
-        }
-    }
 }
 
 pub fn methods(_ctx: &MethodContext) -> Value {
@@ -99,20 +68,22 @@ pub fn mcp_tools_rpc(
 mod tests {
     use super::super::REGISTRY;
     use super::*;
-    use ts_rs::TS;
 
-    #[test]
-    fn method_catalog_ts_matches_registry_len() {
-        MethodCatalog::export_all().expect("ts-rs export MethodCatalog");
-        let dir = std::env::var("TS_RS_EXPORT_DIR").expect("TS_RS_EXPORT_DIR not set");
-        let path = std::path::PathBuf::from(dir).join("MethodCatalog.ts");
-        let contents = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        assert!(
-            contents.contains("names"),
-            "MethodCatalog.ts missing `names` field:\n{contents}"
-        );
-        assert_eq!(MethodCatalog::current().names.len(), REGISTRY.len());
+    /// The `daemon.methods` response lists every registry row, in
+    /// registry order, under its registered name.
+    #[tokio::test]
+    async fn daemon_methods_enumerates_the_whole_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = super::super::test_method_context(dir.path(), None);
+        let value = methods(&ctx);
+        let names: Vec<&str> = value["methods"]
+            .as_array()
+            .expect("methods array")
+            .iter()
+            .map(|row| row["name"].as_str().expect("name"))
+            .collect();
+        let expected: Vec<&str> = REGISTRY.iter().map(|sig| sig.name).collect();
+        assert_eq!(names, expected);
     }
 
     #[test]

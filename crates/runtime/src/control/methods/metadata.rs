@@ -9,8 +9,6 @@
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-#[cfg(test)]
-use ts_rs::TS;
 
 use super::{MethodContext, input_err, run_write};
 use crate::audit_helpers::require_known_profile;
@@ -19,8 +17,6 @@ use crate::control::error_map::{handler_err, registry_err};
 use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataSetParams {
     book: i64,
     field: String,
@@ -33,13 +29,10 @@ pub struct MetadataSetParams {
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataClearParams {
     book: i64,
     field: String,
@@ -49,13 +42,10 @@ pub struct MetadataClearParams {
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataVoidParams {
     book: i64,
     field: String,
@@ -65,13 +55,10 @@ pub struct MetadataVoidParams {
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataReauditParams {
     book: i64,
     /// Optional book-side audit profile name. Resolves through the
@@ -79,19 +66,15 @@ pub struct MetadataReauditParams {
     /// outside it; absent means the daemon's overlay-resolved default
     /// profile.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     audit_profile: Option<String>,
     /// The library this call acts on. Absent means the registry's
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataContributorAddParams {
     book: i64,
     role: String,
@@ -104,13 +87,10 @@ pub struct MetadataContributorAddParams {
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataContributorRemoveParams {
     book: i64,
     contributor_id: i64,
@@ -120,13 +100,10 @@ pub struct MetadataContributorRemoveParams {
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataAckParams {
     book: i64,
     reason: String,
@@ -134,13 +111,10 @@ pub struct MetadataAckParams {
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataApproveParams {
     book: i64,
     #[serde(default)]
@@ -149,13 +123,10 @@ pub struct MetadataApproveParams {
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataRejectParams {
     book: i64,
     reason: String,
@@ -163,13 +134,10 @@ pub struct MetadataRejectParams {
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataAdvanceParams {
     book: i64,
     /// Optional book-side audit profile name. Used when `advance`
@@ -178,13 +146,11 @@ pub struct MetadataAdvanceParams {
     /// invalid params on a name outside it, absent means the daemon's
     /// overlay-resolved default profile.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     audit_profile: Option<String>,
     /// The library this call acts on. Absent means the registry's
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 

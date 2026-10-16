@@ -2,7 +2,7 @@
 
 The bookrack daemon exposes a local-only JSON-RPC 2.0 control plane
 alongside its MCP HTTP listener. Operator tooling — one-shot CLI
-subcommands, `bookrack rpc` for ad-hoc RPCs, and the desktop tray —
+subcommands and `bookrack rpc` for ad-hoc RPCs —
 reaches the running daemon through this surface; the MCP listener
 stays tool-scoped — agent clients see a fixed tool set rather than the
 full method registry, and the bulk, queue-bound, and library-lifecycle
@@ -412,7 +412,7 @@ the exit-code bucket does not distinguish the two.
     spelling.
   - `process` — the method reports on the process rather than on a
     library: `daemon.*`, the queue verbs (whose job ids address one
-    daemon-wide queue), `logs.tail`, `tray.focus`, `diagnose.run`. A
+    daemon-wide queue), `logs.tail`, `diagnose.run`. A
     selection is meaningless here, and clients pass it through
     unchanged rather than treating meaningless as wrong.
   - `unrouted` — the method answers about the daemon itself, or about
@@ -540,10 +540,6 @@ the exit-code bucket does not distinguish the two.
   begins with. Either way a caller can warn before the bundle leaves
   the machine; the list is empty on full coverage and empty when
   `scrubbed` is `false`.
-- `tray.focus` — no params; `{ ok: true }`. Signals one waiter on the
-  daemon's focus notification, which a GUI host attached in-process
-  uses to raise its window. A daemon with no GUI attached accepts the
-  call and nothing observes it.
 
 ## Methods (Phase 2)
 
@@ -1029,7 +1025,7 @@ the tool description says which one it ran.
   client and stood up the `bookrack-control-client` transport.
   The REPL surface was later removed entirely in 0.7.0; see
   `CHANGELOG.md`. `bookrack-control-client` survives as the
-  shared transport for the one-shot CLI clients and the tray,
+  shared transport for the one-shot CLI clients,
   and `bookrack-cli-grammar` (renamed from `bookrack-repl-grammar`)
   holds the leaf `clap::Subcommand` definitions the top-level
   CLI consumes.
@@ -1094,7 +1090,8 @@ the tool description says which one it ran.
   entry through the new `tray.focus` control-plane method instead
   of competing for the lock; with no GUI attached the method is a
   no-op and still returns `{ ok: true }` so the contract stays
-  stable between CLI-only and GUI builds. `bookrack-mcp` gains a
+  stable between CLI-only and GUI builds; both were removed in 0.13
+  together with the desktop shell. `bookrack-mcp` gains a
   `--with-queue-worker` flag: without it, queue-bound write
   methods (`ingest.submit`, `ingest.cancel`, `glean.submit`,
   `vectors.*`, `corpus.rebuild`, `stamps.reconcile`, `remove`,
@@ -1138,8 +1135,7 @@ the tool description says which one it ran.
   The trait's `Result` is the only abort path — the runner does
   not auto-retry. Finalize is three writes: skeleton directories,
   `<data_root>/config.toml`, and a merge into the platform-default
-  registry. A GUI driver drives the same probes and the same
-  writes through the same trait. `bookrack init` keeps its exact
+  registry. `bookrack init` keeps its exact
   flag set and terminal transcript; `crates/cli/src/init.rs` is a
   thin shim that pairs `CliWizardDriver` with the runner.
 - **GUI shell (first slice)** — `crates/app` ships a Tauri 2 shell
@@ -1154,7 +1150,9 @@ the tool description says which one it ran.
   caught by the single-instance plugin in-process, or — when the
   lock is held by a CLI daemon — by probe + `tray.focus` RPC
   followed by exit 0. No webview RPC surface exists yet; no
-  control-plane methods were added or changed.
+  control-plane methods were added or changed. Removed in 0.13
+  together with `tray.focus`; the CLI and MCP front ends are the
+  complete surface.
 - **Runtime mounting** — the set of libraries a daemon serves stops
   being fixed at bring-up. New methods: `library.mount` and
   `library.unmount`, both `unrouted` writes taking their own `name`

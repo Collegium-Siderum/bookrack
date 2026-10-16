@@ -18,8 +18,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bookrack_core::queue::QueueState;
 use serde::Serialize;
 use serde_json::Value;
-#[cfg(test)]
-use ts_rs::TS;
 
 use super::MethodContext;
 use crate::control::events::{DegradedCause, Event, EventStreamHandle, QueueTick};
@@ -27,15 +25,11 @@ use crate::control::jsonrpc::{INTERNAL_ERROR, RpcError};
 use crate::queue::{cancel_all_pending, derive_tick, save_atomic};
 
 #[derive(Debug, Clone, Serialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct PauseResponse {
     pub paused: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct ClearResponse {
     pub paused: bool,
     pub cleared: usize,

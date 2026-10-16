@@ -13,8 +13,6 @@
 use bookrack_ops::reads::info::show_library_info;
 use serde::Deserialize;
 use serde_json::{Value, json};
-#[cfg(test)]
-use ts_rs::TS;
 
 use super::MethodContext;
 use crate::control::error_map::registry_err;
@@ -191,8 +189,6 @@ pub async fn doctor_gather_rpc(
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct QueueListParams {
     #[serde(default)]
     limit: Option<u32>,
@@ -291,8 +287,6 @@ fn library_list_value(summaries: Vec<bookrack_ops::registry::LibrarySummary>) ->
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct LibraryInfoParams {
     #[serde(default)]
     name: Option<String>,
@@ -344,8 +338,6 @@ pub async fn library_info(params: &Option<Value>, ctx: &MethodContext) -> Result
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct EventsSnapshotParams {
     channels: Vec<String>,
 }

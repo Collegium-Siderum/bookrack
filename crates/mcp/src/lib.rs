@@ -2061,7 +2061,7 @@ impl ServerHandler for BookrackServer {
     /// call runs attributed to [`Caller::mcp`], regardless of the
     /// [`Caller`] baked into the shared [`Ops`] handle. The daemon
     /// builds one [`Ops`] tagged with its launch surface
-    /// (`Caller::cli()` / `Caller::gui()`) and shares it across REPL,
+    /// (`Caller::cli()`) and shares it across REPL,
     /// HTTP, and queue worker; without this wrap, both the recorded
     /// tool-call `source` and the `actor_kind` / `actor_detail` on
     /// write audit rows would carry the host surface's identity

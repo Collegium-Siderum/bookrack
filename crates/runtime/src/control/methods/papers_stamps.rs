@@ -6,8 +6,6 @@
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-#[cfg(test)]
-use ts_rs::TS;
 
 use super::{MethodContext, run_write};
 use crate::cmd::papers_stamps;
@@ -17,14 +15,11 @@ use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 
 /// Which library's stamps to reconcile.
 #[derive(Debug, Default, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct ReconcileParams {
     /// The library this call acts on. Absent means the registry's
     /// current default — the library the daemon was brought up under,
     /// unless `library.set_default` has moved it since.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 

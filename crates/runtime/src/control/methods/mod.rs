@@ -27,7 +27,7 @@ use bookrack_obs::stream::LogStreamHandle;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::LibraryRegistry;
 use serde_json::Value;
-use tokio::sync::{Mutex as TokioMutex, Notify, OwnedMutexGuard, broadcast};
+use tokio::sync::{Mutex as TokioMutex, OwnedMutexGuard, broadcast};
 
 use super::error_map::rpc_from_problem;
 use super::events::{Event, EventStreamHandle};
@@ -95,7 +95,6 @@ pub mod reads;
 pub mod reads_library;
 pub mod remove;
 pub mod stamps;
-pub mod tray;
 pub mod vectors;
 pub mod verify;
 
@@ -154,11 +153,6 @@ pub struct MethodContext {
     /// dispatch routes queue-bound write methods to a
     /// `-32002 not_ready` response without invoking the handler.
     pub queue_worker_enabled: bool,
-    /// Notification handle the GUI tray (if any) waits on. The
-    /// `tray.focus` method signals one waiter per call; with no GUI
-    /// attached the notification has no consumer and the call is a
-    /// no-op.
-    pub tray_focus_signal: Arc<Notify>,
     /// The supervised llama-server, when the effective profile enables
     /// a reranker and no operator URL overrides the backend. `doctor.
     /// gather` reads its state for the backend row.
@@ -258,7 +252,7 @@ use verify::VerifyParams;
 ///      is what makes the claim checkable rather than asserted.
 ///    * `process` — the method describes the process, not a library:
 ///      `daemon.*`, the queue verbs (whose job ids address one
-///      daemon-wide queue), `logs.tail`, `tray.focus`, `diagnose.run`.
+///      daemon-wide queue), `logs.tail`, `diagnose.run`.
 ///      A selection is meaningless but harmless, so clients pass it
 ///      through unchanged.
 ///    * `unrouted` — the method answers about the daemon or about
@@ -496,10 +490,9 @@ methods! {
     write no_queue async   routed(PapersContributorRemoveParams)
         "papers.metadata.contributor_remove" => papers_metadata::contributor_remove,
 
-    // verify / diagnose / tray / logs
+    // verify / diagnose / logs
     read  no_queue async   routed(VerifyParams)       "verify.run" => verify::run_rpc,
     read  no_queue async   process                    "diagnose.run" => diagnose::run,
-    write no_queue sync    process                    "tray.focus" => tray::focus_rpc,
     read  no_queue sync    process                    "logs.tail" => logs::tail,
 }
 
@@ -775,7 +768,6 @@ pub(crate) fn test_method_context(
         auto_registered: Vec::new(),
         mcp_tools: Arc::new(Vec::new()),
         queue_worker_enabled: false,
-        tray_focus_signal: Arc::new(Notify::new()),
         rerank_supervisor: None,
         control_socket: None,
         queue_paused: Arc::new(AtomicBool::new(false)),
@@ -893,7 +885,6 @@ mod tests {
             "papers.metadata.contributor_remove",
             "verify.run",
             "diagnose.run",
-            "tray.focus",
         ] {
             assert!(
                 !is_queue_bound_method(name),
@@ -942,6 +933,28 @@ mod tests {
     /// macro). Kept in lockstep with the sidebar match in `dispatch`
     /// by `sidebar_methods_appear_in_registry` below.
     const SIDEBAR_METHODS: &[&str] = &["daemon.shutdown", "events.subscribe"];
+
+    /// `tray.focus` is not registered and the router answers a call to
+    /// it with the standard method-not-found error.
+    #[tokio::test]
+    async fn tray_focus_is_not_a_method() {
+        assert!(
+            !REGISTRY.iter().any(|sig| sig.name == "tray.focus"),
+            "tray.focus must not be in REGISTRY"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_method_context(dir.path(), None);
+        let req = Request {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tray.focus".to_string(),
+            params: None,
+        };
+        match dispatch(&req, &ctx).await {
+            Err(err) => assert_eq!(err.code, METHOD_NOT_FOUND, "{err:?}"),
+            Ok(_) => panic!("tray.focus must not dispatch"),
+        }
+    }
 
     #[test]
     fn sidebar_methods_appear_in_registry() {

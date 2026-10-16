@@ -13,8 +13,6 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-#[cfg(test)]
-use ts_rs::TS;
 
 use super::ingest::PriorityRepr;
 use super::{MethodContext, input_err};
@@ -24,15 +22,11 @@ use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 use crate::queue::{self, IntakeOcrInfo};
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct IntakeOcrParams {
     /// Path to the OCR markdown product, with page markers
     /// `<!-- page <label> (sheet <n>) -->`.
-    #[cfg_attr(test, ts(type = "string"))]
     ocr_md: PathBuf,
     /// Path to the scan PDF the OCR product was produced from.
-    #[cfg_attr(test, ts(type = "string"))]
     from_pdf: PathBuf,
     /// Override the expected page count rather than reading it from
     /// the source PDF's `/Pages`.

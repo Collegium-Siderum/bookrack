@@ -15,8 +15,6 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-#[cfg(test)]
-use ts_rs::TS;
 
 use super::{MethodContext, input_err};
 use crate::audit_helpers::require_known_profile;
@@ -25,10 +23,7 @@ use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::queue::{self, Priority};
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct IngestSubmitParams {
-    #[cfg_attr(test, ts(type = "Array<string>"))]
     paths: Vec<PathBuf>,
     #[serde(default)]
     library: Option<String>,
@@ -61,8 +56,6 @@ pub struct IngestSubmitParams {
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 #[serde(rename_all = "lowercase")]
 pub enum PriorityRepr {
     Low,
@@ -159,8 +152,6 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct IngestCancelParams {
     job_id: String,
 }

@@ -17,9 +17,9 @@
 .env.*
 !.env.example
 .claude/
-# `.cargo/config.toml` is committed (routes ts-rs binding output to
-# `crates/app/web/src/generated/` via `TS_RS_EXPORT_DIR`). Everything
-# else under `.cargo/` is machine-specific state — toolchain cache,
+# `.cargo/config.toml` is committed (the optional `include` of the
+# local override file). Everything else under `.cargo/` is
+# machine-specific state — toolchain cache,
 # the `config.local.toml` that the tracked file `include`s for local
 # overrides such as `[build] target-dir`, etc.
 /.cargo/*

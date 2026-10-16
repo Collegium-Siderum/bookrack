@@ -8,6 +8,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Removed
+
+- **The desktop shell.** The `crates/app` Tauri shell, which never
+  shipped in a release artifact, is deleted together with its build
+  and CI dependencies. The CLI and the MCP server are the complete
+  front-end surface; the setup wizard keeps its `WizardDriver` trait
+  so another driver can reuse it.
+- **`tray.focus` and the GUI launch mode.** The `tray.focus`
+  control-plane method is gone: `daemon.methods` no longer lists it
+  and a call answers `-32601 method not found`. `RuntimeOpts.
+  launch_mode` and `LaunchMode` leave the runtime API, and the `gui`
+  caller is retired, so no new audit row carries
+  `actor_detail = "gui"`; rows already recorded keep the value.
+
 ## [0.12.0] - 2026-10-17
 
 ### Added

@@ -183,12 +183,6 @@ fs2 = "0.4"
 # in-process log stream as a Server-Sent Events endpoint under
 # `/session/logs`. License: MIT; in lockstep with `tokio` itself.
 tokio-stream = { version = "0.1", default-features = false, features = ["sync"] }
-# Compile-time TypeScript binding generator. Used as a dev-dependency
-# of `bookrack-runtime` so `cargo test` exports `.ts` files mirroring
-# the `Event` enum and the control-plane DTOs into
-# `crates/app/web/src/generated/`. The runtime crate's release build
-# does not link it. License: MIT.
-ts-rs = { version = "10", features = ["serde-compat", "no-serde-warnings"] }
 # Tabular output renderer for the CLI's read-side commands (queue
 # list, libraries list, papers find/list/show). The render layer
 # wraps it behind `KvTable` / `RowTable` so subcommands compose

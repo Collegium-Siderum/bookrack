@@ -274,8 +274,8 @@ pub const ENV_PREFIX: &str = "BOOKRACK_";
 /// The variables outside [`ENV_PREFIX`] that `.env` may still set.
 ///
 /// Each is one this program's own behaviour depends on, and each has a
-/// surface where the shell is not available to set it: a desktop shell
-/// started from a file manager inherits no `export`, and `.env` is then
+/// surface where the shell is not available to set it: a daemon
+/// started by a service manager inherits no `export`, and `.env` is then
 /// the only place a proxy or a certificate bundle can be named at all.
 ///
 /// The proxy and certificate names are read by the HTTP stack rather
