@@ -901,6 +901,13 @@ impl Config {
         self.data_dir.join("lancedb_papers")
     }
 
+    /// LanceDB directory for the translation memory: one row per
+    /// sealed translation segment, derived from [`Config::translate_db`]
+    /// and rebuilt from it. Its build stamps live in that database.
+    pub fn translate_lancedb_dir(&self) -> PathBuf {
+        translate_lancedb_in(&self.data_dir)
+    }
+
     /// Per-root directory of log files and crash reports. The daemon
     /// writes its log stream under the daemon state directory (see
     /// [`daemon_state_dir`]); this location holds what earlier
@@ -948,6 +955,12 @@ pub fn reference_db_in(data_dir: &Path) -> PathBuf {
 /// that hold a data root without a `Config` both route through it.
 pub fn translate_db_in(data_dir: &Path) -> PathBuf {
     data_dir.join("translate.db")
+}
+
+/// The translation-memory directory under `data_dir`; see
+/// [`Config::translate_lancedb_dir`].
+pub fn translate_lancedb_in(data_dir: &Path) -> PathBuf {
+    data_dir.join("lancedb_translate")
 }
 
 /// Directory for daemon-scoped state that spans libraries: the ingest
@@ -4754,6 +4767,8 @@ mod tests {
         assert_eq!(cfg.papers_corpus_db(), root.join("papers_corpus.db"));
         assert_eq!(cfg.papers_catalog_db(), root.join("papers_catalog.db"));
         assert_eq!(cfg.papers_lancedb_dir(), root.join("lancedb_papers"));
+        assert_eq!(cfg.translate_db(), root.join("translate.db"));
+        assert_eq!(cfg.translate_lancedb_dir(), root.join("lancedb_translate"));
         assert_eq!(cfg.logs_dir(), root.join("logs"));
     }
 

@@ -413,11 +413,28 @@ impl<E: Embedder> Ops<E> {
         bookrack_config::translate_db_in(data_root)
     }
 
+    /// Directory of the translation memory, derived from the same data
+    /// root as [`Self::translate_db_path`]. The MCP translate tools open
+    /// it per call; it is derived from the translation store and
+    /// rebuilt from it.
+    pub fn translate_lancedb_dir(&self) -> PathBuf {
+        let data_root = self.catalog_db.parent().unwrap_or_else(|| Path::new(""));
+        bookrack_config::translate_lancedb_in(data_root)
+    }
+
     /// Borrow the warm embedder, if this `Ops` was built with a library.
-    /// Used by the registry-level ingest wrapper, which feeds the
-    /// embedder into [`bookrack_ingest::ingest_book`].
-    pub(crate) fn embedder(&self) -> Option<&E> {
+    /// The registry-level ingest wrapper feeds it into
+    /// [`bookrack_ingest::ingest_book`]; the MCP translate tools embed
+    /// segment text with it.
+    pub fn embedder(&self) -> Option<&E> {
         self.library.as_ref().map(Library::embedder)
+    }
+
+    /// The embedding model the warm library serves, if this `Ops` was
+    /// built with one. Stamped on derived vector stores so a store
+    /// written by another model is never searched with this one.
+    pub fn embed_model(&self) -> Option<&str> {
+        self.library.as_ref().map(Library::embed_model)
     }
 }
 
