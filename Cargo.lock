@@ -1139,6 +1139,7 @@ dependencies = [
  "bookrack-session",
  "bookrack-test-support",
  "bookrack-translate",
+ "bookrack-vectors",
  "chrono",
  "clap",
  "eyre",

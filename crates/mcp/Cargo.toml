@@ -27,6 +27,9 @@ bookrack-distill.workspace = true
 bookrack-translate.workspace = true
 # Leaf-run reads behind `translate.fetch_segment`'s source text.
 bookrack-corpus = { path = "../corpus" }
+# The translation-memory table that `translate.seal` extends and
+# `translate.tm_search` queries.
+bookrack-vectors = { path = "../vectors" }
 # RFC 3339 timestamps stamped on the `edited_at` overlay column.
 chrono.workspace = true
 # `#[derive(thiserror::Error)]` on the `reference` module's error

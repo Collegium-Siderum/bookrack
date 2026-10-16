@@ -10,6 +10,23 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **mcp: the translation memory.** Sealing a segment now embeds its
+  source text with the library's embedding model and keeps the sealed
+  pair in a memory of its own under the data root, apart from the book
+  index. `translate.tm_search` answers from it: sealed segments whose
+  source resembles the text, in the same language pair, scored by
+  cosine similarity weighted by where the rendering came from, a
+  person's above a machine's, confinable to one book. A fetched
+  segment package carries the nearest such segments as `tm_hits`,
+  itself excluded, and a `tm_status` that says whether the memory was
+  consulted, is absent, or was unavailable. The memory is stamped with
+  the model, width and row layout that wrote it; a memory built with
+  another model is refused by search and seal, and reported as
+  unavailable by fetch, until it is rebuilt. A seal needs the embed
+  backend, refuses a segment whose source text has drifted from its
+  fingerprint, and reports in its receipt whether the memory took the
+  row.
+
 - **mcp: `translate.plan` and `translate.resegment`.** The translation
   store gains its first writes. `translate.plan` turns one book into
   units and segments for a target language: a unit per chapter or
@@ -101,8 +118,8 @@ release workflow extracts the matching section verbatim from this file.
   under the effective injection profile (overridable per call) with
   the reference entries they cite, and whether to use the glossary or
   the clean prompt. `translate.tm_search` fixes the translation-memory
-  contract ahead of its index and answers every valid query with no
-  hits. All three open the stores read-only per call and never create
+  contract, which the memory entry above fills in. All three open the
+  stores read-only per call and never create
   one: a library that has never been translated into reads as having
   no translation data.
 

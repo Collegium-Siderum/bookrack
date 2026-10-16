@@ -12,13 +12,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bookrack_catalog::ActorKind;
-use bookrack_core::{NodeId, PartitionIdx};
+use bookrack_catalog::{ActorKind, Catalog};
+use bookrack_core::{NodeId, PartitionIdx, error_chain};
 use bookrack_corpus::{Corpus, Node};
+use bookrack_embed::Embedder;
 use bookrack_ops::Caller;
 use bookrack_translate::audit::{AuditSubject, NewAudit};
 use bookrack_translate::glossary_terms::NewTerm;
 use bookrack_translate::glossary_translations::NewTranslation;
+use bookrack_translate::meta::TmStamps;
 use bookrack_translate::segmentation::{Script, Triage, script_of, split_at_sentences, triage};
 use bookrack_translate::segments::{
     NewSegment, ProposeStage, SOURCE_KIND_IMPORTED, SegmentRow, span_sha256_hex,
@@ -26,14 +28,16 @@ use bookrack_translate::segments::{
 use bookrack_translate::units::NewUnit;
 use bookrack_translate::witnesses::NewWitness;
 use bookrack_translate::{Translate, TranslateError};
+use bookrack_vectors::{TmRow, TmStore};
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::translate::{
     SpanRef, ToolResult, TranslateToolError, TranslationChoice, WitnessPtr, parse_authority_ref,
-    span_text,
+    segment_source_text, span_text,
 };
+use crate::translate_tm::{TmContext, check_stamps, source_lang_of, tm_row_for};
 
 /// Escape threshold for a leaf in a Latin-script text, in chars.
 // setting: translate.plan.max_chars_latin
@@ -813,6 +817,11 @@ pub struct SegmentReceipt {
     pub sealed_at: Option<String>,
     /// The audit row the write appended.
     pub audit_id: i64,
+    /// After a seal: whether the sealed segment reached the translation
+    /// memory. `false` means the seal stands but the memory was not
+    /// extended; a rebuild catches it up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tm_indexed: Option<bool>,
 }
 
 impl SegmentReceipt {
@@ -825,6 +834,7 @@ impl SegmentReceipt {
             source_kind: row.source_kind.clone(),
             sealed_at: row.sealed_at.clone(),
             audit_id,
+            tm_indexed: None,
         }
     }
 }
@@ -898,17 +908,34 @@ pub(crate) fn propose_logic(
     })?)
 }
 
-/// Where the translation-memory index will take a sealed segment. The
-/// index arrives with a later milestone; until then a seal emits
-/// nothing beyond its row.
-fn emit_tm_row(_sealed: &SegmentRow) {}
+/// What a seal has settled before the memory is consulted: the row as
+/// read and checked against the write, the kinds derived, the source
+/// text with its fingerprint verified, the book's source language, and
+/// the stamps the store carries.
+pub(crate) struct SealPlan {
+    actor_kind: ActorKind,
+    source_kind: String,
+    src_text: String,
+    source_lang: String,
+    intake_id: i64,
+    target_lang: String,
+    stored_stamps: Option<TmStamps>,
+    payload: serde_json::Value,
+}
 
-/// Lock a proposed segment's final text.
-pub(crate) fn seal_logic(
+/// Read and check everything a seal needs from the stores. Refuses
+/// what the write itself would refuse — a segment that is not
+/// proposed, has moved on, or carries no final text — before the
+/// embedder is paid for, and a segment whose source text no longer
+/// matches its fingerprint, so a changed source is never paired with
+/// an old rendering in the memory.
+pub(crate) fn seal_prepare(
     translate: &Translate,
+    corpus: &Corpus,
+    catalog: Option<&Catalog>,
     ctx: &WriteContext<'_>,
     args: &TranslateSealArgs,
-) -> ToolResult<SegmentReceipt> {
+) -> ToolResult<SealPlan> {
     let actor_kind = match args.actor_kind_override.as_deref() {
         None => ctx.caller.actor_kind,
         Some("human") => ActorKind::Human,
@@ -926,6 +953,43 @@ pub(crate) fn seal_logic(
         .ok_or(TranslateError::UnknownSegment {
             segment_id: args.segment_id,
         })?;
+    if row.status != "proposed" {
+        return Err(TranslateError::WrongStatus {
+            segment_id: row.segment_id,
+            status: row.status,
+            wanted: "proposed",
+        }
+        .into());
+    }
+    if row.version != args.expected_version {
+        return Err(TranslateError::VersionConflict {
+            segment_id: row.segment_id,
+            expected: args.expected_version,
+            current: row.version,
+        }
+        .into());
+    }
+    if row.final_text.is_none() {
+        return Err(TranslateError::MissingField {
+            stage: "seal",
+            field: "final_text",
+        }
+        .into());
+    }
+    let unit = translate
+        .unit(row.unit_id)?
+        .ok_or(TranslateToolError::BrokenUnitLink {
+            segment_id: row.segment_id,
+            unit_id: row.unit_id,
+        })?;
+    let src_text = segment_source_text(corpus, &row)?;
+    if span_sha256_hex(&src_text) != row.source_text_sha {
+        return Err(TranslateToolError::SourceDrift {
+            segment_id: row.segment_id,
+        });
+    }
+    let source_lang = source_lang_of(catalog, unit.intake_id)?;
+    let stored_stamps = translate.tm_stamps()?;
     // Derivation, when the caller does not say: a person's approval is
     // `human`; a reviewed import is `edited`; a drafted text is
     // `llm-reflected` when a reflection was recorded, `llm-draft`
@@ -937,22 +1001,103 @@ pub(crate) fn seal_logic(
         None if row.reflection_notes.is_some() => "llm-reflected",
         None => "llm-draft",
     };
-    let payload = args_payload(args);
-    Ok(translate.transaction(|translate| {
-        let sealed =
-            translate.seal_segment(args.segment_id, args.expected_version, source_kind, ctx.now)?;
-        emit_tm_row(&sealed);
+    Ok(SealPlan {
+        actor_kind,
+        source_kind: source_kind.to_owned(),
+        src_text,
+        source_lang,
+        intake_id: unit.intake_id,
+        target_lang: unit.target_lang,
+        stored_stamps,
+        payload: args_payload(args),
+    })
+}
+
+/// Lock a proposed segment's final text and index it in the
+/// translation memory.
+///
+/// In order: a memory that already holds rows must carry this build's
+/// stamps; the source text is embedded, so an unreachable backend
+/// refuses the seal with nothing written; then one transaction stamps
+/// the memory if it was never stamped, seals the row and appends the
+/// audit row; and last the memory row is written. A failure at that
+/// last step leaves the seal standing and the receipt saying
+/// `tm_indexed: false`.
+pub(crate) async fn seal_logic<E: Embedder>(
+    translate: Translate,
+    plan: SealPlan,
+    tm: &TmContext<'_, E>,
+    ctx: &WriteContext<'_>,
+    args: &TranslateSealArgs,
+) -> ToolResult<SegmentReceipt> {
+    let expected = tm.expected_stamps();
+    let existing = tm.try_open().await?;
+    if existing.is_some() {
+        check_stamps(plan.stored_stamps.as_ref(), &expected)?;
+    }
+    let vector = tm.embed_one(&plan.src_text).await?;
+    let (sealed, audit_id) = translate.transaction(|translate| {
+        translate.reconcile_tm_stamps(&expected)?;
+        let sealed = translate.seal_segment(
+            args.segment_id,
+            args.expected_version,
+            &plan.source_kind,
+            ctx.now,
+        )?;
         let mut audit = ctx.audit(
             AuditSubject::Segment(sealed.segment_id),
             "seal",
             args.rationale.as_deref(),
-            &payload,
+            &plan.payload,
             args.cost_tokens,
         );
-        audit.actor_kind = actor_kind;
+        audit.actor_kind = plan.actor_kind;
         let audit_id = translate.append_audit(&audit)?;
-        Ok(SegmentReceipt::from_row(&sealed, audit_id))
-    })?)
+        Ok((sealed, audit_id))
+    })?;
+    let row = tm_row_for(
+        &sealed,
+        plan.intake_id,
+        &plan.target_lang,
+        &plan.source_lang,
+        plan.src_text,
+        vector,
+    );
+    let mut receipt = SegmentReceipt::from_row(&sealed, audit_id);
+    receipt.tm_indexed = Some(index_sealed(tm, existing, sealed.segment_id, row).await);
+    Ok(receipt)
+}
+
+/// Write one sealed segment's row to the memory, creating the table on
+/// the first seal. Reports rather than fails: the seal is already
+/// committed.
+async fn index_sealed<E: Embedder>(
+    tm: &TmContext<'_, E>,
+    existing: Option<TmStore>,
+    segment_id: i64,
+    row: ToolResult<TmRow>,
+) -> bool {
+    let outcome: ToolResult<()> = async {
+        let row = row?;
+        let store = match existing {
+            Some(store) => store,
+            None => TmStore::open(&tm.lancedb_dir, tm.dim).await?,
+        };
+        store.append(std::slice::from_ref(&row)).await?;
+        Ok(())
+    }
+    .await;
+    match outcome {
+        Ok(()) => true,
+        Err(err) => {
+            tracing::warn!(
+                segment_id,
+                reason = %error_chain(&err),
+                "sealed segment not indexed in the translation memory"
+            );
+            false
+        }
+    }
 }
 
 /// Fill the empty draft segments of one unit with an existing
@@ -1338,6 +1483,7 @@ pub(crate) fn glossary_propose_logic(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::translate_tm::test_embed::{Down, Fake};
     use bookrack_corpus::{NewNode, NodeType};
 
     const LONG: &str = "Erster Satz. Zweiter Satz. Dritter Satz.";
@@ -1470,10 +1616,12 @@ mod tests {
     struct Fixture {
         _dir: tempfile::TempDir,
         translate_db: std::path::PathBuf,
+        lancedb: std::path::PathBuf,
         corpus: Corpus,
         units: Vec<NodeId>,
         leaves: Vec<NodeId>,
         caller: Caller,
+        embedder: Fake,
     }
 
     impl Fixture {
@@ -1483,12 +1631,40 @@ mod tests {
             let (units, leaves) = seed_book(&mut corpus);
             Fixture {
                 translate_db: dir.path().join("translate.db"),
+                lancedb: dir.path().join("lancedb_translate"),
                 _dir: dir,
                 corpus,
                 units,
                 leaves,
                 caller: Caller::mcp(),
+                embedder: Fake::constant([1.0, 0.0, 0.0, 0.0]),
             }
+        }
+
+        fn tm(&self) -> TmContext<'_, Fake> {
+            TmContext {
+                lancedb_dir: self.lancedb.clone(),
+                embedder: &self.embedder,
+                embed_model: "fake-model",
+                dim: 4,
+            }
+        }
+
+        /// Seal through both halves, as the tool method does: prepare
+        /// against the stores, then run with the memory.
+        async fn seal(&self, args: &TranslateSealArgs) -> ToolResult<SegmentReceipt> {
+            self.seal_with(&self.tm(), None, args).await
+        }
+
+        async fn seal_with<E: Embedder>(
+            &self,
+            tm: &TmContext<'_, E>,
+            catalog: Option<&Catalog>,
+            args: &TranslateSealArgs,
+        ) -> ToolResult<SegmentReceipt> {
+            let translate = self.store();
+            let plan = seal_prepare(&translate, &self.corpus, catalog, &self.ctx(), args)?;
+            seal_logic(translate, plan, tm, &self.ctx(), args).await
         }
 
         fn ctx(&self) -> WriteContext<'_> {
@@ -2116,8 +2292,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_seal_derives_the_source_kind_and_takes_a_human_override() {
+    #[tokio::test]
+    async fn a_seal_derives_the_source_kind_and_takes_a_human_override() {
         let fx = Fixture::new();
         let planned = fx.plan(&fx.plan_args()).expect("plan");
         let translate = fx.store();
@@ -2131,7 +2307,7 @@ mod tests {
         };
 
         // Not yet proposed: refused, nothing recorded.
-        let err = seal_logic(&translate, &fx.ctx(), &seal_args(a, 1)).expect_err("draft");
+        let err = fx.seal(&seal_args(a, 1)).await.expect_err("draft");
         assert!(
             matches!(
                 err,
@@ -2143,7 +2319,7 @@ mod tests {
         // Draft then final, no reflection: llm-draft.
         propose_logic(&translate, &fx.ctx(), &propose_args(a, 1, "draft")).expect("draft");
         propose_logic(&translate, &fx.ctx(), &propose_args(a, 2, "final")).expect("final");
-        let r = seal_logic(&translate, &fx.ctx(), &seal_args(a, 3)).expect("seal");
+        let r = fx.seal(&seal_args(a, 3)).await.expect("seal");
         assert_eq!(
             (
                 r.status.as_str(),
@@ -2164,7 +2340,7 @@ mod tests {
         reflection.notes = Some("\"thought\"".into());
         propose_logic(&translate, &fx.ctx(), &reflection).expect("reflection");
         propose_logic(&translate, &fx.ctx(), &propose_args(b, 3, "final")).expect("final");
-        let r = seal_logic(&translate, &fx.ctx(), &seal_args(b, 4)).expect("seal");
+        let r = fx.seal(&seal_args(b, 4)).await.expect("seal");
         assert_eq!(r.source_kind.as_deref(), Some("llm-reflected"));
 
         // A person approving: human, and the audit row says so.
@@ -2172,7 +2348,7 @@ mod tests {
         let mut human = seal_args(c, 2);
         human.actor_kind_override = Some("human".into());
         human.rationale = Some("approved on review".into());
-        let r = seal_logic(&translate, &fx.ctx(), &human).expect("seal");
+        let r = fx.seal(&human).await.expect("seal");
         assert_eq!(r.source_kind.as_deref(), Some("human"));
         let last = translate
             .audit_for_segment(c)
@@ -2192,7 +2368,7 @@ mod tests {
         propose_logic(&translate, &fx.ctx(), &propose_args(d, 1, "final")).expect("final");
         let mut explicit = seal_args(d, 2);
         explicit.source_kind = Some("robot".into());
-        let err = seal_logic(&translate, &fx.ctx(), &explicit).expect_err("kind");
+        let err = fx.seal(&explicit).await.expect_err("kind");
         assert!(
             matches!(
                 err,
@@ -2205,7 +2381,7 @@ mod tests {
         );
         let mut bad_override = seal_args(d, 2);
         bad_override.actor_kind_override = Some("import".into());
-        let err = seal_logic(&translate, &fx.ctx(), &bad_override).expect_err("override");
+        let err = fx.seal(&bad_override).await.expect_err("override");
         assert!(
             matches!(
                 err,
@@ -2217,7 +2393,7 @@ mod tests {
             "{err:?}"
         );
         explicit.source_kind = Some("edited".into());
-        let r = seal_logic(&translate, &fx.ctx(), &explicit).expect("seal");
+        let r = fx.seal(&explicit).await.expect("seal");
         assert_eq!(r.source_kind.as_deref(), Some("edited"));
 
         // The read side sees the sealed segment in the unit's history.
@@ -2227,6 +2403,7 @@ mod tests {
             &fx.corpus,
             None,
             catalogs,
+            None,
             &crate::translate::TranslateFetchSegmentArgs {
                 library: None,
                 segment_id: planned.segments[4].segment_id,
@@ -2249,8 +2426,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_import_fills_a_unit_all_or_nothing_and_reads_as_review_work() {
+    #[tokio::test]
+    async fn an_import_fills_a_unit_all_or_nothing_and_reads_as_review_work() {
         let fx = Fixture::new();
         let planned = fx.plan(&fx.plan_args()).expect("plan");
         let unit_b = planned.units[2].unit_id;
@@ -2346,7 +2523,7 @@ mod tests {
             (row.task_mode(), row.final_text.as_deref()),
             ("review", Some("five"))
         );
-        let reviewed = seal_logic(&translate, &fx.ctx(), &seal_args(in_b[0], 2)).expect("seal");
+        let reviewed = fx.seal(&seal_args(in_b[0], 2)).await.expect("seal");
         assert_eq!(
             reviewed.source_kind.as_deref(),
             Some("edited"),
@@ -2607,5 +2784,232 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM translate_audit", [], |r| r.get(0))
             .expect("count");
         assert_eq!(audits, 0);
+    }
+
+    fn propose_final(fx: &Fixture, id: i64) {
+        let translate = fx.store();
+        propose_logic(&translate, &fx.ctx(), &propose_args(id, 1, "final")).expect("final");
+    }
+
+    fn first_proposed(fx: &Fixture) -> i64 {
+        let planned = fx.plan(&fx.plan_args()).expect("plan");
+        let id = planned.segments[0].segment_id;
+        propose_final(fx, id);
+        id
+    }
+
+    fn catalog_with_language(language: &str) -> Catalog {
+        let catalog = Catalog::open_in_memory().expect("catalog");
+        let mut attrs =
+            bookrack_catalog::NewPublicationAttrs::new(1, bookrack_core::ItemKind::Book);
+        attrs.language = Some(language.into());
+        catalog.upsert_publication_attrs(&attrs).expect("attrs");
+        catalog
+    }
+
+    fn memory_row(segment_id: i64) -> TmRow {
+        TmRow {
+            vector: vec![1.0, 0.0, 0.0, 0.0],
+            segment_id,
+            unit_id: 1,
+            intake_id: 1,
+            target_lang: "zh".into(),
+            source_lang: "und".into(),
+            start_node_id: 1,
+            start_char_offset: 0,
+            end_node_id: 1,
+            end_char_offset: 1,
+            src_text: "x".into(),
+            dst_text: "y".into(),
+            source_kind: "human".into(),
+            sealed_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    fn still_proposed(fx: &Fixture, id: i64) {
+        let row = fx.store().segment(id).expect("read").expect("row");
+        assert_eq!((row.status.as_str(), row.version), ("proposed", 2));
+    }
+
+    #[tokio::test]
+    async fn sealing_appends_one_tm_row_with_the_source_lang_of_the_book_and_stamps_the_memory() {
+        let fx = Fixture::new();
+        let id = first_proposed(&fx);
+        let catalog = catalog_with_language("DE");
+        let receipt = fx
+            .seal_with(&fx.tm(), Some(&catalog), &seal_args(id, 2))
+            .await
+            .expect("seal");
+        assert_eq!(
+            (receipt.status.as_str(), receipt.tm_indexed),
+            ("sealed", Some(true))
+        );
+
+        let store = TmStore::try_open(&fx.lancedb)
+            .await
+            .expect("probe")
+            .expect("memory exists");
+        assert_eq!(store.count_rows().await.expect("count"), 1);
+        let hits = store
+            .search(
+                &[1.0, 0.0, 0.0, 0.0],
+                &bookrack_vectors::TmFilter {
+                    target_lang: "zh",
+                    source_lang: "de",
+                    intake_id: Some(1),
+                },
+                5,
+            )
+            .await
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        let sealed = fx.store().segment(id).expect("read").expect("row");
+        assert_eq!(hits[0].row.segment_id, id);
+        assert_eq!(hits[0].row.src_text, "Gregor Samsa erwachte.");
+        assert_eq!(
+            Some(hits[0].row.dst_text.as_str()),
+            sealed.final_text.as_deref()
+        );
+        assert_eq!(hits[0].row.source_kind, "llm-draft");
+        assert_eq!(
+            Some(hits[0].row.sealed_at.as_str()),
+            sealed.sealed_at.as_deref()
+        );
+        // The first seal stamped the memory with this build's parameters.
+        assert_eq!(
+            fx.store().tm_stamps().expect("read"),
+            Some(fx.tm().expected_stamps())
+        );
+        // Under another language pair the row is invisible.
+        let other = store
+            .search(
+                &[1.0, 0.0, 0.0, 0.0],
+                &bookrack_vectors::TmFilter {
+                    target_lang: "zh",
+                    source_lang: "und",
+                    intake_id: None,
+                },
+                5,
+            )
+            .await
+            .expect("search");
+        assert!(other.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sealing_with_an_unreachable_embedder_seals_nothing_and_is_an_embed_error() {
+        let fx = Fixture::new();
+        let id = first_proposed(&fx);
+        let down = Down;
+        let tm = TmContext {
+            lancedb_dir: fx.lancedb.clone(),
+            embedder: &down,
+            embed_model: "fake-model",
+            dim: 4,
+        };
+        let before = audit_rows(&fx.store(), id);
+        let err = fx
+            .seal_with(&tm, None, &seal_args(id, 2))
+            .await
+            .expect_err("down");
+        assert!(matches!(err, TranslateToolError::Embed(_)), "{err:?}");
+        still_proposed(&fx, id);
+        assert_eq!(audit_rows(&fx.store(), id), before);
+        assert!(!fx.lancedb.exists());
+        assert_eq!(fx.store().tm_stamps().expect("read"), None);
+    }
+
+    #[tokio::test]
+    async fn sealing_refuses_when_the_memory_was_built_with_another_model() {
+        let fx = Fixture::new();
+        let id = first_proposed(&fx);
+        TmStore::open(&fx.lancedb, 4)
+            .await
+            .expect("open")
+            .append(&[memory_row(99)])
+            .await
+            .expect("append");
+        fx.store()
+            .reconcile_tm_stamps(&TmStamps {
+                embed_model: "other-model".into(),
+                ..fx.tm().expected_stamps()
+            })
+            .expect("stamp");
+        let err = fx.seal(&seal_args(id, 2)).await.expect_err("mismatch");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(TranslateError::TmStampMismatch { .. })
+            ),
+            "{err:?}"
+        );
+        still_proposed(&fx, id);
+    }
+
+    #[tokio::test]
+    async fn sealing_refuses_when_rows_exist_but_the_memory_is_unstamped() {
+        let fx = Fixture::new();
+        let id = first_proposed(&fx);
+        TmStore::open(&fx.lancedb, 4)
+            .await
+            .expect("open")
+            .append(&[memory_row(99)])
+            .await
+            .expect("append");
+        let err = fx.seal(&seal_args(id, 2)).await.expect_err("unstamped");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(TranslateError::TmUnstamped)
+            ),
+            "{err:?}"
+        );
+        still_proposed(&fx, id);
+        assert_eq!(
+            fx.store().tm_stamps().expect("read"),
+            None,
+            "a seal never stamps a partial memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn sealing_refuses_a_segment_whose_source_text_drifted() {
+        let fx = Fixture::new();
+        let id = first_proposed(&fx);
+        rusqlite::Connection::open(&fx.translate_db)
+            .expect("connection")
+            .execute(
+                "UPDATE translate_segments SET source_text_sha = 'drifted' WHERE segment_id = ?1",
+                [id],
+            )
+            .expect("tamper");
+        let err = fx.seal(&seal_args(id, 2)).await.expect_err("drift");
+        assert!(
+            matches!(err, TranslateToolError::SourceDrift { segment_id } if segment_id == id),
+            "{err:?}"
+        );
+        still_proposed(&fx, id);
+        assert!(!fx.lancedb.exists());
+    }
+
+    #[tokio::test]
+    async fn a_failed_memory_write_after_the_seal_reports_tm_indexed_false() {
+        let mut fx = Fixture::new();
+        let id = first_proposed(&fx);
+        // A memory directory that cannot be created: its parent is a file.
+        let blocker = fx.translate_db.with_file_name("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("blocker");
+        fx.lancedb = blocker.join("lancedb_translate");
+        let receipt = fx.seal(&seal_args(id, 2)).await.expect("the seal stands");
+        assert_eq!(
+            (receipt.status.as_str(), receipt.tm_indexed),
+            ("sealed", Some(false))
+        );
+        let row = fx.store().segment(id).expect("read").expect("row");
+        assert_eq!(row.status, "sealed");
+        assert_eq!(
+            audit_rows(&fx.store(), id).last().map(|r| r.0.as_str()),
+            Some("seal")
+        );
     }
 }

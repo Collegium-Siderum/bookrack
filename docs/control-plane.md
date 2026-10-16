@@ -907,12 +907,20 @@ defined profile, or an embedding model the backend does not hold is
   segments, the texts already recorded, witness pointers, the sealed
   history of the unit, the glossary hits under the effective injection
   profile with the reference entries they cite, and whether to use the
-  glossary or the clean prompt. `tm_search` fixes the
-  translation-memory contract ahead of its index and answers every
-  valid query with no hits. None of the three creates a store: a
-  library that has never been translated into answers `null` from
-  `fetch_segment` and an empty list from `list_pending`, and
-  reference citations resolve to nothing when there is no
+  glossary or the clean prompt, plus the nearest sealed segments of
+  the same language pair from the translation memory and a
+  `tm_status` saying whether the memory was consulted, is absent, or
+  was unavailable. `tm_search` queries the memory directly: hits are
+  sealed segments whose source resembles the text, scored by cosine
+  similarity weighted by `source_kind`, confinable to one book. The
+  memory is derived from the sealed segments and stamped with the
+  embedding model that wrote it; one written by another model is
+  refused (`-32018`) by `tm_search` and reported as unavailable by
+  `fetch_segment` until `translate.tm_rebuild` runs. None of the
+  three creates a store: a library that has never been translated
+  into answers `null` from `fetch_segment` and an empty list from
+  `list_pending`, a library nobody has sealed into answers no memory
+  hits, and reference citations resolve to nothing when there is no
   `reference.db`. The stores are opened read-only per call; a
   translation store this build cannot read is `-32018`.
 
@@ -949,7 +957,11 @@ Seventeen of the tools write:
   caller fetched and refuse a segment that has moved on; `seal` derives
   `source_kind` from the segment's history unless told, and
   `actor_kind_override: "human"` attributes the audit row to a person.
-  An import is all or nothing.
+  A seal also embeds the segment's source text and writes the sealed
+  pair to the translation memory, so the embed backend must be
+  reachable, and a source text that no longer matches the segment's
+  fingerprint is refused; the receipt's `tm_indexed` says whether the
+  memory took the row. An import is all or nothing.
 - `translate.glossary_propose` — record a new source term with its
   first rendering, add a candidate rendering to a term, or change a
   term's primary rendering. A term already on the same key or an

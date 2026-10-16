@@ -31,6 +31,39 @@ pub struct TmStamps {
     pub vector_dim: u32,
 }
 
+impl TmStamps {
+    /// `Ok` when every key equals `expected`; otherwise the first key
+    /// that differs, as a mismatch naming both values.
+    pub fn check_against(&self, expected: &TmStamps) -> TranslateResult<()> {
+        for (key, stored, wanted) in [
+            (
+                TM_SCHEMA_VERSION_KEY,
+                self.schema_version.to_string(),
+                expected.schema_version.to_string(),
+            ),
+            (
+                TM_EMBED_MODEL_KEY,
+                self.embed_model.clone(),
+                expected.embed_model.clone(),
+            ),
+            (
+                TM_VECTOR_DIM_KEY,
+                self.vector_dim.to_string(),
+                expected.vector_dim.to_string(),
+            ),
+        ] {
+            if stored != wanted {
+                return Err(TranslateError::TmStampMismatch {
+                    key,
+                    stored,
+                    expected: wanted,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The single source of truth for the `translate_meta` table's schema.
 /// The frozen baseline DDL in [`crate::migrate`] is rendered from this
 /// spec; `verify_all` pins the two together on every open.
@@ -92,32 +125,7 @@ impl Translate {
     /// end overwrites whatever an interrupted one left.
     pub fn reconcile_tm_stamps(&self, expected: &TmStamps) -> TranslateResult<()> {
         if let Some(stored) = self.tm_stamps()? {
-            for (key, stored, wanted) in [
-                (
-                    TM_SCHEMA_VERSION_KEY,
-                    stored.schema_version.to_string(),
-                    expected.schema_version.to_string(),
-                ),
-                (
-                    TM_EMBED_MODEL_KEY,
-                    stored.embed_model.clone(),
-                    expected.embed_model.clone(),
-                ),
-                (
-                    TM_VECTOR_DIM_KEY,
-                    stored.vector_dim.to_string(),
-                    expected.vector_dim.to_string(),
-                ),
-            ] {
-                if stored != wanted {
-                    return Err(TranslateError::TmStampMismatch {
-                        key,
-                        stored,
-                        expected: wanted,
-                    });
-                }
-            }
-            return Ok(());
+            return stored.check_against(expected);
         }
         self.meta_set(TM_SCHEMA_VERSION_KEY, &expected.schema_version.to_string())?;
         self.meta_set(TM_EMBED_MODEL_KEY, &expected.embed_model)?;

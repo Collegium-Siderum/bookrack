@@ -163,10 +163,19 @@ pub(crate) fn translate_error_to_mcp(e: TranslateToolError) -> ErrorData {
             | TranslateError::TmStampMismatch { .. }
             | TranslateError::TmUnstamped,
         ) => ErrorCode(STATE_UNUSABLE),
+        // No embedder, or one that cannot be reached, is the same
+        // class as the search tools' embed failures.
+        TranslateToolError::NoEmbedder | TranslateToolError::Embed(_) => ErrorCode(STATE_UNUSABLE),
+        TranslateToolError::Vectors(bookrack_vectors::VectorsError::BadFilter(_)) => {
+            ErrorCode::INVALID_PARAMS
+        }
         TranslateToolError::Translate(TranslateError::Sqlite(_) | TranslateError::Migrate(_))
         | TranslateToolError::Corpus(_)
         | TranslateToolError::Refs(_)
         | TranslateToolError::Reference(_)
+        | TranslateToolError::Catalog(_)
+        | TranslateToolError::Vectors(_)
+        | TranslateToolError::EmbeddingShape(_)
         | TranslateToolError::SourceDrift { .. }
         | TranslateToolError::BrokenUnitLink { .. } => ErrorCode::INTERNAL_ERROR,
     };

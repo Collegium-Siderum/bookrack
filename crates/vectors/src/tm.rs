@@ -116,8 +116,9 @@ impl TmFilter<'_> {
     }
 }
 
-/// True when `tag` is one to sixteen ASCII letters, digits or hyphens.
-fn is_lang_tag(tag: &str) -> bool {
+/// True when `tag` is one to sixteen ASCII letters, digits or hyphens:
+/// the shape a language tag must have to enter a filter predicate.
+pub fn is_lang_tag(tag: &str) -> bool {
     !tag.is_empty()
         && tag.len() <= MAX_LANG_LEN
         && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')

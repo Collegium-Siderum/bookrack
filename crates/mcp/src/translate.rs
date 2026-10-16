@@ -4,10 +4,11 @@
 //!
 //! Backs the `translate.fetch_segment`, `translate.tm_search` and
 //! `translate.list_pending` tools: the read face of the translation
-//! store. The write tools and the translation audit arrive with later
-//! milestones. The `pub(crate)` logic helpers take opened handles; the
+//! store. The `pub(crate)` logic helpers take opened handles; the
 //! [`crate::BookrackServer`] tool methods are thin shims that probe and
-//! open the stores read-only, dispatch here, and serialize.
+//! open the stores read-only, dispatch here, and serialize. The
+//! translation memory the two first tools consult is
+//! [`crate::translate_tm`].
 //!
 //! No store is ever created by this surface. A library that has never
 //! been translated into has no `translate.db`, and one without a
@@ -16,13 +17,16 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
+use bookrack_catalog::{Catalog, CatalogError};
 use bookrack_core::{Explain, Problem};
 use bookrack_corpus::{Corpus, CorpusError, Node, NodeId};
 use bookrack_distill::Catalogs;
+use bookrack_embed::{EmbedError, Embedder};
 use bookrack_ops::dto::MAX_SPAN_LEAVES;
 use bookrack_refs::{Refs, RefsError, ResolvedEntry};
 use bookrack_translate::glossary_translations::TranslationRow;
 use bookrack_translate::injection::GlossaryHitRow;
+use bookrack_translate::meta::TmStamps;
 use bookrack_translate::pending::{PendingTotals, PendingUnit};
 use bookrack_translate::segments::{SegmentRow, span_sha256_hex};
 use bookrack_translate::{Translate, TranslateError};
@@ -31,6 +35,10 @@ use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::reference::{ReferenceError, ReferenceLookupArgs, reference_lookup_logic};
+#[cfg(test)]
+use crate::translate_tm::complete_package_tm;
+use crate::translate_tm::{TM_ABSENT, TmContext, TmQuery, search_memory, source_lang_of};
+use bookrack_vectors::VectorsError;
 
 /// Neighbouring segments on each side of the fetched one when the
 /// caller does not say.
@@ -194,6 +202,9 @@ pub struct TranslateFetchSegmentResult {
     pub unit_id: i64,
     pub intake_id: i64,
     pub target_lang: String,
+    /// The book's language as the catalog records it, `und` when it
+    /// records none; the memory is queried under this pair.
+    pub source_lang: String,
     pub source_text: String,
     pub unit_outline: String,
     pub neighbors_before: String,
@@ -206,6 +217,10 @@ pub struct TranslateFetchSegmentResult {
     pub glossary_hits: Vec<GlossaryHit>,
     pub refs_hits: Vec<ResolvedEntry>,
     pub tm_hits: Vec<TmHit>,
+    /// `ok` when the translation memory was consulted, `absent` when
+    /// the library has none, `unavailable` when it could not be
+    /// consulted — then `tm_hits` is empty and the log says why.
+    pub tm_status: String,
     pub effective_profile: String,
     /// `"with_glossary"` or `"clean"`.
     pub recommended_prompt_kind: String,
@@ -354,6 +369,27 @@ pub enum TranslateToolError {
         /// What is wrong with the span.
         reason: &'static str,
     },
+
+    /// The server was built without an embedder, so nothing can reach
+    /// the translation memory.
+    #[error("no embedder to reach the translation memory with")]
+    NoEmbedder,
+
+    /// The embedding backend refused or failed.
+    #[error("embedding error")]
+    Embed(#[from] EmbedError),
+
+    /// The embedder answered with a shape the memory cannot take.
+    #[error("embedding shape error: {0}")]
+    EmbeddingShape(String),
+
+    /// The translation-memory store refused or failed.
+    #[error("translation memory error")]
+    Vectors(#[from] VectorsError),
+
+    /// The catalog refused or failed.
+    #[error("catalog error")]
+    Catalog(#[from] CatalogError),
 }
 
 impl Explain for TranslateToolError {
@@ -367,7 +403,7 @@ impl Explain for TranslateToolError {
             TranslateToolError::Refs(source) => Problem::from_error_chain(source),
             TranslateToolError::Reference(source) => Problem::from_error_chain(source),
             TranslateToolError::SourceDrift { segment_id } => Problem::new(format!(
-                "cannot fetch segment {segment_id}: its source text has drifted"
+                "cannot use segment {segment_id}: its source text has drifted"
             ))
             .detail(
                 "The text under the segment's span no longer hashes to the fingerprint \
@@ -395,6 +431,27 @@ impl Explain for TranslateToolError {
                     )
                     .hint("Take the unit's leaves and offsets from translate.fetch_segment or library.show_toc.")
             }
+            TranslateToolError::NoEmbedder => {
+                Problem::new("cannot reach the translation memory: this server has no embedder")
+                    .detail(
+                        "The memory is embedded with the library's own model, and this server \
+                         was started without one.",
+                    )
+                    .hint("Start the daemon with its embedding backend configured and reachable.")
+            }
+            TranslateToolError::Embed(source) => source.explain(),
+            TranslateToolError::EmbeddingShape(what) => {
+                Problem::new(format!("cannot index with the embedder's answer: {what}"))
+                    .detail("The vectors the embedder returned do not fit the translation memory.")
+                    .hint("Check the embedding model the daemon runs against the one the library was built with.")
+            }
+            TranslateToolError::Vectors(VectorsError::BadFilter(field)) => Problem::new(format!(
+                "cannot run the translation-memory query: `{field}` is not a language tag"
+            ))
+            .detail("A language tag is one to sixteen ASCII letters, digits or hyphens.")
+            .hint("Pass the language codes the catalog and the plan use, such as `de` or `zh-Hant`."),
+            TranslateToolError::Vectors(source) => Problem::from_error_chain(source),
+            TranslateToolError::Catalog(source) => Problem::from_error_chain(source),
         }
     }
 }
@@ -449,7 +506,7 @@ pub(crate) fn span_text(leaves: &[Node], start_char_offset: i64, end_char_offset
 }
 
 /// Read the source text one segment spans.
-fn segment_source_text(corpus: &Corpus, segment: &SegmentRow) -> ToolResult<String> {
+pub(crate) fn segment_source_text(corpus: &Corpus, segment: &SegmentRow) -> ToolResult<String> {
     let leaves = corpus.leaves_between(
         NodeId::new(segment.start_node_id),
         NodeId::new(segment.end_node_id),
@@ -532,11 +589,18 @@ fn assemble_refs_hits(
 /// `None` when there is no translation store or no such segment. The
 /// segment's source text is read from the corpus and checked against
 /// the recorded fingerprint before anything else is assembled.
+///
+/// The translation memory is not consulted here: the package comes
+/// back with `tm_status = absent` and no hits, and
+/// [`crate::translate_tm::complete_package_tm`] fills both in once
+/// the stores are released, since the memory lookup awaits the
+/// embedder.
 pub(crate) fn fetch_segment_logic(
     translate: Option<&Translate>,
     corpus: &Corpus,
     refs: Option<&Refs>,
     catalogs: &Catalogs,
+    catalog: Option<&Catalog>,
     args: &TranslateFetchSegmentArgs,
 ) -> ToolResult<Option<TranslateFetchSegmentResult>> {
     let Some(translate) = translate else {
@@ -558,6 +622,7 @@ pub(crate) fn fetch_segment_logic(
             segment_id: segment.segment_id,
         });
     }
+    let source_lang = source_lang_of(catalog, unit.intake_id)?;
 
     // Siblings in document order: by the first leaf's position, then
     // by offset within it.
@@ -644,6 +709,7 @@ pub(crate) fn fetch_segment_logic(
         unit_id: unit.unit_id,
         intake_id: unit.intake_id,
         target_lang: unit.target_lang.clone(),
+        source_lang,
         source_text,
         unit_outline: unit.source_outline.clone().unwrap_or_default(),
         neighbors_before: before.join(TEXT_JOIN),
@@ -655,6 +721,7 @@ pub(crate) fn fetch_segment_logic(
         glossary_hits: hits.into_iter().map(GlossaryHit::from).collect(),
         refs_hits,
         tm_hits: Vec::new(),
+        tm_status: TM_ABSENT.to_owned(),
         effective_profile,
         recommended_prompt_kind: recommended_prompt_kind.to_owned(),
         current_status: segment.status.clone(),
@@ -666,10 +733,17 @@ pub(crate) fn fetch_segment_logic(
 // translate.tm_search
 // ---------------------------------------------------------------------------
 
-/// Validate a translation-memory query and answer it. The index
-/// arrives with the translation-memory milestone; until then every
-/// valid query has no hits, and the argument shape is already fixed.
-pub(crate) fn tm_search_logic(args: &TranslateTmSearchArgs) -> ToolResult<TranslateTmSearchResult> {
+/// Validate a translation-memory query and answer it from the memory.
+///
+/// The arguments are checked in full, the language tags included,
+/// before anything is consulted. A library nobody has sealed into
+/// answers no hits; a memory holding rows is consulted only when
+/// `stored` carries this build's stamps.
+pub(crate) async fn tm_search_logic<E: Embedder>(
+    tm: Option<&TmContext<'_, E>>,
+    stored: Option<&TmStamps>,
+    args: &TranslateTmSearchArgs,
+) -> ToolResult<TranslateTmSearchResult> {
     if args.text.trim().is_empty() {
         return Err(TranslateToolError::InvalidArgument(
             "`text` is empty".to_owned(),
@@ -692,11 +766,27 @@ pub(crate) fn tm_search_logic(args: &TranslateTmSearchArgs) -> ToolResult<Transl
             "`intake_id_scope` {intake_id} is not a book id; intake ids are positive"
         )));
     }
-    let _limit = args
-        .limit
-        .unwrap_or(DEFAULT_TM_LIMIT)
-        .clamp(1, MAX_TM_LIMIT);
-    Ok(TranslateTmSearchResult { hits: Vec::new() })
+    let limit = usize::try_from(
+        args.limit
+            .unwrap_or(DEFAULT_TM_LIMIT)
+            .clamp(1, MAX_TM_LIMIT),
+    )
+    .unwrap_or(usize::MAX);
+    let query = TmQuery {
+        text: args.text.trim().to_owned(),
+        target_lang: args.target_lang.trim().to_owned(),
+        source_lang: args.source_lang.trim().to_owned(),
+        intake_id: args.intake_id_scope,
+        exclude: None,
+    };
+    query.filter()?;
+    let Some(tm) = tm else {
+        return Err(TranslateToolError::NoEmbedder);
+    };
+    let hits = search_memory(tm, stored, &query, limit)
+        .await?
+        .unwrap_or_default();
+    Ok(TranslateTmSearchResult { hits })
 }
 
 // ---------------------------------------------------------------------------
@@ -730,6 +820,7 @@ pub(crate) fn list_pending_logic(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::translate_tm::test_embed::{Down, Fake};
     use bookrack_corpus::{NewNode, NodeType};
     use bookrack_refs::{NewBook, NewEntry};
     use serde_json::json;
@@ -993,6 +1084,7 @@ mod tests {
             &f.corpus,
             Some(&refs),
             &catalogs(),
+            None,
             &fetch(f.current),
         )
         .expect("fetch")
@@ -1030,6 +1122,8 @@ mod tests {
         assert_eq!(got.refs_hits.len(), 1);
         assert_eq!(got.refs_hits[0].entry_key, "dasein");
         assert!(got.tm_hits.is_empty());
+        assert_eq!(got.tm_status, "absent");
+        assert_eq!(got.source_lang, "und");
         assert_eq!(got.effective_profile, "academic");
         assert_eq!(got.recommended_prompt_kind, "with_glossary");
         assert_eq!(got.current_status, "draft");
@@ -1056,9 +1150,16 @@ mod tests {
         );
 
         let translate = Translate::open_read_only(&translate_db).expect("read-only open");
-        let got = fetch_segment_logic(Some(&translate), &corpus, None, &catalogs(), &fetch(id))
-            .expect("fetch")
-            .expect("package");
+        let got = fetch_segment_logic(
+            Some(&translate),
+            &corpus,
+            None,
+            &catalogs(),
+            None,
+            &fetch(id),
+        )
+        .expect("fetch")
+        .expect("package");
         assert_eq!(got.source_text, expected);
         assert_eq!(got.neighbors_before, "");
         assert_eq!(got.neighbors_after, "");
@@ -1079,6 +1180,7 @@ mod tests {
             &f.corpus,
             None,
             &catalogs(),
+            None,
             &fetch(f.current),
         )
         .expect_err("drift");
@@ -1095,8 +1197,15 @@ mod tests {
     fn an_unknown_segment_is_none() {
         let f = fixture("default");
         let translate = f.translate();
-        let got = fetch_segment_logic(Some(&translate), &f.corpus, None, &catalogs(), &fetch(404))
-            .expect("fetch");
+        let got = fetch_segment_logic(
+            Some(&translate),
+            &f.corpus,
+            None,
+            &catalogs(),
+            None,
+            &fetch(404),
+        )
+        .expect("fetch");
         assert_eq!(got, None);
     }
 
@@ -1110,6 +1219,7 @@ mod tests {
                 &f.corpus,
                 None,
                 &catalogs(),
+                None,
                 &TranslateFetchSegmentArgs {
                     neighbors,
                     ..fetch(f.current)
@@ -1135,7 +1245,7 @@ mod tests {
             injection_profile: Some("academic".into()),
             ..fetch(f.current)
         };
-        let got = fetch_segment_logic(Some(&translate), &f.corpus, None, &catalogs(), &args)
+        let got = fetch_segment_logic(Some(&translate), &f.corpus, None, &catalogs(), None, &args)
             .expect("fetch")
             .expect("package");
         assert_eq!(got.effective_profile, "academic");
@@ -1154,6 +1264,7 @@ mod tests {
             &f.corpus,
             None,
             &catalogs(),
+            None,
             &TranslateFetchSegmentArgs {
                 injection_profile: Some("verbose".into()),
                 ..fetch(f.current)
@@ -1179,6 +1290,7 @@ mod tests {
             &f.corpus,
             None,
             &catalogs(),
+            None,
             &fetch(f.current),
         )
         .expect("fetch")
@@ -1203,6 +1315,7 @@ mod tests {
             &f.corpus,
             Some(&refs),
             &catalogs(),
+            None,
             &fetch(f.current),
         )
         .expect("fetch")
@@ -1235,6 +1348,7 @@ mod tests {
             &f.corpus,
             None,
             &catalogs(),
+            None,
             &fetch(f.current),
         )
         .expect("fetch")
@@ -1294,55 +1408,322 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tm_search_validates_its_arguments_and_answers_with_no_hits() {
-        let args = |text: &str, source_lang: &str, target_lang: &str, limit: Option<u32>| {
-            TranslateTmSearchArgs {
-                library: None,
-                text: text.into(),
-                source_lang: source_lang.into(),
-                target_lang: target_lang.into(),
-                intake_id_scope: None,
-                limit,
+    fn tm_args(
+        text: &str,
+        source_lang: &str,
+        target_lang: &str,
+        limit: Option<u32>,
+    ) -> TranslateTmSearchArgs {
+        TranslateTmSearchArgs {
+            library: None,
+            text: text.into(),
+            source_lang: source_lang.into(),
+            target_lang: target_lang.into(),
+            intake_id_scope: None,
+            limit,
+        }
+    }
+
+    fn tm_ctx<'a, E: Embedder>(dir: &std::path::Path, embedder: &'a E) -> TmContext<'a, E> {
+        TmContext {
+            lancedb_dir: dir.join("lancedb_translate"),
+            embedder,
+            embed_model: "fake-model",
+            dim: 4,
+        }
+    }
+
+    /// The fetched package of the fixture's current segment, with the
+    /// stores released afterwards.
+    fn fetched(f: &Fixture) -> TranslateFetchSegmentResult {
+        let translate = f.translate();
+        fetch_segment_logic(
+            Some(&translate),
+            &f.corpus,
+            None,
+            &catalogs(),
+            None,
+            &fetch(f.current),
+        )
+        .expect("fetch")
+        .expect("package")
+    }
+
+    /// A memory holding the fixture's sealed segment and one row of
+    /// another book, both near the current segment's text.
+    async fn seeded_memory(f: &Fixture, lancedb: &std::path::Path) {
+        let store = bookrack_vectors::TmStore::open(lancedb, 4)
+            .await
+            .expect("open");
+        let row = |segment_id: i64, intake_id: i64, kind: &str, vector: [f32; 4]| {
+            bookrack_vectors::TmRow {
+                vector: vector.to_vec(),
+                segment_id,
+                unit_id: f.unit_id,
+                intake_id,
+                target_lang: "zh".into(),
+                source_lang: "und".into(),
+                start_node_id: 100,
+                start_char_offset: 0,
+                end_node_id: 100,
+                end_char_offset: 14,
+                src_text: "Erster Absatz.".into(),
+                dst_text: format!("rendering {segment_id}"),
+                source_kind: kind.into(),
+                sealed_at: "2026-01-01T00:00:00Z".into(),
             }
         };
+        store
+            .append(&[
+                row(f.sealed, 1, "human", [0.9, 0.1, 0.0, 0.0]),
+                row(f.current, 1, "human", [1.0, 0.0, 0.0, 0.0]),
+                row(77, 2, "llm-draft", [0.95, 0.05, 0.0, 0.0]),
+            ])
+            .await
+            .expect("append");
+    }
+
+    #[tokio::test]
+    async fn the_package_carries_tm_hits_without_the_segment_itself_and_says_ok() {
+        let f = fixture("default");
+        let lancedb = f._dir.path().join("lancedb_translate");
+        seeded_memory(&f, &lancedb).await;
+        let fake = Fake::table(&[("Das Dasein ist Sorge.", [1.0, 0.0, 0.0, 0.0])]);
+        let tm = tm_ctx(f._dir.path(), &fake);
+        let stamps = tm.expected_stamps();
+
+        let mut package = fetched(&f);
+        complete_package_tm(Some(&tm), Some(&stamps), &mut package).await;
+        assert_eq!(package.tm_status, "ok");
+        let ids: Vec<i64> = package.tm_hits.iter().map(|h| h.segment_id).collect();
+        assert_eq!(
+            ids,
+            vec![f.sealed, 77],
+            "the segment itself is left out; books are not"
+        );
+        assert!(package.tm_hits[0].score > package.tm_hits[1].score);
+        assert_eq!(
+            package.tm_hits[0].dst_text,
+            format!("rendering {}", f.sealed)
+        );
+
+        // Without a memory the package says so and carries nothing.
+        let empty = tempfile::tempdir().expect("tempdir");
+        let tm = tm_ctx(empty.path(), &fake);
+        let mut package = fetched(&f);
+        complete_package_tm(Some(&tm), None, &mut package).await;
+        assert_eq!(
+            (package.tm_status.as_str(), package.tm_hits.len()),
+            ("absent", 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_package_says_unavailable_and_still_returns_when_the_memory_cannot_be_consulted() {
+        let f = fixture("default");
+        let lancedb = f._dir.path().join("lancedb_translate");
+        seeded_memory(&f, &lancedb).await;
+        let fake = Fake::table(&[("Das Dasein ist Sorge.", [1.0, 0.0, 0.0, 0.0])]);
+        let tm = tm_ctx(f._dir.path(), &fake);
+
+        // Stamps of another model.
+        let other = TmStamps {
+            embed_model: "other-model".into(),
+            ..tm.expected_stamps()
+        };
+        let mut package = fetched(&f);
+        complete_package_tm(Some(&tm), Some(&other), &mut package).await;
+        assert_eq!(
+            (package.tm_status.as_str(), package.tm_hits.len()),
+            ("unavailable", 0)
+        );
+        assert_eq!(
+            package.source_text, "Das Dasein ist Sorge.",
+            "the rest of the package stands"
+        );
+
+        // No stamps at all.
+        let mut package = fetched(&f);
+        complete_package_tm(Some(&tm), None, &mut package).await;
+        assert_eq!(package.tm_status, "unavailable");
+
+        // The embedder is down.
+        let down = Down;
+        let tm_down = tm_ctx(f._dir.path(), &down);
+        let stamps = tm.expected_stamps();
+        let mut package = fetched(&f);
+        complete_package_tm(Some(&tm_down), Some(&stamps), &mut package).await;
+        assert_eq!(
+            (package.tm_status.as_str(), package.tm_hits.len()),
+            ("unavailable", 0)
+        );
+
+        // No embedder at all.
+        let mut package = fetched(&f);
+        complete_package_tm::<Fake>(None, Some(&stamps), &mut package).await;
+        assert_eq!(package.tm_status, "unavailable");
+    }
+
+    #[tokio::test]
+    async fn tm_search_validates_its_arguments_before_any_memory_is_consulted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fake = Fake::constant([1.0, 0.0, 0.0, 0.0]);
+        let tm = tm_ctx(dir.path(), &fake);
         let scoped = TranslateTmSearchArgs {
             intake_id_scope: Some(0),
-            ..args("Dasein", "de", "zh", None)
+            ..tm_args("Dasein", "de", "zh", None)
         };
-        let err = tm_search_logic(&scoped).expect_err("non-positive scope");
+        let err = tm_search_logic(Some(&tm), None, &scoped)
+            .await
+            .expect_err("non-positive scope");
         assert!(
             matches!(err, TranslateToolError::InvalidArgument(_)),
             "{err:?}"
         );
-        assert!(
-            tm_search_logic(&TranslateTmSearchArgs {
-                intake_id_scope: Some(3),
-                ..args("Dasein", "de", "zh", None)
-            })
-            .expect("scoped")
-            .hits
-            .is_empty()
-        );
-        let got = tm_search_logic(&args("Dasein", "de", "zh", None)).expect("search");
-        assert!(got.hits.is_empty());
-        assert!(
-            tm_search_logic(&args("Dasein", "de", "zh", Some(0)))
-                .expect("clamped")
-                .hits
-                .is_empty()
-        );
         for bad in [
-            args(" ", "de", "zh", None),
-            args("Dasein", "", "zh", None),
-            args("Dasein", "de", "", None),
+            tm_args(" ", "de", "zh", None),
+            tm_args("Dasein", "", "zh", None),
+            tm_args("Dasein", "de", "", None),
         ] {
-            let err = tm_search_logic(&bad).expect_err("invalid");
+            let err = tm_search_logic(Some(&tm), None, &bad)
+                .await
+                .expect_err("invalid");
             assert!(
                 matches!(err, TranslateToolError::InvalidArgument(_)),
                 "{err:?}"
             );
         }
+        // A bad tag is refused with no memory to search, before the
+        // embedder or the store is touched.
+        let err = tm_search_logic(Some(&tm), None, &tm_args("Dasein", "de", "zh'; x", None))
+            .await
+            .expect_err("bad tag");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Vectors(VectorsError::BadFilter("target_lang"))
+            ),
+            "{err:?}"
+        );
+        // Without an embedder nothing can be consulted.
+        let err = tm_search_logic::<Fake>(None, None, &tm_args("Dasein", "de", "zh", None))
+            .await
+            .expect_err("no embedder");
+        assert!(matches!(err, TranslateToolError::NoEmbedder), "{err:?}");
+        // A library nobody has sealed into answers no hits, scoped or
+        // not, clamped or not, and gets no memory created for it.
+        for args in [
+            tm_args("Dasein", "de", "zh", None),
+            tm_args("Dasein", "de", "zh", Some(0)),
+            TranslateTmSearchArgs {
+                intake_id_scope: Some(3),
+                ..tm_args("Dasein", "de", "zh", None)
+            },
+        ] {
+            let got = tm_search_logic(Some(&tm), None, &args)
+                .await
+                .expect("search");
+            assert!(got.hits.is_empty());
+        }
+        assert!(!tm.lancedb_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn tm_search_refuses_an_unstamped_or_mismatched_memory_and_serves_a_stamped_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fake = Fake::table(&[("Dasein", [1.0, 0.0, 0.0, 0.0])]);
+        let tm = tm_ctx(dir.path(), &fake);
+        let store = bookrack_vectors::TmStore::open(&tm.lancedb_dir, 4)
+            .await
+            .expect("open");
+        let row = |segment_id: i64, kind: &str, vector: [f32; 4]| bookrack_vectors::TmRow {
+            vector: vector.to_vec(),
+            segment_id,
+            unit_id: 1,
+            intake_id: 1,
+            target_lang: "zh".into(),
+            source_lang: "de".into(),
+            start_node_id: 100,
+            start_char_offset: 0,
+            end_node_id: 100,
+            end_char_offset: 6,
+            src_text: "Dasein".into(),
+            dst_text: format!("rendering {segment_id}"),
+            source_kind: kind.into(),
+            sealed_at: "2026-01-01T00:00:00Z".into(),
+        };
+        store
+            .append(&[
+                row(1, "llm-draft", [1.0, 0.0, 0.0, 0.0]),
+                row(2, "human", [0.95, 0.05, 0.0, 0.0]),
+            ])
+            .await
+            .expect("append");
+        drop(store);
+
+        let err = tm_search_logic(Some(&tm), None, &tm_args("Dasein", "de", "zh", None))
+            .await
+            .expect_err("unstamped");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(bookrack_translate::TranslateError::TmUnstamped)
+            ),
+            "{err:?}"
+        );
+        let other = TmStamps {
+            embed_model: "other-model".into(),
+            ..tm.expected_stamps()
+        };
+        let err = tm_search_logic(
+            Some(&tm),
+            Some(&other),
+            &tm_args("Dasein", "de", "zh", None),
+        )
+        .await
+        .expect_err("mismatch");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(
+                    bookrack_translate::TranslateError::TmStampMismatch { .. }
+                )
+            ),
+            "{err:?}"
+        );
+
+        let stamps = tm.expected_stamps();
+        let got = tm_search_logic(
+            Some(&tm),
+            Some(&stamps),
+            &tm_args("Dasein", "de", "zh", None),
+        )
+        .await
+        .expect("search");
+        let ids: Vec<i64> = got.hits.iter().map(|h| h.segment_id).collect();
+        assert_eq!(
+            ids,
+            vec![2, 1],
+            "the person's rendering outranks the nearer draft"
+        );
+        assert_eq!(got.hits[0].dst_text, "rendering 2");
+        assert_eq!(got.hits[0].span.end_char_offset, 6);
+        let got = tm_search_logic(
+            Some(&tm),
+            Some(&stamps),
+            &tm_args("Dasein", "de", "zh", Some(1)),
+        )
+        .await
+        .expect("search");
+        assert_eq!(got.hits.len(), 1);
+        let got = tm_search_logic(
+            Some(&tm),
+            Some(&stamps),
+            &tm_args("Dasein", "en", "zh", None),
+        )
+        .await
+        .expect("search");
+        assert!(got.hits.is_empty(), "another language pair");
     }
 
     #[test]
@@ -1363,6 +1744,7 @@ mod tests {
             &corpus,
             refs.as_ref(),
             &catalogs(),
+            None,
             &fetch(1),
         )
         .expect("fetch");
@@ -1399,6 +1781,7 @@ mod tests {
             &f.corpus,
             refs.as_ref(),
             &catalogs(),
+            None,
             &fetch(f.current),
         )
         .expect("fetch")

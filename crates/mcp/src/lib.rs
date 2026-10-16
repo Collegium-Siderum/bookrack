@@ -35,6 +35,7 @@ use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
 mod error_map;
 mod reference;
 mod translate;
+mod translate_tm;
 mod translate_write;
 use error_map::{
     invalid_params_err, ops_error_to_mcp, reference_error_to_mcp, report_to_mcp, respond_with,
@@ -2045,8 +2046,11 @@ impl BookrackServer {
                        or the clean prompt. Pass a segment_id from \
                        translate.list_pending; `injection_profile` overrides the unit's \
                        profile for this call only; `neighbors` (0..=5, default 1) is \
-                       the number of adjacent segments on each side. Returns null when \
-                       no such segment exists or the library has no translation data."
+                       the number of adjacent segments on each side. `tm_hits` carries \
+                       the nearest sealed segments of the same language pair, this one \
+                       excluded, and `tm_status` says whether the translation memory was \
+                       consulted (`ok`), is `absent`, or was `unavailable`. Returns null \
+                       when no such segment exists or the library has no translation data."
     )]
     async fn translate_fetch_segment(
         &self,
@@ -2054,40 +2058,74 @@ impl BookrackServer {
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
         let ops = handle.ops();
-        let translate_store =
-            translate::probe_translate(&ops.translate_db_path()).map_err(translate_error_to_mcp)?;
-        let corpus = bookrack_corpus::Corpus::open_read_only(ops.corpus_db())
-            .map_err(|e| translate_error_to_mcp(e.into()))?;
-        let refs =
-            translate::probe_refs(&ops.reference_db_path()).map_err(translate_error_to_mcp)?;
-        let catalogs = reference::catalogs().map_err(reference_error_to_mcp)?;
-        let package = translate::fetch_segment_logic(
-            translate_store.as_ref(),
-            &corpus,
-            refs.as_ref(),
-            catalogs,
-            &args,
-        )
-        .map_err(translate_error_to_mcp)?;
+        // The stores are released before the memory is consulted: that
+        // lookup awaits the embedder, and the handles are not `Sync`.
+        let (mut package, stored_stamps) = {
+            let translate_store = translate::probe_translate(&ops.translate_db_path())
+                .map_err(translate_error_to_mcp)?;
+            let corpus = bookrack_corpus::Corpus::open_read_only(ops.corpus_db())
+                .map_err(|e| translate_error_to_mcp(e.into()))?;
+            let refs =
+                translate::probe_refs(&ops.reference_db_path()).map_err(translate_error_to_mcp)?;
+            let catalogs = reference::catalogs().map_err(reference_error_to_mcp)?;
+            let catalog = bookrack_catalog::Catalog::open_read_only(ops.catalog_db())
+                .map_err(|e| translate_error_to_mcp(e.into()))?;
+            let package = translate::fetch_segment_logic(
+                translate_store.as_ref(),
+                &corpus,
+                refs.as_ref(),
+                catalogs,
+                Some(&catalog),
+                &args,
+            )
+            .map_err(translate_error_to_mcp)?;
+            let stored_stamps = match &translate_store {
+                Some(store) => store
+                    .tm_stamps()
+                    .map_err(|e| translate_error_to_mcp(e.into()))?,
+                None => None,
+            };
+            (package, stored_stamps)
+        };
+        if let Some(package) = package.as_mut() {
+            let tm = translate_tm::tm_context(ops).ok();
+            translate_tm::complete_package_tm(tm.as_ref(), stored_stamps.as_ref(), package).await;
+        }
         respond_with(&package)
     }
 
-    /// Translation-memory search. The index arrives with a later
-    /// milestone; the argument and reply shapes are fixed now.
+    /// Translation-memory search.
     #[tool(
         name = "translate.tm_search",
-        description = "Search the translation memory for segments whose source resembles \
-                       `text`, confined to one book with `intake_id_scope`; `limit` is \
-                       clamped to 1..=50 (default 10). The index arrives with the \
-                       translation-memory milestone; until then every valid query \
-                       returns an empty hits list."
+        description = "Search the translation memory for sealed segments whose source \
+                       resembles `text` in the same language pair (`source_lang` to \
+                       `target_lang`). `score` is cosine similarity weighted by \
+                       `source_kind`, so a person's rendering ranks above a machine's; \
+                       `intake_id_scope` confines hits to one book; `limit` is clamped to \
+                       1..=50 (default 10). A library nobody has sealed into answers an \
+                       empty list; a memory built with another embedding model is refused \
+                       until translate.tm_rebuild runs."
     )]
     async fn translate_tm_search(
         &self,
         Parameters(args): Parameters<translate::TranslateTmSearchArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let _handle = self.resolve_handle(args.library.as_deref())?;
-        let result = translate::tm_search_logic(&args).map_err(translate_error_to_mcp)?;
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let ops = handle.ops();
+        let stored_stamps = {
+            let translate_store = translate::probe_translate(&ops.translate_db_path())
+                .map_err(translate_error_to_mcp)?;
+            match &translate_store {
+                Some(store) => store
+                    .tm_stamps()
+                    .map_err(|e| translate_error_to_mcp(e.into()))?,
+                None => None,
+            }
+        };
+        let tm = translate_tm::tm_context(ops).ok();
+        let result = translate::tm_search_logic(tm.as_ref(), stored_stamps.as_ref(), &args)
+            .await
+            .map_err(translate_error_to_mcp)?;
         respond_with(&result)
     }
 
@@ -2222,19 +2260,35 @@ impl BookrackServer {
                        `imported`) and is derived from the segment's history when absent; \
                        `actor_kind_override: \"human\"` records that a person approved it. \
                        Pass the `current_version` as `expected_version`. Records one audit row \
-                       carrying `rationale` and `cost_tokens`."
+                       carrying `rationale` and `cost_tokens`. Embeds the source text and \
+                       indexes the sealed segment in the translation memory, so the embed \
+                       backend must be reachable; `tm_indexed` in the receipt says whether \
+                       the memory took the row."
     )]
     async fn translate_seal(
         &self,
         Parameters(args): Parameters<translate_write::TranslateSealArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (translate, _corpus, caller, now) = self.translate_write_stores(&args.library)?;
+        let (translate, corpus, caller, now) = self.translate_write_stores(&args.library)?;
+        let handle = self.resolve_handle(Some(&args.library))?;
+        let ops = handle.ops();
+        let tm = translate_tm::tm_context(ops).map_err(translate_error_to_mcp)?;
         let ctx = translate_write::WriteContext {
             caller: &caller,
             now: &now,
         };
-        let result =
-            translate_write::seal_logic(&translate, &ctx, &args).map_err(translate_error_to_mcp)?;
+        // The corpus and catalog are released before the embedder is
+        // awaited; the translation store travels into the seal.
+        let plan = {
+            let corpus = corpus;
+            let catalog = bookrack_catalog::Catalog::open_read_only(ops.catalog_db())
+                .map_err(|e| translate_error_to_mcp(e.into()))?;
+            translate_write::seal_prepare(&translate, &corpus, Some(&catalog), &ctx, &args)
+                .map_err(translate_error_to_mcp)?
+        };
+        let result = translate_write::seal_logic(translate, plan, &tm, &ctx, &args)
+            .await
+            .map_err(translate_error_to_mcp)?;
         respond_with(&result)
     }
 
@@ -2534,6 +2588,27 @@ bookrack_core::fixed_settings! {
     "translate.plan.max_chars_cjk" = translate_write::MAX_CHARS_CJK,
         "chars a CJK-script leaf may hold before a plan cuts it at sentence boundaries",
         acts on "translate.plan";
+    "translate.tm_weight_human" = translate_tm::TM_WEIGHT_HUMAN,
+        "score weight of a memory row a person wrote or approved",
+        acts on "translate.tm_search";
+    "translate.tm_weight_edited" = translate_tm::TM_WEIGHT_EDITED,
+        "score weight of a memory row imported and then reviewed by a person",
+        acts on "translate.tm_search";
+    "translate.tm_weight_llm_reflected" = translate_tm::TM_WEIGHT_LLM_REFLECTED,
+        "score weight of a memory row a machine drafted and reflected on",
+        acts on "translate.tm_search";
+    "translate.tm_weight_llm_draft" = translate_tm::TM_WEIGHT_LLM_DRAFT,
+        "score weight of a memory row a machine sealed straight from its draft",
+        acts on "translate.tm_search";
+    "translate.tm_weight_imported" = translate_tm::TM_WEIGHT_IMPORTED,
+        "score weight of a memory row imported and never reviewed",
+        acts on "translate.tm_search";
+    "translate.tm_overfetch" = translate_tm::TM_OVERFETCH,
+        "memory candidates fetched per hit wanted before weighting reorders them",
+        acts on "translate.tm_search";
+    "translate.tm_package_hits" = translate_tm::TM_PACKAGE_HITS,
+        "most memory hits a fetched segment package carries",
+        acts on "translate.fetch_segment";
 }
 
 /// Enumerate every MCP tool the live server exposes. Calls into the
