@@ -910,7 +910,24 @@ defined profile, or an embedding model the backend does not hold is
   glossary or the clean prompt, plus the nearest sealed segments of
   the same language pair from the translation memory and a
   `tm_status` saying whether the memory was consulted, is absent, or
-  was unavailable. `tm_search` queries the memory directly: hits are
+  was unavailable. The segment is addressed by `segment_id`, or by
+  the `node_id` of a corpus leaf — the id the read tools report —
+  together with the `target_lang` it was planned into; exactly one
+  address is given (`-32602` otherwise). By node, the package is the
+  first segment covering the leaf in document order, and
+  `matching_segments` lists every segment covering it with its span
+  and status, so a leaf cut into several segments, or one inside a
+  segment spanning several leaves, is visible and fetched one by one;
+  by segment id the list is empty. Coverage is decided by document
+  position, not by node id. A node that is not a translatable leaf —
+  unknown, an organizing node, a figure or other leaf a plan excludes,
+  a code block or other leaf a plan skips, an empty leaf — is
+  `-32602` with the reason; a leaf whose section has no unit in that
+  language, a library with no translation store included, is
+  `-32602` with the `translate.plan` call that would cover it; a leaf
+  whose unit is planned but that no segment touches is `-32602`
+  pointing at planning the section again. `fetch_segment` never
+  plans. `tm_search` queries the memory directly: hits are
   sealed segments whose source resembles the text, scored by cosine
   similarity weighted by `source_kind`, confinable to one book. The
   memory is derived from the sealed segments and stamped with the
@@ -918,8 +935,8 @@ defined profile, or an embedding model the backend does not hold is
   refused (`-32018`) by `tm_search` and reported as unavailable by
   `fetch_segment` until `translate.tm_rebuild` runs. None of the
   three creates a store: a library that has never been translated
-  into answers `null` from `fetch_segment` and an empty list from
-  `list_pending`, a library nobody has sealed into answers no memory
+  into answers `null` from `fetch_segment` by segment id and an empty
+  list from `list_pending`, a library nobody has sealed into answers no memory
   hits, and reference citations resolve to nothing when there is no
   `reference.db`. The stores are opened read-only per call; a
   translation store this build cannot read is `-32018`.

@@ -139,6 +139,12 @@ pub(crate) fn translate_error_to_mcp(e: TranslateToolError) -> ErrorData {
         // fine, so none of these is a state-unusable code.
         TranslateToolError::InvalidArgument(_)
         | TranslateToolError::SpanOutOfUnit { .. }
+        | TranslateToolError::UnknownNode { .. }
+        | TranslateToolError::NodeNotALeaf { .. }
+        | TranslateToolError::NodeCarriesNoText { .. }
+        | TranslateToolError::LeafSkipped { .. }
+        | TranslateToolError::UnitNotPlanned { .. }
+        | TranslateToolError::LeafUnplanned { .. }
         | TranslateToolError::Translate(
             TranslateError::UnknownProfile { .. }
             | TranslateError::VersionConflict { .. }
@@ -334,6 +340,27 @@ mod tests {
             profile.message
         );
         assert!(profile.message.contains("verbose"), "{}", profile.message);
+
+        let unplanned = translate_error_to_mcp(TranslateToolError::UnitNotPlanned {
+            node_id: 300_000_007,
+            intake_id: 3,
+            target_lang: "zh".into(),
+            chapter_node_id: 300_000_002,
+        });
+        assert_eq!(
+            unplanned.code,
+            ErrorCode::INVALID_PARAMS,
+            "{}",
+            unplanned.message
+        );
+        let hint = unplanned
+            .data
+            .as_ref()
+            .and_then(|d| d.get("hint"))
+            .and_then(|h| h.as_str())
+            .unwrap_or_default();
+        assert!(hint.contains("translate.plan"), "{hint}");
+        assert!(hint.contains("300000002"), "{hint}");
 
         let unusable = translate_error_to_mcp(TranslateToolError::Translate(
             TranslateError::SchemaTooNew {

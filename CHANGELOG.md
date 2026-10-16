@@ -10,6 +10,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **mcp: `translate.fetch_segment` by corpus leaf.** The segment
+  package can now be addressed by the `node_id` the read tools report
+  for a passage, together with the target language it was planned
+  into, instead of only by `segment_id`. The reply is the first
+  segment covering that leaf in document order, and a new
+  `matching_segments` list names every segment covering it with its
+  span and status, so a leaf cut into several segments, or one inside a
+  segment spanning several leaves, is fetched one by one rather than
+  mistaken for done. A leaf whose section has not been planned into
+  that language is refused with the `translate.plan` call that would
+  cover it; a leaf a plan excludes or skips, an organizing node, and a
+  leaf added after its section was planned each get their own reason.
+  The tool still never plans.
+
 - **mcp: the translation memory.** Sealing a segment now embeds its
   source text with the library's embedding model and keeps the sealed
   pair in a memory of its own under the data root, apart from the book

@@ -14,6 +14,10 @@ The four translator skeletons shipped with bookrack are English. Before the firs
 4. At the end of the unit, apply the tier below.
 5. When `translate.list_pending` returns no units, the translation is complete. Progress lives only there; keep no progress file of your own.
 
+## One passage on demand
+
+Outside the loop, a passage found while reading is translated in place: fetch it with `translate.fetch_segment` by the `node_id` the read tool reported and the `target_lang`, translate the package as in step 3, and seal it. A refusal naming a `translate.plan` call means the passage's section has no unit yet; run that call, then fetch again. `matching_segments` lists every segment covering the passage; fetch and translate the rest before treating the passage as done.
+
 ## Tiers
 
 - **A0, one chapter in the loop.** Stop at the end of every unit, present the proposed texts and the review notes, wait for approval, then seal each segment with `translate.seal` and `actor_kind_override: "human"`. Use this for the first one or two chapters while the glossary, the profile and the renderings settle.

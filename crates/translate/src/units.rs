@@ -135,6 +135,27 @@ impl Translate {
         Ok((existing, false))
     }
 
+    /// The unit planned on `(intake_id, target_lang, node_id)`, or
+    /// `None` if that organizing node has not been planned into that
+    /// language.
+    pub fn unit_by_key(
+        &self,
+        intake_id: i64,
+        target_lang: &str,
+        node_id: i64,
+    ) -> TranslateResult<Option<UnitRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "{SELECT_UNIT} WHERE intake_id = ?1 AND target_lang = ?2 AND node_id = ?3"
+                ),
+                rusqlite::params![intake_id, target_lang, node_id],
+                read_unit,
+            )
+            .optional()?)
+    }
+
     /// Every unit of `(intake_id, target_lang)` in `unit_order`.
     pub fn units_for(&self, intake_id: i64, target_lang: &str) -> TranslateResult<Vec<UnitRow>> {
         let mut stmt = self.conn.prepare(&format!(
@@ -226,6 +247,22 @@ mod tests {
             .expect("other lang");
         assert!(inserted);
         assert_ne!(other, id);
+    }
+
+    #[test]
+    fn unit_by_key_finds_the_one_unit_on_its_triple_and_nothing_else() {
+        let t = seed::fresh();
+        let zh = seed::unit(&t, 1, "zh", 40, 0);
+        let en = seed::unit(&t, 1, "en", 40, 0);
+        seed::unit(&t, 2, "zh", 40, 0);
+        let got = t.unit_by_key(1, "zh", 40).expect("read").expect("row");
+        assert_eq!(got.unit_id, zh);
+        assert_eq!(
+            t.unit_by_key(1, "en", 40).expect("read").map(|u| u.unit_id),
+            Some(en)
+        );
+        assert_eq!(t.unit_by_key(1, "zh", 41).expect("read"), None);
+        assert_eq!(t.unit_by_key(3, "zh", 40).expect("read"), None);
     }
 
     #[test]

@@ -2043,14 +2043,23 @@ impl BookrackServer {
                        already recorded, witness pointers, the sealed history of the \
                        unit, glossary hits under the effective injection profile with \
                        the reference entries they cite, and whether to use the glossary \
-                       or the clean prompt. Pass a segment_id from \
-                       translate.list_pending; `injection_profile` overrides the unit's \
-                       profile for this call only; `neighbors` (0..=5, default 1) is \
-                       the number of adjacent segments on each side. `tm_hits` carries \
+                       or the clean prompt. Address the segment by `segment_id` from \
+                       translate.list_pending, or by the `node_id` of a corpus leaf from \
+                       library.search, library.context_window or library.show_toc \
+                       together with the `target_lang` it was planned into: the package \
+                       is then the first segment covering that leaf in document order \
+                       and `matching_segments` lists every segment covering it, so a \
+                       leaf cut into several segments is fetched one by one. A leaf whose \
+                       section is not planned is refused with the translate.plan call \
+                       that would cover it; fetch_segment never plans. \
+                       `injection_profile` overrides the unit's profile for this call \
+                       only; `neighbors` (0..=5, default 1) is the number of adjacent \
+                       segments on each side. `tm_hits` carries \
                        the nearest sealed segments of the same language pair, this one \
                        excluded, and `tm_status` says whether the translation memory was \
-                       consulted (`ok`), is `absent`, or was `unavailable`. Returns null \
-                       when no such segment exists or the library has no translation data."
+                       consulted (`ok`), is `absent`, or was `unavailable`. By \
+                       segment_id, returns null when no such segment exists or the \
+                       library has no translation data."
     )]
     async fn translate_fetch_segment(
         &self,

@@ -2596,7 +2596,9 @@ mod tests {
             None,
             &crate::translate::TranslateFetchSegmentArgs {
                 library: None,
-                segment_id: planned.segments[4].segment_id,
+                segment_id: Some(planned.segments[4].segment_id),
+                node_id: None,
+                target_lang: None,
                 injection_profile: None,
                 neighbors: None,
             },
@@ -3563,7 +3565,9 @@ mod tests {
             None,
             &crate::translate::TranslateFetchSegmentArgs {
                 library: None,
-                segment_id: ids[0],
+                segment_id: Some(ids[0]),
+                node_id: None,
+                target_lang: None,
                 injection_profile: None,
                 neighbors: None,
             },

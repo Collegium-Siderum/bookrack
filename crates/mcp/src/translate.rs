@@ -28,6 +28,7 @@ use bookrack_translate::glossary_translations::TranslationRow;
 use bookrack_translate::injection::GlossaryHitRow;
 use bookrack_translate::meta::TmStamps;
 use bookrack_translate::pending::{PendingTotals, PendingUnit};
+use bookrack_translate::segmentation::{Triage, triage};
 use bookrack_translate::segments::{SegmentRow, span_sha256_hex};
 use bookrack_translate::{Translate, TranslateError};
 use rmcp::schemars;
@@ -68,11 +69,22 @@ const REFS_MIN_SEVERITY: &str = "warn";
 // Argument and reply shapes
 // ---------------------------------------------------------------------------
 
-/// Arguments for `translate.fetch_segment`.
+/// Arguments for `translate.fetch_segment`. A segment is addressed
+/// either by `segment_id`, or by a corpus leaf's `node_id` together
+/// with the `target_lang` it was planned into; exactly one of the two
+/// addresses is given.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TranslateFetchSegmentArgs {
     pub library: Option<String>,
-    pub segment_id: i64,
+    /// The segment to fetch.
+    pub segment_id: Option<i64>,
+    /// A corpus leaf to fetch the segment covering; the first of
+    /// several in document order, the rest listed in
+    /// `matching_segments`.
+    pub node_id: Option<i64>,
+    /// The target language the leaf's unit was planned into; required
+    /// with `node_id`.
+    pub target_lang: Option<String>,
     /// Injection profile for this call only; the unit's own profile
     /// is not changed.
     pub injection_profile: Option<String>,
@@ -194,11 +206,39 @@ pub struct TmHit {
     pub score: f64,
 }
 
+/// One segment covering the leaf a node-addressed fetch named.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SegmentMatch {
+    pub segment_id: i64,
+    pub span: SpanRef,
+    pub status: String,
+}
+
+impl From<&SegmentRow> for SegmentMatch {
+    fn from(row: &SegmentRow) -> Self {
+        SegmentMatch {
+            segment_id: row.segment_id,
+            span: SpanRef {
+                start_node_id: row.start_node_id,
+                start_char_offset: row.start_char_offset,
+                end_node_id: row.end_node_id,
+                end_char_offset: row.end_char_offset,
+            },
+            status: row.status.clone(),
+        }
+    }
+}
+
 /// Reply of `translate.fetch_segment`: everything a translation prompt
 /// for one segment needs, in one package.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct TranslateFetchSegmentResult {
     pub segment_id: i64,
+    /// Every segment covering the addressed leaf, in document order,
+    /// the fetched one included, when the fetch is by `node_id`; empty
+    /// when it is by `segment_id`. A leaf cut into several segments, or
+    /// one inside a segment spanning several leaves, shows here.
+    pub matching_segments: Vec<SegmentMatch>,
     pub unit_id: i64,
     pub intake_id: i64,
     pub target_lang: String,
@@ -352,6 +392,72 @@ pub enum TranslateToolError {
         segment_id: i64,
     },
 
+    /// A node-addressed fetch named a node the corpus does not have.
+    #[error("node {node_id} does not exist")]
+    UnknownNode {
+        /// The id that matched nothing.
+        node_id: i64,
+    },
+
+    /// A node-addressed fetch named an organizing node.
+    #[error("node {node_id} is a {node_type}, not a leaf")]
+    NodeNotALeaf {
+        /// The organizing node.
+        node_id: i64,
+        /// Its type, as the corpus names it.
+        node_type: String,
+    },
+
+    /// A node-addressed fetch named a leaf that is not part of the text.
+    #[error("node {node_id} carries no text: {reason}")]
+    NodeCarriesNoText {
+        /// The leaf.
+        node_id: i64,
+        /// Its type, as the corpus names it.
+        node_type: String,
+        /// Why a plan excludes it.
+        reason: &'static str,
+    },
+
+    /// A node-addressed fetch named a leaf a plan leaves untranslated.
+    #[error("leaf {node_id} is left untranslated: {reason}")]
+    LeafSkipped {
+        /// The leaf.
+        node_id: i64,
+        /// Its type, as the corpus names it.
+        node_type: String,
+        /// The plan's verdict.
+        reason: String,
+    },
+
+    /// No unit of the target language covers the leaf's section.
+    #[error("no unit covers node {node_id} for {target_lang}")]
+    UnitNotPlanned {
+        /// The leaf.
+        node_id: i64,
+        /// The book it belongs to.
+        intake_id: i64,
+        /// The language asked for.
+        target_lang: String,
+        /// The organizing node a plan would have to cover.
+        chapter_node_id: i64,
+    },
+
+    /// The leaf's unit is planned, but no segment covers the leaf.
+    #[error("no segment covers leaf {node_id} in unit {unit_id}")]
+    LeafUnplanned {
+        /// The leaf.
+        node_id: i64,
+        /// The unit covering its section.
+        unit_id: i64,
+        /// The book it belongs to.
+        intake_id: i64,
+        /// The language asked for.
+        target_lang: String,
+        /// The organizing node the unit is planned on.
+        chapter_node_id: i64,
+    },
+
     /// A segment names a unit that does not exist.
     #[error("segment {segment_id} names missing unit {unit_id}")]
     BrokenUnitLink {
@@ -411,6 +517,71 @@ impl Explain for TranslateToolError {
                  re-extracted since.",
             )
             .hint("Re-anchoring the segments of a re-ingested book arrives with the reaudit tool."),
+            TranslateToolError::UnknownNode { node_id } => {
+                Problem::new(format!("cannot locate a segment for node {node_id}: no such node"))
+                    .hint(
+                        "Pass a leaf's node_id as library.search, library.context_window or \
+                         library.show_toc report it.",
+                    )
+            }
+            TranslateToolError::NodeNotALeaf { node_id, node_type } => Problem::new(format!(
+                "cannot locate a segment for node {node_id}: a {node_type} is a section, not a leaf"
+            ))
+            .hint(
+                "Pass the node_id of a paragraph or other leaf; to plan this section itself, \
+                 call translate.plan with it as chapter_node_id.",
+            ),
+            TranslateToolError::NodeCarriesNoText {
+                node_id,
+                node_type,
+                reason,
+            } => Problem::new(format!(
+                "cannot locate a segment for node {node_id}: a {node_type} is not part of the text"
+            ))
+            .detail(format!("A plan excludes the leaf: {reason}."))
+            .hint("Only leaves that carry prose are planned into segments; nothing here needs translating."),
+            TranslateToolError::LeafSkipped {
+                node_id,
+                node_type,
+                reason,
+            } => Problem::new(format!(
+                "cannot fetch a segment for node {node_id}: a plan leaves this {node_type} untranslated"
+            ))
+            .detail(format!("The plan's verdict for the leaf is: {reason}."))
+            .hint("Planning again leaves the leaf as it is; render it by hand if it needs a translation."),
+            TranslateToolError::UnitNotPlanned {
+                node_id,
+                intake_id,
+                target_lang,
+                chapter_node_id,
+            } => Problem::new(format!(
+                "no translation unit covers node {node_id} for {target_lang}"
+            ))
+            .detail(format!(
+                "The leaf's section, node {chapter_node_id}, has not been planned into \
+                 {target_lang}; fetch_segment never plans."
+            ))
+            .hint(format!(
+                "Run translate.plan with intake_id {intake_id}, target_lang \"{target_lang}\" and \
+                 chapter_node_id {chapter_node_id}, then fetch this node again."
+            )),
+            TranslateToolError::LeafUnplanned {
+                node_id,
+                unit_id,
+                intake_id,
+                target_lang,
+                chapter_node_id,
+            } => Problem::new(format!("no segment covers node {node_id} in its unit"))
+                .detail(format!(
+                    "Unit {unit_id} covers the leaf's section, node {chapter_node_id}, but none \
+                     of its segments touches this leaf; the leaf entered the book after the \
+                     unit was planned."
+                ))
+                .hint(format!(
+                    "Run translate.plan with intake_id {intake_id}, target_lang \"{target_lang}\" \
+                     and chapter_node_id {chapter_node_id} again: a plan only slices leaves no \
+                     segment touches, so the rest of the unit is left as it is."
+                )),
             TranslateToolError::BrokenUnitLink {
                 segment_id,
                 unit_id,
@@ -519,9 +690,9 @@ pub(crate) fn segment_source_text(corpus: &Corpus, segment: &SegmentRow) -> Tool
     ))
 }
 
-/// Document-order position of a segment's first leaf, looked up once
-/// per node. A node the corpus no longer has sorts last.
-fn start_position(
+/// Document-order position of a leaf, looked up once per node. A node
+/// the corpus no longer has sorts last.
+fn leaf_position(
     corpus: &Corpus,
     positions: &mut HashMap<i64, Option<i64>>,
     node_id: i64,
@@ -534,6 +705,151 @@ fn start_position(
         .and_then(|n| n.toc_lo);
     positions.insert(node_id, pos);
     Ok(pos)
+}
+
+/// How a fetch names its segment.
+enum Address {
+    Segment(i64),
+    Node { node_id: i64, target_lang: String },
+}
+
+/// Read the one address the arguments carry.
+fn address_of(args: &TranslateFetchSegmentArgs) -> ToolResult<Address> {
+    match (args.segment_id, args.node_id, args.target_lang.as_deref()) {
+        (Some(_), Some(_), _) => Err(TranslateToolError::InvalidArgument(
+            "`segment_id` and `node_id` are two addresses for one segment; pass one".to_owned(),
+        )),
+        (None, None, _) => Err(TranslateToolError::InvalidArgument(
+            "one of `segment_id` and `node_id` is required".to_owned(),
+        )),
+        (Some(segment_id), None, _) => Ok(Address::Segment(segment_id)),
+        (None, Some(node_id), Some(lang)) if !lang.trim().is_empty() => Ok(Address::Node {
+            node_id,
+            target_lang: lang.to_owned(),
+        }),
+        (None, Some(_), _) => Err(TranslateToolError::InvalidArgument(
+            "`target_lang` is required with `node_id`".to_owned(),
+        )),
+    }
+}
+
+/// A leaf a node-addressed fetch resolved: the node, the book it
+/// belongs to, and the organizing node whose unit covers it.
+struct TranslatableLeaf {
+    node: Node,
+    intake_id: i64,
+    chapter_node_id: i64,
+}
+
+impl TranslatableLeaf {
+    fn not_planned(&self, target_lang: &str) -> TranslateToolError {
+        TranslateToolError::UnitNotPlanned {
+            node_id: self.node.node_id.get(),
+            intake_id: self.intake_id,
+            target_lang: target_lang.to_owned(),
+            chapter_node_id: self.chapter_node_id,
+        }
+    }
+}
+
+/// Resolve `node_id` to a leaf a plan turns into segments. An unknown
+/// node, an organizing node, a leaf a plan excludes or skips, and an
+/// empty leaf are each refused with their own reason; the verdict is
+/// the plan's own `triage`, so the answer matches what a plan would
+/// do with the leaf.
+fn translatable_leaf(corpus: &Corpus, node_id: i64) -> ToolResult<TranslatableLeaf> {
+    let Some(node) = corpus.get_node(NodeId::new(node_id))? else {
+        return Err(TranslateToolError::UnknownNode { node_id });
+    };
+    let node_type = node.node_type.as_str().to_owned();
+    if node.node_type.is_organizing() {
+        return Err(TranslateToolError::NodeNotALeaf { node_id, node_type });
+    }
+    match triage(node.node_type) {
+        Triage::Exclude(reason) => {
+            return Err(TranslateToolError::NodeCarriesNoText {
+                node_id,
+                node_type,
+                reason,
+            });
+        }
+        Triage::Skip { reason, .. } => {
+            return Err(TranslateToolError::LeafSkipped {
+                node_id,
+                node_type,
+                reason: reason.to_owned(),
+            });
+        }
+        Triage::Segment | Triage::SegmentWhole => {}
+    }
+    if node.text_content.as_deref().unwrap_or("").is_empty() {
+        return Err(TranslateToolError::LeafSkipped {
+            node_id,
+            node_type,
+            reason: "empty leaf".to_owned(),
+        });
+    }
+    // A unit's leaves are the direct children of its node, so the
+    // leaf's parent is the node a unit covering it is planned on; the
+    // book is the leaf's id partition.
+    let intake_id = node.node_id.partition().get();
+    let chapter_node_id = node.parent_id.map(NodeId::get).unwrap_or(node_id);
+    Ok(TranslatableLeaf {
+        node,
+        intake_id,
+        chapter_node_id,
+    })
+}
+
+/// The segments of `target_lang` covering `leaf`, in document order,
+/// as the fetched segment plus the whole list. Coverage is decided by
+/// document position: a segment covers the leaf when the leaf's
+/// position lies between those of the segment's first and last leaf.
+/// Node ids are not ordering keys, so an id range would get a span
+/// whose ids run against the text wrong.
+fn segments_covering_leaf(
+    translate: &Translate,
+    corpus: &Corpus,
+    leaf: &TranslatableLeaf,
+    target_lang: &str,
+) -> ToolResult<(SegmentRow, Vec<SegmentMatch>)> {
+    let node_id = leaf.node.node_id.get();
+    let Some(unit) = translate.unit_by_key(leaf.intake_id, target_lang, leaf.chapter_node_id)?
+    else {
+        return Err(leaf.not_planned(target_lang));
+    };
+    let mut positions = HashMap::new();
+    let mut covering = Vec::new();
+    for segment in translate.segments_in_unit(unit.unit_id)? {
+        let start = leaf_position(corpus, &mut positions, segment.start_node_id)?;
+        let end = leaf_position(corpus, &mut positions, segment.end_node_id)?;
+        let covers = match (leaf.node.toc_lo, start, end) {
+            (Some(pos), Some(lo), Some(hi)) => lo <= pos && pos <= hi,
+            _ => segment.start_node_id == node_id || segment.end_node_id == node_id,
+        };
+        if covers {
+            covering.push((
+                start.unwrap_or(i64::MAX),
+                segment.start_char_offset,
+                segment,
+            ));
+        }
+    }
+    covering.sort_by_key(|(pos, offset, s)| (*pos, *offset, s.segment_id));
+    let matching = covering
+        .iter()
+        .map(|(_, _, s)| SegmentMatch::from(s))
+        .collect();
+    let Some((_, _, first)) = covering.into_iter().next() else {
+        return Err(TranslateToolError::LeafUnplanned {
+            node_id,
+            unit_id: unit.unit_id,
+            intake_id: leaf.intake_id,
+            target_lang: target_lang.to_owned(),
+            chapter_node_id: leaf.chapter_node_id,
+        });
+    };
+    Ok((first, matching))
 }
 
 /// Split `refs://<slug>#<key>` at the first `#`. Anything else is not
@@ -586,9 +902,13 @@ fn assemble_refs_hits(
 
 /// Build the `translate.fetch_segment` package.
 ///
-/// `None` when there is no translation store or no such segment. The
-/// segment's source text is read from the corpus and checked against
-/// the recorded fingerprint before anything else is assembled.
+/// By `segment_id`, `None` when there is no translation store or no
+/// such segment. By `node_id`, the leaf is resolved first and every
+/// way it can fail to name a segment is an error with its own next
+/// step, a missing store included: nothing is planned then, and the
+/// plan hint is the answer. The segment's source text is read from
+/// the corpus and checked against the recorded fingerprint before
+/// anything else is assembled.
 ///
 /// The translation memory is not consulted here: the package comes
 /// back with `tm_status = absent` and no hits, and
@@ -603,10 +923,25 @@ pub(crate) fn fetch_segment_logic(
     catalog: Option<&Catalog>,
     args: &TranslateFetchSegmentArgs,
 ) -> ToolResult<Option<TranslateFetchSegmentResult>> {
-    let Some(translate) = translate else {
-        return Ok(None);
+    let (segment, matching_segments) = match address_of(args)? {
+        Address::Segment(segment_id) => match translate.map(|t| t.segment(segment_id)) {
+            Some(Ok(Some(segment))) => (segment, Vec::new()),
+            Some(Ok(None)) | None => return Ok(None),
+            Some(Err(e)) => return Err(e.into()),
+        },
+        Address::Node {
+            node_id,
+            target_lang,
+        } => {
+            let leaf = translatable_leaf(corpus, node_id)?;
+            let Some(translate) = translate else {
+                return Err(leaf.not_planned(&target_lang));
+            };
+            segments_covering_leaf(translate, corpus, &leaf, &target_lang)?
+        }
     };
-    let Some(segment) = translate.segment(args.segment_id)? else {
+    // Both arms have returned by now when there is no store.
+    let Some(translate) = translate else {
         return Ok(None);
     };
     let Some(unit) = translate.unit(segment.unit_id)? else {
@@ -629,7 +964,7 @@ pub(crate) fn fetch_segment_logic(
     let mut positions = HashMap::new();
     let mut siblings = Vec::new();
     for sibling in translate.segments_in_unit(unit.unit_id)? {
-        let pos = start_position(corpus, &mut positions, sibling.start_node_id)?;
+        let pos = leaf_position(corpus, &mut positions, sibling.start_node_id)?;
         siblings.push((pos.unwrap_or(i64::MAX), sibling.start_char_offset, sibling));
     }
     siblings.sort_by_key(|(pos, offset, s)| (*pos, *offset, s.segment_id));
@@ -706,6 +1041,7 @@ pub(crate) fn fetch_segment_logic(
 
     Ok(Some(TranslateFetchSegmentResult {
         segment_id: segment.segment_id,
+        matching_segments,
         unit_id: unit.unit_id,
         intake_id: unit.intake_id,
         target_lang: unit.target_lang.clone(),
@@ -855,6 +1191,44 @@ mod tests {
         ids[1..].to_vec()
     }
 
+    /// Like [`seed_corpus`], but the leaf ids run against document
+    /// order: the first leaf in the book carries the highest id.
+    /// Returns the leaves in document order.
+    fn seed_corpus_ids_reversed(
+        corpus: &mut Corpus,
+        intake_id: i64,
+        texts: [&str; 3],
+    ) -> Vec<NodeId> {
+        let partition = corpus.allocate_partition(intake_id).expect("partition");
+        let root = partition.book_root_id;
+        corpus
+            .insert_node(&NewNode::root(root, NodeType::Work).title("A Book"))
+            .expect("root");
+        let ids = corpus.allocate_node_ids(partition.idx, 4).expect("ids");
+        corpus
+            .insert_node(
+                &NewNode::child(ids[0], root, root, 0, 1, NodeType::Chapter)
+                    .title("Chapter One")
+                    .toc_span(0, 2),
+            )
+            .expect("chapter");
+        let mut leaves = Vec::new();
+        for (i, text) in texts.iter().enumerate() {
+            let pos = i64::try_from(i).expect("small");
+            let id = ids[texts.len() - i];
+            corpus
+                .insert_node(
+                    &NewNode::child(id, ids[0], root, pos, 2, NodeType::Paragraph)
+                        .text(*text)
+                        .text_stats(i64::try_from(text.chars().count()).expect("small"), 1)
+                        .toc_span(pos, pos),
+                )
+                .expect("leaf");
+            leaves.push(id);
+        }
+        leaves
+    }
+
     /// Seed one row through plain SQL and return the id it reports.
     fn sql(conn: &rusqlite::Connection, statement: &str, params: &[&dyn rusqlite::ToSql]) -> i64 {
         conn.query_row(statement, params, |row| row.get(0))
@@ -862,12 +1236,22 @@ mod tests {
     }
 
     fn unit(conn: &rusqlite::Connection, intake_id: i64, node_id: i64, profile: &str) -> i64 {
+        unit_in(conn, intake_id, "zh", node_id, profile)
+    }
+
+    fn unit_in(
+        conn: &rusqlite::Connection,
+        intake_id: i64,
+        target_lang: &str,
+        node_id: i64,
+        profile: &str,
+    ) -> i64 {
         sql(
             conn,
             "INSERT INTO translate_units (intake_id, target_lang, node_id, unit_order, \
-             source_outline, injection_profile) VALUES (?1, 'zh', ?2, 0, 'I > 1', ?3) \
+             source_outline, injection_profile) VALUES (?1, ?2, ?3, 0, 'I > 1', ?4) \
              RETURNING unit_id",
-            &[&intake_id, &node_id, &profile],
+            &[&intake_id, &target_lang, &node_id, &profile],
         )
     }
 
@@ -970,22 +1354,71 @@ mod tests {
     fn fetch(segment_id: i64) -> TranslateFetchSegmentArgs {
         TranslateFetchSegmentArgs {
             library: None,
-            segment_id,
+            segment_id: Some(segment_id),
+            node_id: None,
+            target_lang: None,
             injection_profile: None,
             neighbors: None,
         }
     }
 
-    /// One book of three leaves, one unit, three segments: a sealed
-    /// one on leaf 0, the fetched one on leaf 1, a draft one on leaf 2.
-    /// The translation store is a real file, written through the
-    /// writable open once and then seeded over a plain connection, so
-    /// every read in a test goes through the read-only door.
+    fn by_node(node_id: NodeId, target_lang: &str) -> TranslateFetchSegmentArgs {
+        TranslateFetchSegmentArgs {
+            library: None,
+            segment_id: None,
+            node_id: Some(node_id.get()),
+            target_lang: Some(target_lang.to_owned()),
+            injection_profile: None,
+            neighbors: None,
+        }
+    }
+
+    /// The organizing node a leaf hangs from.
+    fn parent_of(corpus: &Corpus, leaf: NodeId) -> NodeId {
+        corpus
+            .get_node(leaf)
+            .expect("read")
+            .expect("leaf")
+            .parent_id
+            .expect("a leaf has a parent")
+    }
+
+    /// Add one more leaf of `node_type` under `parent` at document
+    /// position `pos`.
+    fn add_leaf(
+        corpus: &mut Corpus,
+        parent: NodeId,
+        pos: i64,
+        node_type: NodeType,
+        text: Option<&str>,
+    ) -> NodeId {
+        let root = parent.partition().root();
+        let id = corpus
+            .allocate_node_ids(parent.partition(), 1)
+            .expect("ids")[0];
+        let mut node = NewNode::child(id, parent, root, pos, 2, node_type).toc_span(pos, pos);
+        if let Some(text) = text {
+            node = node
+                .text(text)
+                .text_stats(i64::try_from(text.chars().count()).expect("small"), 1);
+        }
+        corpus.insert_node(&node).expect("leaf");
+        id
+    }
+
+    /// One book of three leaves under one chapter, one unit on that
+    /// chapter, three segments: a sealed one on leaf 0, the fetched
+    /// one on leaf 1, a draft one on leaf 2. The translation store is
+    /// a real file, written through the writable open once and then
+    /// seeded over a plain connection, so every read in a test goes
+    /// through the read-only door.
     struct Fixture {
         _dir: tempfile::TempDir,
         translate_db: std::path::PathBuf,
         conn: rusqlite::Connection,
         corpus: Corpus,
+        chapter: NodeId,
+        leaves: Vec<NodeId>,
         unit_id: i64,
         sealed: i64,
         current: i64,
@@ -1012,7 +1445,8 @@ mod tests {
             1,
             ["Erster Absatz.", "Das Dasein ist Sorge.", "Dritter Absatz."],
         );
-        let unit_id = unit(&conn, 1, leaves[0].get(), profile);
+        let chapter = parent_of(&corpus, leaves[0]);
+        let unit_id = unit(&conn, 1, chapter.get(), profile);
         let whole = |text: &str| (0, i64::try_from(text.chars().count()).expect("small"));
         let (lo, hi) = whole("Erster Absatz.");
         let sealed = segment(
@@ -1051,10 +1485,42 @@ mod tests {
             translate_db,
             conn,
             corpus,
+            chapter,
+            leaves,
             unit_id,
             sealed,
             current,
             later,
+        }
+    }
+
+    impl Fixture {
+        fn fetch_by_node(
+            &self,
+            node: NodeId,
+            lang: &str,
+        ) -> ToolResult<Option<TranslateFetchSegmentResult>> {
+            fetch_segment_logic(
+                Some(&self.translate()),
+                &self.corpus,
+                None,
+                &catalogs(),
+                None,
+                &by_node(node, lang),
+            )
+        }
+
+        fn fetch_by_id(&self, segment_id: i64) -> TranslateFetchSegmentResult {
+            fetch_segment_logic(
+                Some(&self.translate()),
+                &self.corpus,
+                None,
+                &catalogs(),
+                None,
+                &fetch(segment_id),
+            )
+            .expect("fetch")
+            .expect("package")
         }
     }
 
@@ -1207,6 +1673,397 @@ mod tests {
         )
         .expect("fetch");
         assert_eq!(got, None);
+    }
+
+    fn whole_span(leaf: NodeId, text: &str) -> SpanRef {
+        SpanRef {
+            start_node_id: leaf.get(),
+            start_char_offset: 0,
+            end_node_id: leaf.get(),
+            end_char_offset: i64::try_from(text.chars().count()).expect("small"),
+        }
+    }
+
+    #[test]
+    fn a_leaf_addressed_by_node_fetches_the_same_package_as_its_segment() {
+        let f = fixture("default");
+        let by_id = f.fetch_by_id(f.current);
+        assert!(by_id.matching_segments.is_empty());
+
+        let by_node = f
+            .fetch_by_node(f.leaves[1], "zh")
+            .expect("fetch")
+            .expect("package");
+        assert_eq!(by_node.segment_id, f.current);
+        assert_eq!(
+            by_node.matching_segments,
+            vec![SegmentMatch {
+                segment_id: f.current,
+                span: whole_span(f.leaves[1], "Das Dasein ist Sorge."),
+                status: "draft".into(),
+            }]
+        );
+        assert_eq!(
+            TranslateFetchSegmentResult {
+                matching_segments: Vec::new(),
+                ..by_node
+            },
+            by_id
+        );
+    }
+
+    #[test]
+    fn a_leaf_cut_into_several_segments_lists_them_all_in_document_order() {
+        let f = fixture("default");
+        f.conn
+            .execute(
+                "DELETE FROM translate_segments WHERE segment_id = ?1",
+                [f.current],
+            )
+            .expect("drop the whole-leaf segment");
+        // The later half is inserted first, so segment ids run against
+        // the text's order.
+        let second = segment(
+            &f.conn,
+            f.unit_id,
+            (f.leaves[1], 11),
+            (f.leaves[1], 21),
+            &span_sha256_hex("ist Sorge."),
+            "sealed",
+        );
+        let first = segment(
+            &f.conn,
+            f.unit_id,
+            (f.leaves[1], 0),
+            (f.leaves[1], 11),
+            &span_sha256_hex("Das Dasein "),
+            "draft",
+        );
+        assert!(second < first);
+
+        let got = f
+            .fetch_by_node(f.leaves[1], "zh")
+            .expect("fetch")
+            .expect("package");
+        assert_eq!(got.segment_id, first);
+        assert_eq!(got.source_text, "Das Dasein ");
+        assert_eq!(got.neighbors_after, "ist Sorge.");
+        assert_eq!(
+            got.matching_segments
+                .iter()
+                .map(|m| (m.segment_id, m.span.start_char_offset, m.status.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(first, 0, "draft"), (second, 11, "sealed")]
+        );
+    }
+
+    #[test]
+    fn a_segment_spanning_three_leaves_is_found_from_its_middle_leaf() {
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let leaves = seed_corpus(&mut corpus, 1, ["abc\u{e9}def", "middle", "ghi jkl"]);
+        let chapter = parent_of(&corpus, leaves[0]);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let translate_db = dir.path().join("translate.db");
+        drop(Translate::open(&translate_db).expect("create"));
+        let conn = rusqlite::Connection::open(&translate_db).expect("seed connection");
+        let unit_id = unit(&conn, 1, chapter.get(), "default");
+        let expected = "\u{e9}def\n\nmiddle\n\nghi";
+        let id = segment(
+            &conn,
+            unit_id,
+            (leaves[0], 3),
+            (leaves[2], 3),
+            &span_sha256_hex(expected),
+            "draft",
+        );
+
+        let translate = Translate::open_read_only(&translate_db).expect("read-only open");
+        let got = fetch_segment_logic(
+            Some(&translate),
+            &corpus,
+            None,
+            &catalogs(),
+            None,
+            &by_node(leaves[1], "zh"),
+        )
+        .expect("fetch")
+        .expect("package");
+        assert_eq!(got.segment_id, id);
+        assert_eq!(got.source_text, expected);
+        assert_eq!(got.matching_segments.len(), 1);
+        assert_eq!(
+            got.matching_segments[0].span,
+            SpanRef {
+                start_node_id: leaves[0].get(),
+                start_char_offset: 3,
+                end_node_id: leaves[2].get(),
+                end_char_offset: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn document_order_decides_coverage_when_node_ids_run_against_it() {
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let leaves = seed_corpus_ids_reversed(&mut corpus, 1, ["one", "two", "three"]);
+        assert!(leaves[0] > leaves[1] && leaves[1] > leaves[2]);
+        let chapter = parent_of(&corpus, leaves[0]);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let translate_db = dir.path().join("translate.db");
+        drop(Translate::open(&translate_db).expect("create"));
+        let conn = rusqlite::Connection::open(&translate_db).expect("seed connection");
+        let unit_id = unit(&conn, 1, chapter.get(), "default");
+        let expected = "one\n\ntwo\n\nthree";
+        let id = segment(
+            &conn,
+            unit_id,
+            (leaves[0], 0),
+            (leaves[2], 5),
+            &span_sha256_hex(expected),
+            "draft",
+        );
+
+        let translate = Translate::open_read_only(&translate_db).expect("read-only open");
+        for leaf in &leaves {
+            let got = fetch_segment_logic(
+                Some(&translate),
+                &corpus,
+                None,
+                &catalogs(),
+                None,
+                &by_node(*leaf, "zh"),
+            )
+            .expect("fetch")
+            .expect("package");
+            assert_eq!(got.segment_id, id, "leaf {leaf}");
+        }
+        // The span's ids are inverted relative to its text, which is
+        // what an id-range test would get wrong.
+        let span = &fetch_segment_logic(
+            Some(&translate),
+            &corpus,
+            None,
+            &catalogs(),
+            None,
+            &by_node(leaves[1], "zh"),
+        )
+        .expect("fetch")
+        .expect("package")
+        .matching_segments[0]
+            .span;
+        assert!(span.start_node_id > span.end_node_id);
+    }
+
+    #[test]
+    fn target_languages_are_located_apart() {
+        let f = fixture("default");
+        let en_unit = unit_in(&f.conn, 1, "en", f.chapter.get(), "default");
+        let en = segment(
+            &f.conn,
+            en_unit,
+            (f.leaves[1], 0),
+            (f.leaves[1], 21),
+            &span_sha256_hex("Das Dasein ist Sorge."),
+            "draft",
+        );
+        assert_ne!(en, f.current);
+
+        let got = f
+            .fetch_by_node(f.leaves[1], "en")
+            .expect("fetch")
+            .expect("package");
+        assert_eq!((got.segment_id, got.target_lang.as_str()), (en, "en"));
+        let got = f
+            .fetch_by_node(f.leaves[1], "zh")
+            .expect("fetch")
+            .expect("package");
+        assert_eq!(
+            (got.segment_id, got.target_lang.as_str()),
+            (f.current, "zh")
+        );
+        let err = f
+            .fetch_by_node(f.leaves[1], "fr")
+            .expect_err("fr was never planned");
+        assert!(
+            matches!(
+                &err,
+                TranslateToolError::UnitNotPlanned { target_lang, .. } if target_lang == "fr"
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn an_unplanned_leaf_names_the_plan_call_that_would_cover_it() {
+        let mut f = fixture("default");
+        let other = seed_corpus(&mut f.corpus, 2, ["Un.", "Deux.", "Trois."]);
+        let chapter = parent_of(&f.corpus, other[1]);
+
+        let err = f
+            .fetch_by_node(other[1], "zh")
+            .expect_err("book 2 is not planned");
+        assert!(
+            matches!(
+                &err,
+                TranslateToolError::UnitNotPlanned { node_id, intake_id, target_lang, chapter_node_id }
+                    if *node_id == other[1].get() && *intake_id == 2 && target_lang == "zh"
+                        && *chapter_node_id == chapter.get()
+            ),
+            "{err:?}"
+        );
+        let hint = err.explain().data.hint.expect("hint");
+        assert!(hint.contains("translate.plan"), "{hint}");
+        assert!(hint.contains(&chapter.get().to_string()), "{hint}");
+
+        // No translation store at all is the same answer: nothing is planned.
+        let err = fetch_segment_logic(
+            None,
+            &f.corpus,
+            None,
+            &catalogs(),
+            None,
+            &by_node(f.leaves[1], "zh"),
+        )
+        .expect_err("no store");
+        assert!(
+            matches!(err, TranslateToolError::UnitNotPlanned { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn nodes_that_are_not_translatable_leaves_are_argument_errors() {
+        let mut f = fixture("default");
+        let figure = add_leaf(&mut f.corpus, f.chapter, 3, NodeType::Figure, None);
+
+        let err = f
+            .fetch_by_node(NodeId::new(999_999_999), "zh")
+            .expect_err("no such node");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::UnknownNode {
+                    node_id: 999_999_999
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(err.explain().data.hint.is_some());
+
+        let err = f
+            .fetch_by_node(f.chapter, "zh")
+            .expect_err("a chapter is not a leaf");
+        assert!(
+            matches!(&err, TranslateToolError::NodeNotALeaf { node_type, .. } if node_type == "chapter"),
+            "{err:?}"
+        );
+        assert!(
+            err.explain()
+                .data
+                .hint
+                .expect("hint")
+                .contains("translate.plan")
+        );
+
+        let err = f
+            .fetch_by_node(figure, "zh")
+            .expect_err("a figure carries no text");
+        assert!(
+            matches!(&err, TranslateToolError::NodeCarriesNoText { node_type, .. } if node_type == "figure"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn skipped_leaves_say_why_and_do_not_suggest_planning_again() {
+        let mut f = fixture("default");
+        let code = add_leaf(
+            &mut f.corpus,
+            f.chapter,
+            3,
+            NodeType::Code,
+            Some("let x = 1;"),
+        );
+        let empty = add_leaf(&mut f.corpus, f.chapter, 4, NodeType::Paragraph, Some(""));
+
+        let err = f.fetch_by_node(code, "zh").expect_err("code is skipped");
+        assert!(
+            matches!(&err, TranslateToolError::LeafSkipped { reason, .. } if reason == "not translatable"),
+            "{err:?}"
+        );
+        let hint = err.explain().data.hint.expect("hint");
+        assert!(!hint.contains("translate.plan"), "{hint}");
+
+        let err = f
+            .fetch_by_node(empty, "zh")
+            .expect_err("an empty leaf is skipped");
+        assert!(
+            matches!(&err, TranslateToolError::LeafSkipped { reason, .. } if reason == "empty leaf"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_leaf_added_after_the_plan_points_at_planning_again() {
+        let mut f = fixture("default");
+        let fresh = add_leaf(
+            &mut f.corpus,
+            f.chapter,
+            3,
+            NodeType::Paragraph,
+            Some("Vierter Absatz."),
+        );
+
+        let err = f
+            .fetch_by_node(fresh, "zh")
+            .expect_err("no segment covers the new leaf");
+        assert!(
+            matches!(
+                &err,
+                TranslateToolError::LeafUnplanned { node_id, unit_id, chapter_node_id, .. }
+                    if *node_id == fresh.get() && *unit_id == f.unit_id
+                        && *chapter_node_id == f.chapter.get()
+            ),
+            "{err:?}"
+        );
+        let hint = err.explain().data.hint.expect("hint");
+        assert!(hint.contains("translate.plan"), "{hint}");
+        assert!(hint.contains(&f.chapter.get().to_string()), "{hint}");
+    }
+
+    #[test]
+    fn exactly_one_address_is_required() {
+        let f = fixture("default");
+        let translate = f.translate();
+        let attempt = |args: TranslateFetchSegmentArgs| {
+            fetch_segment_logic(Some(&translate), &f.corpus, None, &catalogs(), None, &args)
+                .expect_err("refused")
+        };
+        let both = attempt(TranslateFetchSegmentArgs {
+            node_id: Some(f.leaves[1].get()),
+            target_lang: Some("zh".into()),
+            ..fetch(f.current)
+        });
+        assert!(
+            matches!(both, TranslateToolError::InvalidArgument(_)),
+            "{both:?}"
+        );
+        let neither = attempt(TranslateFetchSegmentArgs {
+            segment_id: None,
+            ..fetch(f.current)
+        });
+        assert!(
+            matches!(neither, TranslateToolError::InvalidArgument(_)),
+            "{neither:?}"
+        );
+        let no_lang = attempt(TranslateFetchSegmentArgs {
+            target_lang: None,
+            ..by_node(f.leaves[1], "zh")
+        });
+        assert!(
+            matches!(&no_lang, TranslateToolError::InvalidArgument(what) if what.contains("target_lang")),
+            "{no_lang:?}"
+        );
     }
 
     #[test]
