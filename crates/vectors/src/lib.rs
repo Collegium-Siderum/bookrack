@@ -26,6 +26,7 @@ pub use meta::{DEFAULT_INDEX_NAME, META_FILENAME, SCHEMA_VERSION, VectorsMeta};
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Float32Type, Int32Type, Int64Type};
@@ -454,6 +455,24 @@ pub struct ChunkStore {
     dim: usize,
 }
 
+/// Open a LanceDB connection on `lancedb_dir` with strong read
+/// consistency.
+///
+/// A connection checks for versions committed by other connections only
+/// as often as its read-consistency interval allows, and LanceDB's
+/// default is never. A zero interval makes every read on a table opened
+/// through this connection resolve the latest on-disk version first, so
+/// a handle held for the lifetime of a process observes deletes and
+/// rebuilds performed through other handles or other processes. The
+/// check reads one manifest per operation, which on local storage costs
+/// far less than the query it precedes.
+async fn connect(lancedb_dir: &Path) -> Result<lancedb::Connection> {
+    Ok(lancedb::connect(&lancedb_dir.to_string_lossy())
+        .read_consistency_interval(Duration::ZERO)
+        .execute()
+        .await?)
+}
+
 impl ChunkStore {
     /// Open the existing chunks table under `lancedb_dir`, or return
     /// `None` if no such table is on disk.
@@ -481,9 +500,7 @@ impl ChunkStore {
                 current: bookrack_dbkit::READER_VERSION,
             });
         }
-        let conn = lancedb::connect(&lancedb_dir.to_string_lossy())
-            .execute()
-            .await?;
+        let conn = connect(lancedb_dir).await?;
         let names = conn.table_names().execute().await?;
         if !names.iter().any(|name| name == TABLE) {
             return Ok(None);
@@ -522,9 +539,7 @@ impl ChunkStore {
             meta::remove(lancedb_dir)?;
             return Ok(());
         }
-        let conn = lancedb::connect(&lancedb_dir.to_string_lossy())
-            .execute()
-            .await?;
+        let conn = connect(lancedb_dir).await?;
         let names = conn.table_names().execute().await?;
         if names.iter().any(|name| name == TABLE) {
             conn.drop_table(TABLE, &[]).await?;
@@ -559,9 +574,7 @@ impl ChunkStore {
         // explicitly so the side effect on a fresh data root is intended
         // and visible at this call site rather than buried in the FFI.
         std::fs::create_dir_all(lancedb_dir)?;
-        let conn = lancedb::connect(&lancedb_dir.to_string_lossy())
-            .execute()
-            .await?;
+        let conn = connect(lancedb_dir).await?;
         let names = conn.table_names().execute().await?;
         let (table, dim) = if names.iter().any(|name| name == TABLE) {
             let table = conn.open_table(TABLE).execute().await?;
@@ -2263,5 +2276,50 @@ mod tests {
         // A second handle on the same directory finds the committed row.
         let reopened = ChunkStore::open(dir.path(), DIM).await.expect("reopen");
         assert_eq!(reopened.count_rows().await.expect("count"), 1);
+    }
+
+    /// A handle held open across a write made through a different handle
+    /// reads the table as it is on disk now, not as it was when the
+    /// handle was opened. Both the row count and a search must stop
+    /// seeing the deleted partition.
+    #[tokio::test]
+    async fn a_long_lived_handle_sees_a_delete_made_through_another_handle() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let reader = ChunkStore::open(dir.path(), DIM)
+            .await
+            .expect("open reader");
+        reader
+            .append(&[
+                row(1, 1, [1.0, 0.0, 0.0, 0.0]),
+                row(2, 1, [0.0, 1.0, 0.0, 0.0]),
+            ])
+            .await
+            .expect("append");
+        assert_eq!(reader.count_rows().await.expect("count before"), 2);
+
+        let writer = ChunkStore::open(dir.path(), DIM)
+            .await
+            .expect("open writer");
+        writer
+            .delete_partition(PartitionIdx::new(1))
+            .await
+            .expect("delete");
+        drop(writer);
+
+        assert_eq!(
+            reader.count_rows().await.expect("count after"),
+            1,
+            "the reader still counts the deleted partition"
+        );
+        let hits = reader
+            .search(&[1.0, 0.0, 0.0, 0.0], 10)
+            .await
+            .expect("search after");
+        let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["chunk p2 o1"],
+            "the reader still returns deleted rows"
+        );
     }
 }
