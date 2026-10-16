@@ -180,6 +180,41 @@ impl Translate {
     }
 }
 
+/// A sealed segment joined to the unit fields the translation memory
+/// keys on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealedSegment {
+    pub segment: SegmentRow,
+    pub intake_id: i64,
+    pub target_lang: String,
+}
+
+impl Translate {
+    /// Every sealed segment of the store, or of one book, joined to its
+    /// unit, in `(intake_id, target_lang, unit_order, start_node_id,
+    /// start_char_offset)` order.
+    pub fn sealed_segments(&self, intake_id: Option<i64>) -> TranslateResult<Vec<SealedSegment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.segment_id, s.unit_id, s.start_node_id, s.start_char_offset, \
+             s.end_node_id, s.end_char_offset, s.source_text_sha, s.status, s.draft_text, \
+             s.reflection_notes, s.final_text, s.source_kind, s.sealed_at, s.version, \
+             u.intake_id, u.target_lang FROM translate_segments s \
+             JOIN translate_units u ON u.unit_id = s.unit_id \
+             WHERE s.status = 'sealed' AND (?1 IS NULL OR u.intake_id = ?1) \
+             ORDER BY u.intake_id, u.target_lang, u.unit_order, s.start_node_id, \
+             s.start_char_offset",
+        )?;
+        let rows = stmt.query_map([intake_id], |row| {
+            Ok(SealedSegment {
+                segment: read_segment(row)?,
+                intake_id: row.get(14)?,
+                target_lang: row.get(15)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
+
 /// One segment to insert: a span and the fingerprint of the text it
 /// covers. Status starts at `draft`, version at 1.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -482,6 +517,46 @@ mod tests {
     fn an_unknown_segment_reads_as_none() {
         let t = seed::fresh();
         assert_eq!(t.segment(404).expect("read"), None);
+    }
+
+    /// Seal `segment_id` by filling it with text and locking it, the
+    /// two writes a sealed row can come from.
+    fn seal(t: &Translate, segment_id: i64, source_kind: &str) {
+        t.import_fill(segment_id, "final").expect("fill");
+        t.seal_segment(segment_id, 2, source_kind, "2026-01-01T00:00:00Z")
+            .expect("seal");
+    }
+
+    #[test]
+    fn sealed_segments_lists_only_sealed_rows_with_their_unit_fields_in_order() {
+        let t = seed::fresh();
+        let later_unit = seed::unit(&t, 1, "zh", 11, 1);
+        let first_unit = seed::unit(&t, 1, "zh", 10, 0);
+        let other_book = seed::unit(&t, 2, "en", 20, 0);
+        let in_later = seed::segment(&t, later_unit, 11, 0, 5, "draft");
+        let in_first_late = seed::segment(&t, first_unit, 10, 40, 60, "draft");
+        let in_first = seed::segment(&t, first_unit, 10, 0, 40, "draft");
+        let elsewhere = seed::segment(&t, other_book, 20, 0, 5, "draft");
+        let draft = seed::segment(&t, first_unit, 10, 60, 70, "draft");
+        let proposed = seed::segment(&t, first_unit, 10, 70, 80, "draft");
+        for id in [in_later, in_first_late, in_first, elsewhere] {
+            seal(&t, id, "human");
+        }
+        t.import_fill(proposed, "pending").expect("fill");
+        let _ = draft;
+
+        let all = t.sealed_segments(None).expect("read");
+        let ids: Vec<i64> = all.iter().map(|s| s.segment.segment_id).collect();
+        assert_eq!(ids, vec![in_first, in_first_late, in_later, elsewhere]);
+        assert!(all.iter().all(|s| s.segment.status == "sealed"));
+        assert_eq!((all[0].intake_id, all[0].target_lang.as_str()), (1, "zh"));
+        assert_eq!((all[3].intake_id, all[3].target_lang.as_str()), (2, "en"));
+        assert_eq!(all[0].segment.final_text.as_deref(), Some("final"));
+
+        let scoped = t.sealed_segments(Some(2)).expect("read");
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].segment.segment_id, elsewhere);
+        assert!(t.sealed_segments(Some(3)).expect("read").is_empty());
     }
 
     #[test]

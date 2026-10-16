@@ -57,6 +57,7 @@ pub const ACTIONS: &[&str] = &[
     "term_create",
     "translation_add",
     "set_primary",
+    "tm_rebuild",
 ];
 
 /// What an audit row is about: at most one of the three id columns.

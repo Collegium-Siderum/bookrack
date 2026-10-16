@@ -243,6 +243,24 @@ pub enum TranslateError {
         /// The values the vocabulary admits.
         known: &'static [&'static str],
     },
+
+    /// The translation memory was built with other parameters than
+    /// this build embeds with: another model, another vector width, or
+    /// another row layout.
+    #[error("translation memory stamp {key} is {stored:?}, this build expects {expected:?}")]
+    TmStampMismatch {
+        /// The `translate_meta` key that differs.
+        key: &'static str,
+        /// The value recorded in the store.
+        stored: String,
+        /// The value this build would record.
+        expected: String,
+    },
+
+    /// The translation memory holds rows but no complete set of build
+    /// stamps, so nothing says which model wrote them.
+    #[error("translation memory carries rows but no build stamps")]
+    TmUnstamped,
 }
 
 /// The next step every refused segment write shares.
@@ -417,6 +435,37 @@ impl Explain for TranslateError {
                             .join(", ")
                     ))
                     .hint(format!("Pass one of the known {what} values."))
+            }
+
+            TranslateError::TmStampMismatch {
+                key,
+                stored,
+                expected,
+            } => Problem::new(format!(
+                "cannot use the translation memory: `{key}` was built as {stored:?}, this build \
+                 embeds as {expected:?}"
+            ))
+            .detail(
+                "Every row of the memory was embedded by one model at one width; vectors from \
+                 another model are not comparable, so a memory built elsewhere is never searched \
+                 or extended.",
+            )
+            .hint(
+                "Run translate.tm_rebuild on the whole library to re-embed every sealed segment \
+                 with this build's model, or restore the embedding model the memory was built \
+                 with.",
+            ),
+
+            TranslateError::TmUnstamped => {
+                Problem::new("cannot use the translation memory: it carries rows but no build stamps")
+                    .detail(
+                        "A rebuild was interrupted before it stamped the memory, or the store \
+                         predates the stamps; a partial memory is never served.",
+                    )
+                    .hint(
+                        "Run translate.tm_rebuild on the whole library (no `intake_id`); it \
+                         starts from an empty memory and stamps it once every row is written.",
+                    )
             }
 
             TranslateError::Verify(source) => {

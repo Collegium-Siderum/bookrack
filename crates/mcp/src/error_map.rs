@@ -152,11 +152,16 @@ pub(crate) fn translate_error_to_mcp(e: TranslateToolError) -> ErrorData {
             | TranslateError::UnknownTranslation { .. }
             | TranslateError::UnknownValue { .. },
         ) => ErrorCode::INVALID_PARAMS,
+        // A translation memory built by another model, or left
+        // unstamped by an interrupted rebuild, is a store this build
+        // cannot serve until it is rebuilt.
         TranslateToolError::Translate(
             TranslateError::SchemaTooNew { .. }
             | TranslateError::SchemaTooOld { .. }
             | TranslateError::ReaderTooOld { .. }
-            | TranslateError::Verify(_),
+            | TranslateError::Verify(_)
+            | TranslateError::TmStampMismatch { .. }
+            | TranslateError::TmUnstamped,
         ) => ErrorCode(STATE_UNUSABLE),
         TranslateToolError::Translate(TranslateError::Sqlite(_) | TranslateError::Migrate(_))
         | TranslateToolError::Corpus(_)
@@ -251,6 +256,33 @@ mod tests {
         let expected = e.to_string(); // error-boundary-check: allow
         let data = ops_error_to_mcp(e);
         assert_eq!(data.message, expected);
+    }
+
+    #[test]
+    fn a_translation_memory_built_elsewhere_or_unstamped_is_state_unusable_with_a_rebuild_hint() {
+        use bookrack_translate::TranslateError;
+        for err in [
+            TranslateError::TmStampMismatch {
+                key: "tm_embed_model",
+                stored: "model-a".into(),
+                expected: "model-b".into(),
+            },
+            TranslateError::TmUnstamped,
+        ] {
+            let mapped = translate_error_to_mcp(TranslateToolError::Translate(err));
+            assert_eq!(mapped.code, ErrorCode(STATE_UNUSABLE), "{}", mapped.message);
+            let data: bookrack_core::ProblemData =
+                serde_json::from_value(mapped.data.expect("data slot filled"))
+                    .expect("ProblemData");
+            assert!(
+                data.hint
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("translate.tm_rebuild"),
+                "hint: {:?}",
+                data.hint
+            );
+        }
     }
 
     #[test]
