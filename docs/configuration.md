@@ -281,9 +281,8 @@ collision matters more than a stable URL.
 
 ### When `.env` is read
 
-`.env` is loaded by the binaries — `bookrack`, `bookrack-mcp`, and the
-desktop shell — as the first thing each of them does, before anything
-reads a variable. The search runs upward from the working directory,
+`.env` is loaded by the binaries — `bookrack` and `bookrack-mcp` — as
+the first thing each of them does, before anything reads a variable. The search runs upward from the working directory,
 so which file is found depends on where the command was started.
 
 Two consequences follow. A process that reads a variable does so after
@@ -339,7 +338,7 @@ managed directories the registry and the downloaded reranker live in, a
 those is something a project's configuration file is written to do.
 
 The admitted foreign names are admitted because there is a surface with
-no other way to set them: a desktop shell started from a file manager
+no other way to set them: a daemon started by a service manager
 inherits no `export`, and `.env` is then the only place a proxy or a
 certificate bundle can be named at all. The list is matched exactly, so
 `Http_Proxy` is not `HTTP_PROXY`.

@@ -189,18 +189,6 @@ tokio-stream = { version = "0.1", default-features = false, features = ["sync"] 
 # `crates/app/web/src/generated/`. The runtime crate's release build
 # does not link it. License: MIT.
 ts-rs = { version = "10", features = ["serde-compat", "no-serde-warnings"] }
-# Desktop shell framework for the `app` crate: webview window, tray
-# icon, and event loop. Default features (wry, compression,
-# dynamic-acl, x11/dbus on Linux, common-controls-v6 on Windows) plus
-# `tray-icon` for the persistent tray entry point.
-# License: MIT OR Apache-2.0.
-tauri = { version = "2", features = ["tray-icon"] }
-# Build-script companion of `tauri`: validates `tauri.conf.json` and
-# generates the ACL schemas the macro context consumes.
-tauri-build = "2"
-# Routes a second launch of the same app into the running instance's
-# callback instead of a second event loop. License: MIT OR Apache-2.0.
-tauri-plugin-single-instance = "2"
 # Tabular output renderer for the CLI's read-side commands (queue
 # list, libraries list, papers find/list/show). The render layer
 # wraps it behind `KvTable` / `RowTable` so subcommands compose
@@ -228,7 +216,7 @@ debug = "line-tables-only"
 # Same reasoning extended to the dev profile, which covers `cargo build`,
 # `cargo check`, `cargo clippy`, and the `rust-analyzer` worker. Full
 # DWARF across a 27-crate workspace with heavy dependency trees
-# (lance/arrow, tantivy, the Tauri webview stack, pdfium-render) inflates
+# (lance/arrow, tantivy, pdfium-render) inflates
 # `target/debug` by hundreds of gigabytes once incremental caches
 # accumulate. Line tables preserve panic backtraces and `RUST_BACKTRACE=1`
 # symbol names; stepping a debugger into third-party crates loses local

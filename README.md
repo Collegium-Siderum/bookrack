@@ -203,9 +203,7 @@ Clone the repo and build the two binaries:
 cargo build --release -p bookrack-cli -p bookrack-mcp
 ```
 
-The two `-p` flags are not optional: a bare `cargo build` also builds
-the desktop shell, which needs the WebKitGTK, GTK and AppIndicator
-development packages on Linux. The binaries land in `target/release/`.
+The binaries land in `target/release/`.
 
 Two limits of a source build. It is not portable across CPU
 generations: the vector library compiles with `-march=native`, so run
