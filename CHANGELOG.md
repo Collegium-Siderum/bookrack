@@ -51,7 +51,8 @@ release workflow extracts the matching section verbatim from this file.
   and prompt kind (with glossary, clean), and the brief that drives the
   book loop: plan, work the pending units one agent session each, apply
   the review tier at the end of a unit, and stop when the token budget
-  for a chapter or the book is spent. The skeletons are English, with
+  for a chapter or the book is spent; the brief states the defaults of
+  650,000 tokens per chapter and 2,000,000 per book. The skeletons are English, with
   the ten rules of the prompt contract as fixed headings; a translation
   prompt is written in its target language, so the dispatcher's first
   task for a language is to render them into it under the library's

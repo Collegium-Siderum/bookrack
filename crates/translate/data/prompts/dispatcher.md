@@ -21,7 +21,7 @@ The four translator skeletons shipped with bookrack are English. Before the firs
 
 ## Budget brake
 
-Every `translate.propose` and `translate.seal` call carries `cost_tokens`: the tokens the stage cost, as the chapter agent reports them. Add them up per unit as the receipts come back. When a unit's sum passes `{{budget_per_chapter}}`, or the book's running sum passes `{{budget_per_book}}`, stop after the current segment and wait for a person. The thresholds are set from the first measured chapter.
+Every `translate.propose` and `translate.seal` call carries `cost_tokens`: the tokens the stage cost, as the chapter agent reports them. Add them up per unit as the receipts come back. When a unit's sum passes `{{budget_per_chapter}}`, or the book's running sum passes `{{budget_per_book}}`, stop after the current segment and wait for a person. The thresholds were set from the first measured chapter: 650,000 tokens per chapter and 2,000,000 per book, unless the person running the loop fills in others.
 
 ## Guardrails
 

@@ -56,8 +56,8 @@ pub const PLACEHOLDERS: [&str; 8] = [
     "{{budget_per_chapter}}",
 ];
 
-/// Placeholder the dispatcher fills once the first chapter has been
-/// measured.
+/// Placeholder for the book budget; the brief states the default beside
+/// it, so the person running the loop fills it in only to override.
 pub const BUDGET_PER_BOOK: &str = "{{budget_per_book}}";
 
 /// Every shipped skeleton with its file name, the four translator
@@ -164,6 +164,7 @@ mod tests {
             "cost_tokens",
             "{{budget_per_chapter}}",
             BUDGET_PER_BOOK,
+            "650,000 tokens per chapter and 2,000,000 per book",
             "actor_kind_override",
             "<data_root>/translate/prompts/{{target_lang}}/",
         ] {
