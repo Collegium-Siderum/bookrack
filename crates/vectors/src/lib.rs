@@ -18,11 +18,18 @@
 //! jieba full-text index are deliberate follow-ons — at pilot scale a
 //! brute-force [`ChunkStore::search`] is both exact and fast, and the
 //! index is only worth building past tens of thousands of rows.
+//!
+//! A second table family, the translation memory, lives in [`tm`]: one
+//! row per sealed translation segment, searched by language pair. It
+//! shares the connection plumbing and nothing else — the sidecar, the
+//! ANN index and the partition arithmetic are all `chunks`-specific.
 
 pub mod meta;
+pub mod tm;
 
 pub use lancedb::index::IndexStatistics;
 pub use meta::{DEFAULT_INDEX_NAME, META_FILENAME, SCHEMA_VERSION, VectorsMeta};
+pub use tm::{TM_SCHEMA_VERSION, TM_TABLE, TmFilter, TmHitRow, TmRow, TmStore};
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -53,7 +60,7 @@ static LANCE_ENV_INIT: OnceLock<()> = OnceLock::new();
 /// just `LANCE_INCLUDE_VECTOR_CENTROIDS=false`, which silences a noisy
 /// per-`list_indices` warning on lancedb 0.30 about an upcoming
 /// default change.
-fn ensure_lance_env() {
+pub(crate) fn ensure_lance_env() {
     LANCE_ENV_INIT.get_or_init(|| {
         // SAFETY: env is mutated exactly once, before any background
         // task could observe it. `OnceLock::get_or_init` guarantees
@@ -91,6 +98,12 @@ pub enum VectorsError {
     /// unexpected type — a schema the store did not write.
     #[error("chunks query result is missing or mistyped the {0:?} column")]
     BadColumn(&'static str),
+
+    /// A caller-supplied filter value is outside the shape the store
+    /// admits into a query predicate: a language tag that is not
+    /// `[A-Za-z0-9-]{1,16}`. Refused before any query is assembled.
+    #[error("translation-memory filter is not a language tag: {0}")]
+    BadFilter(&'static str),
 
     /// IO failure on the `vectors_meta.json` sidecar — read, write, or
     /// rename.
@@ -466,7 +479,7 @@ pub struct ChunkStore {
 /// rebuilds performed through other handles or other processes. The
 /// check reads one manifest per operation, which on local storage costs
 /// far less than the query it precedes.
-async fn connect(lancedb_dir: &Path) -> Result<lancedb::Connection> {
+pub(crate) async fn connect(lancedb_dir: &Path) -> Result<lancedb::Connection> {
     Ok(lancedb::connect(&lancedb_dir.to_string_lossy())
         .read_consistency_interval(Duration::ZERO)
         .execute()
@@ -1034,7 +1047,7 @@ fn is_index_not_found(err: &lancedb::Error) -> bool {
 /// Read the fixed-size list width of the `vector` column from a
 /// LanceDB schema. Used when opening an existing chunks table so the
 /// store handle reflects the on-disk dim, not the caller's hint.
-fn vector_dim_from_schema(schema: &Schema) -> Result<usize> {
+pub(crate) fn vector_dim_from_schema(schema: &Schema) -> Result<usize> {
     let field = schema
         .field_with_name("vector")
         .map_err(|_| VectorsError::BadColumn("vector"))?;
@@ -1177,28 +1190,34 @@ fn read_hits(batch: &RecordBatch, out: &mut Vec<SearchHit>) -> Result<()> {
     Ok(())
 }
 
-fn string_column<'a>(batch: &'a RecordBatch, name: &'static str) -> Result<&'a StringArray> {
+pub(crate) fn string_column<'a>(
+    batch: &'a RecordBatch,
+    name: &'static str,
+) -> Result<&'a StringArray> {
     batch
         .column_by_name(name)
         .and_then(|c| c.as_string_opt::<i32>())
         .ok_or(VectorsError::BadColumn(name))
 }
 
-fn i64_column<'a>(batch: &'a RecordBatch, name: &'static str) -> Result<&'a Int64Array> {
+pub(crate) fn i64_column<'a>(batch: &'a RecordBatch, name: &'static str) -> Result<&'a Int64Array> {
     batch
         .column_by_name(name)
         .and_then(|c| c.as_primitive_opt::<Int64Type>())
         .ok_or(VectorsError::BadColumn(name))
 }
 
-fn i32_column<'a>(batch: &'a RecordBatch, name: &'static str) -> Result<&'a Int32Array> {
+pub(crate) fn i32_column<'a>(batch: &'a RecordBatch, name: &'static str) -> Result<&'a Int32Array> {
     batch
         .column_by_name(name)
         .and_then(|c| c.as_primitive_opt::<Int32Type>())
         .ok_or(VectorsError::BadColumn(name))
 }
 
-fn f32_column<'a>(batch: &'a RecordBatch, name: &'static str) -> Result<&'a Float32Array> {
+pub(crate) fn f32_column<'a>(
+    batch: &'a RecordBatch,
+    name: &'static str,
+) -> Result<&'a Float32Array> {
     batch
         .column_by_name(name)
         .and_then(|c| c.as_primitive_opt::<Float32Type>())
