@@ -107,25 +107,41 @@ fn is_terminator(c: char) -> bool {
 }
 
 /// Whether `c` may trail a terminator and still belong to the sentence
-/// it closes: closing quotation marks and brackets.
+/// it closes: closing quotation marks and brackets. Which mark closes a
+/// quotation depends on the typographic convention — German and Swiss
+/// text close with the marks English and French open with — so a mark
+/// that closes under any convention counts; a quotation never opens
+/// directly after a terminator.
 fn is_closer(c: char) -> bool {
     matches!(
         c,
         '"' | '\''
             | ')'
             | ']'
+            | '\u{AB}' // left-pointing double angle quotation mark (closes in German)
             | '\u{BB}' // right-pointing double angle quotation mark
+            | '\u{2018}' // left single quotation mark (closes in German)
             | '\u{2019}' // right single quotation mark
+            | '\u{201C}' // left double quotation mark (closes in German)
             | '\u{201D}' // right double quotation mark
+            | '\u{2039}' // single left-pointing angle quotation mark (closes in German)
+            | '\u{203A}' // single right-pointing angle quotation mark
+            | '\u{3009}' // right angle bracket
+            | '\u{300B}' // right double angle bracket
             | '\u{300D}' // right corner bracket
             | '\u{300F}' // right white corner bracket
             | '\u{FF09}' // fullwidth right parenthesis
+            | '\u{FF3D}' // fullwidth right square bracket
     )
 }
 
 /// Char offsets at which a new sentence starts: after a run of
-/// terminators and whatever closers and whitespace trail it. Strictly
-/// increasing, never 0 and never the text's length.
+/// terminators and whatever closers and whitespace trail it, provided
+/// the text goes on with something a sentence can start with. A comma
+/// or a lowercase letter there means the terminator closed a quotation
+/// inside a sentence that continues — `»Hilfe!«, hielt` or `»Komm!«
+/// sagte er` — so no boundary is placed. Strictly increasing, never 0
+/// and never the text's length.
 pub fn sentence_boundaries(text: &str) -> Vec<usize> {
     let mut boundaries = Vec::new();
     let mut after_terminator = false;
@@ -136,7 +152,9 @@ pub fn sentence_boundaries(text: &str) -> Vec<usize> {
             if is_closer(c) || c.is_whitespace() {
                 continue;
             }
-            boundaries.push(i);
+            if c != ',' && !c.is_lowercase() {
+                boundaries.push(i);
+            }
             after_terminator = false;
         }
     }
@@ -241,7 +259,10 @@ mod tests {
     #[test]
     fn boundaries_follow_terminator_runs_closers_and_whitespace() {
         assert_eq!(sentence_boundaries("One. Two! Three?"), vec![5, 10]);
-        assert_eq!(sentence_boundaries("Wait... what?! Yes."), vec![8, 15]);
+        // An ellipsis followed by a lowercase word trails off inside the
+        // sentence; only the `?!` run ends it.
+        assert_eq!(sentence_boundaries("Wait... what?! Yes."), vec![15]);
+        assert_eq!(sentence_boundaries("Wait... What?! Yes."), vec![8, 15]);
         assert_eq!(sentence_boundaries("He said \"go.\" She went."), vec![14]);
         assert_eq!(
             sentence_boundaries("\u{4ed6}\u{8bf4}\u{3002}\u{300d}\u{5979}\u{8d70}\u{4e86}\u{3002}"),
@@ -252,6 +273,48 @@ mod tests {
             Vec::<usize>::new()
         );
         assert_eq!(sentence_boundaries("ends here."), Vec::<usize>::new());
+    }
+
+    /// A closing quotation mark of any convention stays with the sentence
+    /// it closes: German and Swiss typography close with `\u{ab}`,
+    /// `\u{201c}`, `\u{2018}` and `\u{2039}`, which open a quotation in
+    /// English or French. A terminator that only closes a quotation
+    /// inside a running sentence — followed by a comma or a lowercase
+    /// word — is no boundary either.
+    #[test]
+    fn closing_quotation_marks_of_every_convention_stay_with_their_sentence() {
+        assert_eq!(
+            sentence_boundaries("\u{bb}Komm!\u{ab} sagte er. Dann ging er."),
+            vec![18]
+        );
+        assert_eq!(
+            sentence_boundaries("He asked \"why?\", then left. Later."),
+            vec![28]
+        );
+        assert_eq!(
+            sentence_boundaries("\u{bb}Hilfe!\u{ab}, hielt sie"),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            sentence_boundaries("\u{bb}Ja.\u{ab} Dann ging er."),
+            vec![6]
+        );
+        assert_eq!(
+            sentence_boundaries("\u{201e}Nein!\u{201c} sagte er."),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            sentence_boundaries("\u{201a}Nein!\u{2018} sagte er."),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            sentence_boundaries("\u{203a}Nein!\u{2039} sagte er."),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            sentence_boundaries("\u{300a}\u{4e66}\u{3002}\u{300b}\u{5979}\u{8d70}\u{4e86}\u{3002}"),
+            vec![4]
+        );
     }
 
     fn chained(ranges: &[(usize, usize)], len: usize) -> bool {

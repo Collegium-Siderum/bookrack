@@ -16,8 +16,9 @@ release workflow extracts the matching section verbatim from this file.
   section that directly holds text, a segment per paragraph, heading,
   footnote or caption, quotations and poems kept whole, formulas, code
   and tables skipped and listed with the reason, and a paragraph past
-  the per-script threshold cut at sentence boundaries. It can be
-  narrowed to one subtree, anchors witness books on the planned units,
+  the per-script threshold cut at sentence boundaries, where a closing
+  quotation mark of any convention stays with the sentence it closes. It
+  can be narrowed to one subtree, anchors witness books on the planned units,
   and is idempotent. `translate.resegment` replaces the virgin segments
   of one unit with spans the agent chooses, so adjacent short
   paragraphs can be merged or a long one split differently. Every call
