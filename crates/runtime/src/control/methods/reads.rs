@@ -333,11 +333,9 @@ pub async fn library_info(params: &Option<Value>, ctx: &MethodContext) -> Result
     // accepted set, which the write side already reports as caller
     // input, and a flat `INTERNAL_ERROR` here would drop both the code
     // and the set.
-    let embed_model = crate::profile::effective_embed_config(handle.cfg())
-        .map_err(|e| crate::control::error_map::handler_err("library.info", e))?
-        .model;
     let info_context =
-        crate::daemon::library_info_context(handle.cfg(), &embed_model, &ctx.info_context.mcp_addr);
+        crate::daemon::library_info_context_for(handle.cfg(), &ctx.info_context.mcp_addr)
+            .map_err(|e| crate::control::error_map::handler_err("library.info", e))?;
     let info = show_library_info(handle.ops(), info_context)
         .await
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("library info failed: {e}")))?;

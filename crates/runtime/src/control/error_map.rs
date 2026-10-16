@@ -84,11 +84,15 @@ use crate::mount::MountRefusal;
 /// `"corpus.rebuild"`, ...), used only to label the residual
 /// [`INTERNAL_ERROR`] message.
 ///
+/// The MCP front end re-wraps the returned envelope in its own error
+/// type without re-deciding the code, so a handler error shared by
+/// both surfaces takes one code on each.
+///
 /// An error the walk recognises no type in still leaves through
 /// [`rpc_from_problem`], so `data` is on the envelope unconditionally:
 /// `retryable` alone, since such an error has neither evidence nor a
 /// next step to name.
-pub(crate) fn handler_err(method: &str, err: Report) -> RpcError {
+pub fn handler_err(method: &str, err: Report) -> RpcError {
     for cause in err.chain() {
         if let Some(e) = cause.downcast_ref::<OpsError>() {
             return from_ops(e);

@@ -1302,6 +1302,22 @@ pub fn library_info_context(cfg: &Config, embed_model: &str, mcp_addr: &str) -> 
     }
 }
 
+/// The static half of a library's status card, built from the library a
+/// handle names: [`library_info_context`] over `cfg`, with the embedding
+/// model taken from the library's effective index profile. Every front
+/// end serving `library.info` for a selected library builds the card's
+/// identity through this one function, so the identity and the counts
+/// on one card always describe the same root. `mcp_addr` is the
+/// process-wide listener address and is passed in from the bring-up
+/// snapshot.
+///
+/// Fails when the library's index profile does not resolve; the error
+/// classifies as caller input through the control-plane error map.
+pub fn library_info_context_for(cfg: &Config, mcp_addr: &str) -> Result<LibraryInfoContext> {
+    let embed = crate::profile::effective_embed_config(cfg)?;
+    Ok(library_info_context(cfg, &embed.model, mcp_addr))
+}
+
 /// Map [`ResolutionSource`] onto the operator-visible label woven into
 /// `session.info` and the daemon's startup banner.
 pub fn resolution_source_label(source: ResolutionSource) -> &'static str {

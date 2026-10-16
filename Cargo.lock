@@ -1137,6 +1137,7 @@ dependencies = [
  "bookrack-refs",
  "bookrack-runtime",
  "bookrack-session",
+ "bookrack-test-support",
  "bookrack-translate",
  "chrono",
  "clap",

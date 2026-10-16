@@ -98,6 +98,17 @@ pub(crate) fn ops_error_to_mcp(e: OpsError) -> ErrorData {
     ErrorData::new(ErrorCode(rpc.code), rpc.message, rpc.data)
 }
 
+/// Map a handler's `eyre::Report` onto the MCP envelope through the
+/// control plane's classifier, for the tool bodies that share a
+/// runtime helper with a control-plane method. `method` labels the
+/// residual internal-error message with the tool's wire name. As with
+/// [`ops_error_to_mcp`], the code is decided once, in
+/// [`bookrack_runtime::control::error_map::handler_err`].
+pub(crate) fn report_to_mcp(method: &str, e: eyre::Report) -> ErrorData {
+    let rpc = bookrack_runtime::control::error_map::handler_err(method, e);
+    ErrorData::new(ErrorCode(rpc.code), rpc.message, rpc.data)
+}
+
 /// Map a [`reference::ReferenceError`] to an MCP error: the
 /// catalog / argument-shape variants are caller-input problems and
 /// surface as `invalid_params`, the refs-store and catalog-load
