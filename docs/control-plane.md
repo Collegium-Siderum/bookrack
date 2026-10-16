@@ -934,7 +934,7 @@ buckets below; adding, renaming, or removing a tool fails that test
 until the list is updated, which is the point at which the version
 discipline (a tool-surface change is a minor bump) applies.
 
-Seventeen of the tools write:
+Eighteen of the tools write:
 
 - `library.metadata.set` / `library.metadata.clear` — add or remove an
   override on one bibliographic field.
@@ -962,6 +962,15 @@ Seventeen of the tools write:
   reachable, and a source text that no longer matches the segment's
   fingerprint is refused; the receipt's `tm_indexed` says whether the
   memory took the row. An import is all or nothing.
+- `translate.tm_rebuild` — recompute the translation memory from the
+  sealed segments, of the whole library or of one book. A whole
+  rebuild drops the rows and the stamps, embeds every sealed segment
+  with the library's model, and stamps the memory last; one cut short
+  leaves rows without stamps, which every read refuses until a whole
+  rebuild runs again. A rebuild of one book requires a memory already
+  stamped by this build, checked before any row is deleted. Segments
+  whose source text has drifted from its fingerprint are counted and
+  left out. One `translate_audit` row.
 - `translate.glossary_propose` — record a new source term with its
   first rendering, add a candidate rendering to a term, or change a
   term's primary rendering. A term already on the same key or an

@@ -67,6 +67,10 @@ pub const TM_OVERFETCH: usize = 3;
 // setting: translate.tm_package_hits
 pub const TM_PACKAGE_HITS: usize = 3;
 
+/// Sealed segments embedded per request when the memory is rebuilt.
+// setting: translate.tm_embed_batch
+pub const TM_EMBED_BATCH: usize = 32;
+
 /// The source language a row records when the catalog names none for
 /// the book, or names something that is not a language tag.
 pub const UNKNOWN_LANG: &str = "und";
@@ -402,6 +406,34 @@ pub(crate) mod test_embed {
                         .unwrap_or_else(|| panic!("no fake vector for {text:?}"))
                 })
                 .collect())
+        }
+    }
+
+    /// An embedder that answers one constant vector for a number of
+    /// requests, then goes down.
+    pub(crate) struct Flaky {
+        ok_requests: usize,
+        requests: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Flaky {
+        pub(crate) fn after(ok_requests: usize) -> Flaky {
+            Flaky {
+                ok_requests,
+                requests: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Embedder for Flaky {
+        async fn embed_batch(&self, texts: &[String]) -> bookrack_embed::Result<Vec<Vec<f32>>> {
+            let served = self
+                .requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if served >= self.ok_requests {
+                return Err(EmbedError::Unreachable("connection reset".to_owned()));
+            }
+            Ok(texts.iter().map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect())
         }
     }
 

@@ -2315,6 +2315,44 @@ impl BookrackServer {
         respond_with(&result)
     }
 
+    /// Rebuild the translation memory from the sealed segments.
+    #[tool(
+        name = "translate.tm_rebuild",
+        description = "Rebuild the translation memory from every sealed segment of the \
+                       library, or of one book with `intake_id`: drop the existing rows, \
+                       embed each sealed segment's source text with the library's embedding \
+                       model, and stamp the memory. Run it after switching the embedding \
+                       model, or once to index segments sealed before the memory existed. \
+                       A rebuild of one book requires a memory already stamped by this \
+                       build; a rebuild cut short leaves an unstamped memory that every \
+                       read refuses until a whole rebuild runs. Records one audit row \
+                       carrying `reason`."
+    )]
+    async fn translate_tm_rebuild(
+        &self,
+        Parameters(args): Parameters<translate_write::TranslateTmRebuildArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (translate, corpus, caller, now) = self.translate_write_stores(&args.library)?;
+        let handle = self.resolve_handle(Some(&args.library))?;
+        let ops = handle.ops();
+        let tm = translate_tm::tm_context(ops).map_err(translate_error_to_mcp)?;
+        let plan = {
+            let corpus = corpus;
+            let catalog = bookrack_catalog::Catalog::open_read_only(ops.catalog_db())
+                .map_err(|e| translate_error_to_mcp(e.into()))?;
+            translate_write::tm_rebuild_prepare(&translate, &corpus, Some(&catalog), &args)
+                .map_err(translate_error_to_mcp)?
+        };
+        let ctx = translate_write::WriteContext {
+            caller: &caller,
+            now: &now,
+        };
+        let result = translate_write::tm_rebuild_logic(translate, plan, &tm, &ctx, &args)
+            .await
+            .map_err(translate_error_to_mcp)?;
+        respond_with(&result)
+    }
+
     /// Propose a glossary term, rendering or primary choice.
     #[tool(
         name = "translate.glossary_propose",
@@ -2609,6 +2647,9 @@ bookrack_core::fixed_settings! {
     "translate.tm_package_hits" = translate_tm::TM_PACKAGE_HITS,
         "most memory hits a fetched segment package carries",
         acts on "translate.fetch_segment";
+    "translate.tm_embed_batch" = translate_tm::TM_EMBED_BATCH,
+        "sealed segments embedded per request when the memory is rebuilt",
+        acts on "translate.tm_rebuild";
 }
 
 /// Enumerate every MCP tool the live server exposes. Calls into the

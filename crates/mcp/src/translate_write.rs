@@ -37,7 +37,7 @@ use crate::translate::{
     SpanRef, ToolResult, TranslateToolError, TranslationChoice, WitnessPtr, parse_authority_ref,
     segment_source_text, span_text,
 };
-use crate::translate_tm::{TmContext, check_stamps, source_lang_of, tm_row_for};
+use crate::translate_tm::{TM_EMBED_BATCH, TmContext, check_stamps, source_lang_of, tm_row_for};
 
 /// Escape threshold for a leaf in a Latin-script text, in chars.
 // setting: translate.plan.max_chars_latin
@@ -847,6 +847,32 @@ pub struct TranslateImportResult {
     pub audit_id: i64,
 }
 
+/// Arguments for `translate.tm_rebuild`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TranslateTmRebuildArgs {
+    /// The library whose memory to rebuild. Required.
+    pub library: String,
+    /// Rebuild one book's rows only. The memory must then already
+    /// carry this build's stamps; otherwise rebuild the whole library.
+    pub intake_id: Option<i64>,
+    pub reason: Option<String>,
+}
+
+/// Reply of `translate.tm_rebuild`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TranslateTmRebuildResult {
+    /// Rows dropped before the rebuild.
+    pub removed: usize,
+    /// Sealed segments written to the memory.
+    pub indexed: usize,
+    /// Sealed segments left out because their source text no longer
+    /// matches the fingerprint they recorded.
+    pub skipped_drift: usize,
+    pub embed_model: String,
+    pub vector_dim: usize,
+    pub audit_id: i64,
+}
+
 fn require_text(what: &str, value: &str) -> ToolResult<()> {
     if value.trim().is_empty() {
         return Err(TranslateToolError::InvalidArgument(format!(
@@ -1098,6 +1124,170 @@ async fn index_sealed<E: Embedder>(
             false
         }
     }
+}
+
+/// A sealed segment ready to embed: everything its memory row needs
+/// but the vector.
+struct PendingRow {
+    segment: SegmentRow,
+    intake_id: i64,
+    target_lang: String,
+    source_lang: String,
+    src_text: String,
+}
+
+/// What a rebuild has read from the stores before the memory is
+/// touched: the sealed segments with their source texts checked, the
+/// drifted ones counted, and the stamps the store carries.
+pub(crate) struct TmRebuildPlan {
+    rows: Vec<PendingRow>,
+    skipped_drift: usize,
+    stored_stamps: Option<TmStamps>,
+}
+
+/// Read every sealed segment the rebuild covers. A segment whose
+/// source text no longer hashes to its fingerprint, or whose leaves
+/// the corpus no longer has, is counted and left out: re-anchoring is
+/// the reaudit's job, and the memory must never pair a changed source
+/// with an old rendering.
+pub(crate) fn tm_rebuild_prepare(
+    translate: &Translate,
+    corpus: &Corpus,
+    catalog: Option<&Catalog>,
+    args: &TranslateTmRebuildArgs,
+) -> ToolResult<TmRebuildPlan> {
+    if let Some(intake_id) = args.intake_id
+        && intake_id <= 0
+    {
+        return Err(TranslateToolError::InvalidArgument(format!(
+            "`intake_id` {intake_id} is not a book id; intake ids are positive"
+        )));
+    }
+    let mut langs: HashMap<i64, String> = HashMap::new();
+    let mut rows = Vec::new();
+    let mut skipped_drift = 0;
+    for sealed in translate.sealed_segments(args.intake_id)? {
+        let src_text = match segment_source_text(corpus, &sealed.segment) {
+            Ok(text) if span_sha256_hex(&text) == sealed.segment.source_text_sha => text,
+            Ok(_) | Err(TranslateToolError::Corpus(_)) => {
+                skipped_drift += 1;
+                continue;
+            }
+            Err(other) => return Err(other),
+        };
+        let source_lang = match langs.get(&sealed.intake_id) {
+            Some(lang) => lang.clone(),
+            None => {
+                let lang = source_lang_of(catalog, sealed.intake_id)?;
+                langs.insert(sealed.intake_id, lang.clone());
+                lang
+            }
+        };
+        rows.push(PendingRow {
+            segment: sealed.segment,
+            intake_id: sealed.intake_id,
+            target_lang: sealed.target_lang,
+            source_lang,
+            src_text,
+        });
+    }
+    Ok(TmRebuildPlan {
+        rows,
+        skipped_drift,
+        stored_stamps: translate.tm_stamps()?,
+    })
+}
+
+/// Rebuild the memory from the sealed segments, whole or for one book.
+///
+/// A whole rebuild drops the table and the stamps, writes every row,
+/// and stamps the memory last, so the stamps certify a complete
+/// memory and nothing else: a rebuild cut short by the embedder leaves
+/// rows without stamps, which every reader refuses until a whole
+/// rebuild runs again from the start. A rebuild of one book requires
+/// the memory it extends to carry this build's stamps already, checked
+/// before any row is deleted, so vectors of two models never share a
+/// table.
+pub(crate) async fn tm_rebuild_logic<E: Embedder>(
+    translate: Translate,
+    plan: TmRebuildPlan,
+    tm: &TmContext<'_, E>,
+    ctx: &WriteContext<'_>,
+    args: &TranslateTmRebuildArgs,
+) -> ToolResult<TranslateTmRebuildResult> {
+    let expected = tm.expected_stamps();
+    let existing = tm.try_open().await?;
+    let removed;
+    let store = match (args.intake_id, existing) {
+        (Some(intake_id), Some(store)) => {
+            check_stamps(plan.stored_stamps.as_ref(), &expected)?;
+            let before = store.count_rows().await?;
+            store.delete_intake(intake_id).await?;
+            removed = before.saturating_sub(store.count_rows().await?);
+            store
+        }
+        (Some(_), None) => {
+            if let Some(stored) = &plan.stored_stamps {
+                stored.check_against(&expected)?;
+            }
+            removed = 0;
+            TmStore::open(&tm.lancedb_dir, tm.dim).await?
+        }
+        (None, existing) => {
+            removed = match &existing {
+                Some(store) => store.count_rows().await?,
+                None => 0,
+            };
+            drop(existing);
+            TmStore::drop_table(&tm.lancedb_dir).await?;
+            translate.clear_tm_stamps()?;
+            TmStore::open(&tm.lancedb_dir, tm.dim).await?
+        }
+    };
+    let mut indexed = 0;
+    for batch in plan.rows.chunks(TM_EMBED_BATCH) {
+        let texts: Vec<String> = batch.iter().map(|row| row.src_text.clone()).collect();
+        let vectors = tm.embed_many(&texts).await?;
+        let rows = batch
+            .iter()
+            .zip(vectors)
+            .map(|(row, vector)| {
+                tm_row_for(
+                    &row.segment,
+                    row.intake_id,
+                    &row.target_lang,
+                    &row.source_lang,
+                    row.src_text.clone(),
+                    vector,
+                )
+            })
+            .collect::<ToolResult<Vec<TmRow>>>()?;
+        indexed += store.append(&rows).await?;
+    }
+    let payload = serde_json::json!({
+        "args": serde_json::to_value(args).unwrap_or(serde_json::Value::Null),
+        "removed": removed,
+        "indexed": indexed,
+        "skipped_drift": plan.skipped_drift,
+    });
+    let audit_id = translate.transaction(|translate| {
+        translate.reconcile_tm_stamps(&expected)?;
+        translate.append_audit(&ctx.audit(
+            AuditSubject::None,
+            "tm_rebuild",
+            args.reason.as_deref(),
+            &payload,
+            None,
+        ))
+    })?;
+    Ok(TranslateTmRebuildResult {
+        removed,
+        indexed,
+        skipped_drift: plan.skipped_drift,
+        embed_model: expected.embed_model,
+        vector_dim: tm.dim,
+        audit_id,
+    })
 }
 
 /// Fill the empty draft segments of one unit with an existing
@@ -1483,7 +1673,7 @@ pub(crate) fn glossary_propose_logic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::translate_tm::test_embed::{Down, Fake};
+    use crate::translate_tm::test_embed::{Down, Fake, Flaky};
     use bookrack_corpus::{NewNode, NodeType};
 
     const LONG: &str = "Erster Satz. Zweiter Satz. Dritter Satz.";
@@ -3010,6 +3200,402 @@ mod tests {
         assert_eq!(
             audit_rows(&fx.store(), id).last().map(|r| r.0.as_str()),
             Some("seal")
+        );
+    }
+
+    fn rebuild_args(intake_id: Option<i64>) -> TranslateTmRebuildArgs {
+        TranslateTmRebuildArgs {
+            library: "lab".into(),
+            intake_id,
+            reason: Some("model swap".into()),
+        }
+    }
+
+    impl Fixture {
+        async fn rebuild_with<E: Embedder>(
+            &self,
+            tm: &TmContext<'_, E>,
+            args: &TranslateTmRebuildArgs,
+        ) -> ToolResult<TranslateTmRebuildResult> {
+            let translate = self.store();
+            let plan = tm_rebuild_prepare(&translate, &self.corpus, None, args)?;
+            tm_rebuild_logic(translate, plan, tm, &self.ctx(), args).await
+        }
+
+        async fn rebuild(
+            &self,
+            args: &TranslateTmRebuildArgs,
+        ) -> ToolResult<TranslateTmRebuildResult> {
+            self.rebuild_with(&self.tm(), args).await
+        }
+
+        async fn memory_rows(&self) -> usize {
+            match TmStore::try_open(&self.lancedb).await.expect("probe") {
+                Some(store) => store.count_rows().await.expect("count"),
+                None => 0,
+            }
+        }
+
+        /// Seal the first two planned segments the ordinary way.
+        async fn two_sealed(&self) -> (i64, i64) {
+            let planned = self.plan(&self.plan_args()).expect("plan");
+            let (a, b) = (
+                planned.segments[0].segment_id,
+                planned.segments[1].segment_id,
+            );
+            for id in [a, b] {
+                propose_final(self, id);
+                self.seal(&seal_args(id, 2)).await.expect("seal");
+            }
+            (a, b)
+        }
+    }
+
+    /// Write `n` sealed segments over prefixes of four paragraphs of
+    /// the planned book, straight into the store.
+    fn seed_sealed_rows(fx: &Fixture, n: usize) -> Vec<i64> {
+        let planned = fx.plan(&fx.plan_args()).expect("plan");
+        let conn = rusqlite::Connection::open(&fx.translate_db).expect("connection");
+        let leaf = |i: usize| fx.leaves[i].get();
+        let unit_of = |leaf: i64| {
+            planned
+                .segments
+                .iter()
+                .find(|s| s.span.start_node_id == leaf)
+                .map(|s| s.unit_id)
+                .expect("planned leaf")
+        };
+        let mut spans = Vec::new();
+        for (leaf, text) in [
+            (leaf(0), "Gregor Samsa erwachte."),
+            (leaf(2), LONG),
+            (leaf(5), "Fuenf."),
+            (leaf(6), "Sechs."),
+        ] {
+            for end in 1..text.chars().count() {
+                let prefix: String = text.chars().take(end).collect();
+                spans.push((unit_of(leaf), leaf, end, prefix));
+            }
+        }
+        assert!(spans.len() >= n, "not enough spans for {n} rows");
+        let mut ids = Vec::new();
+        for (unit_id, leaf, end, prefix) in spans.into_iter().take(n) {
+            let id: i64 = conn
+                .query_row(
+                    "INSERT INTO translate_segments (unit_id, start_node_id, start_char_offset, \
+                     end_node_id, end_char_offset, source_text_sha, status, final_text, \
+                     source_kind, sealed_at, version) VALUES (?1, ?2, 0, ?2, ?3, ?4, 'sealed', \
+                     'rendering', 'human', '2026-01-01T00:00:00Z', 2) RETURNING segment_id",
+                    rusqlite::params![
+                        unit_id,
+                        leaf,
+                        i64::try_from(end).expect("small"),
+                        span_sha256_hex(&prefix)
+                    ],
+                    |row| row.get(0),
+                )
+                .expect("insert sealed");
+            ids.push(id);
+        }
+        ids
+    }
+
+    #[tokio::test]
+    async fn a_full_rebuild_drops_everything_restamps_and_indexes_every_sealed_segment() {
+        let fx = Fixture::new();
+        let (a, b) = fx.two_sealed().await;
+        // A stray row and another model's stamps, as a swap leaves them.
+        TmStore::open(&fx.lancedb, 4)
+            .await
+            .expect("open")
+            .append(&[memory_row(99)])
+            .await
+            .expect("append");
+        let store = fx.store();
+        store.clear_tm_stamps().expect("clear");
+        store
+            .reconcile_tm_stamps(&TmStamps {
+                embed_model: "other-model".into(),
+                ..fx.tm().expected_stamps()
+            })
+            .expect("stamp");
+        assert_eq!(fx.memory_rows().await, 3);
+
+        let result = fx.rebuild(&rebuild_args(None)).await.expect("rebuild");
+        assert_eq!(
+            (result.removed, result.indexed, result.skipped_drift),
+            (3, 2, 0)
+        );
+        assert_eq!(
+            (result.embed_model.as_str(), result.vector_dim),
+            ("fake-model", 4)
+        );
+        assert_eq!(fx.memory_rows().await, 2);
+        assert_eq!(
+            fx.store().tm_stamps().expect("read"),
+            Some(fx.tm().expected_stamps())
+        );
+        let memory = TmStore::try_open(&fx.lancedb)
+            .await
+            .expect("probe")
+            .expect("memory");
+        let hits = memory
+            .search(
+                &[1.0, 0.0, 0.0, 0.0],
+                &bookrack_vectors::TmFilter {
+                    target_lang: "zh",
+                    source_lang: "und",
+                    intake_id: None,
+                },
+                10,
+            )
+            .await
+            .expect("search");
+        let mut ids: Vec<i64> = hits.iter().map(|h| h.row.segment_id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![a, b], "the stray row is gone");
+        // One audit row, with the counts.
+        let conn = rusqlite::Connection::open(&fx.translate_db).expect("connection");
+        let (count, payload): (i64, String) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(payload_json) FROM translate_audit WHERE action = 'tm_rebuild'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("audit");
+        assert_eq!(count, 1);
+        let payload: serde_json::Value = serde_json::from_str(&payload).expect("json");
+        assert_eq!(payload["removed"], 3);
+        assert_eq!(payload["indexed"], 2);
+        assert_eq!(payload["args"]["reason"], "model swap");
+    }
+
+    #[tokio::test]
+    async fn a_scoped_rebuild_touches_only_that_books_rows() {
+        let fx = Fixture::new();
+        let (a, _) = fx.two_sealed().await;
+        let mut elsewhere = memory_row(99);
+        elsewhere.intake_id = 2;
+        TmStore::try_open(&fx.lancedb)
+            .await
+            .expect("probe")
+            .expect("memory")
+            .append(&[elsewhere])
+            .await
+            .expect("append");
+        assert_eq!(fx.memory_rows().await, 3);
+
+        let result = fx.rebuild(&rebuild_args(Some(1))).await.expect("rebuild");
+        assert_eq!(
+            (result.removed, result.indexed, result.skipped_drift),
+            (2, 2, 0)
+        );
+        assert_eq!(fx.memory_rows().await, 3, "the other book's row survives");
+        let memory = TmStore::try_open(&fx.lancedb)
+            .await
+            .expect("probe")
+            .expect("memory");
+        let hits = memory
+            .search(
+                &[1.0, 0.0, 0.0, 0.0],
+                &bookrack_vectors::TmFilter {
+                    target_lang: "zh",
+                    source_lang: "und",
+                    intake_id: Some(2),
+                },
+                10,
+            )
+            .await
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].row.segment_id, 99);
+        let _ = a;
+
+        let err = fx
+            .rebuild(&rebuild_args(Some(0)))
+            .await
+            .expect_err("not a book id");
+        assert!(
+            matches!(err, TranslateToolError::InvalidArgument(_)),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scoped_rebuild_refuses_an_unstamped_or_mismatched_memory_before_deleting_anything() {
+        let fx = Fixture::new();
+        fx.two_sealed().await;
+        assert_eq!(fx.memory_rows().await, 2);
+
+        fx.store().clear_tm_stamps().expect("clear");
+        let err = fx
+            .rebuild(&rebuild_args(Some(1)))
+            .await
+            .expect_err("unstamped");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(TranslateError::TmUnstamped)
+            ),
+            "{err:?}"
+        );
+        assert_eq!(fx.memory_rows().await, 2, "nothing was deleted");
+
+        fx.store()
+            .reconcile_tm_stamps(&TmStamps {
+                embed_model: "other-model".into(),
+                ..fx.tm().expected_stamps()
+            })
+            .expect("stamp");
+        let err = fx
+            .rebuild(&rebuild_args(Some(1)))
+            .await
+            .expect_err("mismatch");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(TranslateError::TmStampMismatch { .. })
+            ),
+            "{err:?}"
+        );
+        assert_eq!(fx.memory_rows().await, 2, "nothing was deleted");
+        assert_eq!(
+            fx.store().tm_stamps().expect("read").map(|s| s.embed_model),
+            Some("other-model".into()),
+            "the stamps were not touched either"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_drifted_segment_is_counted_and_skipped() {
+        let fx = Fixture::new();
+        let (a, b) = fx.two_sealed().await;
+        rusqlite::Connection::open(&fx.translate_db)
+            .expect("connection")
+            .execute(
+                "UPDATE translate_segments SET source_text_sha = 'drifted' WHERE segment_id = ?1",
+                [a],
+            )
+            .expect("tamper");
+        let result = fx.rebuild(&rebuild_args(None)).await.expect("rebuild");
+        assert_eq!(
+            (result.removed, result.indexed, result.skipped_drift),
+            (2, 1, 1)
+        );
+        let memory = TmStore::try_open(&fx.lancedb)
+            .await
+            .expect("probe")
+            .expect("memory");
+        let hits = memory
+            .search(
+                &[1.0, 0.0, 0.0, 0.0],
+                &bookrack_vectors::TmFilter {
+                    target_lang: "zh",
+                    source_lang: "und",
+                    intake_id: None,
+                },
+                10,
+            )
+            .await
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].row.segment_id, b);
+    }
+
+    #[tokio::test]
+    async fn an_embedder_failure_midway_leaves_rows_but_no_stamps_and_every_read_refuses_until_a_full_rebuild()
+     {
+        let fx = Fixture::new();
+        let ids = seed_sealed_rows(&fx, TM_EMBED_BATCH + 2);
+        let flaky = Flaky::after(1);
+        let tm_flaky = TmContext {
+            lancedb_dir: fx.lancedb.clone(),
+            embedder: &flaky,
+            embed_model: "fake-model",
+            dim: 4,
+        };
+        let err = fx
+            .rebuild_with(&tm_flaky, &rebuild_args(None))
+            .await
+            .expect_err("cut short");
+        assert!(matches!(err, TranslateToolError::Embed(_)), "{err:?}");
+        assert_eq!(
+            fx.memory_rows().await,
+            TM_EMBED_BATCH,
+            "the first batch stays on disk"
+        );
+        assert_eq!(
+            fx.store().tm_stamps().expect("read"),
+            None,
+            "nothing certified it"
+        );
+
+        // Every read refuses or degrades until a whole rebuild.
+        let stored = fx.store().tm_stamps().expect("read");
+        let tm = fx.tm();
+        let err = crate::translate::tm_search_logic(
+            Some(&tm),
+            stored.as_ref(),
+            &crate::translate::TranslateTmSearchArgs {
+                library: None,
+                text: "Gregor".into(),
+                source_lang: "und".into(),
+                target_lang: "zh".into(),
+                intake_id_scope: None,
+                limit: None,
+            },
+        )
+        .await
+        .expect_err("unstamped");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(TranslateError::TmUnstamped)
+            ),
+            "{err:?}"
+        );
+        let catalogs = crate::reference::catalogs().expect("catalogs");
+        let mut package = crate::translate::fetch_segment_logic(
+            Some(&fx.store()),
+            &fx.corpus,
+            None,
+            catalogs,
+            None,
+            &crate::translate::TranslateFetchSegmentArgs {
+                library: None,
+                segment_id: ids[0],
+                injection_profile: None,
+                neighbors: None,
+            },
+        )
+        .expect("fetch")
+        .expect("package");
+        crate::translate_tm::complete_package_tm(Some(&tm), stored.as_ref(), &mut package).await;
+        assert_eq!(package.tm_status, "unavailable");
+        let err = fx
+            .rebuild(&rebuild_args(Some(1)))
+            .await
+            .expect_err("a scoped rebuild does not repair it");
+        assert!(
+            matches!(
+                err,
+                TranslateToolError::Translate(TranslateError::TmUnstamped)
+            ),
+            "{err:?}"
+        );
+
+        let result = fx
+            .rebuild(&rebuild_args(None))
+            .await
+            .expect("whole rebuild");
+        assert_eq!(
+            (result.removed, result.indexed, result.skipped_drift),
+            (TM_EMBED_BATCH, ids.len(), 0)
+        );
+        assert_eq!(fx.memory_rows().await, ids.len());
+        assert_eq!(
+            fx.store().tm_stamps().expect("read"),
+            Some(fx.tm().expected_stamps())
         );
     }
 }

@@ -42,7 +42,11 @@ Each on-disk store records the build parameters of the data it holds:
 `catalog.db` carries the schema revision and a per-row
 `extractor_version`, `corpus.db` carries `embed_model` / `vector_dim` /
 `chunk_version` / `normalize_version` in `index_meta`, and the LanceDB
-chunks table is gated by those same stamps at serve time. Every store
+chunks table is gated by those same stamps at serve time;
+`translate.db` carries `tm_embed_model` / `tm_vector_dim` /
+`tm_schema_version` in `translate_meta`, the stamps of the translation
+memory derived from it, checked by every MCP translate tool that reads
+or extends that memory. Every store
 also carries a `min_reader_version` value the writer last stamped;
 opening a store whose stamp exceeds this binary's `READER_VERSION`
 fails with `ReaderTooOld`. A binary that bumps a behaviour-sensitive
@@ -66,7 +70,8 @@ earlier ones already happened.
 | `text-splitter`, `bookrack_ingest::CHUNK_VERSION` | `chunk_version` | chunks → vectors | `bookrack vectors reembed` (books); `bookrack papers vectors reembed` (papers) |
 | `bookrack_glean::CHUNK_VERSION` | `chunk_version` on the papers store | papers chunks → papers vectors | `bookrack papers vectors reset` |
 | `bookrack_normalize::NORMALIZE_VERSION` | `normalize_version` | chunks → vectors | `bookrack vectors reembed` (books); `bookrack papers vectors reembed` (papers) |
-| Embedding model name or vector width | `embed_model` / `vector_dim` | chunks → vectors | `bookrack libraries fork` (try it side by side) or `bookrack vectors reset` + `bookrack papers vectors reset` (in place) — see [Switching the embedding model](#switching-the-embedding-model) |
+| Embedding model name or vector width | `embed_model` / `vector_dim` | chunks → vectors | `bookrack libraries fork` (try it side by side) or `bookrack vectors reset` + `bookrack papers vectors reset` (in place) — see [Switching the embedding model](#switching-the-embedding-model); the translation memory is restamped separately, see the next row |
+| Embedding model name or vector width, or `bookrack_vectors::TM_SCHEMA_VERSION` (manual bump) | `tm_embed_model` / `tm_vector_dim` / `tm_schema_version` in `translate_meta` | the translation memory (`lancedb_translate/`) | the MCP tool `translate.tm_rebuild` over the whole library; until it runs, `translate.tm_search` and `translate.seal` refuse the memory and `translate.fetch_segment` reports it unavailable. A forked library starts without a memory and needs the same rebuild before its first seal |
 | `catalog.db` / `papers_catalog.db` schema bump | catalog `user_version` | none — migrated forward in place (one exception: the v14 OCR-derivation edge, see below) | open the library (migration is automatic); after upgrading a library that predates v14, run `bookrack doctor --backfill-ocr-derivation` once |
 | `corpus.db` schema bump | corpus `schema_version` | corpus tree | `bookrack corpus rebuild` |
 | `papers_corpus.db` schema bump | papers corpus `schema_version` | papers corpus tree | `bookrack papers corpus rebuild` |

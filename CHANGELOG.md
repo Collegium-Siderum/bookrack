@@ -27,6 +27,18 @@ release workflow extracts the matching section verbatim from this file.
   fingerprint, and reports in its receipt whether the memory took the
   row.
 
+- **mcp: `translate.tm_rebuild`.** The translation memory is derived,
+  and this is the tool that derives it: from every sealed segment of
+  the library, or of one book, it drops the rows, embeds each source
+  text again with the library's model, and stamps the memory once
+  every row is written. It is the way to index segments sealed before
+  the memory existed and the way back after an embedding-model switch.
+  A rebuild of one book needs a memory this build already stamped,
+  checked before anything is deleted; a rebuild cut short leaves a
+  memory without stamps that every read refuses until a whole rebuild
+  runs. Segments whose source text has drifted are counted and left
+  out. One audit row.
+
 - **mcp: `translate.plan` and `translate.resegment`.** The translation
   store gains its first writes. `translate.plan` turns one book into
   units and segments for a target language: a unit per chapter or
