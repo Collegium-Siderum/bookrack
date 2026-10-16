@@ -166,10 +166,13 @@ impl<E: Embedder> Library<E> {
 
     /// Drop the cached vector store and rebind it from the lance dir on
     /// disk. Called by [`bookrack_ops::LibraryHandle::ingest_book`] right
-    /// after a successful ingest: the first ingest into a previously
-    /// empty data dir creates the lance dir mid-process, and the
-    /// `store=None` cached at [`Self::open`] would otherwise hide every
-    /// subsequent search.
+    /// after a successful ingest, for the one case a long-lived handle
+    /// cannot cover on its own: the first ingest into a previously empty
+    /// data dir creates the lance dir mid-process, and the `store=None`
+    /// cached at [`Self::open`] would otherwise hide every subsequent
+    /// search. Rows written through other handles into an existing
+    /// table need no rebind — the store's connection resolves the
+    /// latest on-disk version on every read.
     ///
     /// Holds the write lock, so any in-flight searches finish before the
     /// rebind and any later search waits for it. Verifies the rebound
