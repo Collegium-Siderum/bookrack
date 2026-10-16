@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-app"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-config",
  "bookrack-control-client",
@@ -842,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-audit-profile"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-core",
  "serde",
@@ -855,7 +855,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-catalog"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-core",
  "bookrack-dbkit",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-cli"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "anstyle",
  "bookrack-catalog",
@@ -912,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-cli-grammar"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-core",
  "clap",
@@ -920,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-config"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-core",
  "bookrack-test-support",
@@ -939,7 +939,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-control-client"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-core",
  "bookrack-session",
@@ -954,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-core"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "chrono",
  "serde",
@@ -964,7 +964,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-corpus"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-core",
  "bookrack-dbkit",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-dbkit"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-core",
  "rusqlite",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-diagnose"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-audit-profile",
  "bookrack-catalog",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-distill"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-audit-profile",
  "bookrack-core",
@@ -1026,7 +1026,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-embed"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-core",
  "reqwest 0.13.4",
@@ -1038,7 +1038,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-extract"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-audit-profile",
  "bookrack-config",
@@ -1060,7 +1060,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-glean"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-audit-profile",
  "bookrack-catalog",
@@ -1085,7 +1085,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-index-profile"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-core",
  "serde",
@@ -1096,7 +1096,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-ingest"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-audit-profile",
  "bookrack-catalog",
@@ -1122,7 +1122,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-mcp"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "axum",
  "bookrack-catalog",
@@ -1156,7 +1156,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-metadata"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-audit-profile",
  "bookrack-catalog",
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-normalize"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-core",
  "sha2 0.10.9",
@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-obs"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-config",
  "bookrack-core",
@@ -1194,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-ops"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-catalog",
  "bookrack-config",
@@ -1219,7 +1219,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-query"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-catalog",
  "bookrack-config",
@@ -1240,7 +1240,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-refs"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-core",
  "bookrack-dbkit",
@@ -1254,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-rerank"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-core",
  "reqwest 0.13.4",
@@ -1265,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-runtime"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "async-trait",
  "bookrack-audit-profile",
@@ -1312,7 +1312,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-search"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-catalog",
  "bookrack-core",
@@ -1331,7 +1331,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-session"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-core",
  "dirs 5.0.1",
@@ -1342,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-test-support"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-config",
  "bookrack-core",
@@ -1353,7 +1353,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-translate"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "bookrack-catalog",
  "bookrack-core",
@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-vectors"
-version = "0.12.0-dev"
+version = "0.13.0-dev"
 dependencies = [
  "arrow-array",
  "arrow-schema",
