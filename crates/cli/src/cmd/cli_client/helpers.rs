@@ -109,7 +109,7 @@ pub async fn served_library_names(runtime_dir: Option<&Path>) -> Option<Vec<Stri
 /// The probe calls `status` directly rather than through [`dispatch`]:
 /// the selection it exists to settle is not settled yet, and `status`
 /// is one of the methods that refuses a selection.
-async fn settle_library_selection(client: &ControlClient) -> Result<()> {
+pub(super) async fn settle_library_selection(client: &ControlClient) -> Result<()> {
     let Some(selection) = library_param::pending() else {
         return Ok(());
     };

@@ -11,10 +11,21 @@
 //!    Matched case-insensitively per ASCII so macOS `realpath`
 //!    capitalisation (e.g. `disk` vs `DISK` for the same volume)
 //!    collapses to one form.
-//! 2. Literal `data_dir` path → `<DATA_DIR>` (kept as a more specific
-//!    fallback when the configured path was not normalised through
-//!    rule 1).
+//! 2. Literal root paths → a placeholder each: the bundle's own
+//!    `data_dir` → `<DATA_DIR>`, the data root of every other library
+//!    the same daemon serves → `<OTHER_ROOT>`, the daemon state
+//!    directory → `<STATE_DIR>`. Kept as a more specific fallback when
+//!    a path was not normalised through rule 1 — a root under a
+//!    temporary directory, say. The daemon's log stream is shared
+//!    across the libraries it serves, so a line about one library
+//!    carries that library's root into every other library's bundle;
+//!    only the roots mounted at collection time are known here, and a
+//!    root unmounted before then, or one a retired registry entry once
+//!    named, is covered by rule 1 alone.
 //! 3. Literal `home_dir` path → `<HOME>` (same role for `$HOME`).
+//!    Rules 2 and 3 substitute the longest literal first, so a root
+//!    nested under another, or under the home directory, keeps its own
+//!    placeholder.
 //! 4. Path basenames with a known book extension
 //!    (`.pdf`, `.epub`, `.djvu`, `.mobi`, `.md`, `.azw3`) → a
 //!    `<file:sha8>.<ext>` token, so latin-script titles cannot leak
@@ -31,7 +42,7 @@
 //! maps to the same output, so the resulting tarball is byte-stable
 //! across runs.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
@@ -39,8 +50,9 @@ use sha2::{Digest, Sha256};
 /// bundle path, or [`Scrubber::passthrough`] for `--no-scrub`.
 pub struct Scrubber {
     enabled: bool,
-    data_dir_str: Option<String>,
-    home_dir_str: Option<String>,
+    /// Literal path prefixes and the placeholder each folds to, longest
+    /// literal first.
+    prefixes: Vec<(String, &'static str)>,
     book_extensions: Vec<String>,
 }
 
@@ -60,12 +72,45 @@ impl Scrubber {
         home_dir_path: Option<&Path>,
         book_extensions: Vec<String>,
     ) -> Scrubber {
-        Scrubber {
+        let mut scrubber = Scrubber {
             enabled: true,
-            data_dir_str: data_dir_path.map(|p| p.to_string_lossy().into_owned()),
-            home_dir_str: home_dir_path.map(|p| p.to_string_lossy().into_owned()),
+            prefixes: Vec::new(),
             book_extensions,
+        };
+        scrubber.push_prefix(data_dir_path, DATA_DIR_PLACEHOLDER);
+        scrubber.push_prefix(home_dir_path, HOME_PLACEHOLDER);
+        scrubber
+    }
+
+    /// Name the roots a shared source may carry besides the bundle's
+    /// own: the data roots of the other libraries the daemon serves,
+    /// and the daemon state directory. Each folds to its own
+    /// placeholder under rule 2.
+    pub fn with_shared_roots(
+        mut self,
+        other_roots: &[PathBuf],
+        state_dir: Option<&Path>,
+    ) -> Scrubber {
+        for root in other_roots {
+            self.push_prefix(Some(root), OTHER_ROOT_PLACEHOLDER);
         }
+        self.push_prefix(state_dir, STATE_DIR_PLACEHOLDER);
+        self
+    }
+
+    /// Register one literal prefix, keeping the list longest-first and
+    /// free of duplicates so the first placeholder a path earned is the
+    /// one it keeps.
+    fn push_prefix(&mut self, path: Option<&Path>, placeholder: &'static str) {
+        let Some(literal) = path.map(|p| p.to_string_lossy().into_owned()) else {
+            return;
+        };
+        if literal.is_empty() || self.prefixes.iter().any(|(known, _)| *known == literal) {
+            return;
+        }
+        self.prefixes.push((literal, placeholder));
+        self.prefixes
+            .sort_by_key(|(literal, _)| std::cmp::Reverse(literal.len()));
     }
 
     /// Build a no-op scrubber. Used when the operator passes
@@ -73,8 +118,7 @@ impl Scrubber {
     pub fn passthrough() -> Scrubber {
         Scrubber {
             enabled: false,
-            data_dir_str: None,
-            home_dir_str: None,
+            prefixes: Vec::new(),
             book_extensions: Vec::new(),
         }
     }
@@ -90,18 +134,12 @@ impl Scrubber {
         // case-insensitive volume names collapse before the literal
         // string match attempts an exact-case compare.
         let mut out = scrub_os_prefixes(input);
-        // Rule 2 + 3: literal data_dir / home_dir replacement as a
-        // narrower fallback. Order matters: data_dir is often nested
-        // under home_dir, substitute the deeper path first.
-        if let Some(d) = &self.data_dir_str
-            && !d.is_empty()
-        {
-            out = out.replace(d, DATA_DIR_PLACEHOLDER);
-        }
-        if let Some(h) = &self.home_dir_str
-            && !h.is_empty()
-        {
-            out = out.replace(h, HOME_PLACEHOLDER);
+        // Rule 2 + 3: literal root / home_dir replacement as a
+        // narrower fallback. The list is longest-first, so a root
+        // nested under another root or under home_dir is substituted
+        // before the path that contains it.
+        for (literal, placeholder) in &self.prefixes {
+            out = out.replace(literal, placeholder);
         }
         // Rule 4: hash book-extension basenames so latin-script titles
         // cannot ride through inside a path string. Runs after the
@@ -133,6 +171,13 @@ pub const DATA_DIR_PLACEHOLDER: &str = "<DATA_DIR>";
 
 /// The placeholder substituted for the user's home directory path.
 pub const HOME_PLACEHOLDER: &str = "<HOME>";
+
+/// The placeholder substituted for the data root of another library
+/// the same daemon serves.
+pub const OTHER_ROOT_PLACEHOLDER: &str = "<OTHER_ROOT>";
+
+/// The placeholder substituted for the daemon state directory.
+pub const STATE_DIR_PLACEHOLDER: &str = "<STATE_DIR>";
 
 /// The placeholder substituted for a `/Volumes/<seg>/` (macOS),
 /// matched case-insensitively per ASCII so `realpath`-canonicalised
@@ -455,6 +500,29 @@ mod tests {
         let s = scrubber();
         let out = s.scrub_string(&format!("opened {FAKE_DATA_DIR}/catalog.db"));
         assert_eq!(out, "opened <DATA_DIR>/catalog.db");
+    }
+
+    /// A root nested under another root, and the state directory
+    /// nested under the home directory, each keep their own
+    /// placeholder: the longest literal is substituted first.
+    #[test]
+    fn shared_roots_are_substituted_longest_first() {
+        let s = Scrubber::new(
+            Some(Path::new("/srv/libs/beta")),
+            Some(Path::new("/srv")),
+            Vec::new(),
+        )
+        .with_shared_roots(
+            &[
+                PathBuf::from("/srv/libs/beta/nested-alpha"),
+                PathBuf::from("/srv/libs/alpha"),
+            ],
+            Some(Path::new("/srv/state")),
+        );
+        assert_eq!(
+            s.scrub_string("/srv/libs/beta/nested-alpha/x /srv/libs/beta/y /srv/libs/alpha/z /srv/state/q /srv/w"),
+            "<OTHER_ROOT>/x <DATA_DIR>/y <OTHER_ROOT>/z <STATE_DIR>/q <HOME>/w"
+        );
     }
 
     #[test]

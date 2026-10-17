@@ -392,12 +392,17 @@ the exit-code bucket does not distinguish the two.
   registry did not know — and is `[]` when it recorded nothing. It is
   a fact about this session, not persisted: the next start on the same
   root finds the entry in place and reports an empty list.
-- `doctor.gather` — JSON serialisation of the same report the
-  `bookrack doctor` subcommand prints. Gathered inside the daemon, so
+- `doctor.gather` — `{ library? }` → JSON serialisation of the same
+  report the `bookrack doctor` subcommand prints. The library-level
+  rows — data root, store files and their stamps, open pipeline runs,
+  backup directory, free disk — are about the library `library` names,
+  or the registry's current default when it is absent; a name the
+  registry does not hold is `-32010`. The daemon-level rows are the
+  session's whichever library was named: gathered inside the daemon,
   the `MCP endpoint` row probes the address this session bound and not
-  the one the caller's environment names; the row is `fail` when a
-  service that is not bookrack answers there, or when nothing answers
-  at an address the daemon reports serving.
+  the one the caller's environment names, and is `fail` when a service
+  that is not bookrack answers there, or when nothing answers at an
+  address the daemon reports serving.
 - `daemon.methods` — the live method table: every name this daemon
   dispatches, with its read/write class, whether the queue worker
   carries it, and how a library selection reaches it. Authoritative at
@@ -412,11 +417,14 @@ the exit-code bucket does not distinguish the two.
     spelling.
   - `process` — the method reports on the process rather than on a
     library: `daemon.*`, the queue verbs (whose job ids address one
-    daemon-wide queue), `logs.tail`, `diagnose.run`. A
-    selection is meaningless here, and clients pass it through
-    unchanged rather than treating meaningless as wrong.
+    daemon-wide queue), `logs.tail`. A selection is meaningless here,
+    and clients pass it through unchanged rather than treating
+    meaningless as wrong. The test is what the method gathers, not how
+    much of it is process-wide: `doctor.gather` and `diagnose.run`
+    each carry one library's data among the process-level rest, so
+    both are `routed`.
   - `unrouted` — the method answers about the daemon itself, or about
-    every library at once: `status`, `daemon.status`, `doctor.gather`,
+    every library at once: `status`, `daemon.status`,
     `events.snapshot`, `library.list`, `library.set_default`,
     `library.mount`, `library.unmount`. It has
     no key to carry a selection, so a client holding an explicit one
@@ -529,10 +537,20 @@ the exit-code bucket does not distinguish the two.
   not broken, and a rebuild is `bookrack vectors rebuild`'s to decide.
   The report is printed as text, or as the raw result under `--json`,
   before the exit code is set, so a script has both.
-- `diagnose.run` — `{ out?, days?, no_scrub? }` → `{ out_path, files,
-  scrubbed, scrub_gaps }`. Bundles crash reports, recent logs, and a
-  catalog snapshot for a bug attachment. Scrubbed of local paths and
-  titles unless `no_scrub` is set. `scrub_gaps` names the redactions
+- `diagnose.run` — `{ library?, out?, days?, no_scrub? }` →
+  `{ library, out_path, files, scrubbed, scrub_gaps }`. Bundles crash
+  reports, recent logs, and a catalog snapshot for a bug attachment.
+  `library` selects the library whose catalog, stores, and audit
+  overlay are snapshotted and under whose root the bundle lands when
+  `out` is absent; it defaults to the registry's current default, and
+  the result echoes the name resolved. The logs and crash reports are
+  the process's, read from the daemon state directory first, and the
+  bundle's `manifest.json` records the library under `library`.
+  Scrubbed of local paths and titles unless `no_scrub` is set: the
+  named library's root, the roots of every other library the daemon
+  serves, and the daemon state directory each fold to a placeholder,
+  since a shared log line about one library carries that library's
+  root into another's bundle. `scrub_gaps` names the redactions
   that had no input to work from, or had one worth doubting:
   `["home_dir"]` when the host exposed no home directory at all, and
   `["home_dir_unverified"]` when `HOME` named a directory that does not
@@ -735,10 +753,13 @@ a plan id minted against one library is not redeemable against
 another (`-32015`). `papers.remove` and the `remove` / `corpus.rebuild`
 / `vectors.reembed` execute legs scope their plan ids the same way.
 
-`diagnose.run` is the exception among the daemon's write-path methods:
-a diagnostic bundle describes the process and the machine under it
-rather than any one mounted library, so it takes no `library` and
-resolves from the selection the daemon was started with.
+`diagnose.run` and `doctor.gather` take the same optional `library`,
+although neither is a write: half of what each gathers belongs to one
+library — the catalog snapshot, the audit overlay, and the bundle's
+landing place; the store rows, open runs, and free disk — and that half
+follows the selection. The other half is the process's — the log
+stream and crash reports, the daemon's listening address and state
+directory — and is the same whichever library is named.
 
 Every write command takes the runtime-wide write mutex on entry; a
 second concurrent write returns `-32001 busy`.

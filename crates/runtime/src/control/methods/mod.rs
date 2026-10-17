@@ -25,7 +25,7 @@ use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::stream::LogStreamHandle;
 use bookrack_ops::reads::info::LibraryInfoContext;
-use bookrack_ops::registry::LibraryRegistry;
+use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use serde_json::Value;
 use tokio::sync::{Mutex as TokioMutex, OwnedMutexGuard, broadcast};
 
@@ -252,9 +252,12 @@ use verify::VerifyParams;
 ///      is what makes the claim checkable rather than asserted.
 ///    * `process` — the method describes the process, not a library:
 ///      `daemon.*`, the queue verbs (whose job ids address one
-///      daemon-wide queue), `logs.tail`, `diagnose.run`.
-///      A selection is meaningless but harmless, so clients pass it
-///      through unchanged.
+///      daemon-wide queue), `logs.tail`. A selection is meaningless
+///      but harmless, so clients pass it through unchanged. The test
+///      is what the method gathers: a method whose answer carries one
+///      library's data — `doctor.gather`'s store rows, `diagnose.run`'s
+///      catalog snapshot — is routed, however much of the rest is
+///      process-wide.
 ///    * `unrouted` — the method answers about the daemon or about
 ///      every library at once, so a selection naming one library
 ///      cannot be honoured and must be refused rather than dropped.
@@ -337,7 +340,8 @@ methods! {
     write no_queue sidebar process                    "daemon.shutdown",
     read  no_queue sync    unrouted                   "status" => reads::status_rpc,
     read  no_queue sync    unrouted                   "daemon.status" => reads::status_rpc,
-    read  no_queue async   unrouted                   "doctor.gather" => reads::doctor_gather_rpc,
+    read  no_queue async   routed(reads::DoctorGatherParams)
+        "doctor.gather" => reads::doctor_gather_rpc,
     read  no_queue sync    process                    "daemon.methods" => meta::methods_rpc,
     read  no_queue sync    process                    "daemon.mcp_tools" => meta::mcp_tools_rpc,
 
@@ -492,7 +496,8 @@ methods! {
 
     // verify / diagnose / logs
     read  no_queue async   routed(VerifyParams)       "verify.run" => verify::run_rpc,
-    read  no_queue async   process                    "diagnose.run" => diagnose::run,
+    read  no_queue async   routed(diagnose::DiagnoseRunParams)
+        "diagnose.run" => diagnose::run,
     read  no_queue sync    process                    "logs.tail" => logs::tail,
 }
 
@@ -599,6 +604,20 @@ pub fn refuses_library(method: &str) -> bool {
     REGISTRY
         .iter()
         .any(|sig| sig.name == method && sig.selection == "unrouted")
+}
+
+/// The handle a routed method acts on: the library `name` names, or
+/// the registry's current default when the caller named none. One
+/// lookup shared by every library-level method, so "unnamed means the
+/// current default pointer" is decided in one place; a name the
+/// registry does not hold is `-32010`.
+pub fn select_library(
+    ctx: &MethodContext,
+    name: Option<&str>,
+) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>, RpcError> {
+    ctx.registry
+        .get(name)
+        .map_err(super::error_map::registry_err)
 }
 
 /// RAII bundle owning the write mutex guard and the broadcast handle

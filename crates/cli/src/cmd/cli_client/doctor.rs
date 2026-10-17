@@ -16,6 +16,8 @@ use bookrack_session::{lock_is_held, peek_lock, resolve_runtime_dir, tty_lock_na
 use eyre::{Context, Result};
 use serde_json::Value;
 
+use super::helpers;
+
 /// Refuse the offline repair named by `flag` unless the session lock
 /// shows that no daemon can be serving the library.
 ///
@@ -163,11 +165,14 @@ pub async fn run(
     match bookrack_control_client::discover(runtime_dir.as_deref()) {
         Ok(socket) => match bookrack_control_client::connect(&socket).await {
             Ok(client) => {
-                // Not routed through `helpers::dispatch`: this call
-                // sits between two fallbacks that run without a
-                // daemon. It still passes the selection gate, which
-                // refuses a `--library` naming a library this report
-                // cannot be about.
+                // Not opened through `helpers::connect`: this call sits
+                // between two fallbacks that run without a daemon, and
+                // that helper reads "no daemon" as an error. The two
+                // things it would have done on the way are done here:
+                // the selection is settled into a name now that a
+                // daemon can answer which root it serves, and the gate
+                // puts that name on the call.
+                helpers::settle_library_selection(&client).await?;
                 let params = library_param::apply("doctor.gather", Value::Null)?;
                 let value = client
                     .call_raw("doctor.gather", params)

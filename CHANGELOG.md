@@ -46,6 +46,26 @@ release workflow extracts the matching section verbatim from this file.
   could not tell an install from a no-op. Each artifact now prints one
   JSON object ahead of the report: `{ "install": "pdfium" |
   "reranker", "path", "downloaded" }`.
+- **`bookrack doctor` and `bookrack diagnose` honour `--library` on a
+  running daemon.** `doctor.gather` and `diagnose.run` take an
+  optional `library` and are routed like every other library-level
+  method: the data root, store, open-runs, backup-dir, and disk rows of
+  the doctor report, and the catalog snapshot, audit overlay, and
+  landing place of the diagnose bundle, are the named library's. Absent
+  a name they follow the registry's current default rather than the
+  library the daemon was brought up under. Both commands reported on
+  the bring-up library whatever `--library` said: `doctor` because its
+  own connection path never settled the flag into a name, `diagnose`
+  because the method was filed as process-level. The doctor report's
+  daemon-level rows and the bundle's logs and crash reports are the
+  process's whichever library is named. The `diagnose.run` result
+  echoes the resolved name as `library`.
+- **Diagnose bundle schema 5.** `manifest.json` and `env.txt` name the
+  library the bundle describes, and the scrubber folds the roots of
+  every library the daemon serves and the daemon state directory to
+  placeholders, not only the selected library's root — a shared log
+  line about one library carries that library's root into another's
+  bundle. See `docs/UPGRADE.md` for what an older bundle may carry.
 - **`doctor` writes nothing to stderr when it falls back.** A session
   lock that could not be read, or a daemon that did not answer,
   produced a line of prose on stderr before the in-process report. The

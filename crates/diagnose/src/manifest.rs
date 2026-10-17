@@ -19,7 +19,7 @@ use crate::Options;
 /// Bundle schema version. Bump when any file's shape changes, when a
 /// new scrub rule is added, or when the tarball layout rearranges.
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
-pub const MANIFEST_SCHEMA_VERSION: u32 = 4;
+pub const MANIFEST_SCHEMA_VERSION: u32 = 5;
 
 /// The top-level `manifest.json` document.
 #[derive(Debug, Serialize)]
@@ -30,6 +30,11 @@ pub struct Manifest {
     pub bookrack_version: &'static str,
     /// `std::env::consts::OS`.
     pub os: &'static str,
+    /// The registry name of the library the bundle describes — whose
+    /// catalog, stores, and audit overlay were snapshotted — or `null`
+    /// when the root was resolved without one. The logs and crash
+    /// reports are the process's and may mention other libraries.
+    pub library: Option<String>,
     /// `std::env::consts::ARCH`.
     pub arch: &'static str,
     /// When the bundle was assembled, ISO-8601 UTC.
@@ -66,6 +71,7 @@ pub struct FileEntry {
 /// derived from the scrubber's inputs.
 pub fn build(
     opts: &Options,
+    library: Option<String>,
     bundle_dir: &Path,
     now: SystemTime,
     scrub_gaps: Vec<&'static str>,
@@ -77,6 +83,7 @@ pub fn build(
         schema_version: MANIFEST_SCHEMA_VERSION,
         bookrack_version: env!("CARGO_PKG_VERSION"),
         os: std::env::consts::OS,
+        library,
         arch: std::env::consts::ARCH,
         generated_at: iso8601_z(now),
         days: opts.days,
@@ -156,7 +163,7 @@ mod tests {
         std::fs::write(root.join("logs/a"), b"first").unwrap();
         std::fs::write(root.join("env.txt"), b"hi\n").unwrap();
         let opts = Options::default();
-        let m = build(&opts, root, UNIX_EPOCH, Vec::new()).unwrap();
+        let m = build(&opts, None, root, UNIX_EPOCH, Vec::new()).unwrap();
         let paths: Vec<&str> = m.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["env.txt", "logs/a", "logs/c"]);
         assert_eq!(m.files[0].bytes, 3);
@@ -168,7 +175,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let opts = Options::default();
-        let m = build(&opts, root, UNIX_EPOCH, vec![crate::SCRUB_GAP_HOME_DIR]).unwrap();
+        let m = build(
+            &opts,
+            None,
+            root,
+            UNIX_EPOCH,
+            vec![crate::SCRUB_GAP_HOME_DIR],
+        )
+        .unwrap();
         write(root, &m).unwrap();
         let bytes = std::fs::read(root.join("manifest.json")).unwrap();
         let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

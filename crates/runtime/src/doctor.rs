@@ -33,6 +33,7 @@
 //! short-circuiting the very diagnosis the user needs.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use bookrack_catalog::Catalog;
 use bookrack_config::{
@@ -172,11 +173,23 @@ pub enum Reporter<'a> {
 /// Pure over its inputs in the sense that every observation is fresh —
 /// there is no in-process cache to invalidate between successive calls.
 pub async fn gather(selection: &LibrarySelection, runtime_dir: Option<&Path>) -> Report {
-    gather_with(selection, Reporter::InProcess { runtime_dir }).await
+    gather_with(
+        Config::resolve(selection).map(Arc::new),
+        Reporter::InProcess { runtime_dir },
+    )
+    .await
 }
 
-/// [`gather`] from a named vantage point; see [`Reporter`].
-pub async fn gather_with(selection: &LibrarySelection, reporter: Reporter<'_>) -> Report {
+/// [`gather`] over an already-resolved configuration, from a named
+/// vantage point; see [`Reporter`]. The daemon passes the selected
+/// library handle's own configuration, so the library-level rows are
+/// about that library and not about whatever a fresh resolve would
+/// find; the in-process path resolves the selection and passes the
+/// outcome, failure included, so a broken configuration is a row.
+pub async fn gather_with(
+    resolved: Result<Arc<Config>, ConfigError>,
+    reporter: Reporter<'_>,
+) -> Report {
     let mut rows = Vec::new();
     let (rerank_supervisor, served_mcp_addr) = match &reporter {
         Reporter::Daemon {
@@ -188,7 +201,7 @@ pub async fn gather_with(selection: &LibrarySelection, reporter: Reporter<'_>) -
     };
 
     push_reporter_row(&mut rows, &reporter);
-    let cfg = push_data_root_row(&mut rows, selection);
+    let cfg = push_data_root_row(&mut rows, resolved);
     push_pdfium_row(&mut rows);
     push_fd_limit_row(&mut rows);
     if let Some(cfg) = &cfg {
@@ -202,10 +215,10 @@ pub async fn gather_with(selection: &LibrarySelection, reporter: Reporter<'_>) -
     let registry = probe_registry(list_libraries());
     push_registry_consistency_rows(&mut rows, &registry);
     push_index_profile_coherence_rows(&mut rows, &registry);
-    let ollama_url = ollama_url_for_probe(cfg.as_ref());
-    let embed_model = embed_model_for_probe(cfg.as_ref());
+    let ollama_url = ollama_url_for_probe(cfg.as_deref());
+    let embed_model = embed_model_for_probe(cfg.as_deref());
     push_ollama_rows(&mut rows, &ollama_url, &embed_model).await;
-    push_reranker_rows(&mut rows, cfg.as_ref(), rerank_supervisor).await;
+    push_reranker_rows(&mut rows, cfg.as_deref(), rerank_supervisor).await;
     push_mcp_endpoint_row(&mut rows, served_mcp_addr).await;
 
     Report { rows }
@@ -545,8 +558,11 @@ pub fn render_backfill_report(report: &BackfillReport, json: bool) {
     }
 }
 
-fn push_data_root_row(rows: &mut Vec<Row>, selection: &LibrarySelection) -> Option<Config> {
-    match Config::resolve(selection) {
+fn push_data_root_row(
+    rows: &mut Vec<Row>,
+    resolved: Result<Arc<Config>, ConfigError>,
+) -> Option<Arc<Config>> {
+    match resolved {
         Ok(cfg) => {
             let value = cfg.data_dir().display().to_string();
             let source = resolution_source_label(cfg.source());
@@ -1103,8 +1119,19 @@ fn push_store_rows(rows: &mut Vec<Row>, cfg: &Config) {
     }
     rows.push(backup_dir_row(
         &cfg.backup_dir(),
-        cfg.backup_dir() != cfg.data_dir().join("backup"),
+        !same_path(&cfg.backup_dir(), &cfg.data_dir().join("backup")),
     ));
+}
+
+/// Whether two paths name one location: equal as written, or equal
+/// once both resolve on disk, so a symlinked or differently spelled
+/// default is not reported as an override.
+fn same_path(a: &Path, b: &Path) -> bool {
+    a == b
+        || match (a.canonicalize(), b.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
 }
 
 /// One store's row: its path and the outcome of opening it when

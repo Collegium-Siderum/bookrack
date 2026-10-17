@@ -162,11 +162,25 @@ fn served_libraries(ctx: &MethodContext) -> Value {
     Value::Array(rows)
 }
 
-pub async fn doctor_gather(ctx: &MethodContext) -> Value {
-    // The address this daemon bound, not the one the environment
-    // names: the report is about the surface this session is serving.
+/// Which library `doctor.gather` reports on.
+#[derive(Debug, Default, Deserialize)]
+pub struct DoctorGatherParams {
+    /// The library whose root, stores, open runs, and free disk the
+    /// report covers. Absent means the registry's current default.
+    #[serde(default)]
+    library: Option<String>,
+}
+
+routed_params!(DoctorGatherParams);
+
+pub async fn doctor_gather(ctx: &MethodContext, library: Option<&str>) -> Result<Value, RpcError> {
+    // The library-level rows come from the selected handle's own
+    // configuration; the daemon-level rows — the address this daemon
+    // bound, the reranker it supervises, the state directory — are the
+    // session's whatever library was named.
+    let handle = super::select_library(ctx, library)?;
     let report = doctor::gather_with(
-        &ctx.selection,
+        Ok(handle.cfg_arc()),
         doctor::Reporter::Daemon {
             rerank_supervisor: ctx.rerank_supervisor.as_deref(),
             mcp_addr: ctx.info_context.mcp_addr.as_str(),
@@ -174,7 +188,7 @@ pub async fn doctor_gather(ctx: &MethodContext) -> Value {
         },
     )
     .await;
-    serde_json::to_value(report).unwrap_or(Value::Null)
+    Ok(serde_json::to_value(report).unwrap_or(Value::Null))
 }
 
 pub fn status_rpc(_params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -182,10 +196,16 @@ pub fn status_rpc(_params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
 }
 
 pub async fn doctor_gather_rpc(
-    _params: &Option<Value>,
+    params: &Option<Value>,
     ctx: &MethodContext,
 ) -> Result<Value, RpcError> {
-    Ok(doctor_gather(ctx).await)
+    let parsed: DoctorGatherParams = match params {
+        Some(v) if !v.is_null() => serde_json::from_value(v.clone()).map_err(|e| {
+            RpcError::new(INVALID_PARAMS, format!("invalid doctor.gather params: {e}"))
+        })?,
+        _ => DoctorGatherParams::default(),
+    };
+    doctor_gather(ctx, parsed.library.as_deref()).await
 }
 
 #[derive(Debug, Default, Deserialize)]
