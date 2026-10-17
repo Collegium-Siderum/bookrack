@@ -135,6 +135,20 @@ release workflow extracts the matching section verbatim from this file.
   `data_dir`, `default` — and the top-level `data_dir` is gone;
   `default_library` names the row marked `default`. A client that read
   `data_dir` takes it from that row.
+- **`bookrack verify` checks the paper stores and `reference.db`.** The
+  report covered the book pipeline alone, so a paper store that did
+  not verify, a paper whose stored file was gone, or a `reference.db`
+  this build cannot read went unreported and the command exited 0.
+  `verify.run` now returns the paper pipeline's findings under
+  `papers`, under the same field names the book side keeps at the top
+  level, plus `reference_missing`, `reference_schema_ok`, and
+  `reference_schema_error`; the book-side fields are unchanged.
+  `bookrack verify` judges the paper side by the book side's table and
+  exits 1 on a `reference.db` that does not open read-only at this
+  build's schema version, an older one included. `not_initialised` now
+  means no database at all: a root holding only paper stores or only
+  `reference.db` was reported as uninitialised, and its stores went
+  unchecked.
 
 ### Removed
 

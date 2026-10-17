@@ -184,8 +184,9 @@ enum Command {
     /// Exits 1 when a store does not verify, cannot be read, is missing
     /// beside the other, or an intake's file is gone.
     ///
-    /// Compare the catalog and corpus schemas against the binary's
-    /// TableSpecs and tally the cross-store counts: catalog intakes,
+    /// Compare the book and paper catalog and corpus schemas against the
+    /// binary's TableSpecs, check that reference.db opens at this build's
+    /// schema version, and tally the cross-store counts: catalog intakes,
     /// vectors-meta chunk count, and intake-file existence on disk.
     #[command(after_long_help = bookrack_cli_grammar::examples![
         "verify",
@@ -2419,11 +2420,11 @@ mod tests {
         let cfg = Config::new(tmp.path().to_path_buf(), "http://localhost:0".to_string());
         let report = bookrack_runtime::cmd::verify::build_verify_report(&cfg);
         assert!(report.not_initialised);
-        assert!(!report.catalog_schema_ok);
-        assert!(report.catalog_schema_error.is_none());
-        assert!(!report.corpus_schema_ok);
-        assert!(report.corpus_schema_error.is_none());
-        assert!(report.vectors_built_at_chunk_count.is_none());
+        assert!(!report.books.catalog_schema_ok);
+        assert!(report.books.catalog_schema_error.is_none());
+        assert!(!report.books.corpus_schema_ok);
+        assert!(report.books.corpus_schema_error.is_none());
+        assert!(report.books.vectors_built_at_chunk_count.is_none());
         // The data dir is unchanged — no stores were created as a
         // side effect of the verify call.
         assert!(!cfg.catalog_db().exists());

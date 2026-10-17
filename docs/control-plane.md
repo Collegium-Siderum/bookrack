@@ -524,18 +524,32 @@ the exit-code bucket does not distinguish the two.
   write lock, so the report answers alongside a write in flight rather
   than queueing behind the write mutex. Each store reports for itself:
   one that cannot be read carries its reason in its own `*_error` field
-  and leaves the others untouched. A root with neither store
-  (`not_initialised`) and an absent vector sidecar are how a fresh
-  library looks and are not errors — `vectors_meta_error` is populated
-  only when the sidecar is there and unreadable. The method returns
-  findings, not a verdict; `bookrack verify` judges them on the client
-  side and exits `1` when any of these holds: `catalog_schema_error`,
+  and leaves the others untouched. The book pipeline's findings
+  (`catalog.db`, `corpus.db`, `lancedb/`, intake files under `books/`)
+  sit at the top level; the paper pipeline's (`papers_catalog.db`,
+  `papers_corpus.db`, `lancedb_papers/`, intake files under `papers/`)
+  sit under `papers` with the same field names. `reference_missing`,
+  `reference_schema_ok`, and `reference_schema_error` report whether
+  `reference.db` opens read-only at the schema version this build
+  reads — a version check only: unlike the catalog and corpus doors,
+  this one does not verify table shapes. A root with none of the five
+  databases (`not_initialised`), a pipeline with neither store on disk,
+  an absent `reference.db`, and an absent vector sidecar are how a fresh
+  or single-pipeline library looks and are not errors —
+  `vectors_meta_error` is populated only when the sidecar is there and
+  unreadable. The method returns findings, not a verdict; `bookrack
+  verify` judges them on the client side and exits `1` when any of
+  these holds on either pipeline: `catalog_schema_error`,
   `corpus_schema_error`, `intake_scan_error`, or `vectors_meta_error` is
   set; exactly one of `catalog_missing` / `corpus_missing` is true (half
-  a library is a damaged one, not an uninitialised one); or
-  `missing_intake_files` is non-empty. `not_initialised`, an absent
-  vector sidecar, and any `vectors_churn` value exit `0` — not built is
-  not broken, and a rebuild is `bookrack vectors rebuild`'s to decide.
+  a pipeline is a damaged one, not an unused one); or
+  `missing_intake_files` is non-empty. It also exits `1` when
+  `reference_schema_error` is set, a version behind this build's
+  included, since the read path refuses that store the same way.
+  `not_initialised`, an unused pipeline, an absent `reference.db`, an
+  absent vector sidecar, and any `vectors_churn` value exit `0` — not
+  built is not broken, and a rebuild is `bookrack vectors rebuild`'s to
+  decide.
   The report is printed as text, or as the raw result under `--json`,
   before the exit code is set, so a script has both.
 - `diagnose.run` — `{ library?, out?, days?, no_scrub? }` →
