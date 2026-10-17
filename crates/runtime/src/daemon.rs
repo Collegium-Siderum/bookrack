@@ -578,7 +578,6 @@ impl DaemonRuntime {
             let state = Arc::clone(&queue_state);
             let state_path = queue_state_path.clone();
             let shutdown_rx = shutdown_tx.subscribe();
-            let library_default = library_name.clone();
             let events_for_loop = event_stream.clone();
             let events_for_runner = event_stream.clone();
             let queue_paused_worker = Arc::clone(&queue_paused);
@@ -588,16 +587,20 @@ impl DaemonRuntime {
                 shutdown_rx,
                 move |job| {
                     let registry = Arc::clone(&registry);
-                    let library_default = library_default.clone();
                     let sink = EventProgressSink::new(job.id.clone(), events_for_runner.clone());
                     async move {
                         sink.report(Stage::Extract, None, None);
                         let outcome = tokio::task::spawn_blocking(move || {
                             let runtime = tokio::runtime::Handle::current();
-                            let library = if job.library.is_empty() {
-                                library_default
+                            // A submit pins the job to a registry name
+                            // at enqueue time. An empty name is a row
+                            // from a queue document written before the
+                            // field was filled, and reads as the
+                            // registry's current default.
+                            let library: Option<&str> = if job.library.is_empty() {
+                                None
                             } else {
-                                job.library.clone()
+                                Some(job.library.as_str())
                             };
                             let force = job.force;
                             let hold_for_metadata = job.hold_for_metadata;
@@ -607,7 +610,7 @@ impl DaemonRuntime {
                             let audit_profile = job.audit_profile.clone();
                             runtime.block_on(async move {
                                 let handle = registry
-                                    .get(Some(&library))
+                                    .get(library)
                                     .map_err(|e| queue::JobError::Book(format!("registry: {e}")))?;
                                 if let Some(ocr) = intake_ocr {
                                     let params = prepare_book_params(

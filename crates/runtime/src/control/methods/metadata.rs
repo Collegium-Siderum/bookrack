@@ -26,8 +26,8 @@ pub struct MetadataSetParams {
     #[serde(default)]
     confirmed: bool,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
     library: Option<String>,
 }
@@ -39,8 +39,8 @@ pub struct MetadataClearParams {
     #[serde(default)]
     reason: Option<String>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
     library: Option<String>,
 }
@@ -52,8 +52,8 @@ pub struct MetadataVoidParams {
     #[serde(default)]
     reason: Option<String>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
     library: Option<String>,
 }
@@ -68,8 +68,8 @@ pub struct MetadataReauditParams {
     #[serde(default)]
     audit_profile: Option<String>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
     library: Option<String>,
 }
@@ -84,8 +84,8 @@ pub struct MetadataContributorAddParams {
     #[serde(default)]
     reason: Option<String>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
     library: Option<String>,
 }
@@ -97,8 +97,8 @@ pub struct MetadataContributorRemoveParams {
     #[serde(default)]
     reason: Option<String>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
     library: Option<String>,
 }
@@ -108,8 +108,8 @@ pub struct MetadataAckParams {
     book: i64,
     reason: String,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
     library: Option<String>,
 }
@@ -120,8 +120,8 @@ pub struct MetadataApproveParams {
     #[serde(default)]
     reason: Option<String>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
     library: Option<String>,
 }
@@ -131,8 +131,8 @@ pub struct MetadataRejectParams {
     book: i64,
     reason: String,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
     library: Option<String>,
 }
@@ -148,8 +148,8 @@ pub struct MetadataAdvanceParams {
     #[serde(default)]
     audit_profile: Option<String>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
     library: Option<String>,
 }

@@ -87,7 +87,7 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             ),
         ));
     }
-    let library = parsed.library.unwrap_or_else(|| ctx.library_name.clone());
+    let library = super::resolve_submit_target(ctx, parsed.library.as_deref())?;
     let priority = parsed
         .priority
         .map(PriorityRepr::into_priority)

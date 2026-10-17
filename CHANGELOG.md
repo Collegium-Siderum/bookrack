@@ -32,6 +32,18 @@ release workflow extracts the matching section verbatim from this file.
   exit `2` where it was `1`. The guard also runs before
   `--install-pdfium` / `--install-reranker`, so a refused repair no
   longer downloads first.
+- **A queue submit resolves its library through the registry before the
+  job is written.** `ingest.submit`, `glean.submit`, and `intake.ocr`
+  took a missing `library` as the library the daemon was brought up
+  under, so on a daemon started under a non-default library an unnamed
+  submit landed on the primary while every other unnamed call reached
+  the registry's default, and a `library.set_default` moved at run time
+  never reached the queue. The three also wrote an explicit name into
+  the job unchecked, so a misspelt library was accepted with a job id
+  and failed at the worker. An unnamed submit now resolves to the
+  registry's current default pointer at enqueue time, the row carries
+  that name from then on, and a name the registry does not hold is
+  refused with `-32010` before any row exists.
 
 ### Changed
 

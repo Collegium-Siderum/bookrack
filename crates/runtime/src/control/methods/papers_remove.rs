@@ -28,8 +28,8 @@ pub struct PapersRemoveParams {
     #[serde(default)]
     plan_id: Option<String>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
     library: Option<String>,
 }

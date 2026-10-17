@@ -132,12 +132,14 @@ pub struct MethodContext {
     pub started_at_rfc3339: String,
     pub selection: LibrarySelection,
     /// Name of the primary (bring-up-selected) library. A single-value
-    /// snapshot consumed by the queue worker's no-name fallback, the
-    /// `status` card, and the `library.changed` snapshot a subscriber
-    /// receives on connect; per-library status surfaces are a later
-    /// milestone. A `library.changed` published *by a write* names the
-    /// library that write touched instead — [`run_write`] takes it
-    /// from the handler's own handle.
+    /// snapshot consumed by the `status` card and the `library.changed`
+    /// snapshot a subscriber receives on connect; per-library status
+    /// surfaces are a later milestone. It is not a routing fallback:
+    /// a call that names no library resolves through
+    /// [`select_library`] to the registry's current default pointer.
+    /// A `library.changed` published *by a write* names the library
+    /// that write touched instead — [`run_write`] takes it from the
+    /// handler's own handle.
     pub library_name: String,
     /// Registry names bring-up registered for the selected root, in
     /// the order written; empty when it registered nothing. A fact
@@ -618,6 +620,16 @@ pub fn select_library(
     ctx.registry
         .get(name)
         .map_err(super::error_map::registry_err)
+}
+
+/// The registry name a queue-submitting method writes into its job:
+/// [`select_library`]'s answer for `name`, so an unnamed submit is
+/// pinned to the registry's current default at enqueue time and a
+/// name the registry does not hold is `-32010` before any row exists.
+/// The job carries the resolved name from then on; moving the default
+/// pointer later does not move a queued job.
+pub fn resolve_submit_target(ctx: &MethodContext, name: Option<&str>) -> Result<String, RpcError> {
+    Ok(select_library(ctx, name)?.name().to_string())
 }
 
 /// RAII bundle owning the write mutex guard and the broadcast handle

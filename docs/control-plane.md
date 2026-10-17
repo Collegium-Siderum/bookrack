@@ -742,12 +742,18 @@ the exit-code bucket does not distinguish the two.
 
 Every write method takes an optional `library`: the registry name of
 the library it acts on. Absent, it resolves to the registry's current
-default — which is the library the daemon was brought up under until
-`library.set_default` moves it. `bookrack libraries default` sends that
-method whenever a daemon is listening, so the running daemon follows a
-pointer moved from the CLI rather than keeping the value it read at
-bring-up; with nothing listening it writes the registry directly and
-the next start picks the change up. A name the registry does not know is
+default pointer, which `library.set_default` moves at run time; the
+pointer is not the library the daemon was brought up under, and the two
+differ whenever the daemon came up under a non-default library.
+`bookrack libraries default` sends that method whenever a daemon is
+listening, so the running daemon follows a pointer moved from the CLI
+rather than keeping the value it read at bring-up; with nothing
+listening it writes the registry directly and the next start picks the
+change up. The queue-submitting methods — `ingest.submit`,
+`glean.submit`, `intake.ocr` — resolve the name the same way before the
+job is written, so the row carries the library it will run under and a
+later move of the pointer does not move a queued job. A name the
+registry does not know is
 refused with `-32010 invalid library` before any store is opened, and
 a plan id minted against one library is not redeemable against
 another (`-32015`). `papers.remove` and the `remove` / `corpus.rebuild`
