@@ -65,6 +65,14 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **`worker.progress` no longer names stages the worker cannot see.**
+  The event announced `extract` when the worker pulled a job and
+  `embed` once the job had succeeded — neither a real stage boundary,
+  and a paper job was shown under the same two book-pipeline names.
+  It now carries the job's `kind` and announces `processing` once, on
+  pull; the job's outcome is read from the `queue.tick` that closes
+  it. A subscriber matching on `extract` or `embed` sees neither
+  again; `ingest` was never emitted.
 - **Book-side `metadata` writes return what they recorded.** Each
   answered `{ ok: true }` and printed its sentence on the daemon's own
   stdout, while the same ops call handed an MCP agent the audit row it

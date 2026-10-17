@@ -587,10 +587,11 @@ impl DaemonRuntime {
                 shutdown_rx,
                 move |job| {
                     let registry = Arc::clone(&registry);
-                    let sink = EventProgressSink::new(job.id.clone(), events_for_runner.clone());
+                    let sink =
+                        EventProgressSink::new(job.id.clone(), job.kind, events_for_runner.clone());
                     async move {
-                        sink.report(Stage::Extract, None, None);
-                        let outcome = tokio::task::spawn_blocking(move || {
+                        sink.report(Stage::Processing, None, None);
+                        tokio::task::spawn_blocking(move || {
                             let runtime = tokio::runtime::Handle::current();
                             // A submit pins the job to a registry name
                             // at enqueue time. An empty name is a row
@@ -718,11 +719,7 @@ impl DaemonRuntime {
                             })
                         })
                         .await
-                        .map_err(|e| queue::JobError::Book(format!("queue worker join: {e}")))?;
-                        if outcome.is_ok() {
-                            sink.report(Stage::Embed, None, None);
-                        }
-                        outcome
+                        .map_err(|e| queue::JobError::Book(format!("queue worker join: {e}")))?
                     }
                 },
                 events_for_loop,

@@ -1075,10 +1075,13 @@ the tool description says which one it ran.
   snapshot (`queue.json` in the daemon state directory), so a
   subscriber's view always coincides with what a crash recovery
   would replay.
-- `worker.progress` — `{ job_id, stage, stage_progress?, message? }`
-  with `stage` in `extract` / `ingest` / `embed`. Phase 2 emits at
-  the runner's two visible boundaries (`extract` on pull,
-  `embed` on success); finer-grained progress is deferred.
+- `worker.progress` — `{ job_id, kind, stage, stage_progress?, message? }`
+  where `kind` is the job's pipeline (`book` / `paper` / `reference`,
+  as on `queue.list`). `stage` names only a position the worker can
+  observe; today that is `processing`, published once when the worker
+  pulls the job. It does not name pipeline stages the worker cannot
+  see, and it does not report the job's terminal state — that arrives
+  on the `queue.tick` whose `last_finished` carries the job.
 - `library.changed` — `{ library }` published after every successful
   write command finishes, which includes a `library.mount` or
   `library.unmount` naming the library that joined or left the served
