@@ -11,7 +11,6 @@ use std::time::Duration;
 use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::library_param;
 use bookrack_config::LibrarySelection;
-use bookrack_control_client::ControlError;
 use bookrack_runtime::control::{HealthProbe, probe};
 use bookrack_session::{lock_is_held, peek_lock, resolve_runtime_dir, tty_lock_name};
 use eyre::{Context, Result};
@@ -110,19 +109,24 @@ pub async fn run(
     // picks the artifacts up on its next start.
     if install_pdfium {
         let path = bookrack_runtime::pdfium_install::install_pinned_pdfium().await?;
-        if !json {
+        if json {
+            println!("{}", install_line("pdfium", &path, true));
+        } else {
             println!("installed {}", path.display());
         }
     }
     if install_reranker {
         let outcomes = bookrack_runtime::reranker_install::install_reranker().await?;
-        if !json {
-            for outcome in outcomes {
-                if outcome.downloaded {
-                    println!("installed {}", outcome.path.display());
-                } else {
-                    println!("{} already installed", outcome.path.display());
-                }
+        for outcome in outcomes {
+            if json {
+                println!(
+                    "{}",
+                    install_line("reranker", &outcome.path, outcome.downloaded)
+                );
+            } else if outcome.downloaded {
+                println!("installed {}", outcome.path.display());
+            } else {
+                println!("{} already installed", outcome.path.display());
             }
         }
     }
@@ -171,20 +175,37 @@ pub async fn run(
                     .map_err(eyre::Report::from)?;
                 bookrack_runtime::doctor::render_value(&value, json)
             }
-            Err(ControlError::NotRunning) => {
-                bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await
-            }
-            Err(err) => {
-                eprintln!("bookrack: connect to {}: {err}", socket.path().display());
-                bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await
-            }
+            // A daemon that did not answer is a finding, not a
+            // preamble: the in-process report's reporter row states
+            // which path produced it and what it found at the lock,
+            // so nothing goes to stderr ahead of the report.
+            Err(_) => bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await,
         },
-        Err(ControlError::NotRunning) => {
-            bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await
-        }
-        Err(err) => {
-            eprintln!("bookrack: resolve daemon address: {err}");
-            bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await
-        }
+        Err(_) => bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await,
+    }
+}
+
+/// One line of `--json` output per installed artifact, printed ahead
+/// of the report: which install produced it, where it landed, and
+/// whether this run downloaded it or found it in place.
+fn install_line(install: &str, path: &Path, downloaded: bool) -> Value {
+    serde_json::json!({
+        "install": install,
+        "path": path.display().to_string(),
+        "downloaded": downloaded,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_line_names_the_install_its_path_and_whether_it_downloaded() {
+        let line = install_line("reranker", Path::new("/managed/model.gguf"), false);
+        assert_eq!(line["install"], "reranker");
+        assert_eq!(line["path"], "/managed/model.gguf");
+        assert_eq!(line["downloaded"], false);
+        assert_eq!(line.as_object().map(|o| o.len()), Some(3));
     }
 }

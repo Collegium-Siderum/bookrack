@@ -33,6 +33,26 @@ release workflow extracts the matching section verbatim from this file.
   `--install-pdfium` / `--install-reranker`, so a refused repair no
   longer downloads first.
 
+### Changed
+
+- **`doctor`'s repair flags are mutually exclusive.** `--rename-envelopes`,
+  `--backfill-ocr-derivation`, and `--close-abandoned-runs` each
+  return before the report, so two at once resolved by statement order
+  with the loser silently dropped; the grammar now refuses the pair
+  (exit `2`). `--dry-run` requires one of them: alone, it printed the
+  ordinary report as if the flag were absent.
+- **`doctor --json` reports its installs.** `--install-pdfium` and
+  `--install-reranker` printed nothing under `--json`, so a caller
+  could not tell an install from a no-op. Each artifact now prints one
+  JSON object ahead of the report: `{ "install": "pdfium" |
+  "reranker", "path", "downloaded" }`.
+- **`doctor` writes nothing to stderr when it falls back.** A session
+  lock that could not be read, or a daemon that did not answer,
+  produced a line of prose on stderr before the in-process report. The
+  report's own reporter row already says which path produced it and
+  what it found at the lock, so the prose is gone and `--json` output
+  is the report alone.
+
 ### Removed
 
 - **The desktop shell.** The `crates/app` Tauri shell, which never

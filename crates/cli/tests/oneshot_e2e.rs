@@ -183,6 +183,37 @@ async fn audit_profile_is_refused_before_the_early_dispatches() -> Result<()> {
     Ok(())
 }
 
+/// Under `--json`, stdout carries the report and stderr carries
+/// nothing. A session lock that cannot be read sends `doctor` down its
+/// in-process fallback; which path produced the report is a row of the
+/// report itself, so no prose on stderr precedes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doctor_json_keeps_stderr_clean_when_the_lock_cannot_be_read() -> Result<()> {
+    let sandbox = Sandbox::new();
+    std::fs::create_dir_all(sandbox.tty_lock_path())?;
+
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+        .args(["doctor", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let report: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("doctor --json is not JSON ({e}): {stdout}"));
+    assert!(
+        report.get("rows").is_some(),
+        "the fallback report landed: {stdout}"
+    );
+    assert!(
+        stderr.is_empty(),
+        "nothing on stderr under --json; the reporter row says which path answered: {stderr:?}",
+    );
+    Ok(())
+}
+
 /// `bookrack status` answers "not running" as a legal verdict: a
 /// fresh runtime directory with no lock renders the short card and
 /// exits 0, not the daemon-not-running code 2. `--json` keeps the
