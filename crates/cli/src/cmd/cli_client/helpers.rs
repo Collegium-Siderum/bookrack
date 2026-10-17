@@ -1,8 +1,6 @@
 //! Shared connection, rendering, and progress plumbing for the
 //! one-shot CLI clients in this module tree.
 
-use std::collections::HashSet;
-use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,12 +10,14 @@ use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::library_param;
 use bookrack_cli::path_sugar::{self, Routing};
 use bookrack_cli::render::confirm::{ConfirmMode, Confirmation};
-use bookrack_cli::render::job_report::{JobOutcomeRecord, JobOutcomeReport, JobOutcomeState};
+use bookrack_cli::render::job_report::{JobOutcomeRecord, JobOutcomeReport};
 use bookrack_cli::render::{OutputMode, ctx};
 use bookrack_control_client::{ControlClient, ControlError, Event};
 use eyre::{Context, Result};
 use serde_json::Value;
 use tokio::sync::broadcast;
+
+use super::progress_view::ProgressView;
 
 /// Discover the daemon and open a control-plane connection. Returns
 /// [`BookrackCliError::DaemonNotRunning`] when no daemon is listening
@@ -212,12 +212,15 @@ pub async fn call_with_progress_value(
             .map_err(eyre::Report::from)
     };
     tokio::pin!(call_future);
+    let mut view = ProgressView::for_call(method);
     let value = loop {
         tokio::select! {
             biased;
             res = &mut call_future => break res?,
             ev = events.recv() => match ev {
-                Ok(event) => render_event(&event),
+                Ok(event) => {
+                    view.apply(&event);
+                }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => {
                     break (&mut call_future).await?;
@@ -225,7 +228,6 @@ pub async fn call_with_progress_value(
             },
         }
     };
-    finish_progress_line();
     Ok(value)
 }
 
@@ -239,8 +241,8 @@ pub async fn call_with_progress_value(
 /// a `queue.tick` carrying `last_finished` fires between the RPC
 /// returning and the wait loop starting.
 ///
-/// `worker.progress` events are still rendered while the wait is in
-/// flight, so the operator sees per-stage progress on stderr.
+/// The batch's progress is drawn on stderr through a [`ProgressView`]
+/// while the wait is in flight, and cleared on every exit from it.
 ///
 /// Bounded by a stall timeout equal to [`DEFAULT_AWAIT_STALL_TIMEOUT`]
 /// so a daemon that silently stops emitting events does not leave the
@@ -249,54 +251,41 @@ pub async fn await_jobs(
     rx: broadcast::Receiver<Event>,
     job_ids: &[String],
 ) -> Result<JobOutcomeReport> {
-    let report = await_jobs_from_rx(
+    await_jobs_from_rx(
         rx,
-        job_ids.to_vec(),
+        ProgressView::for_jobs(job_ids),
         Instant::now(),
         DEFAULT_AWAIT_STALL_TIMEOUT,
     )
-    .await?;
-    finish_progress_line();
-    Ok(report)
+    .await
 }
 
 /// Test-friendly core of [`await_jobs`]: drains the receiver until
-/// every awaited id has appeared in a `queue.tick`'s `last_finished`.
+/// every job `view` awaits has appeared in a `queue.tick`'s
+/// `last_finished`.
 ///
 /// `stall_timeout` bounds the wait between consecutive events. The
 /// timer resets every time an event lands; a stretch with no events
 /// at all surfaces as an error instead of hanging the CLI.
 async fn await_jobs_from_rx(
     mut rx: broadcast::Receiver<Event>,
-    job_ids: Vec<String>,
+    mut view: ProgressView,
     started_at: Instant,
     stall_timeout: Duration,
 ) -> Result<JobOutcomeReport> {
-    if job_ids.is_empty() {
-        return Ok(JobOutcomeReport::new(Vec::new(), started_at.elapsed()));
-    }
-    let mut pending: HashSet<String> = job_ids.into_iter().collect();
-    let mut jobs: Vec<JobOutcomeRecord> = Vec::with_capacity(pending.len());
-    while !pending.is_empty() {
+    let mut jobs: Vec<JobOutcomeRecord> = Vec::with_capacity(view.pending());
+    while !view.is_complete() {
         match tokio::time::timeout(stall_timeout, rx.recv()).await {
             Err(_elapsed) => {
                 return Err(eyre::eyre!(
                     "control event stream stalled for {}s with {} job(s) still pending; \
                      daemon may be unresponsive",
                     stall_timeout.as_secs(),
-                    pending.len()
+                    view.pending()
                 ));
             }
             Ok(Ok(event)) => {
-                if event.lag {
-                    eprintln!("\nbookrack: event stream lagged; waiting on remaining jobs");
-                    continue;
-                }
-                render_event(&event);
-                if event.channel == "queue.tick"
-                    && let Some(record) = extract_finished(&event.value, &pending)
-                {
-                    pending.remove(&record.job_id);
+                if let Some(record) = view.apply(&event) {
                     jobs.push(record);
                 }
             }
@@ -304,92 +293,12 @@ async fn await_jobs_from_rx(
             Ok(Err(broadcast::error::RecvError::Closed)) => {
                 return Err(eyre::eyre!(
                     "control event stream closed before {} job(s) finished",
-                    pending.len()
+                    view.pending()
                 ));
             }
         }
     }
     Ok(JobOutcomeReport::new(jobs, started_at.elapsed()))
-}
-
-/// Parses a `last_finished` payload off a `queue.tick` value into a
-/// [`JobOutcomeRecord`]. Returns `None` when the tick has no terminal
-/// outcome, when the id is not one of the awaited jobs, or when any
-/// required field is missing or unknown.
-fn extract_finished(value: &Value, pending: &HashSet<String>) -> Option<JobOutcomeRecord> {
-    let lf = value.get("last_finished")?;
-    let job_id = lf.get("job_id")?.as_str()?.to_string();
-    if !pending.contains(&job_id) {
-        return None;
-    }
-    let kind = lf.get("kind")?.as_str()?.to_string();
-    let state = JobOutcomeState::from_wire(lf.get("state")?.as_str()?)?;
-    let error = lf.get("error").and_then(Value::as_str).map(String::from);
-    let finished_at = lf.get("finished_at")?.as_str()?.to_string();
-    Some(JobOutcomeRecord {
-        job_id,
-        kind,
-        state,
-        error,
-        finished_at,
-    })
-}
-
-/// Render one broadcast [`Event`] to stderr.
-///
-/// No-op in `Json` and `Quiet` render modes so machine-output and
-/// silent-success paths stay clean. `worker.progress` rewrites the
-/// current row with `\r`; `queue.tick` reuses the same row to show
-/// pending / running counts; other channels are dropped.
-pub fn render_event(event: &Event) {
-    let ctx = ctx();
-    if ctx.is_json() || ctx.is_quiet() {
-        return;
-    }
-    if event.lag {
-        eprintln!("\nbookrack: event stream lagged; progress may be incomplete");
-        return;
-    }
-    match event.channel.as_str() {
-        "worker.progress" => render_worker_progress(&event.value),
-        "queue.tick" => render_queue_tick(&event.value),
-        _ => {}
-    }
-}
-
-fn render_worker_progress(value: &Value) {
-    let job = value.get("job_id").and_then(Value::as_str).unwrap_or("?");
-    let stage = value.get("stage").and_then(Value::as_str).unwrap_or("?");
-    let progress = value
-        .get("stage_progress")
-        .and_then(Value::as_f64)
-        .map(|p| format!(" {:>3.0}%", p * 100.0))
-        .unwrap_or_default();
-    let message = value.get("message").and_then(Value::as_str).unwrap_or("");
-    let job_short: String = job.chars().take(8).collect();
-    eprint!("\r{job_short} [{stage}{progress}] {message}");
-    std::io::stderr().flush().ok();
-}
-
-fn render_queue_tick(value: &Value) {
-    let pending = value.get("pending").and_then(Value::as_u64).unwrap_or(0);
-    let running = value.get("running").and_then(Value::as_u64).unwrap_or(0);
-    let current = value
-        .get("current")
-        .and_then(Value::as_str)
-        .map(|c| c.chars().take(8).collect::<String>())
-        .unwrap_or_else(|| "-".to_string());
-    eprint!("\r[QUEUE] current={current} pending={pending} running={running}");
-    std::io::stderr().flush().ok();
-}
-
-/// Emit a trailing newline after the progress row so the final
-/// stdout payload starts on a fresh line.
-pub fn finish_progress_line() {
-    if ctx().is_json() || ctx().is_quiet() {
-        return;
-    }
-    eprintln!();
 }
 
 /// Extract `job_ids` (an array of strings) or `job_id` (a single
@@ -721,6 +630,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::cli_client::progress_view::testing::RecordingSurface;
+    use crate::cmd::cli_client::progress_view::{SurfaceKind, ViewState};
+    use bookrack_cli::render::job_report::JobOutcomeState;
     use bookrack_runtime::control::methods::REGISTRY;
     use serde_json::json;
 
@@ -876,10 +788,27 @@ mod tests {
     /// test still finishes promptly.
     const TEST_STALL_TIMEOUT: Duration = Duration::from_secs(5);
 
+    /// A view over `ids` that draws nothing.
+    fn quiet_view(ids: &[&str]) -> ProgressView {
+        let ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+        ProgressView::with_surface(ViewState::for_jobs(&ids), SurfaceKind::Hidden.build())
+    }
+
+    /// A view over `ids` whose surface calls land in the returned log.
+    fn recorded_view(ids: &[&str]) -> (ProgressView, Arc<std::sync::Mutex<Vec<String>>>) {
+        let ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let view = ProgressView::with_surface(
+            ViewState::for_jobs(&ids),
+            Box::new(RecordingSurface(Arc::clone(&log))),
+        );
+        (view, log)
+    }
+
     #[tokio::test]
     async fn await_jobs_returns_immediately_when_empty() {
         let (_tx, rx) = broadcast::channel::<Event>(4);
-        let report = await_jobs_from_rx(rx, Vec::new(), Instant::now(), TEST_STALL_TIMEOUT)
+        let report = await_jobs_from_rx(rx, quiet_view(&[]), Instant::now(), TEST_STALL_TIMEOUT)
             .await
             .unwrap();
         assert!(report.jobs.is_empty());
@@ -889,9 +818,9 @@ mod tests {
     #[tokio::test]
     async fn await_jobs_collects_all_three_terminal_states() {
         let (tx, rx) = broadcast::channel::<Event>(16);
-        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let view = quiet_view(&["a", "b", "c"]);
         let handle = tokio::spawn(async move {
-            await_jobs_from_rx(rx, ids, Instant::now(), TEST_STALL_TIMEOUT).await
+            await_jobs_from_rx(rx, view, Instant::now(), TEST_STALL_TIMEOUT).await
         });
         tx.send(tick("a", "done", 2, 1)).unwrap();
         tx.send(tick("b", "failed", 1, 1)).unwrap();
@@ -907,9 +836,9 @@ mod tests {
     #[tokio::test]
     async fn await_jobs_ignores_ticks_for_other_ids_and_empty_finished() {
         let (tx, rx) = broadcast::channel::<Event>(16);
-        let ids = vec!["target".to_string()];
+        let view = quiet_view(&["target"]);
         let handle = tokio::spawn(async move {
-            await_jobs_from_rx(rx, ids, Instant::now(), TEST_STALL_TIMEOUT).await
+            await_jobs_from_rx(rx, view, Instant::now(), TEST_STALL_TIMEOUT).await
         });
         tx.send(tick_without_finished()).unwrap();
         tx.send(tick("other", "done", 1, 0)).unwrap();
@@ -926,9 +855,9 @@ mod tests {
     #[tokio::test]
     async fn await_jobs_errors_when_stream_stalls_with_no_events() {
         let (tx, rx) = broadcast::channel::<Event>(4);
-        let ids = vec!["a".to_string()];
+        let (view, log) = recorded_view(&["a"]);
         let started = Instant::now();
-        let err = await_jobs_from_rx(rx, ids, started, Duration::from_millis(50))
+        let err = await_jobs_from_rx(rx, view, started, Duration::from_millis(50))
             .await
             .unwrap_err();
         drop(tx);
@@ -939,55 +868,28 @@ mod tests {
             "stall fired after {:?}",
             started.elapsed()
         );
+        assert_eq!(
+            log.lock().unwrap().last().map(String::as_str),
+            Some("clear"),
+            "a stalled wait left its progress line drawn"
+        );
     }
 
     #[tokio::test]
     async fn await_jobs_errors_when_stream_closes_with_pending() {
         let (tx, rx) = broadcast::channel::<Event>(4);
-        let ids = vec!["a".to_string()];
+        let (view, log) = recorded_view(&["a"]);
         let handle = tokio::spawn(async move {
-            await_jobs_from_rx(rx, ids, Instant::now(), TEST_STALL_TIMEOUT).await
+            await_jobs_from_rx(rx, view, Instant::now(), TEST_STALL_TIMEOUT).await
         });
         drop(tx);
         let err = handle.await.unwrap().unwrap_err();
         assert!(err.to_string().contains("1 job"));
-    }
-
-    #[test]
-    fn extract_finished_filters_by_pending_set() {
-        let mut pending = HashSet::new();
-        pending.insert("a".to_string());
-        let ev = tick("a", "done", 0, 0).value;
-        assert!(extract_finished(&ev, &pending).is_some());
-        let other = tick("b", "done", 0, 0).value;
-        assert!(extract_finished(&other, &pending).is_none());
-    }
-
-    #[test]
-    fn extract_finished_recognises_skipped_duplicate_state() {
-        // Sanity-guard the wire-token contract between the daemon and
-        // the CLI wait path: a job whose ingest short-circuited on the
-        // noop-if-up-to-date path must be extracted as a terminal
-        // outcome, otherwise `bookrack ingest --wait` would silently
-        // spin until the stall timeout when every job was a dedup skip.
-        let mut pending = HashSet::new();
-        pending.insert("a".to_string());
-        let ev = tick("a", "skipped_duplicate", 0, 0).value;
-        let record =
-            extract_finished(&ev, &pending).expect("skipped_duplicate terminal recognised");
-        assert!(matches!(record.state, JobOutcomeState::SkippedDuplicate));
-    }
-
-    #[test]
-    fn extract_finished_recognises_needs_ocr_state() {
-        // A scan source that ends in `needs_ocr` is a terminal the wait
-        // path must stop on, otherwise `bookrack ingest` would spin
-        // until the stall timeout when every job needed OCR.
-        let mut pending = HashSet::new();
-        pending.insert("a".to_string());
-        let ev = tick("a", "needs_ocr", 0, 0).value;
-        let record = extract_finished(&ev, &pending).expect("needs_ocr terminal recognised");
-        assert!(matches!(record.state, JobOutcomeState::NeedsOcr));
+        assert_eq!(
+            log.lock().unwrap().last().map(String::as_str),
+            Some("clear"),
+            "a closed stream left the progress line drawn"
+        );
     }
 
     #[test]

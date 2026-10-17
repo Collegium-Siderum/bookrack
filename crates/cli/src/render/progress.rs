@@ -1,55 +1,69 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Stage-aware spinner used by the CLI's async-job renderers.
+//! Status spinner used by the CLI's async-wait renderers.
 //!
 //! Wraps [`indicatif::ProgressBar`] behind a small, opinionated API:
-//! one current stage label, an optional `0..=100` percentage, and a
-//! tail message. The wrapper centralises the formatting so individual
-//! subcommand modules do not write `\r` rewrites by hand.
+//! one status line drawn next to the spinner, lines printed above it,
+//! and a clear on finish. The bar stays hidden until a reveal delay
+//! has elapsed, so a wait that ends quickly never draws a frame. The
+//! wrapper centralises the formatting so individual subcommand modules
+//! do not write `\r` rewrites by hand.
 
 use std::time::Duration;
 
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use super::ctx;
 
-/// Stage-tagged spinner that draws on stderr.
+/// Redraw interval of the spinner glyph.
+// setting: internal -- the animation rate of a glyph that carries no
+// information
+const TICK: Duration = Duration::from_millis(120);
+
+/// Status spinner that draws on stderr.
 ///
-/// The spinner is hidden when the installed [`RenderCtx`] is in
+/// The spinner is inert when the installed [`RenderCtx`] is in
 /// `Quiet` or `Json` mode; in those modes every method becomes a
 /// no-op so call sites can render unconditionally.
+///
+/// [`RenderCtx`]: super::RenderCtx
 pub struct SpinnerWithStage {
     inner: Option<ProgressBar>,
 }
 
 impl SpinnerWithStage {
-    /// Builds a new spinner. `label` is shown verbatim before the
-    /// stage tag (typically a short job-id prefix).
-    pub fn new(label: &str) -> Self {
+    /// Builds a spinner that starts drawing on stderr once
+    /// `reveal_after` has elapsed, unless it was finished first.
+    pub fn new(reveal_after: Duration) -> Self {
         if ctx().is_quiet() || ctx().is_json() {
             return Self { inner: None };
         }
-        let pb = ProgressBar::new_spinner();
+        let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::hidden());
         pb.set_style(spinner_style());
-        pb.enable_steady_tick(Duration::from_millis(120));
-        pb.set_message(label.to_string());
+        pb.enable_steady_tick(TICK);
+        let revealer = pb.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(reveal_after);
+            if !revealer.is_finished() {
+                revealer.set_draw_target(ProgressDrawTarget::stderr());
+            }
+        });
         Self { inner: Some(pb) }
     }
 
-    /// Updates the stage tag and optional progress percentage.
-    pub fn set_stage(&self, stage: &str, percent: Option<u8>) {
+    /// Replaces the status line drawn next to the spinner.
+    pub fn set_line(&self, line: &str) {
         if let Some(pb) = &self.inner {
-            let pct = percent
-                .map(|p| format!("{p:>3}%"))
-                .unwrap_or_else(|| "----".to_string());
-            pb.set_message(format!("[{stage} {pct}]"));
+            pb.set_message(line.to_string());
         }
     }
 
-    /// Appends a tail message to the current line.
-    pub fn set_tail(&self, tail: &str) {
+    /// Prints `line` on stderr above the spinner. Goes through
+    /// [`ProgressBar::suspend`] because [`ProgressBar::println`]
+    /// prints nothing while the bar is hidden.
+    pub fn print_above(&self, line: &str) {
         if let Some(pb) = &self.inner {
-            pb.set_message(format!("{} {}", pb.message(), tail));
+            pb.suspend(|| eprintln!("{line}"));
         }
     }
 
@@ -62,7 +76,7 @@ impl SpinnerWithStage {
 }
 
 fn spinner_style() -> ProgressStyle {
-    ProgressStyle::with_template("{spinner} {msg}")
+    ProgressStyle::with_template("{spinner} {wide_msg}")
         .unwrap_or_else(|_| ProgressStyle::default_spinner())
         .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", ""])
 }
@@ -80,10 +94,10 @@ mod tests {
         // The process-wide ctx is first-write-wins; require that this
         // test's init actually took effect before reading the spinner.
         assert!(super::super::ctx().is_quiet());
-        let s = SpinnerWithStage::new("xxxxxxxx");
+        let s = SpinnerWithStage::new(Duration::ZERO);
         assert!(s.inner.is_none(), "quiet mode must not build a bar");
-        s.set_stage("EXTRACT", Some(50));
-        s.set_tail("reading file");
+        s.set_line("1/2 job [processing ----]");
+        s.print_above("1/2 job done");
         s.finish_and_clear();
     }
 }

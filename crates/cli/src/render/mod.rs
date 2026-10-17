@@ -70,7 +70,8 @@ impl ColorMode {
     }
 }
 
-fn stderr_is_tty() -> bool {
+/// True when stderr is attached to a terminal.
+pub fn stderr_is_tty() -> bool {
     use std::io::IsTerminal;
     std::io::stderr().is_terminal()
 }

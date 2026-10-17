@@ -65,6 +65,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **A waiting command draws one progress line, about what it waits
+  on.** `ingest`, `papers ingest`, and `intake ocr` drew progress by
+  rewriting stderr with carriage returns: the queue counts and the job
+  stage overwrote each other on one row, any job's progress was shown —
+  another terminal's batch included — and a wait that ended in an error
+  left the row behind. The line now counts this batch's finished jobs
+  against its size, shows the stage of this batch's running job, prints
+  a line for each job that finishes when the batch has more than one,
+  and is cleared on every exit. Long writes such as `vectors rebuild`,
+  `stamps reconcile`, and `dryrun` show their method beside a spinner
+  instead of unrelated queue jobs. With stderr not a terminal, the line
+  becomes appended lines — one per stage and per finished job — with no
+  carriage returns. Nothing is drawn for a wait shorter than half a
+  second, or under `--json` or `--quiet`.
 - **`worker.progress` no longer names stages the worker cannot see.**
   The event announced `extract` when the worker pulled a job and
   `embed` once the job had succeeded — neither a real stage boundary,

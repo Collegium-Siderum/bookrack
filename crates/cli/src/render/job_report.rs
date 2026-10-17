@@ -159,7 +159,8 @@ impl JobOutcomeReport {
     }
 }
 
-fn state_word(state: JobOutcomeState) -> &'static str {
+/// The word a human summary uses for `state`.
+pub fn state_word(state: JobOutcomeState) -> &'static str {
     match state {
         JobOutcomeState::Done => "done",
         JobOutcomeState::SkippedDuplicate => "already in catalog",

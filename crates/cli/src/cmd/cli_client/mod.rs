@@ -27,6 +27,7 @@ pub mod listing;
 pub mod logs;
 pub mod metadata;
 pub mod papers;
+pub(crate) mod progress_view;
 pub mod queue;
 pub mod quit;
 pub mod remove;
