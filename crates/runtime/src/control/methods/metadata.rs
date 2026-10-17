@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `metadata.{set,clear,ack,approve,reject}` JSON-RPC handlers.
+//! `metadata.*` JSON-RPC handlers.
 //!
 //! Each method maps onto the matching variant of
 //! [`crate::cmd::metadata::WriteMetadataAction`] and runs through
 //! [`super::run_write`] so the write mutex, daemon-state flag, and
-//! broadcast notifications are managed in one place.
+//! broadcast notifications are managed in one place. Each answers with
+//! the [`crate::cmd::metadata::MetadataWriteReport`] the write
+//! returned.
 
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use super::{MethodContext, input_err, run_write};
+use super::{MethodContext, input_err, ok_reply, run_write};
 use crate::audit_helpers::require_known_profile;
 use crate::cmd::metadata::{WriteMetadataAction, run_write as run_metadata};
 use crate::control::error_map::{handler_err, registry_err};
@@ -294,10 +296,10 @@ async fn run_metadata_action(
     let handle = ctx.registry.get(library).map_err(registry_err)?;
     let cfg = handle.cfg_arc();
     run_write(ctx, handle.name(), move || async move {
-        run_metadata(&cfg, action, profile_name.as_deref())
+        let report = run_metadata(&cfg, action, profile_name.as_deref())
             .await
             .map_err(|e| handler_err("metadata.write", e))?;
-        Ok(json!({ "ok": true }))
+        ok_reply(&report)
     })
     .await
 }

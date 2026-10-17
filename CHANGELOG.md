@@ -65,6 +65,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **Book-side `metadata` writes return what they recorded.** Each
+  answered `{ ok: true }` and printed its sentence on the daemon's own
+  stdout, while the same ops call handed an MCP agent the audit row it
+  wrote. The control-plane reply now carries the same fields the MCP
+  write tools return — `audit_id`, `actor_kind`, `actor_detail`,
+  `changed` — plus `book`, the edited `field`, a new contributor's id,
+  a re-audit's verdict and confidence, and for `advance`, or an
+  `approve` that resumed a parked book, the chunk and batch counts with
+  `resumed` saying which. `bookrack metadata` words each as one line
+  naming the library, and shows a reply without those fields as it
+  came.
 - **The vector and stamp writes report what they did.** `vectors
   rebuild`, `drop`, and `reset` and `stamps reconcile`, on both sides,
   answered `{ ok: true }` and printed their result on the daemon's own

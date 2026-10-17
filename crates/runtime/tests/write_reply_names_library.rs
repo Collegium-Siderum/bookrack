@@ -189,10 +189,10 @@ async fn an_unnamed_write_lands_on_the_registry_default_and_says_so() -> Result<
     join_with_deadline(runtime, repl_handle, driver).await
 }
 
-/// A metadata write whose reply carried nothing but `ok` now carries
-/// the library it acted on beside it.
+/// A metadata write answers with the library it acted on beside `ok`
+/// and the audit row it wrote, a row the named library's catalog holds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_bare_ok_write_carries_the_library() -> Result<()> {
+async fn a_metadata_write_carries_the_library_and_its_audit_row() -> Result<()> {
     let roots = world();
     let runtime_root = tempfile::tempdir()?;
     let runtime = start_under_beta(runtime_root.path()).await?;
@@ -203,6 +203,7 @@ async fn a_bare_ok_write_carries_the_library() -> Result<()> {
         )?
         .into_intake()
         .intake_id;
+    let alpha_catalog = roots.alpha.join("catalog.db");
     let sock = runtime.control_sock.path.clone();
     let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
 
@@ -217,7 +218,18 @@ async fn a_bare_ok_write_carries_the_library() -> Result<()> {
             json!({ "book": book, "reason": "the gap is known" }),
         )
         .await?;
-        assert_eq!(reply, json!({ "ok": true, "library": "alpha" }));
+        assert_eq!(reply["ok"], Value::Bool(true), "{reply}");
+        assert_eq!(reply["library"], "alpha", "{reply}");
+        let audit_id = reply["audit_id"]
+            .as_i64()
+            .with_context(|| format!("no audit_id: {reply}"))?;
+        assert!(
+            Catalog::open(&alpha_catalog)?
+                .recent_metadata_audit("", 1000)?
+                .iter()
+                .any(|row| row.audit_id == audit_id),
+            "the reply's audit_id must name a row of the library it acted on: {reply}"
+        );
 
         let _ = call(&mut reader, &mut w, 2, "daemon.shutdown", Value::Null).await?;
         Ok::<(), eyre::Report>(())

@@ -606,8 +606,26 @@ the exit-code bucket does not distinguish the two.
 - `metadata.set` / `metadata.clear` / `metadata.void` /
   `metadata.reaudit` / `metadata.ack` / `metadata.approve` /
   `metadata.reject` / `metadata.advance` — same params as the
-  `bookrack metadata` REPL subcommands, plus `library?`; return
-  `{ ok: true, library }` on success. `metadata.reaudit` and `metadata.advance` additionally
+  `bookrack metadata` REPL subcommands, plus `library?`. Each returns
+  `ok: true`, `library`, and `book` with what the write recorded, in
+  the field names the MCP write tools use:
+  - `set` / `clear` / `void` → `{ field, audit_id, actor_kind,
+    actor_detail, changed }`; `ack` / `reject` /
+    `contributor_remove` → the same without `field`;
+    `contributor_add` adds `contributor_id`. `audit_id` names the
+    `metadata_audit` row the edit wrote; `changed` is false for an
+    edit that changed nothing, which is still audited.
+  - `reaudit` → `{ verdict, previous_verdict, confidence,
+    previous_confidence }`, the previous pair `null` when nothing was
+    stored. A re-audit writes no audit row.
+  - `advance` → `{ resumed: true, chunks_written, batches }`, what the
+    resumed CHUNK→EMBED wrote.
+  - `approve` → the edit fields plus `resumed`, which says whether the
+    book was parked at the metadata gate and the approval resumed it;
+    when `true`, `chunks_written` and `batches` follow as for
+    `advance`.
+
+  `metadata.reaudit` and `metadata.advance` additionally
   accept `audit_profile?`, which routes through the same built-in set
   as `ingest.submit` for the re-audit they trigger, and is refused
   with `-32602` when it names nothing in that set. The other writes
