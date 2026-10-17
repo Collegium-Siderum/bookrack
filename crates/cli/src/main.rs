@@ -1121,6 +1121,21 @@ async fn run() -> Result<()> {
     }
     let json_global = cli.json;
 
+    // The audit-profile gate runs ahead of every dispatch, including
+    // the four below that return before the shared resolver: a global
+    // flag the subcommand does not consume is refused as operator
+    // input rather than parsed and discarded.
+    let audit_profile = cli.audit_profile.clone();
+    if audit_profile.is_some() && !accepts_audit_profile(&cli.command) {
+        return Err(bookrack_cli::error::BookrackCliError::LocalUserError {
+            message: "--audit-profile is only consumed by `ingest`, `intake ocr`, \
+                      `dryrun`, `metadata reaudit`, `metadata advance`, and \
+                      `papers metadata reaudit`; remove it for this subcommand"
+                .to_string(),
+        }
+        .into());
+    }
+
     // `doctor` resolves on its own — it has a daemon-running path
     // (control plane) and a daemon-not-running fallback that probes
     // the data root directly without going through `Config::resolve`,
@@ -1229,14 +1244,6 @@ async fn run() -> Result<()> {
     // root from this process. The `AuditProfile` reflection runner
     // is the lone exception — it reads compiled-in profiles and
     // needs no config.
-    let audit_profile = cli.audit_profile.clone();
-    if audit_profile.is_some() && !accepts_audit_profile(&cli.command) {
-        eyre::bail!(
-            "--audit-profile is only consumed by `ingest`, `intake ocr`, \
-             `dryrun`, `metadata reaudit`, `metadata advance`, and \
-             `papers metadata reaudit`; remove it for this subcommand"
-        );
-    }
     let selection = cli.selection();
     match cli.command {
         Command::Config { action } => match action {
@@ -2069,6 +2076,18 @@ mod tests {
             vec!["bookrack", "vectors", "rebuild"],
             vec!["bookrack", "papers", "list"],
             vec!["bookrack", "logs", "--tail", "5"],
+            // The four subcommands that dispatch before the shared
+            // resolver; the gate has to sit ahead of them too.
+            vec!["bookrack", "doctor"],
+            vec![
+                "bookrack",
+                "init",
+                "--non-interactive",
+                "--data-dir",
+                "/tmp/x",
+            ],
+            vec!["bookrack", "run"],
+            vec!["bookrack", "rpc", "list"],
         ];
         for argv in outsiders {
             let cli = Cli::try_parse_from(argv.clone()).expect("argv parses");

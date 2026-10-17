@@ -8,6 +8,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`--audit-profile` is refused on `doctor`, `init`, `run`, and
+  `rpc`.** The gate that rejects the global flag on a subcommand that
+  does not consume it ran after those four had already dispatched, so
+  `bookrack --audit-profile strict doctor` printed its report with the
+  flag silently discarded, and `bookrack --audit-profile strict run`
+  started a daemon that ignored it. The gate now runs ahead of every
+  dispatch, and the refusal exits `2` as operator input instead of `1`.
+
 ### Removed
 
 - **The desktop shell.** The `crates/app` Tauri shell, which never
