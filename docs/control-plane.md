@@ -452,9 +452,10 @@ the exit-code bucket does not distinguish the two.
 - `library.info` — full status card for one library;
   `params.name` selects which.
 - `library.fork` — `{ new_name, data_dir, library? }` →
-  `{ new_name, data_dir, mounted, mount_error }`. `library` names the
-  *source* — the one method that holds two libraries at once, so it is
-  written out rather than inherited.
+  `{ new_name, data_dir, mounted, mount_error, library }`. `library`
+  names the *source*, in the params and in the reply — the one method
+  that holds two libraries at once, so it is written out rather than
+  inherited.
   Clones
   the served library into a sibling registry entry: the envelope store is
   hardlinked where the filesystem allows, the catalog and corpus are
@@ -466,7 +467,7 @@ the exit-code bucket does not distinguish the two.
   would delete data to report a serving problem. Such a fork still
   succeeds, with `mounted: false` and `mount_error` naming the reason;
   the repair is `library.mount` against the name the fork registered.
-- `library.mount` — `{ name }` → `{ ok: true, name }`. Open the
+- `library.mount` — `{ name }` → `{ ok: true, name, library }`. Open the
   registered library `name` and add it to the served set, without a
   restart. `name` is a registry name, never a path: registering a root
   stays a separate act, with its own failure modes. The mount runs the
@@ -479,7 +480,7 @@ the exit-code bucket does not distinguish the two.
   another process holds the root's lock. Being a write, it takes the
   write mutex — a concurrent write sees `-32001 busy` for the second or
   so a mount takes — and fires `library.changed` on success.
-- `library.unmount` — `{ name }` → `{ ok: true, name }`. Stop serving
+- `library.unmount` — `{ name }` → `{ ok: true, name, library }`. Stop serving
   `name` and give its data root back. Three libraries are refused: the
   registry's current default (an unnamed call would resolve to a key
   the served set no longer has), the library the daemon came up under
@@ -578,8 +579,11 @@ the exit-code bucket does not distinguish the two.
   reloads it before running the ingest; set to anything else, the call
   is refused with `-32602 invalid params` before a job is queued, and
   the error's `detail` lists the accepted names.
-- `ingest.cancel` — `{ job_id }` → `{ ok: true }`. Marks the matching
-  pending or running job as cancelled.
+- `ingest.cancel` — `{ job_id }` → `{ ok: true, job_id }`. Marks the
+  one pending or running job whose id starts with `job_id` as
+  cancelled; the reply's `job_id` is the full id the prefix resolved
+  to. The queue spans libraries, so the reply carries no `library`;
+  `queue.list` reports it per row.
 - `intake.ocr` — `{ ocr_md, from_pdf, expected_pages?, allow_partial?,
   library?, priority?, force?, hold_for_metadata?, audit_profile? }`
   → `{ job_id: <uuid v7> }`. Append a single OCR-intake job. The worker
@@ -603,7 +607,7 @@ the exit-code bucket does not distinguish the two.
   `metadata.reaudit` / `metadata.ack` / `metadata.approve` /
   `metadata.reject` / `metadata.advance` — same params as the
   `bookrack metadata` REPL subcommands, plus `library?`; return
-  `{ ok: true }` on success. `metadata.reaudit` and `metadata.advance` additionally
+  `{ ok: true, library }` on success. `metadata.reaudit` and `metadata.advance` additionally
   accept `audit_profile?`, which routes through the same built-in set
   as `ingest.submit` for the re-audit they trigger, and is refused
   with `-32602` when it names nothing in that set. The other writes
@@ -758,6 +762,16 @@ refused with `-32010 invalid library` before any store is opened, and
 a plan id minted against one library is not redeemable against
 another (`-32015`). `papers.remove` and the `remove` / `corpus.rebuild`
 / `vectors.reembed` execute legs scope their plan ids the same way.
+
+Every method that goes through the write mutex names the library it
+acted on in its success reply: `library` is the registry name the call
+resolved to — the explicit parameter, or the default pointer at the
+moment of the call. A method that already returns an object keeps
+every field it had; `library` is added beside them. `library.fork`
+reports the source library there, next to `new_name`;
+`library.mount` and `library.unmount` report the same name in `name`
+and `library`. A daemon serving a root selected by path rather than
+by registry name reports it as `default`.
 
 `diagnose.run` and `doctor.gather` take the same optional `library`,
 although neither is a write: half of what each gathers belongs to one

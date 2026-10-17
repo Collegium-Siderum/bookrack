@@ -8,6 +8,24 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Added
+
+- **A write's reply names the library it acted on.** Every control-plane
+  method that takes the write mutex — the `vectors`, `stamps`,
+  `corpus`, `metadata`, `remove`, and `dryrun` writes on both sides,
+  and `library.fork` / `mount` / `unmount` — answers with `library`:
+  the registry name the call resolved to, which for an unnamed call is
+  the default pointer at that moment. The reply kept no trace of it, so
+  an operator had nothing but memory to tell which library a write had
+  landed on once `library.set_default` had moved the pointer. A reply
+  that already carried fields keeps all of them; `library.fork`
+  reports the source library. `papers metadata` writes end their
+  sentence with `Library: <name>.`
+- **`ingest.cancel` returns the full id of the job it cancelled.** The
+  method takes a prefix and answered `{ ok: true }`, so the caller
+  could not tell which job the prefix had matched; the reply now
+  carries `job_id`.
+
 ### Fixed
 
 - **`--audit-profile` is refused on `doctor`, `init`, `run`, and

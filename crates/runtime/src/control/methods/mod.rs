@@ -675,6 +675,11 @@ impl Drop for WriteSession {
 /// cannot leave the daemon stranded with the write source raised and
 /// MCP paused, or allow a second writer to enter while the blocking
 /// work is still running.
+///
+/// A success reply that is a JSON object names the library the write
+/// acted on: `library` is set to `library` unless `op` already put a
+/// `library` key there. A reply of any other shape, and every error,
+/// passes through unchanged.
 pub(crate) async fn run_write<F, Fut>(
     ctx: &MethodContext,
     library: &str,
@@ -700,7 +705,13 @@ where
     let library_name = library.to_string();
     let join = tokio::task::spawn_blocking(move || {
         let handle = tokio::runtime::Handle::current();
-        let result = handle.block_on(op());
+        let result = handle.block_on(op()).map(|mut value| {
+            if let Value::Object(map) = &mut value {
+                map.entry("library")
+                    .or_insert_with(|| Value::String(library_name.clone()));
+            }
+            value
+        });
         if result.is_ok() {
             event_stream.publish(Event::LibraryChanged {
                 library: library_name,
@@ -856,6 +867,86 @@ mod tests {
         }
         assert!(saw_unpaused, "expected McpAvailability paused:false");
         assert!(saw_idle, "expected DaemonState::Idle after paused:false");
+    }
+
+    /// Drive `op` through [`run_write`] on the handle `name` selects in
+    /// a single-library context served under `served`, so the library
+    /// name reaches `run_write` the way a handler hands it over.
+    async fn write_reply(
+        served: Option<&str>,
+        name: Option<&str>,
+        reply: Result<Value, RpcError>,
+    ) -> Result<Value, RpcError> {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_method_context(dir.path(), served);
+        let handle = select_library(&ctx, name).expect("the served library resolves");
+        run_write(&ctx, handle.name(), move || async move { reply }).await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_write_names_the_library_on_a_bare_ok_reply() {
+        let reply = write_reply(Some("alpha"), None, Ok(serde_json::json!({ "ok": true })))
+            .await
+            .expect("the write succeeds");
+        assert_eq!(reply, serde_json::json!({ "ok": true, "library": "alpha" }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_write_adds_library_beside_existing_fields() {
+        let reply = write_reply(
+            Some("alpha"),
+            Some("alpha"),
+            Ok(serde_json::json!({ "name": "x" })),
+        )
+        .await
+        .expect("the write succeeds");
+        assert_eq!(reply["name"], "x", "{reply}");
+        assert_eq!(reply["library"], "alpha", "{reply}");
+    }
+
+    /// A path-selected root is served under the handle name `default`,
+    /// the same name `daemon.rs` gives an unnamed configuration; the
+    /// reply reports that name as it is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_write_names_the_anonymous_root_default() {
+        let reply = write_reply(None, None, Ok(serde_json::json!({ "ok": true })))
+            .await
+            .expect("the write succeeds");
+        assert_eq!(reply["library"], "default", "{reply}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_write_keeps_an_existing_library_key() {
+        let reply = write_reply(
+            Some("alpha"),
+            None,
+            Ok(serde_json::json!({ "library": "keep" })),
+        )
+        .await
+        .expect("the write succeeds");
+        assert_eq!(reply, serde_json::json!({ "library": "keep" }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_write_leaves_a_non_object_reply_alone() {
+        let reply = write_reply(Some("alpha"), None, Ok(serde_json::json!([1, 2])))
+            .await
+            .expect("the write succeeds");
+        assert_eq!(reply, serde_json::json!([1, 2]));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_write_does_not_touch_an_error_reply() {
+        let err = write_reply(
+            Some("alpha"),
+            None,
+            Err(RpcError::new(INVALID_PARAMS, "refused as given")),
+        )
+        .await
+        .expect_err("the write fails");
+        assert_eq!(err.code, INVALID_PARAMS);
+        assert_eq!(err.message, "refused as given");
+        assert!(err.data.is_none(), "{err:?}");
     }
 
     #[test]

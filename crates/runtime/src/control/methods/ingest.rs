@@ -156,6 +156,8 @@ pub struct IngestCancelParams {
     job_id: String,
 }
 
+/// Cancel the one pending or running job whose id starts with
+/// `job_id`. The reply carries the full id the prefix resolved to.
 pub async fn cancel(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: IngestCancelParams = match params {
         Some(v) if !v.is_null() => serde_json::from_value(v.clone()).map_err(|e| {
@@ -168,7 +170,7 @@ pub async fn cancel(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             ));
         }
     };
-    let (_full_id, tick) = super::queue_writes::mutate_jobs_and_persist(
+    let (full_id, tick) = super::queue_writes::mutate_jobs_and_persist(
         &ctx.queue_state,
         &ctx.queue_state_path,
         |guard| {
@@ -181,7 +183,7 @@ pub async fn cancel(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         },
     )?;
     ctx.event_stream.publish(Event::QueueTick(tick));
-    Ok(json!({ "ok": true }))
+    Ok(json!({ "ok": true, "job_id": full_id }))
 }
 
 routed_params!(IngestSubmitParams);

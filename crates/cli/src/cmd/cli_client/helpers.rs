@@ -12,8 +12,8 @@ use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::library_param;
 use bookrack_cli::path_sugar::{self, Routing};
 use bookrack_cli::render::confirm::{ConfirmMode, Confirmation};
-use bookrack_cli::render::ctx;
 use bookrack_cli::render::job_report::{JobOutcomeRecord, JobOutcomeReport, JobOutcomeState};
+use bookrack_cli::render::{OutputMode, ctx};
 use bookrack_control_client::{ControlClient, ControlError, Event};
 use eyre::{Context, Result};
 use serde_json::Value;
@@ -453,9 +453,40 @@ pub fn print_value(value: &Value) {
     if ctx().is_quiet() {
         return;
     }
-    match serde_json::to_string_pretty(value) {
-        Ok(text) => println!("{text}"),
-        Err(_) => println!("{value}"),
+    println!("{}", pretty(value));
+}
+
+fn pretty(value: &Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+/// Print the outcome of one write in the mode the operator asked for.
+/// See [`outcome_line`] for what each mode prints.
+pub fn emit_outcome(response: &Value, sentence: Option<String>) {
+    if let Some(text) = outcome_line(ctx().output(), response, sentence) {
+        println!("{text}");
+    }
+}
+
+/// Output-mode gate shared by every write that renders its reply as a
+/// sentence: `Quiet` prints nothing and lets the exit code answer,
+/// `Json` prints the server's response payload so a script parses one
+/// object, `Human` prints `sentence`.
+///
+/// A caller builds `sentence` only when the reply carries every field
+/// the sentence states, and passes `None` otherwise; `Human` then
+/// prints the payload as `Json` does, so a reply from a daemon that
+/// does not report a field is shown as it is rather than worded with
+/// a value nobody sent.
+pub fn outcome_line(
+    mode: OutputMode,
+    response: &Value,
+    sentence: Option<String>,
+) -> Option<String> {
+    match (mode, sentence) {
+        (OutputMode::Quiet, _) => None,
+        (OutputMode::Human, Some(sentence)) => Some(sentence),
+        (OutputMode::Json | OutputMode::Human, _) => Some(pretty(response)),
     }
 }
 
@@ -1046,6 +1077,64 @@ mod tests {
             BookrackCliError::IngestPartialFailure { .. }
         ));
         assert_eq!(cause.as_cli().exit_code(), 5);
+    }
+    const SENTENCE: &str = "Cleared override on title for paper 7.";
+
+    fn write_response() -> Value {
+        json!({ "removed": true, "field": "title", "intake_id": 7 })
+    }
+
+    #[test]
+    fn a_write_outcome_prints_nothing_in_quiet_mode() {
+        assert_eq!(
+            outcome_line(
+                OutputMode::Quiet,
+                &write_response(),
+                Some(SENTENCE.to_string())
+            ),
+            None
+        );
+        assert_eq!(
+            outcome_line(OutputMode::Quiet, &write_response(), None),
+            None
+        );
+    }
+
+    #[test]
+    fn a_write_outcome_prints_the_server_payload_in_json_mode() {
+        for sentence in [Some(SENTENCE.to_string()), None] {
+            let line = outcome_line(OutputMode::Json, &write_response(), sentence)
+                .expect("json mode prints the payload");
+            assert!(
+                !line.contains(SENTENCE),
+                "the human sentence reached a --json stream:\n{line}"
+            );
+            let parsed: Value =
+                serde_json::from_str(&line).expect("json mode prints one JSON object");
+            assert_eq!(parsed, write_response());
+        }
+    }
+
+    #[test]
+    fn a_write_outcome_prints_the_sentence_in_human_mode() {
+        assert_eq!(
+            outcome_line(
+                OutputMode::Human,
+                &write_response(),
+                Some(SENTENCE.to_string())
+            ),
+            Some(SENTENCE.to_string())
+        );
+    }
+
+    /// A reply too thin to word is shown as it came, not as a sentence
+    /// with a value filled in.
+    #[test]
+    fn a_write_outcome_without_a_sentence_prints_the_payload_in_human_mode() {
+        let line = outcome_line(OutputMode::Human, &write_response(), None)
+            .expect("human mode prints something");
+        let parsed: Value = serde_json::from_str(&line).expect("the payload, as JSON");
+        assert_eq!(parsed, write_response());
     }
 }
 
