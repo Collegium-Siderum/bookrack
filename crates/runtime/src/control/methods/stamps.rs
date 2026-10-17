@@ -3,9 +3,9 @@
 //! `stamps.reconcile` JSON-RPC handler.
 
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use super::{MethodContext, run_write};
+use super::{MethodContext, ok_reply, run_write};
 use crate::cmd::stamps;
 use crate::control::error_map::handler_err;
 use crate::control::error_map::registry_err;
@@ -37,10 +37,10 @@ pub async fn reconcile(params: &Option<Value>, ctx: &MethodContext) -> Result<Va
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
     run_write(ctx, handle.name(), move || async move {
-        stamps::reconcile(&cfg)
+        let report = stamps::reconcile(&cfg)
             .await
             .map_err(|e| handler_err("stamps.reconcile", e))?;
-        Ok(json!({ "ok": true }))
+        ok_reply(&report)
     })
     .await
 }

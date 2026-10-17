@@ -6,13 +6,78 @@
 
 use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_config::Config;
-use bookrack_corpus::{Corpus, EMBED_MODEL_KEY, VECTOR_DIM_KEY};
-use bookrack_vectors::{AnnKind, ChunkStore};
+use bookrack_corpus::Corpus;
+use bookrack_vectors::{AnnConfig, AnnKind, ChunkStore};
 use eyre::{Context, Result};
+use serde::Serialize;
 
+use crate::cmd::ResetInterrupted;
 use crate::cmd::input_error::CmdInputError;
 use crate::embed_helpers::embedder;
 use crate::pipeline_run_helpers::{close_run, open_run};
+
+/// The ANN configuration a rebuild built the index with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AnnRebuildReport {
+    /// The index kind, spelled as `--kind` takes it.
+    pub kind: &'static str,
+    /// IVF partition count.
+    pub num_partitions: u32,
+    /// PQ sub-vector count, for the PQ kinds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_sub_vectors: Option<u32>,
+    /// PQ code width, for the PQ kinds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_bits: Option<u32>,
+    /// Query-time partition fan-out.
+    pub nprobes: u32,
+    /// Query-time refinement multiplier, when set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refine_factor: Option<u32>,
+}
+
+impl From<&AnnConfig> for AnnRebuildReport {
+    fn from(cfg: &AnnConfig) -> Self {
+        AnnRebuildReport {
+            kind: cfg.kind.as_str(),
+            num_partitions: cfg.num_partitions,
+            num_sub_vectors: cfg.num_sub_vectors,
+            num_bits: cfg.num_bits,
+            nprobes: cfg.nprobes,
+            refine_factor: cfg.refine_factor,
+        }
+    }
+}
+
+/// The index kind a drop left the store at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AnnDropReport {
+    /// Always `brute-force`: search falls back to a full scan.
+    pub kind: &'static str,
+}
+
+impl AnnDropReport {
+    pub(crate) fn brute_force() -> Self {
+        AnnDropReport {
+            kind: AnnKind::BruteForce.as_str(),
+        }
+    }
+}
+
+/// What one reset pass re-embedded.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct VectorsResetReport {
+    /// Whether the pass continued an interrupted reset instead of
+    /// starting a fresh one.
+    pub resumed: bool,
+    /// Intakes this pass re-embedded.
+    pub intakes_reembedded: usize,
+    /// Chunk rows this pass wrote.
+    pub chunks_written: usize,
+    /// Intakes this pass found nothing to chunk in; they stay at
+    /// `Extracted`.
+    pub skipped_empty: Vec<i64>,
+}
 
 /// Parse a `--kind` value, reporting an unsupported one against the
 /// accepted set.
@@ -36,9 +101,10 @@ pub(crate) fn parse_ann_kind(s: &str) -> Result<AnnKind> {
     })
 }
 
-/// Render `bookrack vectors rebuild` — build or rebuild the ANN index
+/// Run `bookrack vectors rebuild` — build or rebuild the ANN index
 /// from CLI flags, falling back to the persisted meta or the C1
-/// recommended default for any flag not supplied.
+/// recommended default for any flag not supplied. Returns the
+/// configuration the index was built with.
 #[allow(clippy::too_many_arguments)]
 pub async fn rebuild(
     cfg: &Config,
@@ -48,7 +114,7 @@ pub async fn rebuild(
     num_bits: Option<u32>,
     nprobes: Option<u32>,
     refine_factor: Option<u32>,
-) -> Result<()> {
+) -> Result<AnnRebuildReport> {
     let lancedb_dir = cfg.lancedb_dir();
     let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
     let dim = corpus
@@ -93,12 +159,7 @@ pub async fn rebuild(
         .build_ann_index(&base, &lancedb_dir, bookrack_ingest::now_rfc3339())
         .await
         .context("build ann index")?;
-    println!(
-        "rebuilt: kind={} np={}",
-        base.kind.as_str(),
-        base.num_partitions
-    );
-    Ok(())
+    Ok(AnnRebuildReport::from(&base))
 }
 
 /// Compute a reembed plan without writing anything. Returns the
@@ -153,9 +214,9 @@ pub async fn execute_reembed_from_plan(
     result
 }
 
-/// Render `bookrack vectors drop` — drop any ANN index and stamp the
+/// Run `bookrack vectors drop` — drop any ANN index and stamp the
 /// meta as `kind = brute-force`. Search falls back to a full scan.
-pub async fn drop(cfg: &Config) -> Result<()> {
+pub async fn drop(cfg: &Config) -> Result<AnnDropReport> {
     let lancedb_dir = cfg.lancedb_dir();
     let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
     let dim = corpus
@@ -174,19 +235,24 @@ pub async fn drop(cfg: &Config) -> Result<()> {
         .drop_ann_index(&lancedb_dir, bookrack_ingest::now_rfc3339())
         .await
         .context("drop ann index")?;
-    println!("dropped: kind=brute-force");
-    Ok(())
+    Ok(AnnDropReport::brute_force())
 }
 
-/// Render `bookrack vectors reset` — drop the chunks table, clear the
+/// Run `bookrack vectors reset` — drop the chunks table, clear the
 /// corpus stamps, and re-embed every book with the index profile's
 /// embedding model. The old vectors are unrecoverable. Use after
 /// pointing the library at a profile that declares a different model;
-/// for a non-destructive trial, use `libraries fork` instead.
-pub async fn reset<F>(cfg: &Config, yes: bool, resume: bool, ask: F) -> Result<()>
-where
-    F: FnOnce(&str) -> Result<bool>,
-{
+/// for a non-destructive trial, use `libraries fork` instead. The
+/// caller confirms; this function does not ask.
+///
+/// With `resume`, continue a reset that stopped partway: the
+/// destructive steps are skipped and the intakes still at `Extracted`
+/// are re-embedded. A resume with none at `Extracted` does nothing,
+/// registers no run, and reports zero.
+///
+/// A failure of the reset pass itself carries [`ResetInterrupted`]; a
+/// failure while setting it up does not.
+pub async fn reset(cfg: &Config, resume: bool) -> Result<VectorsResetReport> {
     let lancedb_dir = cfg.lancedb_dir();
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
@@ -194,75 +260,18 @@ where
     let embed_cfg = crate::profile::effective_embed_config(cfg)?;
     let embedder_client = embedder(cfg, &embed_cfg)?;
 
-    let embedded_intakes = catalog
-        .intakes_with_status(IntakeStatus::Embedded)
-        .context("count embedded intakes")?;
-    let extracted_intakes = catalog
-        .intakes_with_status(IntakeStatus::Extracted)
-        .context("count extracted intakes")?;
-    let current_model = corpus
-        .meta_get(EMBED_MODEL_KEY)
-        .context("read embed_model stamp")?;
-    let current_dim = corpus
-        .meta_get(VECTOR_DIM_KEY)
-        .context("read vector_dim stamp")?;
-    let store_dim = ChunkStore::try_open(&lancedb_dir)
-        .await
-        .context("probe chunk store")?
-        .map(|s| s.dimension());
-
-    if resume {
-        if extracted_intakes.is_empty() {
-            println!(
-                "nothing to resume: no intakes are in the Extracted state.\n\
-                 If you meant to start a fresh reset, drop --resume."
-            );
-            return Ok(());
-        }
-        println!(
-            "resume reset: {} intake(s) in Extracted will be re-embedded with model '{}'.",
-            extracted_intakes.len(),
-            embed_cfg.model
-        );
-    } else {
-        println!("vectors reset plan:");
-        match (current_model.as_deref(), current_dim.as_deref()) {
-            (Some(m), Some(d)) => println!("  current library: model='{m}', dim={d}"),
-            _ => println!("  current library: no stamps recorded"),
-        }
-        match store_dim {
-            Some(d) => println!("  chunks table:    dim={d}"),
-            None => println!("  chunks table:    absent"),
-        }
-        println!(
-            "  target model:    '{}' (probed dim deferred to first embed)",
-            embed_cfg.model
-        );
-        println!(
-            "  affected:        {} Embedded intake(s) -> will be re-embedded",
-            embedded_intakes.len()
-        );
-        if !extracted_intakes.is_empty() {
-            println!(
-                "  also pending:    {} Extracted intake(s) already waiting",
-                extracted_intakes.len()
-            );
-        }
-        println!(
-            "This drops the chunks table, clears the corpus index stamps, and\n\
-             reembeds every book from the corpus node tree. The old vectors are\n\
-             unrecoverable. Restart the daemon after this completes so it picks\n\
-             up the new model."
-        );
-        let prompt = "Type RESET (exact, uppercase) to continue: ";
-        if !yes && !ask(prompt)? {
-            println!("aborted; no changes written");
-            return Ok(());
-        }
+    if resume
+        && catalog
+            .intakes_with_status(IntakeStatus::Extracted)
+            .context("count extracted intakes")?
+            .is_empty()
+    {
+        return Ok(VectorsResetReport {
+            resumed: true,
+            ..VectorsResetReport::default()
+        });
     }
 
-    // Registered past the confirmation prompt: a declined reset is not
-    // a pass and leaves no row behind.
     let run = open_run(
         &catalog,
         &cfg.catalog_db(),
@@ -279,36 +288,26 @@ where
     )
     .await;
     close_run(&catalog, run, outcome.is_ok());
-
-    let report = match outcome {
-        Ok(report) => report,
-        Err(e) => {
-            // A mid-build failure leaves finished intakes at Embedded
-            // and the failing one at Extracted, so a resume continues
-            // where this run stopped.
-            eprintln!(
-                "reset did not finish; rerun with `bookrack vectors reset --resume` \
-                 once the cause is addressed"
-            );
-            return Err(e).context("reset_and_rechunk");
-        }
-    };
-
-    println!(
-        "reset complete: {} intake(s) re-embedded, {} chunk row(s) written",
-        report.intakes_reembedded, report.chunks_written,
-    );
-    if !report.skipped_empty.is_empty() {
-        println!("skipped (no prose leaves): {:?}", report.skipped_empty);
-    }
-    println!("restart the daemon so the new model takes effect.");
-    Ok(())
+    // A failure here leaves finished intakes at Embedded and the
+    // failing one at Extracted, so a resume continues where it stopped.
+    let report = outcome.wrap_err(ResetInterrupted)?;
+    Ok(VectorsResetReport {
+        resumed: resume,
+        intakes_reembedded: report.intakes_reembedded,
+        chunks_written: report.chunks_written,
+        skipped_empty: report.skipped_empty,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use bookrack_catalog::Catalog;
+    use bookrack_core::PartitionIdx;
+    use bookrack_corpus::VECTOR_DIM_KEY;
+    use bookrack_vectors::ChunkRow;
+
+    const DIM: usize = 4;
 
     fn temp_cfg() -> (tempfile::TempDir, Config) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -333,6 +332,85 @@ mod tests {
             .collect()
     }
 
+    /// Stamp the corpus with the store width and write `n` chunk rows,
+    /// enough for a one-partition IVF index to train on.
+    async fn seed_chunks(cfg: &Config, n: i64) {
+        Corpus::open(&cfg.corpus_db())
+            .expect("open corpus")
+            .meta_set(VECTOR_DIM_KEY, &DIM.to_string())
+            .expect("stamp vector_dim");
+        let store = ChunkStore::open(&cfg.lancedb_dir(), DIM)
+            .await
+            .expect("open store");
+        let rows: Vec<ChunkRow> = (1..=n)
+            .map(|offset| {
+                let node = PartitionIdx::new(1).node_id(offset).expect("in range");
+                let v = offset as f32 / n as f32;
+                ChunkRow {
+                    vector: vec![v, 1.0 - v, 0.5, 0.25],
+                    text: format!("chunk {offset}"),
+                    start_node_id: node,
+                    start_char_offset: 0,
+                    end_node_id: node,
+                    end_char_offset: 10,
+                    norm_chunk_sha256: format!("sha-{offset}"),
+                }
+            })
+            .collect();
+        store.append(&rows).await.expect("append rows");
+    }
+
+    /// The ANN configuration as the store's own sidecar records it.
+    async fn stored_ann_cfg(cfg: &Config) -> AnnConfig {
+        ChunkStore::open(&cfg.lancedb_dir(), DIM)
+            .await
+            .expect("open store")
+            .current_ann_cfg(&cfg.lancedb_dir())
+            .expect("read ann config")
+            .expect("an index was recorded")
+    }
+
+    /// The report is the configuration the index was built with: the
+    /// flags given, the kind's defaults for the rest, and the same
+    /// values the store's sidecar holds afterwards.
+    #[tokio::test]
+    async fn rebuild_reports_the_configuration_it_built() {
+        let (_tmp, cfg) = temp_cfg();
+        seed_chunks(&cfg, 300).await;
+
+        let report = rebuild(&cfg, Some("ivf-flat"), Some(1), None, None, Some(3), None)
+            .await
+            .expect("rebuild");
+
+        assert_eq!(
+            report,
+            AnnRebuildReport {
+                kind: "ivf-flat",
+                num_partitions: 1,
+                num_sub_vectors: None,
+                num_bits: None,
+                nprobes: 3,
+                refine_factor: None,
+            }
+        );
+        assert_eq!(
+            report,
+            AnnRebuildReport::from(&stored_ann_cfg(&cfg).await),
+            "the report must describe what the store recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_reports_the_brute_force_kind_it_left() {
+        let (_tmp, cfg) = temp_cfg();
+        seed_chunks(&cfg, 4).await;
+
+        let report = drop(&cfg).await.expect("drop");
+
+        assert_eq!(report.kind, "brute-force");
+        assert_eq!(stored_ann_cfg(&cfg).await.kind.as_str(), report.kind);
+    }
+
     /// A whole-library pass registers one run row and closes it with a
     /// terminal status, so `bookrack runs list` shows that the pass
     /// happened. An empty library still counts as a pass: the run is
@@ -341,31 +419,33 @@ mod tests {
     async fn reset_registers_and_closes_one_run() {
         let (_tmp, cfg) = temp_cfg();
 
-        reset(&cfg, true, false, |_| Ok(true))
+        let report = reset(&cfg, false)
             .await
             .expect("reset succeeds on an empty library");
 
+        assert_eq!(report, VectorsResetReport::default());
         assert_eq!(
             runs(&cfg),
             vec![("reset".to_string(), Some("ok".to_string()))]
         );
     }
 
-    /// Declining the confirmation prompt is not a pass. Registering
-    /// before the prompt would leave a run row for something that
-    /// never ran.
+    /// A resume with nothing at `Extracted` is not a pass: it reports
+    /// that it resumed and did nothing, and leaves no run row.
     #[tokio::test]
-    async fn a_declined_reset_registers_nothing() {
+    async fn a_resume_with_nothing_to_resume_reports_zero_and_registers_nothing() {
         let (_tmp, cfg) = temp_cfg();
 
-        reset(&cfg, false, false, |_| Ok(false))
-            .await
-            .expect("declining is not an error");
+        let report = reset(&cfg, true).await.expect("resume");
 
-        assert!(
-            runs(&cfg).is_empty(),
-            "no run row for a pass that never ran"
+        assert_eq!(
+            report,
+            VectorsResetReport {
+                resumed: true,
+                ..VectorsResetReport::default()
+            }
         );
+        assert!(runs(&cfg).is_empty(), "{:?}", runs(&cfg));
     }
 
     /// The reembed pass registers on its execute leg. The plan leg is

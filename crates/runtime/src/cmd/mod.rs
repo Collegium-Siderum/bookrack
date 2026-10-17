@@ -26,6 +26,19 @@ pub mod stamps;
 pub mod vectors;
 pub mod verify;
 
+/// Context a vector reset attaches to a failure of the reset pass
+/// itself, as opposed to the setup ahead of it — opening the stores,
+/// resolving the embedding configuration. The control plane reads it
+/// to decide whether a resumed reset is a next step worth offering.
+#[derive(Debug)]
+pub(crate) struct ResetInterrupted;
+
+impl std::fmt::Display for ResetInterrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("reset did not finish")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bookrack_cli_grammar::help_gate;

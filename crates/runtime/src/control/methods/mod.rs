@@ -730,6 +730,26 @@ where
     }
 }
 
+/// A write's success reply built from the report its command returned:
+/// the report's fields with `ok: true` beside them. [`run_write`] adds
+/// `library` on the way out.
+pub(crate) fn ok_reply<T: serde::Serialize>(report: &T) -> Result<Value, RpcError> {
+    let mut value = serde_json::to_value(report).map_err(|e| {
+        RpcError::new(
+            crate::control::jsonrpc::INTERNAL_ERROR,
+            format!("could not serialize the write reply: {e}"),
+        )
+    })?;
+    let Some(map) = value.as_object_mut() else {
+        return Err(RpcError::new(
+            crate::control::jsonrpc::INTERNAL_ERROR,
+            "a write report must serialize to a JSON object",
+        ));
+    };
+    map.insert("ok".to_string(), Value::Bool(true));
+    Ok(value)
+}
+
 /// Workspace path forwarded into the dispatcher's selection. Exposed
 /// for tests that want to fabricate a [`MethodContext`].
 #[allow(dead_code)]

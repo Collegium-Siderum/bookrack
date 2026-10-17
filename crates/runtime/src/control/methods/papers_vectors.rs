@@ -6,14 +6,15 @@
 //!
 //! As with the book-side vectors handlers, the control plane never
 //! prompts on the caller's behalf: destructive methods that expose a
-//! `yes` parameter reject requests with `yes = false` up front, and
-//! the `ask` closure handed to the cmd layer denies any prompt that
-//! does reach it.
+//! `yes` parameter reject requests with `yes = false` up front. Each
+//! write answers with the report its command returned, in the same
+//! shape as its book-side peer.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{MethodContext, require_yes, run_write};
+use super::vectors::reset_err;
+use super::{MethodContext, ok_reply, require_yes, run_write};
 use crate::cmd::papers_vectors;
 use crate::control::error_map::{handler_err, plan_lookup_err, registry_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
@@ -48,7 +49,7 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
     run_write(ctx, handle.name(), move || async move {
-        papers_vectors::rebuild(
+        let report = papers_vectors::rebuild(
             &cfg,
             parsed.kind.as_deref(),
             parsed.num_partitions,
@@ -59,7 +60,7 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         )
         .await
         .map_err(|e| handler_err("papers.vectors_rebuild", e))?;
-        Ok(json!({ "ok": true }))
+        ok_reply(&report)
     })
     .await
 }
@@ -204,10 +205,10 @@ pub async fn reset(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
     run_write(ctx, handle.name(), move || async move {
-        papers_vectors::reset(&cfg, parsed.yes, parsed.resume, deny_destructive)
+        let report = papers_vectors::reset(&cfg, parsed.resume)
             .await
-            .map_err(|e| handler_err("papers.vectors_reset", e))?;
-        Ok(json!({ "ok": true }))
+            .map_err(|e| reset_err("papers.vectors_reset", e))?;
+        ok_reply(&report)
     })
     .await
 }
@@ -232,10 +233,10 @@ pub async fn drop_index(params: &Option<Value>, ctx: &MethodContext) -> Result<V
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
     run_write(ctx, handle.name(), move || async move {
-        papers_vectors::drop(&cfg)
+        let report = papers_vectors::drop(&cfg)
             .await
             .map_err(|e| handler_err("papers.vectors_drop", e))?;
-        Ok(json!({ "ok": true }))
+        ok_reply(&report)
     })
     .await
 }
@@ -249,10 +250,6 @@ fn parse<T: serde::de::DeserializeOwned + Default>(
             .map_err(|e| RpcError::new(INVALID_PARAMS, format!("invalid {method} params: {e}"))),
         _ => Ok(T::default()),
     }
-}
-
-fn deny_destructive(_prompt: &str) -> eyre::Result<bool> {
-    Ok(false)
 }
 
 routed_params!(

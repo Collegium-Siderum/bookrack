@@ -139,6 +139,26 @@ impl RpcError {
             data: None,
         }
     }
+
+    /// Add `step` to the envelope's hint: it becomes the hint when
+    /// `data` carries none, and follows the one already there
+    /// otherwise, so a step that depends on the cause being fixed first
+    /// is read after the step that fixes it. An envelope without `data`
+    /// gains one holding the hint and `retryable: false`; `data` of any
+    /// shape but an object is left as it is.
+    pub fn append_hint(&mut self, step: &str) {
+        let data = self
+            .data
+            .get_or_insert_with(|| serde_json::json!({ "retryable": false }));
+        let Some(map) = data.as_object_mut() else {
+            return;
+        };
+        let hint = match map.get("hint").and_then(Value::as_str) {
+            Some(existing) if !existing.is_empty() => format!("{existing} {step}"),
+            _ => step.to_string(),
+        };
+        map.insert("hint".to_string(), Value::String(hint));
+    }
 }
 
 /// One server-initiated event notification.
@@ -262,6 +282,46 @@ mod tests {
         assert!(s.contains(r#""channel":"daemon.state""#));
         assert!(s.contains(r#""value":"idle""#));
         assert!(!s.contains(r#""lag""#));
+    }
+
+    #[test]
+    fn append_hint_writes_the_hint_when_there_is_none() {
+        let mut err = RpcError::new(INTERNAL_ERROR, "it broke");
+        err.data = Some(serde_json::json!({ "detail": "evidence", "retryable": false }));
+        err.append_hint("Run it again.");
+        assert_eq!(
+            err.data,
+            Some(serde_json::json!({
+                "detail": "evidence",
+                "hint": "Run it again.",
+                "retryable": false,
+            }))
+        );
+        assert_eq!(err.message, "it broke");
+    }
+
+    #[test]
+    fn append_hint_follows_the_hint_already_there() {
+        let mut err = RpcError::new(INTERNAL_ERROR, "it broke");
+        err.data = Some(serde_json::json!({ "hint": "Fix the cause.", "retryable": true }));
+        err.append_hint("Run it again.");
+        assert_eq!(
+            err.data,
+            Some(serde_json::json!({
+                "hint": "Fix the cause. Run it again.",
+                "retryable": true,
+            }))
+        );
+    }
+
+    #[test]
+    fn append_hint_gives_an_envelope_without_data_a_hint() {
+        let mut err = RpcError::new(INTERNAL_ERROR, "it broke");
+        err.append_hint("Run it again.");
+        assert_eq!(
+            err.data,
+            Some(serde_json::json!({ "hint": "Run it again.", "retryable": false }))
+        );
     }
 
     #[test]

@@ -375,7 +375,10 @@ async fn vectors(action: PapersVectorsAction, runtime_dir: Option<PathBuf>) -> R
                 "nprobes": nprobes,
                 "refine_factor": refine_factor,
             });
-            helpers::call_and_print(&client, "papers.vectors_rebuild", params).await
+            let reply =
+                helpers::call_with_progress_value(client, "papers.vectors_rebuild", params).await?;
+            helpers::emit_outcome(&reply, super::vectors::rebuild_sentence(&reply));
+            Ok(())
         }
         PapersVectorsAction::Drop { yes } => {
             helpers::run_destructive(
@@ -391,6 +394,7 @@ async fn vectors(action: PapersVectorsAction, runtime_dir: Option<PathBuf>) -> R
                            `papers vectors rebuild`. Type 'yes' to continue:",
                     unanswered_hint:
                         "papers vectors drop removes the paper ANN index; pass --yes to confirm",
+                    outcome: super::vectors::drop_sentence,
                 },
             )
             .await
@@ -432,6 +436,7 @@ async fn vectors(action: PapersVectorsAction, runtime_dir: Option<PathBuf>) -> R
                            Type RESET (exact, uppercase) to continue:",
                     unanswered_hint:
                         "papers vectors reset drops the existing paper vectors; pass --yes to confirm",
+                    outcome: |reply| super::vectors::reset_sentence(reply, "paper intake"),
                 },
             )
             .await
@@ -443,7 +448,11 @@ async fn stamps(action: PapersStampsAction, runtime_dir: Option<PathBuf>) -> Res
     let client = helpers::connect(runtime_dir.as_deref()).await?;
     match action {
         PapersStampsAction::Reconcile => {
-            helpers::call_and_print(&client, "papers.stamps_reconcile", json!({})).await
+            let reply =
+                helpers::call_with_progress_value(client, "papers.stamps_reconcile", json!({}))
+                    .await?;
+            helpers::emit_outcome(&reply, super::stamps::reconcile_sentence(&reply));
+            Ok(())
         }
     }
 }

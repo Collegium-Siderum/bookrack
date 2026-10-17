@@ -65,6 +65,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **The vector and stamp writes report what they did.** `vectors
+  rebuild`, `drop`, and `reset` and `stamps reconcile`, on both sides,
+  answered `{ ok: true }` and printed their result on the daemon's own
+  stdout, where a background daemon has nobody reading it. The reply
+  now carries it: the index configuration a rebuild built, the kind a
+  drop left, the counts a reset re-embedded — this pass's own, so a
+  resume reports what it picked up — and the stamps a reconcile wrote.
+  The CLI words each as one line naming the library, and shows a reply
+  without those fields as it came. A reset that fails partway adds the
+  `--resume` rerun to the error's hint instead of printing it on the
+  daemon's stderr; one that fails before it changed anything does not
+  suggest it.
 - **`doctor`'s repair flags are mutually exclusive.** `--rename-envelopes`,
   `--backfill-ocr-derivation`, and `--close-abandoned-runs` each
   return before the report, so two at once resolved by statement order

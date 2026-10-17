@@ -605,9 +605,9 @@ pub fn destructive_confirmation_decision(
     }
 }
 
-/// Bundle of prompt-shaped strings for [`run_destructive`]. Groups
-/// the three knobs that describe "how does the operator see this
-/// confirmation" so the function signature stays readable.
+/// What the operator sees around one [`run_destructive`] call: the
+/// confirmation it asks for, and how the reply is worded once the call
+/// succeeds. Grouped so the function signature stays readable.
 pub struct DestructivePrompt<'a> {
     /// Confirmation strength — `Soft` (`yes`/`y`) or
     /// `Hard { token: "RESET" }`.
@@ -619,6 +619,9 @@ pub struct DestructivePrompt<'a> {
     /// Remedy offered when stdin carried no answer. Should explain
     /// what the command does and how to opt in without a prompt.
     pub unanswered_hint: &'a str,
+    /// The human-mode sentence for the reply, or `None` when the reply
+    /// lacks a field the sentence states; see [`emit_outcome`].
+    pub outcome: fn(&Value) -> Option<String>,
 }
 
 /// One-shot destructive RPC wrapper for methods that do not need a
@@ -647,6 +650,9 @@ pub struct DestructivePrompt<'a> {
 /// A caller without a terminal is asked like any other. Bounding the
 /// read so an idle pipe cannot park the command is
 /// `render::confirm`'s job, not this one.
+///
+/// The reply is printed through [`emit_outcome`], worded by
+/// `prompt.outcome`.
 pub async fn run_destructive(
     client: Arc<ControlClient>,
     method: &str,
@@ -707,7 +713,9 @@ where
         .expect("params verified as an object above")
         .insert("yes".to_string(), Value::Bool(true));
 
-    call_with_progress(client, method, params).await
+    let reply = call_with_progress_value(client, method, params).await?;
+    emit_outcome(&reply, (prompt.outcome)(&reply));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1249,6 +1257,7 @@ mod destructive_wire_tests {
             mode: ConfirmMode::Hard { token: "RESET" },
             text: "Type RESET to continue:",
             unanswered_hint: "vectors reset drops the existing vectors; pass --yes to confirm",
+            outcome: |_| None,
         }
     }
 

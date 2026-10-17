@@ -630,11 +630,25 @@ the exit-code bucket does not distinguish the two.
 - `vectors.rebuild` / `vectors.reembed` / `vectors.reset` /
   `vectors.drop` — mirror the matching `bookrack vectors` actions.
   `vectors.drop` takes `{ yes? }`; the daemon rejects the call
-  without `yes = true`. All four take `library?`.
+  without `yes = true`. All four take `library?`. Replies, beside
+  `library`:
+  - `vectors.rebuild` → `{ ok: true, kind, num_partitions,
+    num_sub_vectors?, num_bits?, nprobes, refine_factor? }`, the
+    configuration the index was built with.
+  - `vectors.drop` → `{ ok: true, kind: "brute-force" }`, the kind the
+    store is left at.
+  - `vectors.reset` → `{ ok: true, resumed, intakes_reembedded,
+    chunks_written, skipped_empty }`, the counts of this pass alone:
+    a resume reports what it picked up, not the library's totals, and
+    a resume with nothing waiting at `Extracted` reports zeros. A
+    failure inside the reset pass appends to the error's hint the
+    step to rerun with `resume = true`; a failure while the reset is
+    being set up — before anything changed — does not.
 - `corpus.rebuild` — `{ include_vectors?, book?, stale_only?, dry_run?,
   yes?, library? }`.
-- `stamps.reconcile` — `{ library? }`; rewrites the corpus index
-  stamps.
+- `stamps.reconcile` — `{ library? }` → `{ ok: true, embed_model,
+  vector_dim, chunk_version, normalize_version, library }`; rewrites
+  the corpus index stamps and reports the values written.
 - `papers.corpus_rebuild` —
   `{ include_vectors?, paper?, stale_only?, dry_run?, yes? }`. Peer of
   `corpus.rebuild` for the paper pipeline; reconstructs
@@ -645,9 +659,11 @@ the exit-code bucket does not distinguish the two.
   `vectors.*` against `lancedb_papers`. Same param shapes; the
   reembed variant takes `paper?` instead of `book?`, and
   `papers.vectors_drop` takes `{ yes? }` with the same
-  `-32012` gate as `vectors.drop`.
+  `-32012` gate as `vectors.drop`. Each replies in the shape of its
+  book-side peer.
 - `papers.stamps_reconcile` — `{ library? }`; rewrites the
-  `papers_corpus.db` index stamps from the active embedder.
+  `papers_corpus.db` index stamps from the active embedder and replies
+  in the shape of `stamps.reconcile`.
 - `papers.dryrun` — `{ path, out?, no_chunk?, library? }`. Peer of `dryrun` for
   the paper pipeline; writes a paper-shaped JSONL plus a summary
   sidecar under `<data_root>/dryruns/dryrun-paper-...`. Reports
