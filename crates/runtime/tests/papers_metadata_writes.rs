@@ -461,7 +461,7 @@ async fn a_reaudit_changes_what_show_paper_reports() -> Result<()> {
 ///
 /// Subscribers refresh their view of a library on `library.changed`,
 /// and a write that opens the catalog beside the daemon's write path
-/// publishes nothing: the desktop shell shows stale paper metadata
+/// publishes nothing: a subscriber shows stale paper metadata
 /// until something else happens to touch that library. The event is
 /// also the observable end of the rest of the write path — the write
 /// mutex against a concurrent ingest, and the MCP pause — so it is the

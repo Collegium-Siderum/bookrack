@@ -438,6 +438,34 @@ The knobs themselves are unchanged. Declare the listen address with
 Nothing about the resolved values changes — only where they may be
 written.
 
+## Diagnose bundle schema 5
+
+`manifest.json` moved from 4 to 5 because both the file shape and the
+scrubbing contract changed. The manifest and `env.txt` now name the
+library the bundle describes — `library` in the manifest, a `library`
+line in `env.txt` — because a daemon serving several libraries builds
+a bundle about whichever one `bookrack diagnose --library <name>`
+selects, and a reader has to know which catalog snapshot they are
+looking at. Scrub rule 2 widened from the one data root to every root
+the daemon serves plus its state directory, each folded to its own
+placeholder (`<DATA_DIR>`, `<OTHER_ROOT>`, `<STATE_DIR>`): the log
+stream the bundle copies is shared across libraries, so a line about
+one library carries that library's root into every other library's
+bundle, and rule 1 only covers roots under a user home or a volume.
+
+As with schema 4, nothing on disk goes stale and there is no refresh
+command. The version matters to whoever reads a bundle:
+
+- A bundle stamped 4 or lower from a daemon serving several libraries
+  may carry the other libraries' roots verbatim under `logs/` and
+  `crashes/` wherever those roots sat outside the rule 1 patterns, and
+  it does not say which library its `catalog/` snapshot came from.
+  Treat such a bundle as less redacted than its `scrubbed: true`
+  claims.
+- Roots mounted at collection time are the ones folded. A library
+  unmounted before the bundle was built, or a root a retired registry
+  entry once named, is covered by rule 1 alone.
+
 ## Diagnose bundle schema 4
 
 `manifest.json` inside a `bookrack diagnose` bundle carries a

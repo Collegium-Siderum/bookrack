@@ -5,11 +5,9 @@
 //! Peer of [`super::stamps::reconcile`] for the paper pipeline.
 
 use serde::Deserialize;
-use serde_json::{Value, json};
-#[cfg(test)]
-use ts_rs::TS;
+use serde_json::Value;
 
-use super::{MethodContext, run_write};
+use super::{MethodContext, ok_reply, run_write};
 use crate::cmd::papers_stamps;
 use crate::control::error_map::handler_err;
 use crate::control::error_map::registry_err;
@@ -17,14 +15,11 @@ use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 
 /// Which library's stamps to reconcile.
 #[derive(Debug, Default, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct ReconcileParams {
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
@@ -44,10 +39,10 @@ pub async fn reconcile(params: &Option<Value>, ctx: &MethodContext) -> Result<Va
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
     run_write(ctx, handle.name(), move || async move {
-        papers_stamps::reconcile(&cfg)
+        let report = papers_stamps::reconcile(&cfg)
             .await
             .map_err(|e| handler_err("papers.stamps_reconcile", e))?;
-        Ok(json!({ "ok": true }))
+        ok_reply(&report)
     })
     .await
 }

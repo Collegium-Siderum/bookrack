@@ -32,6 +32,20 @@ use bookrack_config::Config;
 pub use options::{DEFAULT_DAYS, Options};
 pub use scrub::Scrubber;
 
+/// Which library a bundle describes, and what else the shared sources
+/// it copies may name.
+#[derive(Debug, Clone, Default)]
+pub struct Scope {
+    /// The registry name of the library the bundle's `Config` belongs
+    /// to; `None` when the caller resolved a root without one.
+    pub library: Option<String>,
+    /// Data roots of the other libraries the same daemon serves. The
+    /// daemon's log stream is shared across them, so a line about one
+    /// carries that library's root into this bundle; the scrubber
+    /// folds each named root to a placeholder.
+    pub other_roots: Vec<PathBuf>,
+}
+
 bookrack_core::fixed_settings! {
     owner = "diagnose";
     "diagnose.days_default" = options::DEFAULT_DAYS,
@@ -125,7 +139,13 @@ pub struct CollectReport {
 }
 
 /// Build a diagnose bundle for `cfg` and return where it landed.
-pub fn collect(cfg: &Config, opts: &Options) -> Result<CollectReport> {
+///
+/// `cfg` is the library the bundle describes: its catalog, stores,
+/// audit overlay, and default landing place. The logs and crash
+/// reports are the process's, read from the daemon state directory
+/// first; `scope` names that library and the other roots those shared
+/// sources may mention.
+pub fn collect(cfg: &Config, opts: &Options, scope: &Scope) -> Result<CollectReport> {
     let now = opts.now.unwrap_or_else(SystemTime::now);
     let unix_ms = now
         .duration_since(UNIX_EPOCH)
@@ -143,6 +163,10 @@ pub fn collect(cfg: &Config, opts: &Options) -> Result<CollectReport> {
             Some(cfg.data_dir()),
             home.as_deref(),
             data.scrub_book_extensions,
+        )
+        .with_shared_roots(
+            &scope.other_roots,
+            bookrack_config::daemon_state_dir().ok().as_deref(),
         );
         (scrubber, Some(source), home)
     } else {
@@ -152,7 +176,15 @@ pub fn collect(cfg: &Config, opts: &Options) -> Result<CollectReport> {
 
     let since = since_ts(now, opts.days);
 
-    collectors::env::collect(cfg, opts, now, home_source, &bundle_dir, &scrubber)?;
+    collectors::env::collect(
+        cfg,
+        opts,
+        scope.library.as_deref(),
+        now,
+        home_source,
+        &bundle_dir,
+        &scrubber,
+    )?;
     collectors::crashes::collect(cfg, &bundle_dir, &scrubber)?;
     collectors::logs::collect(cfg, opts, now, &bundle_dir, &scrubber)?;
     collectors::catalog::collect(cfg, &since, &bundle_dir, &scrubber)?;
@@ -162,7 +194,7 @@ pub fn collect(cfg: &Config, opts: &Options) -> Result<CollectReport> {
     collectors::refs::collect(cfg, &bundle_dir, &scrubber)?;
     collectors::queue::collect(&bundle_dir, &scrubber)?;
 
-    let manifest = manifest::build(opts, &bundle_dir, now, gaps)?;
+    let manifest = manifest::build(opts, scope.library.clone(), &bundle_dir, now, gaps)?;
     let scrubbed = manifest.scrubbed;
     let files = manifest.files.len();
     let scrub_gaps = manifest.scrub_gaps.clone();
@@ -252,7 +284,10 @@ fn since_ts(now: SystemTime, days: u32) -> String {
 
 /// Re-export the public path placeholders so consumers (and the CLI's
 /// human-readable output) can recognise them.
-pub use scrub::{DATA_DIR_PLACEHOLDER, HOME_PLACEHOLDER, USER_PLACEHOLDER, VOL_PLACEHOLDER};
+pub use scrub::{
+    DATA_DIR_PLACEHOLDER, HOME_PLACEHOLDER, OTHER_ROOT_PLACEHOLDER, STATE_DIR_PLACEHOLDER,
+    USER_PLACEHOLDER, VOL_PLACEHOLDER,
+};
 
 #[cfg(test)]
 mod tests {

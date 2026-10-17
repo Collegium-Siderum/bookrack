@@ -184,8 +184,9 @@ enum Command {
     /// Exits 1 when a store does not verify, cannot be read, is missing
     /// beside the other, or an intake's file is gone.
     ///
-    /// Compare the catalog and corpus schemas against the binary's
-    /// TableSpecs and tally the cross-store counts: catalog intakes,
+    /// Compare the book and paper catalog and corpus schemas against the
+    /// binary's TableSpecs, check that reference.db opens at this build's
+    /// schema version, and tally the cross-store counts: catalog intakes,
     /// vectors-meta chunk count, and intake-file existence on disk.
     #[command(after_long_help = bookrack_cli_grammar::examples![
         "verify",
@@ -266,14 +267,33 @@ enum Command {
     },
     /// Run a one-screen health check.
     ///
-    /// Reports data root resolution, schema versions, PDFium library
-    /// presence, Ollama daemon reachability, and whether the configured
-    /// embed model is pulled. Exits with a non-zero status when any row
-    /// fails, so a script can branch on the result.
-    #[command(after_long_help = bookrack_cli_grammar::examples![
-        "doctor",
-        "doctor --install-pdfium",
-    ])]
+    /// Each row is one check with a status and a note: the data root
+    /// and how it was resolved, the daemon state directory, the
+    /// catalog, papers, and reference stores with their schema stamps,
+    /// open pipeline runs, free disk under the root, the file-descriptor
+    /// limit, the PDFium library, the registry and its index-profile
+    /// coherence, the Ollama daemon and whether the configured embed
+    /// model is pulled, the reranker backend and model, and the MCP
+    /// endpoint. With a daemon running the report is gathered inside it
+    /// and a row says so; without one it is gathered in-process. Exits
+    /// with a non-zero status when any row fails, so a script can
+    /// branch on the result.
+    ///
+    /// The three repair flags are mutually exclusive and replace the
+    /// report with the repair's own summary; `--dry-run` qualifies one
+    /// of them. The install flags run first and the report follows.
+    #[command(
+        after_long_help = bookrack_cli_grammar::examples![
+            "doctor",
+            "doctor --install-pdfium",
+            "doctor --close-abandoned-runs --dry-run",
+        ],
+        group(clap::ArgGroup::new("repair").multiple(false).args([
+            "rename_envelopes",
+            "backfill_ocr_derivation",
+            "close_abandoned_runs",
+        ])),
+    )]
     Doctor {
         /// Deprecated: use the top-level `--json` instead.
         #[arg(long, hide = true)]
@@ -317,8 +337,8 @@ enum Command {
         close_abandoned_runs: bool,
         /// With `--rename-envelopes`, `--backfill-ocr-derivation`, or
         /// `--close-abandoned-runs`, compute the plan without touching
-        /// the disk or database.
-        #[arg(long)]
+        /// the disk or database. Refused without one of them.
+        #[arg(long, requires = "repair")]
         dry_run: bool,
     },
     /// Submit one or more files for ingest.
@@ -1121,6 +1141,21 @@ async fn run() -> Result<()> {
     }
     let json_global = cli.json;
 
+    // The audit-profile gate runs ahead of every dispatch, including
+    // the four below that return before the shared resolver: a global
+    // flag the subcommand does not consume is refused as operator
+    // input rather than parsed and discarded.
+    let audit_profile = cli.audit_profile.clone();
+    if audit_profile.is_some() && !accepts_audit_profile(&cli.command) {
+        return Err(bookrack_cli::error::BookrackCliError::LocalUserError {
+            message: "--audit-profile is only consumed by `ingest`, `intake ocr`, \
+                      `dryrun`, `metadata reaudit`, `metadata advance`, and \
+                      `papers metadata reaudit`; remove it for this subcommand"
+                .to_string(),
+        }
+        .into());
+    }
+
     // `doctor` resolves on its own — it has a daemon-running path
     // (control plane) and a daemon-not-running fallback that probes
     // the data root directly without going through `Config::resolve`,
@@ -1229,14 +1264,6 @@ async fn run() -> Result<()> {
     // root from this process. The `AuditProfile` reflection runner
     // is the lone exception — it reads compiled-in profiles and
     // needs no config.
-    let audit_profile = cli.audit_profile.clone();
-    if audit_profile.is_some() && !accepts_audit_profile(&cli.command) {
-        eyre::bail!(
-            "--audit-profile is only consumed by `ingest`, `intake ocr`, \
-             `dryrun`, `metadata reaudit`, `metadata advance`, and \
-             `papers metadata reaudit`; remove it for this subcommand"
-        );
-    }
     let selection = cli.selection();
     match cli.command {
         Command::Config { action } => match action {
@@ -2029,6 +2056,43 @@ mod tests {
         }
     }
 
+    /// The three catalog- or store-touching repairs each return before
+    /// the report path, so two at once could only resolve by statement
+    /// order with the loser silently dropped. The grammar refuses the
+    /// pair instead.
+    #[test]
+    fn doctor_repair_flags_are_mutually_exclusive() {
+        for pair in [
+            ["--rename-envelopes", "--backfill-ocr-derivation"],
+            ["--rename-envelopes", "--close-abandoned-runs"],
+            ["--backfill-ocr-derivation", "--close-abandoned-runs"],
+        ] {
+            let parsed = Cli::try_parse_from(["bookrack", "doctor", pair[0], pair[1]]);
+            assert!(
+                parsed.is_err(),
+                "{pair:?} must be refused by the grammar, not resolved by order",
+            );
+        }
+    }
+
+    /// `--dry-run` qualifies a repair; alone it has nothing to dry-run
+    /// and used to print the ordinary report as if the flag were absent.
+    #[test]
+    fn doctor_dry_run_requires_a_repair_flag() {
+        assert!(
+            Cli::try_parse_from(["bookrack", "doctor", "--dry-run"]).is_err(),
+            "--dry-run with no repair flag must be refused",
+        );
+        for repair in [
+            "--rename-envelopes",
+            "--backfill-ocr-derivation",
+            "--close-abandoned-runs",
+        ] {
+            Cli::try_parse_from(["bookrack", "doctor", repair, "--dry-run"])
+                .unwrap_or_else(|e| panic!("{repair} --dry-run must parse: {e}"));
+        }
+    }
+
     #[test]
     fn accepts_audit_profile_white_list_matches_consumers() {
         let consumers = [
@@ -2069,6 +2133,18 @@ mod tests {
             vec!["bookrack", "vectors", "rebuild"],
             vec!["bookrack", "papers", "list"],
             vec!["bookrack", "logs", "--tail", "5"],
+            // The four subcommands that dispatch before the shared
+            // resolver; the gate has to sit ahead of them too.
+            vec!["bookrack", "doctor"],
+            vec![
+                "bookrack",
+                "init",
+                "--non-interactive",
+                "--data-dir",
+                "/tmp/x",
+            ],
+            vec!["bookrack", "run"],
+            vec!["bookrack", "rpc", "list"],
         ];
         for argv in outsiders {
             let cli = Cli::try_parse_from(argv.clone()).expect("argv parses");
@@ -2344,11 +2420,11 @@ mod tests {
         let cfg = Config::new(tmp.path().to_path_buf(), "http://localhost:0".to_string());
         let report = bookrack_runtime::cmd::verify::build_verify_report(&cfg);
         assert!(report.not_initialised);
-        assert!(!report.catalog_schema_ok);
-        assert!(report.catalog_schema_error.is_none());
-        assert!(!report.corpus_schema_ok);
-        assert!(report.corpus_schema_error.is_none());
-        assert!(report.vectors_built_at_chunk_count.is_none());
+        assert!(!report.books.catalog_schema_ok);
+        assert!(report.books.catalog_schema_error.is_none());
+        assert!(!report.books.corpus_schema_ok);
+        assert!(report.books.corpus_schema_error.is_none());
+        assert!(report.books.vectors_built_at_chunk_count.is_none());
         // The data dir is unchanged — no stores were created as a
         // side effect of the verify call.
         assert!(!cfg.catalog_db().exists());

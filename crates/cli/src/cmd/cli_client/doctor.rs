@@ -6,19 +6,74 @@
 //! still produce a useful health summary before any session exists.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::library_param;
 use bookrack_config::LibrarySelection;
-use bookrack_control_client::ControlError;
-use eyre::Result;
+use bookrack_runtime::control::{HealthProbe, probe};
+use bookrack_session::{lock_is_held, peek_lock, resolve_runtime_dir, tty_lock_name};
+use eyre::{Context, Result};
 use serde_json::Value;
 
-/// True when a daemon is reachable on the control socket for
-/// `runtime_dir`. Used to keep offline repairs off a live library.
-async fn daemon_is_running(runtime_dir: Option<&Path>) -> bool {
-    match bookrack_control_client::discover(runtime_dir) {
-        Ok(socket) => bookrack_control_client::connect(&socket).await.is_ok(),
-        Err(_) => false,
+use super::helpers;
+
+/// Refuse the offline repair named by `flag` unless the session lock
+/// shows that no daemon can be serving the library.
+///
+/// The guard fails closed. Only two readings of the lock let the repair
+/// through: no lock file, and lock content whose `flock` nobody holds —
+/// what a crashed daemon leaves behind, and what the next `bookrack run`
+/// takes over without cleanup. Every other reading is a refusal with
+/// the exit code the state already has elsewhere: a lock that cannot be
+/// read or parsed, or one that is held but names no control socket, is
+/// `SessionLockUnreadable` (exit 1); a held lock whose daemon does not
+/// answer is `StaleSessionLock` (exit 3); a daemon that answers is
+/// serving the library, and the refusal is operator input (exit 2).
+async fn refuse_repair_under_a_daemon(runtime_dir: Option<&Path>, flag: &str) -> Result<()> {
+    let resolved =
+        resolve_runtime_dir(runtime_dir).context("resolve BOOKRACK_RUNTIME_DIR for the repair")?;
+    let lock_path = resolved.join(tty_lock_name());
+    let info = match peek_lock(&lock_path) {
+        Ok(Some(info)) => info,
+        Ok(None) => return Ok(()),
+        Err(err) => {
+            return Err(BookrackCliError::SessionLockUnreadable {
+                message: format!(
+                    "could not read the session lock at {}: {err:#}. {flag} is an offline \
+                     repair and is refused while it cannot be told whether a daemon is \
+                     serving this library.",
+                    lock_path.display()
+                ),
+            }
+            .into());
+        }
+    };
+    if !lock_is_held(&lock_path)? {
+        return Ok(());
+    }
+    match probe(&info, Duration::from_secs(2)).await {
+        HealthProbe::Healthy(..) => Err(BookrackCliError::LocalUserError {
+            message: format!(
+                "a daemon is serving this library; {flag} is an offline repair. Stop the \
+                 daemon with `bookrack quit` and re-run."
+            ),
+        }
+        .into()),
+        HealthProbe::Stale => Err(BookrackCliError::StaleSessionLock {
+            path: lock_path,
+            pid: info.pid,
+        }
+        .into()),
+        HealthProbe::Unprobeable => Err(BookrackCliError::SessionLockUnreadable {
+            message: format!(
+                "the session lock at {} is held but names no control socket, so it cannot be \
+                 told whether a daemon is serving this library. {flag} is an offline repair \
+                 and is refused.",
+                lock_path.display()
+            ),
+        }
+        .into()),
     }
 }
 
@@ -41,25 +96,39 @@ pub async fn run(
     dry_run: bool,
     runtime_dir: Option<PathBuf>,
 ) -> Result<bool> {
+    // The two catalog-writing repairs are judged first, before any
+    // install runs: a refusal that arrives after a download has
+    // already landed would report the one and hide the other.
+    if backfill_ocr_derivation {
+        refuse_repair_under_a_daemon(runtime_dir.as_deref(), "--backfill-ocr-derivation").await?;
+    }
+    if close_abandoned_runs {
+        refuse_repair_under_a_daemon(runtime_dir.as_deref(), "--close-abandoned-runs").await?;
+    }
     // The installs are host-level actions: they land in the per-user
     // managed directories regardless of whether a daemon is running,
     // so they happen before the report path forks. A running daemon
     // picks the artifacts up on its next start.
     if install_pdfium {
         let path = bookrack_runtime::pdfium_install::install_pinned_pdfium().await?;
-        if !json {
+        if json {
+            println!("{}", install_line("pdfium", &path, true));
+        } else {
             println!("installed {}", path.display());
         }
     }
     if install_reranker {
         let outcomes = bookrack_runtime::reranker_install::install_reranker().await?;
-        if !json {
-            for outcome in outcomes {
-                if outcome.downloaded {
-                    println!("installed {}", outcome.path.display());
-                } else {
-                    println!("{} already installed", outcome.path.display());
-                }
+        for outcome in outcomes {
+            if json {
+                println!(
+                    "{}",
+                    install_line("reranker", &outcome.path, outcome.downloaded)
+                );
+            } else if outcome.downloaded {
+                println!("installed {}", outcome.path.display());
+            } else {
+                println!("{} already installed", outcome.path.display());
             }
         }
     }
@@ -72,18 +141,11 @@ pub async fn run(
         return Ok(!report.has_failures());
     }
     // The derivation backfill opens the catalog for writing, which would
-    // race the daemon's exclusive write handle. It is an offline repair:
-    // refuse it while a daemon is serving this library rather than
-    // corrupt a live session. The dry run is refused too — it still opens
-    // the catalog, and a plan against a library the operator is about to
+    // race the daemon's exclusive write handle. It is an offline repair,
+    // guarded above; the dry run is guarded too — it still opens the
+    // catalog, and a plan against a library the operator is about to
     // take offline is misleading.
     if backfill_ocr_derivation {
-        if daemon_is_running(runtime_dir.as_deref()).await {
-            eyre::bail!(
-                "a daemon is serving this library; --backfill-ocr-derivation is an \
-                 offline repair. Stop the daemon with `bookrack quit` and re-run."
-            );
-        }
         let report = bookrack_runtime::doctor::backfill_ocr_derivation(selection, dry_run).await?;
         bookrack_runtime::doctor::render_backfill_report(&report, json);
         return Ok(!report.has_failures());
@@ -91,16 +153,10 @@ pub async fn run(
     // Closing abandoned runs writes the registry, so it carries the
     // same offline rule as the backfill: a daemon serving the library
     // holds the write handle, and one of its own runs may be in flight.
-    // The dry run is refused for the same reason the backfill's is — a
+    // The dry run is guarded for the same reason the backfill's is — a
     // plan computed against a live library describes a moment that has
     // already passed.
     if close_abandoned_runs {
-        if daemon_is_running(runtime_dir.as_deref()).await {
-            eyre::bail!(
-                "a daemon is serving this library; --close-abandoned-runs is an \
-                 offline repair. Stop the daemon with `bookrack quit` and re-run."
-            );
-        }
         let cfg = bookrack_config::Config::resolve(selection)?;
         let report = bookrack_runtime::open_runs::close_abandoned_runs(&cfg, dry_run);
         bookrack_runtime::open_runs::render_close_report(&report, json);
@@ -109,11 +165,14 @@ pub async fn run(
     match bookrack_control_client::discover(runtime_dir.as_deref()) {
         Ok(socket) => match bookrack_control_client::connect(&socket).await {
             Ok(client) => {
-                // Not routed through `helpers::dispatch`: this call
-                // sits between two fallbacks that run without a
-                // daemon. It still passes the selection gate, which
-                // refuses a `--library` naming a library this report
-                // cannot be about.
+                // Not opened through `helpers::connect`: this call sits
+                // between two fallbacks that run without a daemon, and
+                // that helper reads "no daemon" as an error. The two
+                // things it would have done on the way are done here:
+                // the selection is settled into a name now that a
+                // daemon can answer which root it serves, and the gate
+                // puts that name on the call.
+                helpers::settle_library_selection(&client).await?;
                 let params = library_param::apply("doctor.gather", Value::Null)?;
                 let value = client
                     .call_raw("doctor.gather", params)
@@ -121,20 +180,37 @@ pub async fn run(
                     .map_err(eyre::Report::from)?;
                 bookrack_runtime::doctor::render_value(&value, json)
             }
-            Err(ControlError::NotRunning) => {
-                bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await
-            }
-            Err(err) => {
-                eprintln!("bookrack: connect to {}: {err}", socket.path().display());
-                bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await
-            }
+            // A daemon that did not answer is a finding, not a
+            // preamble: the in-process report's reporter row states
+            // which path produced it and what it found at the lock,
+            // so nothing goes to stderr ahead of the report.
+            Err(_) => bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await,
         },
-        Err(ControlError::NotRunning) => {
-            bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await
-        }
-        Err(err) => {
-            eprintln!("bookrack: resolve daemon address: {err}");
-            bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await
-        }
+        Err(_) => bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await,
+    }
+}
+
+/// One line of `--json` output per installed artifact, printed ahead
+/// of the report: which install produced it, where it landed, and
+/// whether this run downloaded it or found it in place.
+fn install_line(install: &str, path: &Path, downloaded: bool) -> Value {
+    serde_json::json!({
+        "install": install,
+        "path": path.display().to_string(),
+        "downloaded": downloaded,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_line_names_the_install_its_path_and_whether_it_downloaded() {
+        let line = install_line("reranker", Path::new("/managed/model.gguf"), false);
+        assert_eq!(line["install"], "reranker");
+        assert_eq!(line["path"], "/managed/model.gguf");
+        assert_eq!(line["downloaded"], false);
+        assert_eq!(line.as_object().map(|o| o.len()), Some(3));
     }
 }

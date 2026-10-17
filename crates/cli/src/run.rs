@@ -27,9 +27,8 @@ use bookrack_runtime::backend_probe::PreflightRefusal;
 use bookrack_runtime::control::HealthProbe;
 use bookrack_runtime::mcp_endpoint::McpBindRefusal;
 use bookrack_runtime::queue::QueueLoadError;
-use bookrack_runtime::{DaemonRuntime, LaunchMode, RuntimeOpts};
+use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use eyre::{Context, Result};
-use serde_json::Value;
 
 /// CLI inputs for [`run_daemon`]. Parsed from the `Run` clap variant.
 pub struct RunOpts {
@@ -64,14 +63,13 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
         log_config: LogConfig::from_env(),
         caller: Caller::cli(),
         mcp_tools: bookrack_mcp::list_tools(),
-        launch_mode: LaunchMode::Cli,
     };
 
     let mut runtime = match DaemonRuntime::start(runtime_opts).await {
         Ok(rt) => rt,
         Err(err) => {
             if bookrack_session::is_lock_conflict(&err) {
-                return handle_lock_conflict(err, &lock_path, LaunchMode::Cli).await;
+                return handle_lock_conflict(err, &lock_path).await;
             }
             // A refused pre-flight is operator input, not a bug: hand
             // it to the typed CLI error so it picks up exit 2 and the
@@ -120,8 +118,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     let mcp_handle = bookrack_mcp::spawn_listener(&mut runtime);
 
     // Foreground task: an async future that resolves on the shutdown
-    // broadcast. Mirrors the headless pattern used by the Tauri shell
-    // (`crates/app`). The foreground handle is required by
+    // broadcast. The foreground handle is required by
     // `run_until_shutdown`; a no-op blocking thread would stall tokio
     // teardown after a control-plane `daemon.shutdown`.
     let mut shutdown_rx = runtime.shutdown_tx.subscribe();
@@ -133,16 +130,13 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     runtime.run_until_shutdown(mcp_handle, fg_handle).await
 }
 
-/// Resolve a session-lock conflict by probing the running daemon and
-/// taking the action that matches the entry point. `LaunchMode::Cli`
-/// prints the recorded pid and control socket and returns `Ok` so a
-/// second `bookrack run` invocation is a no-op; `LaunchMode::Gui`
-/// routes a `tray.focus` RPC at the live daemon and likewise returns
-/// `Ok` so a double-launched GUI raises its existing window. A lock
-/// pointing at a dead daemon returns
+/// Resolve a session-lock conflict by probing the running daemon. A
+/// healthy daemon prints the recorded pid and control socket and
+/// returns `Ok` so a second `bookrack run` invocation is a no-op. A
+/// lock pointing at a dead daemon returns
 /// [`BookrackCliError::StaleSessionLock`] (exit 3); an unprobeable
 /// lock returns [`BookrackCliError::SessionLockUnreadable`] (exit 1).
-async fn handle_lock_conflict(err: eyre::Report, lock_path: &Path, mode: LaunchMode) -> Result<()> {
+async fn handle_lock_conflict(err: eyre::Report, lock_path: &Path) -> Result<()> {
     let info = match bookrack_session::peek_lock(lock_path) {
         Ok(Some(i)) => i,
         Ok(None) | Err(_) => {
@@ -153,31 +147,20 @@ async fn handle_lock_conflict(err: eyre::Report, lock_path: &Path, mode: LaunchM
         }
     };
     let probe = bookrack_runtime::control::probe(&info, Duration::from_secs(2)).await;
-    match (mode, probe) {
-        (LaunchMode::Cli, HealthProbe::Healthy(pid, sock)) => {
+    match probe {
+        HealthProbe::Healthy(pid, sock) => {
             println!(
                 "bookrack daemon already running: pid={pid} control_sock={}",
                 sock.display()
             );
             Ok(())
         }
-        (LaunchMode::Gui, HealthProbe::Healthy(_pid, sock)) => {
-            let socket = bookrack_control_client::ControlSocket::from_path(sock);
-            let client = bookrack_control_client::connect(&socket)
-                .await
-                .context("connect to live daemon control socket for tray.focus")?;
-            let _: Value = client
-                .call("tray.focus", Value::Null)
-                .await
-                .context("tray.focus rpc")?;
-            Ok(())
-        }
-        (_, HealthProbe::Stale) => Err(BookrackCliError::StaleSessionLock {
+        HealthProbe::Stale => Err(BookrackCliError::StaleSessionLock {
             path: lock_path.to_path_buf(),
             pid: info.pid,
         }
         .into()),
-        (_, HealthProbe::Unprobeable) => Err(BookrackCliError::SessionLockUnreadable {
+        HealthProbe::Unprobeable => Err(BookrackCliError::SessionLockUnreadable {
             message: format!("{err:#}"),
         }
         .into()),

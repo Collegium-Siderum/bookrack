@@ -15,8 +15,6 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-#[cfg(test)]
-use ts_rs::TS;
 
 use super::{MethodContext, input_err};
 use crate::audit_helpers::require_known_profile;
@@ -25,10 +23,7 @@ use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::queue::{self, Priority};
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct IngestSubmitParams {
-    #[cfg_attr(test, ts(type = "Array<string>"))]
     paths: Vec<PathBuf>,
     #[serde(default)]
     library: Option<String>,
@@ -61,8 +56,6 @@ pub struct IngestSubmitParams {
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 #[serde(rename_all = "lowercase")]
 pub enum PriorityRepr {
     Low,
@@ -100,7 +93,7 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         bookrack_audit_profile::ALL_BUILT_IN_NAMES,
     )
     .map_err(input_err)?;
-    let library = parsed.library.unwrap_or_else(|| ctx.library_name.clone());
+    let library = super::resolve_submit_target(ctx, parsed.library.as_deref())?;
     let priority = parsed
         .priority
         .map(PriorityRepr::into_priority)
@@ -159,12 +152,12 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct IngestCancelParams {
     job_id: String,
 }
 
+/// Cancel the one pending or running job whose id starts with
+/// `job_id`. The reply carries the full id the prefix resolved to.
 pub async fn cancel(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: IngestCancelParams = match params {
         Some(v) if !v.is_null() => serde_json::from_value(v.clone()).map_err(|e| {
@@ -177,7 +170,7 @@ pub async fn cancel(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             ));
         }
     };
-    let (_full_id, tick) = super::queue_writes::mutate_jobs_and_persist(
+    let (full_id, tick) = super::queue_writes::mutate_jobs_and_persist(
         &ctx.queue_state,
         &ctx.queue_state_path,
         |guard| {
@@ -190,7 +183,7 @@ pub async fn cancel(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         },
     )?;
     ctx.event_stream.publish(Event::QueueTick(tick));
-    Ok(json!({ "ok": true }))
+    Ok(json!({ "ok": true, "job_id": full_id }))
 }
 
 routed_params!(IngestSubmitParams);

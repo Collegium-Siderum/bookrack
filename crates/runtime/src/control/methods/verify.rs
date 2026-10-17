@@ -5,12 +5,9 @@
 
 use serde::Deserialize;
 use serde_json::Value;
-#[cfg(test)]
-use ts_rs::TS;
 
 use super::super::jsonrpc::RpcError;
 use super::MethodContext;
-use crate::control::error_map::registry_err;
 
 /// Build the cross-store verify report and return it as JSON.
 ///
@@ -20,7 +17,7 @@ use crate::control::error_map::registry_err;
 /// The report walks every intake row and stats its file, so it is built
 /// on a blocking executor and the dispatcher's reactor stays free.
 pub async fn run(library: Option<&str>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let handle = ctx.registry.get(library).map_err(registry_err)?;
+    let handle = super::select_library(ctx, library)?;
     let cfg = handle.cfg_arc();
     let report = tokio::task::spawn_blocking(move || crate::cmd::verify::build_verify_report(&cfg))
         .await
@@ -40,14 +37,11 @@ pub async fn run(library: Option<&str>, ctx: &MethodContext) -> Result<Value, Rp
 
 /// Which library to verify.
 #[derive(Debug, Default, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct VerifyParams {
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 

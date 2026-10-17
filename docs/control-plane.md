@@ -2,7 +2,7 @@
 
 The bookrack daemon exposes a local-only JSON-RPC 2.0 control plane
 alongside its MCP HTTP listener. Operator tooling — one-shot CLI
-subcommands, `bookrack rpc` for ad-hoc RPCs, and the desktop tray —
+subcommands and `bookrack rpc` for ad-hoc RPCs —
 reaches the running daemon through this surface; the MCP listener
 stays tool-scoped — agent clients see a fixed tool set rather than the
 full method registry, and the bulk, queue-bound, and library-lifecycle
@@ -344,9 +344,9 @@ the kind of failure without parsing stderr.
 | exit | meaning | sources |
 | --- | --- | --- |
 | `0` | success | — |
-| `1` | internal / unexpected error | color-eyre fallback for unclassified errors; `-32700 parse error`, `-32600 invalid request`, `-32603 internal error`, and unknown JSON-RPC codes; `SessionLockUnreadable`; `doctor` reported a FAIL row; `verify` judged a finding as damage (see `verify.run` below for the table); `libraries detect` returned a not-a-library or unreadable-manifest verdict |
-| `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32016` plan-id mismatches and plan-target drift, `-32018 state unusable` (a store from another build or with drifted stamps; the hint names the rebuild or the build to run); a locally-resolved command rejected operator input (`libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate, `config effective` given a data root that does not resolve — the report is still printed, with the failure at its head, because a configuration report that fails when the configuration is broken is useless exactly when it is needed); a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0`; `bookrack run` refused to start because an external backend it needs is unusable (the embed model is not pulled, or the Ollama endpoint does not answer), or because the selected data root carries the identity of a library the registry records at another path — either check runs before any library is opened, so nothing was half-started. The same judgement on a live write RPC splits: an unpulled model stays `-32602` and exit `2`, while an unreachable or overloaded backend is `-32017` and exit `4`, because a call that failed mid-session may succeed on the next attempt; `bookrack rpc call` was handed params that are not valid JSON (`RpcParamsInvalid`) or a method name carrying no namespace (`RpcMethodNotNamespaced`), both judged locally before the call is sent; `bookrack init` refused on its input or the host (`--non-interactive` without `--data-dir`, a data root inside the application bundle, a path that is not a directory, a root that already holds a library without `--force`, Ollama unreachable or the embed model not pulled) — each decided before anything is written |
-| `3` | needs operator cleanup | a stale session lock points at a daemon that no longer answers; the operator must remove the lock file before retrying |
+| `1` | internal / unexpected error | color-eyre fallback for unclassified errors; `-32700 parse error`, `-32600 invalid request`, `-32603 internal error`, and unknown JSON-RPC codes; `SessionLockUnreadable` (`bookrack run` on a lock it cannot interpret; an offline `doctor` repair on a lock it cannot read, or a held one naming no control socket, since neither shows the library unserved); `doctor` reported a FAIL row; `verify` judged a finding as damage (see `verify.run` below for the table); `libraries detect` returned a not-a-library or unreadable-manifest verdict |
+| `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32016` plan-id mismatches and plan-target drift, `-32018 state unusable` (a store from another build or with drifted stamps; the hint names the rebuild or the build to run); an offline `doctor` repair (`--backfill-ocr-derivation`, `--close-abandoned-runs`) asked for while a daemon answers on the session lock's control socket; a locally-resolved command rejected operator input (a global `--audit-profile` on a subcommand that does not consume it, judged before any dispatch so the four subcommands that run ahead of the shared resolver — `doctor`, `init`, `run`, `rpc` — refuse it too; `libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate, `config effective` given a data root that does not resolve — the report is still printed, with the failure at its head, because a configuration report that fails when the configuration is broken is useless exactly when it is needed); a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0`; `bookrack run` refused to start because an external backend it needs is unusable (the embed model is not pulled, or the Ollama endpoint does not answer), or because the selected data root carries the identity of a library the registry records at another path — either check runs before any library is opened, so nothing was half-started. The same judgement on a live write RPC splits: an unpulled model stays `-32602` and exit `2`, while an unreachable or overloaded backend is `-32017` and exit `4`, because a call that failed mid-session may succeed on the next attempt; `bookrack rpc call` was handed params that are not valid JSON (`RpcParamsInvalid`) or a method name carrying no namespace (`RpcMethodNotNamespaced`), both judged locally before the call is sent; `bookrack init` refused on its input or the host (`--non-interactive` without `--data-dir`, a data root inside the application bundle, a path that is not a directory, a root that already holds a library without `--force`, Ollama unreachable or the embed model not pulled) — each decided before anything is written |
+| `3` | needs operator cleanup | a stale session lock points at a daemon that no longer answers (`bookrack run`, `bookrack status`, and the offline `doctor` repairs all judge it the same way); the operator must remove the lock file before retrying |
 | `4` | busy / not ready (retryable) | `-32001 busy`, `-32002 not ready` and `queue worker disabled`; `-32017 backend unavailable` (the Ollama daemon did not answer, or reported itself overloaded); a scripted caller can sleep and retry |
 | `5` | async job batch had failures | `bookrack ingest`, `bookrack papers ingest`, and `bookrack intake ocr` return this when at least one queued job ended in `Failed` or `Cancelled`. `Done`, `SkippedDuplicate`, and `NeedsOcr` are terminal successes and do not trigger it — a batch of scan sources that all end in `needs_ocr` returns `0` and points at `bookrack intake list-ocr-pending`. The per-job summary on stdout names the offenders; `--no-wait` returns `0` because the batch is not awaited |
 
@@ -392,12 +392,17 @@ the exit-code bucket does not distinguish the two.
   registry did not know — and is `[]` when it recorded nothing. It is
   a fact about this session, not persisted: the next start on the same
   root finds the entry in place and reports an empty list.
-- `doctor.gather` — JSON serialisation of the same report the
-  `bookrack doctor` subcommand prints. Gathered inside the daemon, so
+- `doctor.gather` — `{ library? }` → JSON serialisation of the same
+  report the `bookrack doctor` subcommand prints. The library-level
+  rows — data root, store files and their stamps, open pipeline runs,
+  backup directory, free disk — are about the library `library` names,
+  or the registry's current default when it is absent; a name the
+  registry does not hold is `-32010`. The daemon-level rows are the
+  session's whichever library was named: gathered inside the daemon,
   the `MCP endpoint` row probes the address this session bound and not
-  the one the caller's environment names; the row is `fail` when a
-  service that is not bookrack answers there, or when nothing answers
-  at an address the daemon reports serving.
+  the one the caller's environment names, and is `fail` when a service
+  that is not bookrack answers there, or when nothing answers at an
+  address the daemon reports serving.
 - `daemon.methods` — the live method table: every name this daemon
   dispatches, with its read/write class, whether the queue worker
   carries it, and how a library selection reaches it. Authoritative at
@@ -412,11 +417,14 @@ the exit-code bucket does not distinguish the two.
     spelling.
   - `process` — the method reports on the process rather than on a
     library: `daemon.*`, the queue verbs (whose job ids address one
-    daemon-wide queue), `logs.tail`, `tray.focus`, `diagnose.run`. A
-    selection is meaningless here, and clients pass it through
-    unchanged rather than treating meaningless as wrong.
+    daemon-wide queue), `logs.tail`. A selection is meaningless here,
+    and clients pass it through unchanged rather than treating
+    meaningless as wrong. The test is what the method gathers, not how
+    much of it is process-wide: `doctor.gather` and `diagnose.run`
+    each carry one library's data among the process-level rest, so
+    both are `routed`.
   - `unrouted` — the method answers about the daemon itself, or about
-    every library at once: `status`, `daemon.status`, `doctor.gather`,
+    every library at once: `status`, `daemon.status`,
     `events.snapshot`, `library.list`, `library.set_default`,
     `library.mount`, `library.unmount`. It has
     no key to carry a selection, so a client holding an explicit one
@@ -444,9 +452,10 @@ the exit-code bucket does not distinguish the two.
 - `library.info` — full status card for one library;
   `params.name` selects which.
 - `library.fork` — `{ new_name, data_dir, library? }` →
-  `{ new_name, data_dir, mounted, mount_error }`. `library` names the
-  *source* — the one method that holds two libraries at once, so it is
-  written out rather than inherited.
+  `{ new_name, data_dir, mounted, mount_error, library }`. `library`
+  names the *source*, in the params and in the reply — the one method
+  that holds two libraries at once, so it is written out rather than
+  inherited.
   Clones
   the served library into a sibling registry entry: the envelope store is
   hardlinked where the filesystem allows, the catalog and corpus are
@@ -458,7 +467,7 @@ the exit-code bucket does not distinguish the two.
   would delete data to report a serving problem. Such a fork still
   succeeds, with `mounted: false` and `mount_error` naming the reason;
   the repair is `library.mount` against the name the fork registered.
-- `library.mount` — `{ name }` → `{ ok: true, name }`. Open the
+- `library.mount` — `{ name }` → `{ ok: true, name, library }`. Open the
   registered library `name` and add it to the served set, without a
   restart. `name` is a registry name, never a path: registering a root
   stays a separate act, with its own failure modes. The mount runs the
@@ -471,7 +480,7 @@ the exit-code bucket does not distinguish the two.
   another process holds the root's lock. Being a write, it takes the
   write mutex — a concurrent write sees `-32001 busy` for the second or
   so a mount takes — and fires `library.changed` on success.
-- `library.unmount` — `{ name }` → `{ ok: true, name }`. Stop serving
+- `library.unmount` — `{ name }` → `{ ok: true, name, library }`. Stop serving
   `name` and give its data root back. Three libraries are refused: the
   registry's current default (an unnamed call would resolve to a key
   the served set no longer has), the library the daemon came up under
@@ -515,24 +524,48 @@ the exit-code bucket does not distinguish the two.
   write lock, so the report answers alongside a write in flight rather
   than queueing behind the write mutex. Each store reports for itself:
   one that cannot be read carries its reason in its own `*_error` field
-  and leaves the others untouched. A root with neither store
-  (`not_initialised`) and an absent vector sidecar are how a fresh
-  library looks and are not errors — `vectors_meta_error` is populated
-  only when the sidecar is there and unreadable. The method returns
-  findings, not a verdict; `bookrack verify` judges them on the client
-  side and exits `1` when any of these holds: `catalog_schema_error`,
+  and leaves the others untouched. The book pipeline's findings
+  (`catalog.db`, `corpus.db`, `lancedb/`, intake files under `books/`)
+  sit at the top level; the paper pipeline's (`papers_catalog.db`,
+  `papers_corpus.db`, `lancedb_papers/`, intake files under `papers/`)
+  sit under `papers` with the same field names. `reference_missing`,
+  `reference_schema_ok`, and `reference_schema_error` report whether
+  `reference.db` opens read-only at the schema version this build
+  reads — a version check only: unlike the catalog and corpus doors,
+  this one does not verify table shapes. A root with none of the five
+  databases (`not_initialised`), a pipeline with neither store on disk,
+  an absent `reference.db`, and an absent vector sidecar are how a fresh
+  or single-pipeline library looks and are not errors —
+  `vectors_meta_error` is populated only when the sidecar is there and
+  unreadable. The method returns findings, not a verdict; `bookrack
+  verify` judges them on the client side and exits `1` when any of
+  these holds on either pipeline: `catalog_schema_error`,
   `corpus_schema_error`, `intake_scan_error`, or `vectors_meta_error` is
   set; exactly one of `catalog_missing` / `corpus_missing` is true (half
-  a library is a damaged one, not an uninitialised one); or
-  `missing_intake_files` is non-empty. `not_initialised`, an absent
-  vector sidecar, and any `vectors_churn` value exit `0` — not built is
-  not broken, and a rebuild is `bookrack vectors rebuild`'s to decide.
+  a pipeline is a damaged one, not an unused one); or
+  `missing_intake_files` is non-empty. It also exits `1` when
+  `reference_schema_error` is set, a version behind this build's
+  included, since the read path refuses that store the same way.
+  `not_initialised`, an unused pipeline, an absent `reference.db`, an
+  absent vector sidecar, and any `vectors_churn` value exit `0` — not
+  built is not broken, and a rebuild is `bookrack vectors rebuild`'s to
+  decide.
   The report is printed as text, or as the raw result under `--json`,
   before the exit code is set, so a script has both.
-- `diagnose.run` — `{ out?, days?, no_scrub? }` → `{ out_path, files,
-  scrubbed, scrub_gaps }`. Bundles crash reports, recent logs, and a
-  catalog snapshot for a bug attachment. Scrubbed of local paths and
-  titles unless `no_scrub` is set. `scrub_gaps` names the redactions
+- `diagnose.run` — `{ library?, out?, days?, no_scrub? }` →
+  `{ library, out_path, files, scrubbed, scrub_gaps }`. Bundles crash
+  reports, recent logs, and a catalog snapshot for a bug attachment.
+  `library` selects the library whose catalog, stores, and audit
+  overlay are snapshotted and under whose root the bundle lands when
+  `out` is absent; it defaults to the registry's current default, and
+  the result echoes the name resolved. The logs and crash reports are
+  the process's, read from the daemon state directory first, and the
+  bundle's `manifest.json` records the library under `library`.
+  Scrubbed of local paths and titles unless `no_scrub` is set: the
+  named library's root, the roots of every other library the daemon
+  serves, and the daemon state directory each fold to a placeholder,
+  since a shared log line about one library carries that library's
+  root into another's bundle. `scrub_gaps` names the redactions
   that had no input to work from, or had one worth doubting:
   `["home_dir"]` when the host exposed no home directory at all, and
   `["home_dir_unverified"]` when `HOME` named a directory that does not
@@ -540,10 +573,6 @@ the exit-code bucket does not distinguish the two.
   begins with. Either way a caller can warn before the bundle leaves
   the machine; the list is empty on full coverage and empty when
   `scrubbed` is `false`.
-- `tray.focus` — no params; `{ ok: true }`. Signals one waiter on the
-  daemon's focus notification, which a GUI host attached in-process
-  uses to raise its window. A daemon with no GUI attached accepts the
-  call and nothing observes it.
 
 ## Methods (Phase 2)
 
@@ -564,8 +593,11 @@ the exit-code bucket does not distinguish the two.
   reloads it before running the ingest; set to anything else, the call
   is refused with `-32602 invalid params` before a job is queued, and
   the error's `detail` lists the accepted names.
-- `ingest.cancel` — `{ job_id }` → `{ ok: true }`. Marks the matching
-  pending or running job as cancelled.
+- `ingest.cancel` — `{ job_id }` → `{ ok: true, job_id }`. Marks the
+  one pending or running job whose id starts with `job_id` as
+  cancelled; the reply's `job_id` is the full id the prefix resolved
+  to. The queue spans libraries, so the reply carries no `library`;
+  `queue.list` reports it per row.
 - `intake.ocr` — `{ ocr_md, from_pdf, expected_pages?, allow_partial?,
   library?, priority?, force?, hold_for_metadata?, audit_profile? }`
   → `{ job_id: <uuid v7> }`. Append a single OCR-intake job. The worker
@@ -588,8 +620,26 @@ the exit-code bucket does not distinguish the two.
 - `metadata.set` / `metadata.clear` / `metadata.void` /
   `metadata.reaudit` / `metadata.ack` / `metadata.approve` /
   `metadata.reject` / `metadata.advance` — same params as the
-  `bookrack metadata` REPL subcommands, plus `library?`; return
-  `{ ok: true }` on success. `metadata.reaudit` and `metadata.advance` additionally
+  `bookrack metadata` REPL subcommands, plus `library?`. Each returns
+  `ok: true`, `library`, and `book` with what the write recorded, in
+  the field names the MCP write tools use:
+  - `set` / `clear` / `void` → `{ field, audit_id, actor_kind,
+    actor_detail, changed }`; `ack` / `reject` /
+    `contributor_remove` → the same without `field`;
+    `contributor_add` adds `contributor_id`. `audit_id` names the
+    `metadata_audit` row the edit wrote; `changed` is false for an
+    edit that changed nothing, which is still audited.
+  - `reaudit` → `{ verdict, previous_verdict, confidence,
+    previous_confidence }`, the previous pair `null` when nothing was
+    stored. A re-audit writes no audit row.
+  - `advance` → `{ resumed: true, chunks_written, batches }`, what the
+    resumed CHUNK→EMBED wrote.
+  - `approve` → the edit fields plus `resumed`, which says whether the
+    book was parked at the metadata gate and the approval resumed it;
+    when `true`, `chunks_written` and `batches` follow as for
+    `advance`.
+
+  `metadata.reaudit` and `metadata.advance` additionally
   accept `audit_profile?`, which routes through the same built-in set
   as `ingest.submit` for the re-audit they trigger, and is refused
   with `-32602` when it names nothing in that set. The other writes
@@ -612,11 +662,25 @@ the exit-code bucket does not distinguish the two.
 - `vectors.rebuild` / `vectors.reembed` / `vectors.reset` /
   `vectors.drop` — mirror the matching `bookrack vectors` actions.
   `vectors.drop` takes `{ yes? }`; the daemon rejects the call
-  without `yes = true`. All four take `library?`.
+  without `yes = true`. All four take `library?`. Replies, beside
+  `library`:
+  - `vectors.rebuild` → `{ ok: true, kind, num_partitions,
+    num_sub_vectors?, num_bits?, nprobes, refine_factor? }`, the
+    configuration the index was built with.
+  - `vectors.drop` → `{ ok: true, kind: "brute-force" }`, the kind the
+    store is left at.
+  - `vectors.reset` → `{ ok: true, resumed, intakes_reembedded,
+    chunks_written, skipped_empty }`, the counts of this pass alone:
+    a resume reports what it picked up, not the library's totals, and
+    a resume with nothing waiting at `Extracted` reports zeros. A
+    failure inside the reset pass appends to the error's hint the
+    step to rerun with `resume = true`; a failure while the reset is
+    being set up — before anything changed — does not.
 - `corpus.rebuild` — `{ include_vectors?, book?, stale_only?, dry_run?,
   yes?, library? }`.
-- `stamps.reconcile` — `{ library? }`; rewrites the corpus index
-  stamps.
+- `stamps.reconcile` — `{ library? }` → `{ ok: true, embed_model,
+  vector_dim, chunk_version, normalize_version, library }`; rewrites
+  the corpus index stamps and reports the values written.
 - `papers.corpus_rebuild` —
   `{ include_vectors?, paper?, stale_only?, dry_run?, yes? }`. Peer of
   `corpus.rebuild` for the paper pipeline; reconstructs
@@ -627,9 +691,11 @@ the exit-code bucket does not distinguish the two.
   `vectors.*` against `lancedb_papers`. Same param shapes; the
   reembed variant takes `paper?` instead of `book?`, and
   `papers.vectors_drop` takes `{ yes? }` with the same
-  `-32012` gate as `vectors.drop`.
+  `-32012` gate as `vectors.drop`. Each replies in the shape of its
+  book-side peer.
 - `papers.stamps_reconcile` — `{ library? }`; rewrites the
-  `papers_corpus.db` index stamps from the active embedder.
+  `papers_corpus.db` index stamps from the active embedder and replies
+  in the shape of `stamps.reconcile`.
 - `papers.dryrun` — `{ path, out?, no_chunk?, library? }`. Peer of `dryrun` for
   the paper pipeline; writes a paper-shaped JSONL plus a summary
   sidecar under `<data_root>/dryruns/dryrun-paper-...`. Reports
@@ -728,21 +794,40 @@ the exit-code bucket does not distinguish the two.
 
 Every write method takes an optional `library`: the registry name of
 the library it acts on. Absent, it resolves to the registry's current
-default — which is the library the daemon was brought up under until
-`library.set_default` moves it. `bookrack libraries default` sends that
-method whenever a daemon is listening, so the running daemon follows a
-pointer moved from the CLI rather than keeping the value it read at
-bring-up; with nothing listening it writes the registry directly and
-the next start picks the change up. A name the registry does not know is
+default pointer, which `library.set_default` moves at run time; the
+pointer is not the library the daemon was brought up under, and the two
+differ whenever the daemon came up under a non-default library.
+`bookrack libraries default` sends that method whenever a daemon is
+listening, so the running daemon follows a pointer moved from the CLI
+rather than keeping the value it read at bring-up; with nothing
+listening it writes the registry directly and the next start picks the
+change up. The queue-submitting methods — `ingest.submit`,
+`glean.submit`, `intake.ocr` — resolve the name the same way before the
+job is written, so the row carries the library it will run under and a
+later move of the pointer does not move a queued job. A name the
+registry does not know is
 refused with `-32010 invalid library` before any store is opened, and
 a plan id minted against one library is not redeemable against
 another (`-32015`). `papers.remove` and the `remove` / `corpus.rebuild`
 / `vectors.reembed` execute legs scope their plan ids the same way.
 
-`diagnose.run` is the exception among the daemon's write-path methods:
-a diagnostic bundle describes the process and the machine under it
-rather than any one mounted library, so it takes no `library` and
-resolves from the selection the daemon was started with.
+Every method that goes through the write mutex names the library it
+acted on in its success reply: `library` is the registry name the call
+resolved to — the explicit parameter, or the default pointer at the
+moment of the call. A method that already returns an object keeps
+every field it had; `library` is added beside them. `library.fork`
+reports the source library there, next to `new_name`;
+`library.mount` and `library.unmount` report the same name in `name`
+and `library`. A daemon serving a root selected by path rather than
+by registry name reports it as `default`.
+
+`diagnose.run` and `doctor.gather` take the same optional `library`,
+although neither is a write: half of what each gathers belongs to one
+library — the catalog snapshot, the audit overlay, and the bundle's
+landing place; the store rows, open runs, and free disk — and that half
+follows the selection. The other half is the process's — the log
+stream and crash reports, the daemon's listening address and state
+directory — and is the same whichever library is named.
 
 Every write command takes the runtime-wide write mutex on entry; a
 second concurrent write returns `-32001 busy`.
@@ -1104,7 +1189,7 @@ the tool description says which one it ran.
   client and stood up the `bookrack-control-client` transport.
   The REPL surface was later removed entirely in 0.7.0; see
   `CHANGELOG.md`. `bookrack-control-client` survives as the
-  shared transport for the one-shot CLI clients and the tray,
+  shared transport for the one-shot CLI clients,
   and `bookrack-cli-grammar` (renamed from `bookrack-repl-grammar`)
   holds the leaf `clap::Subcommand` definitions the top-level
   CLI consumes.
@@ -1169,7 +1254,8 @@ the tool description says which one it ran.
   entry through the new `tray.focus` control-plane method instead
   of competing for the lock; with no GUI attached the method is a
   no-op and still returns `{ ok: true }` so the contract stays
-  stable between CLI-only and GUI builds. `bookrack-mcp` gains a
+  stable between CLI-only and GUI builds; both were removed in 0.13
+  together with the desktop shell. `bookrack-mcp` gains a
   `--with-queue-worker` flag: without it, queue-bound write
   methods (`ingest.submit`, `ingest.cancel`, `glean.submit`,
   `vectors.*`, `corpus.rebuild`, `stamps.reconcile`, `remove`,
@@ -1213,8 +1299,7 @@ the tool description says which one it ran.
   The trait's `Result` is the only abort path — the runner does
   not auto-retry. Finalize is three writes: skeleton directories,
   `<data_root>/config.toml`, and a merge into the platform-default
-  registry. A GUI driver drives the same probes and the same
-  writes through the same trait. `bookrack init` keeps its exact
+  registry. `bookrack init` keeps its exact
   flag set and terminal transcript; `crates/cli/src/init.rs` is a
   thin shim that pairs `CliWizardDriver` with the runner.
 - **GUI shell (first slice)** — `crates/app` ships a Tauri 2 shell
@@ -1229,7 +1314,9 @@ the tool description says which one it ran.
   caught by the single-instance plugin in-process, or — when the
   lock is held by a CLI daemon — by probe + `tray.focus` RPC
   followed by exit 0. No webview RPC surface exists yet; no
-  control-plane methods were added or changed.
+  control-plane methods were added or changed. Removed in 0.13
+  together with `tray.focus`; the CLI and MCP front ends are the
+  complete surface.
 - **Runtime mounting** — the set of libraries a daemon serves stops
   being fixed at bring-up. New methods: `library.mount` and
   `library.unmount`, both `unrouted` writes taking their own `name`

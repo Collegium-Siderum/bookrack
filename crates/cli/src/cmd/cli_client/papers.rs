@@ -284,24 +284,18 @@ async fn review_status_call(
 }
 
 /// Prints the outcome of one `papers metadata` write in the mode the
-/// operator asked for.
+/// operator asked for; the human sentence names the library the reply
+/// reports.
 fn emit_metadata_outcome(response: &Value, sentence: String) {
-    if let Some(text) = metadata_outcome_line(ctx().output(), response, sentence) {
-        println!("{text}");
-    }
+    helpers::emit_outcome(response, Some(name_library(response, sentence)));
 }
 
-/// Output-mode gate shared by every `papers metadata` write: `Quiet`
-/// prints nothing and lets the exit code answer, `Json` prints the
-/// server's response payload so a script parses one object, `Human`
-/// prints the one-line summary.
-fn metadata_outcome_line(mode: OutputMode, response: &Value, sentence: String) -> Option<String> {
-    match mode {
-        OutputMode::Quiet => None,
-        OutputMode::Json => {
-            Some(serde_json::to_string_pretty(response).unwrap_or_else(|_| response.to_string()))
-        }
-        OutputMode::Human => Some(sentence),
+/// `sentence` followed by ` Library: <name>.` when the reply names the
+/// library the write acted on, and unchanged when it does not.
+fn name_library(response: &Value, sentence: String) -> String {
+    match response.get("library").and_then(Value::as_str) {
+        Some(library) => format!("{sentence} Library: {library}."),
+        None => sentence,
     }
 }
 
@@ -381,7 +375,10 @@ async fn vectors(action: PapersVectorsAction, runtime_dir: Option<PathBuf>) -> R
                 "nprobes": nprobes,
                 "refine_factor": refine_factor,
             });
-            helpers::call_and_print(&client, "papers.vectors_rebuild", params).await
+            let reply =
+                helpers::call_with_progress_value(client, "papers.vectors_rebuild", params).await?;
+            helpers::emit_outcome(&reply, super::vectors::rebuild_sentence(&reply));
+            Ok(())
         }
         PapersVectorsAction::Drop { yes } => {
             helpers::run_destructive(
@@ -397,6 +394,7 @@ async fn vectors(action: PapersVectorsAction, runtime_dir: Option<PathBuf>) -> R
                            `papers vectors rebuild`. Type 'yes' to continue:",
                     unanswered_hint:
                         "papers vectors drop removes the paper ANN index; pass --yes to confirm",
+                    outcome: super::vectors::drop_sentence,
                 },
             )
             .await
@@ -438,6 +436,7 @@ async fn vectors(action: PapersVectorsAction, runtime_dir: Option<PathBuf>) -> R
                            Type RESET (exact, uppercase) to continue:",
                     unanswered_hint:
                         "papers vectors reset drops the existing paper vectors; pass --yes to confirm",
+                    outcome: |reply| super::vectors::reset_sentence(reply, "paper intake"),
                 },
             )
             .await
@@ -449,7 +448,11 @@ async fn stamps(action: PapersStampsAction, runtime_dir: Option<PathBuf>) -> Res
     let client = helpers::connect(runtime_dir.as_deref()).await?;
     match action {
         PapersStampsAction::Reconcile => {
-            helpers::call_and_print(&client, "papers.stamps_reconcile", json!({})).await
+            let reply =
+                helpers::call_with_progress_value(client, "papers.stamps_reconcile", json!({}))
+                    .await?;
+            helpers::emit_outcome(&reply, super::stamps::reconcile_sentence(&reply));
+            Ok(())
         }
     }
 }
@@ -793,37 +796,20 @@ mod tests {
         })
     }
 
-    const SENTENCE: &str = "Cleared override on title for paper 7.";
-
-    fn write_response() -> Value {
-        json!({ "removed": true, "field": "title", "intake_id": 7 })
-    }
-
     #[test]
-    fn a_metadata_write_prints_nothing_in_quiet_mode() {
+    fn papers_metadata_human_line_names_the_library() {
+        let sentence = "Set title on paper 12 to \"x\".".to_string();
         assert_eq!(
-            metadata_outcome_line(OutputMode::Quiet, &write_response(), SENTENCE.to_string()),
-            None
+            name_library(
+                &json!({ "ok": true, "intake_id": 12, "library": "alpha" }),
+                sentence.clone()
+            ),
+            "Set title on paper 12 to \"x\". Library: alpha."
         );
-    }
-
-    #[test]
-    fn a_metadata_write_prints_the_server_payload_in_json_mode() {
-        let line = metadata_outcome_line(OutputMode::Json, &write_response(), SENTENCE.to_string())
-            .expect("json mode prints the payload");
-        assert!(
-            !line.contains(SENTENCE),
-            "the human sentence reached a --json stream:\n{line}"
-        );
-        let parsed: Value = serde_json::from_str(&line).expect("json mode prints one JSON object");
-        assert_eq!(parsed, write_response());
-    }
-
-    #[test]
-    fn a_metadata_write_prints_the_summary_in_human_mode() {
         assert_eq!(
-            metadata_outcome_line(OutputMode::Human, &write_response(), SENTENCE.to_string()),
-            Some(SENTENCE.to_string())
+            name_library(&json!({ "ok": true, "intake_id": 12 }), sentence.clone()),
+            sentence,
+            "a reply that names no library leaves the sentence as it was"
         );
     }
 

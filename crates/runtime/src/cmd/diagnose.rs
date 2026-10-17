@@ -14,7 +14,15 @@ pub fn run(cfg: &Config, out: Option<PathBuf>, days: u32, no_scrub: bool) -> Res
         out,
         now: None,
     };
-    let report = bookrack_diagnose::collect(cfg, &opts).context("collect diagnose bundle")?;
+    // One library resolved in-process: nothing else is mounted, so the
+    // only root a shared log can name besides this one is covered by
+    // the state-directory placeholder.
+    let scope = bookrack_diagnose::Scope {
+        library: cfg.library().map(str::to_string),
+        other_roots: Vec::new(),
+    };
+    let report =
+        bookrack_diagnose::collect(cfg, &opts, &scope).context("collect diagnose bundle")?;
     println!("diagnose bundle: {}", report.out_path.display());
     println!("  files: {}", report.files);
     println!("  scrubbed: {}", report.scrubbed);

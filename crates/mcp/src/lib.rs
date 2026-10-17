@@ -507,18 +507,34 @@ pub struct SessionInfoResult {
     pub version: String,
     /// Wall-clock seconds since the daemon started.
     pub uptime_seconds: u64,
-    /// Every library registered with the session, sorted by name.
-    pub libraries: Vec<String>,
-    /// Registry name of the session's default library, or empty when
-    /// the daemon was started without a registry-backed selection.
+    /// Every library this session has mounted, one row each, sorted by
+    /// name.
+    pub libraries: Vec<SessionLibrary>,
+    /// Name of the row in `libraries` marked `default` — the library a
+    /// tool call without a `library` selector resolves to — or empty
+    /// when no row carries the mark.
     pub default_library: String,
     /// MCP listener address (`host:port`), or `disabled` when the
     /// daemon is running without `/mcp`.
     pub mcp_addr: String,
-    /// Where the library lives on disk (rendered).
-    pub data_dir: String,
     /// Ollama HTTP endpoint the daemon will reach.
     pub ollama_url: String,
+}
+
+/// One mounted library in a [`SessionInfoResult`]. The control plane's
+/// `status.served` rows carry the same three fields plus a `primary`
+/// bit, which an MCP client has no use for: it reaches a library by
+/// name or through the default.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SessionLibrary {
+    /// The library's registered short name.
+    pub name: String,
+    /// The library's own data root (rendered), taken from its handle's
+    /// configuration.
+    pub data_dir: String,
+    /// Whether this is the library a tool call without a `library`
+    /// selector resolves to.
+    pub default: bool,
 }
 
 /// Arguments for `session.logs_tail`.
@@ -767,11 +783,11 @@ pub struct BookrackServer {
 #[tool_router(router = tool_router)]
 impl BookrackServer {
     /// Build a handler over the given library registry. `info_context`
-    /// is the bring-up snapshot of the daemon's process-level facts
-    /// (MCP address, data root and ollama url of the library it came up
-    /// on) that `session.info` reports; `library.info` takes only the
-    /// MCP address from it and builds the rest from the selected
-    /// library's handle. `started_at` stamps the daemon's birth so
+    /// is the daemon's bring-up snapshot; only its process-level facts
+    /// are read here. `session.info` reports its MCP address and ollama
+    /// url and takes every library's name and root from the registry;
+    /// `library.info` takes only the MCP address from it and builds the
+    /// rest from the selected library's handle. `started_at` stamps the daemon's birth so
     /// `session.info` can report uptime. `log_stream` is the shared
     /// in-process log fan-out the `session.logs_tail` tool reads its
     /// ring-buffer snapshot from. `queue_state` is the shared snapshot
@@ -1599,30 +1615,40 @@ impl BookrackServer {
     /// Return a one-page status card for the daemon process itself.
     #[tool(
         name = "session.info",
-        description = "Daemon runtime summary: bookrack version, uptime, registered \
-                       libraries, default library, MCP listener address, data root, \
+        description = "Daemon runtime summary: bookrack version, uptime, the libraries \
+                       this session has mounted (each with its data root and whether \
+                       it is the default), the default library, MCP listener address, \
                        and Ollama endpoint."
     )]
     async fn session_info(
         &self,
         Parameters(_): Parameters<SessionInfoArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let mut libraries: Vec<String> = self
+        // One registry read yields both the rows and the default name,
+        // so a default pointer moved mid-call cannot leave the card
+        // naming one default and marking another.
+        let libraries: Vec<SessionLibrary> = self
             .registry
             .list()
             .map_err(|e| ErrorData::internal_error(format!("read library registry: {e}"), None))?
             .into_iter()
-            .map(|s| s.name)
+            .map(|s| SessionLibrary {
+                name: s.name,
+                data_dir: s.data_dir.display().to_string(),
+                default: s.is_default,
+            })
             .collect();
-        libraries.sort();
-        let default_library = self.registry.default_name().unwrap_or_default();
+        let default_library = libraries
+            .iter()
+            .find(|row| row.default)
+            .map(|row| row.name.clone())
+            .unwrap_or_default();
         let result = SessionInfoResult {
             version: env!("CARGO_PKG_VERSION").to_string(),
             uptime_seconds: self.started_at.elapsed().as_secs(),
             libraries,
             default_library,
             mcp_addr: self.info_context.mcp_addr.clone(),
-            data_dir: self.info_context.data_dir.clone(),
             ollama_url: self.info_context.ollama_url.clone(),
         };
         respond_with(&result)
@@ -2426,7 +2452,7 @@ impl ServerHandler for BookrackServer {
     /// call runs attributed to [`Caller::mcp`], regardless of the
     /// [`Caller`] baked into the shared [`Ops`] handle. The daemon
     /// builds one [`Ops`] tagged with its launch surface
-    /// (`Caller::cli()` / `Caller::gui()`) and shares it across REPL,
+    /// (`Caller::cli()`) and shares it across REPL,
     /// HTTP, and queue worker; without this wrap, both the recorded
     /// tool-call `source` and the `actor_kind` / `actor_detail` on
     /// write audit rows would carry the host surface's identity

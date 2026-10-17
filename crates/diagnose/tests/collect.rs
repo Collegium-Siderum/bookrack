@@ -23,7 +23,7 @@ use bookrack_catalog::{
 use bookrack_config::Config;
 use bookrack_core::ItemKind;
 use bookrack_corpus::Corpus;
-use bookrack_diagnose::{Options, collect};
+use bookrack_diagnose::{Options, Scope, collect};
 use bookrack_test_support::{ProcessEnv, process_env};
 
 /// A fixed unix-ms timestamp the test runs against so the bundle name
@@ -107,7 +107,7 @@ fn collect_writes_a_bundle_with_every_collector_present() {
         now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
         ..Options::default()
     };
-    let report = collect(&fx.cfg, &opts).expect("collect");
+    let report = collect(&fx.cfg, &opts, &Scope::default()).expect("collect");
     assert!(report.scrubbed, "scrub on by default");
     // The sandbox exports a home directory, so every redaction has its
     // input and the coverage list stays empty.
@@ -217,7 +217,7 @@ fn collect_snapshots_the_vectors_sidecar_when_present() {
         now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
         ..Options::default()
     };
-    let report = collect(&fx.cfg, &opts).expect("collect");
+    let report = collect(&fx.cfg, &opts, &Scope::default()).expect("collect");
     let bytes = read_archive_file(&report.out_path, "vectors/vectors_meta.json");
     let snapshot: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(snapshot["kind"], "ivf-flat");
@@ -236,7 +236,7 @@ fn collect_records_an_unreadable_vectors_sidecar_as_an_open_error() {
         now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
         ..Options::default()
     };
-    let report = collect(&fx.cfg, &opts).expect("collect");
+    let report = collect(&fx.cfg, &opts, &Scope::default()).expect("collect");
     let bytes = read_archive_file(&report.out_path, "vectors/open-error.json");
     let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(payload["state"], "unreadable");
@@ -275,7 +275,7 @@ fn logs_outside_the_days_window_are_excluded() {
         now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
         ..Options::default()
     };
-    let report = collect(&fx.cfg, &opts).expect("collect");
+    let report = collect(&fx.cfg, &opts, &Scope::default()).expect("collect");
     let names = list_archive_files(&report.out_path);
     assert!(names.iter().any(|n| n == "logs/bookrack.log.2024-06-05"));
     assert!(names.iter().any(|n| n == "logs/bookrack.log.2024-05-29"));
@@ -310,7 +310,7 @@ fn scrub_replaces_private_paths_and_titles_inside_the_bundle() {
         now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
         ..Options::default()
     };
-    let report = collect(&fx.cfg, &opts).expect("collect");
+    let report = collect(&fx.cfg, &opts, &Scope::default()).expect("collect");
     assert!(report.scrubbed, "scrub on by default");
     let bytes = read_archive_file(&report.out_path, "logs/bookrack.log.2024-06-05");
     let body = String::from_utf8(bytes).unwrap();
@@ -334,6 +334,75 @@ fn scrub_replaces_private_paths_and_titles_inside_the_bundle() {
     assert!(
         !body.contains(cjk_title),
         "a CJK run leaked into the bundle: {body}"
+    );
+}
+
+/// The daemon's log stream is shared across the libraries it serves,
+/// so a bundle about one library copies lines that name the others'
+/// roots and the state directory the stream lives in. Every root the
+/// scope names, and the state directory, fold to a placeholder; the
+/// manifest and `env.txt` say which library the bundle is about.
+#[test]
+fn shared_logs_fold_every_mounted_root_and_the_state_dir() {
+    let state_dir = isolate_daemon_state_dir();
+    let state_logs = state_dir.join("logs");
+    std::fs::create_dir_all(&state_logs).unwrap();
+    let fx = Fixture::build();
+    let beta = fx.cfg.data_dir().to_path_buf();
+    let alpha_tmp = tempfile::tempdir().unwrap();
+    let alpha = alpha_tmp.path().to_path_buf();
+    let msg = format!(
+        "mounted {} and {}; queue snapshot under {}",
+        alpha.display(),
+        beta.display(),
+        state_dir.display()
+    );
+    let line = serde_json::json!({ "level": "info", "msg": msg }).to_string();
+    std::fs::write(
+        state_logs.join("bookrack.log.2024-06-04"),
+        format!("{line}\n"),
+    )
+    .unwrap();
+
+    let opts = Options {
+        now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
+        ..Options::default()
+    };
+    let scope = Scope {
+        library: Some("beta".to_string()),
+        other_roots: vec![alpha.clone()],
+    };
+    let report = collect(&fx.cfg, &opts, &scope).expect("collect");
+
+    let body = String::from_utf8(read_archive_file(
+        &report.out_path,
+        "logs/bookrack.log.2024-06-04",
+    ))
+    .unwrap();
+    for (raw, placeholder) in [
+        (&alpha, bookrack_diagnose::OTHER_ROOT_PLACEHOLDER),
+        (&beta, bookrack_diagnose::DATA_DIR_PLACEHOLDER),
+        (&state_dir, bookrack_diagnose::STATE_DIR_PLACEHOLDER),
+    ] {
+        let raw = raw.display().to_string();
+        assert!(
+            !body.contains(&raw),
+            "a root the daemon serves leaked into the shared log copy: {raw} in {body}"
+        );
+        assert!(
+            body.contains(placeholder),
+            "expected {placeholder} in the shared log copy: {body}"
+        );
+    }
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&read_archive_file(&report.out_path, "manifest.json")).unwrap();
+    assert_eq!(manifest["schema_version"], 5, "{manifest}");
+    assert_eq!(manifest["library"], "beta", "{manifest}");
+    let env = String::from_utf8(read_archive_file(&report.out_path, "env.txt")).unwrap();
+    assert!(
+        env.contains("library          : beta"),
+        "env.txt names the library the bundle is about: {env}"
     );
 }
 
@@ -380,7 +449,8 @@ fn a_non_utf8_log_file_does_not_destroy_the_bundle() {
         now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
         ..Options::default()
     };
-    let report = collect(&fx.cfg, &opts).expect("one unreadable log must not fail the bundle");
+    let report = collect(&fx.cfg, &opts, &Scope::default())
+        .expect("one unreadable log must not fail the bundle");
 
     // The intact file is unaffected by its neighbour.
     let good = read_archive_file(&report.out_path, "logs/bookrack.log.2024-06-05");
@@ -435,7 +505,8 @@ fn a_non_utf8_crash_report_does_not_destroy_the_bundle() {
         now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
         ..Options::default()
     };
-    let report = collect(&fx.cfg, &opts).expect("one unreadable crash must not fail the bundle");
+    let report = collect(&fx.cfg, &opts, &Scope::default())
+        .expect("one unreadable crash must not fail the bundle");
 
     let intact = read_archive_file(&report.out_path, "crashes/crash-1717573000000.txt");
     assert!(
@@ -475,7 +546,7 @@ fn collect_honours_no_scrub_and_writes_to_an_explicit_out_path() {
         now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
         ..Options::default()
     };
-    let report = collect(&fx.cfg, &opts).expect("collect");
+    let report = collect(&fx.cfg, &opts, &Scope::default()).expect("collect");
     assert_eq!(report.out_path, out);
     assert!(!report.scrubbed);
 
@@ -504,7 +575,8 @@ fn collect_with_an_empty_logs_dir_still_succeeds() {
         now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
         ..Options::default()
     };
-    let report = collect(&cfg, &opts).expect("collect must tolerate a bare data dir");
+    let report =
+        collect(&cfg, &opts, &Scope::default()).expect("collect must tolerate a bare data dir");
     assert!(report.out_path.exists());
     let names = list_archive_files(&report.out_path);
     assert!(names.iter().any(|n| n == "manifest.json"));
@@ -543,7 +615,7 @@ fn collect_picks_up_the_daemon_state_dir_log_source() {
         now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
         ..Options::default()
     };
-    let report = collect(&fx.cfg, &opts).expect("collect");
+    let report = collect(&fx.cfg, &opts, &Scope::default()).expect("collect");
     let names = list_archive_files(&report.out_path);
     for needle in [
         // Both sources land in the bundle: the daemon state dir...
@@ -637,7 +709,7 @@ fn collect_snapshots_the_paper_stores_when_present() {
         now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
         ..Options::default()
     };
-    let report = collect(&fx.cfg, &opts).expect("collect");
+    let report = collect(&fx.cfg, &opts, &Scope::default()).expect("collect");
 
     let bytes = read_archive_file(&report.out_path, "papers/catalog/intakes-head.json");
     let intakes: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -705,7 +777,7 @@ fn collect_summarises_the_reference_store_without_its_titles() {
         now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
         ..Options::default()
     };
-    let report = collect(&fx.cfg, &opts).expect("collect");
+    let report = collect(&fx.cfg, &opts, &Scope::default()).expect("collect");
     let bytes = read_archive_file(&report.out_path, "refs/summary.json");
     let summary: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(summary["entry_count"], 2, "{summary}");
@@ -739,7 +811,7 @@ fn collect_records_an_unreadable_reference_store_as_an_open_error() {
         now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
         ..Options::default()
     };
-    let report = collect(&fx.cfg, &opts).expect("collect");
+    let report = collect(&fx.cfg, &opts, &Scope::default()).expect("collect");
     let bytes = read_archive_file(&report.out_path, "refs/open-error.json");
     let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(payload["state"], "unreadable", "{payload}");
@@ -794,7 +866,7 @@ fn collect_snapshots_the_queue_document_and_reports_a_refused_one() {
     };
 
     std::fs::write(&queue_path, queue_document_with_one_job(fx.cfg.data_dir())).unwrap();
-    let report = collect(&fx.cfg, &opts).expect("collect");
+    let report = collect(&fx.cfg, &opts, &Scope::default()).expect("collect");
     let bytes = read_archive_file(&report.out_path, "queue/queue.json");
     let snapshot: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
@@ -823,7 +895,7 @@ fn collect_snapshots_the_queue_document_and_reports_a_refused_one() {
         format!("{{\"schema_version\": {newer}, \"paused\": false, \"jobs\": []}}"),
     )
     .unwrap();
-    let report = collect(&fx.cfg, &opts).expect("collect");
+    let report = collect(&fx.cfg, &opts, &Scope::default()).expect("collect");
     let bytes = read_archive_file(&report.out_path, "queue/open-error.json");
     let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(payload["state"], "unreadable", "{payload}");

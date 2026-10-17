@@ -110,3 +110,67 @@ async fn glean_submit_enqueues_paper_jobs_and_ingest_cancel_covers_them() -> Res
 
     join_with_deadline(runtime, repl_handle, driver).await
 }
+
+/// `ingest.cancel` given a prefix of a job id answers with the full id
+/// the prefix resolved to, so the caller learns which job it stopped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ingest_cancel_returns_the_full_job_id_for_a_prefix() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        send(&mut w, r#"{"jsonrpc":"2.0","id":1,"method":"queue.pause"}"#).await?;
+        let resp = recv(&mut reader).await?;
+        assert_eq!(resp["result"]["paused"], Value::Bool(true), "{resp}");
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":2,"method":"glean.submit","params":{"paths":["/tmp/glean-fixture.pdf"]}}"#,
+        )
+        .await?;
+        let submit_resp = recv(&mut reader).await?;
+        let job_id = submit_resp["result"]["job_ids"][0]
+            .as_str()
+            .context("missing job id")?
+            .to_string();
+        let prefix = &job_id[..8];
+        assert_ne!(prefix, job_id, "the prefix must be shorter than the id");
+
+        let cancel_req = format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"ingest.cancel","params":{{"job_id":"{prefix}"}}}}"#
+        );
+        send(&mut w, &cancel_req).await?;
+        let cancel_resp = recv(&mut reader).await?;
+        assert_eq!(
+            cancel_resp["result"]["job_id"].as_str(),
+            Some(job_id.as_str()),
+            "{cancel_resp}"
+        );
+        assert_eq!(
+            cancel_resp["result"]["ok"],
+            Value::Bool(true),
+            "{cancel_resp}"
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}

@@ -21,7 +21,9 @@
 //!   `call_tool` caller override the audit trail depends on;
 //! * `library.info` for a selected library reports that library's
 //!   root and name, not the ones of the library the daemon came up
-//!   on.
+//!   on;
+//! * `session.info` lists each mounted library with its own root and
+//!   default mark, and its default name follows the registry's pointer.
 //!
 //! The registry carries two libraries on two roots so a card whose
 //! identity and counts came from different libraries is observable.
@@ -57,6 +59,9 @@ struct Fixture {
     second_root: PathBuf,
     catalog_db: PathBuf,
     intake_id: i64,
+    /// The registry `serve` routes through, held so a test can move the
+    /// default pointer while the server runs.
+    registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     addr: SocketAddr,
     shutdown_tx: broadcast::Sender<()>,
     server: tokio::task::JoinHandle<eyre::Result<()>>,
@@ -131,9 +136,10 @@ impl Fixture {
             mcp_addr: addr.to_string(),
         };
         let serve_tx = shutdown_tx.clone();
+        let serve_registry = registry.clone();
         let server = tokio::spawn(async move {
             bookrack_mcp::serve(
-                registry,
+                serve_registry,
                 info_context,
                 Instant::now(),
                 LogStreamHandle::default(),
@@ -162,6 +168,7 @@ impl Fixture {
             second_root,
             catalog_db,
             intake_id,
+            registry,
             addr,
             shutdown_tx,
             server,
@@ -378,6 +385,66 @@ async fn library_info_reports_the_selected_librarys_identity() {
         Some(fx.root.display().to_string().as_str()),
         "{body}"
     );
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+/// `session.info` lists every mounted library as a row carrying its own
+/// root and default mark, and names the default from that same set. A
+/// card with one top-level root beside a default name that follows the
+/// registry's pointer pairs two libraries once the pointer moves off
+/// the library the daemon came up on.
+#[tokio::test]
+async fn session_info_rows_carry_each_librarys_root_and_follow_the_default() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+
+    let before = body_json(
+        &client
+            .call_tool(call("session.info", serde_json::json!({})))
+            .await
+            .expect("session.info before the default moves"),
+    );
+    fx.registry
+        .set_default("second")
+        .expect("move the default pointer");
+    let after = body_json(
+        &client
+            .call_tool(call("session.info", serde_json::json!({})))
+            .await
+            .expect("session.info after the default moves"),
+    );
+    let both = format!("before: {before}\nafter: {after}");
+
+    assert!(
+        after.get("data_dir").is_none(),
+        "the card carries a root outside the library rows:\n{both}"
+    );
+    let root = fx.root.display().to_string();
+    let second_root = fx.second_root.display().to_string();
+    assert_eq!(
+        before["libraries"],
+        serde_json::json!([
+            { "name": "fixture", "data_dir": root, "default": true },
+            { "name": "second", "data_dir": second_root, "default": false },
+        ]),
+        "rows before the default moves:\n{both}"
+    );
+    assert_eq!(
+        before["default_library"].as_str(),
+        Some("fixture"),
+        "{both}"
+    );
+    assert_eq!(
+        after["libraries"],
+        serde_json::json!([
+            { "name": "fixture", "data_dir": root, "default": false },
+            { "name": "second", "data_dir": second_root, "default": true },
+        ]),
+        "rows after the default moves:\n{both}"
+    );
+    assert_eq!(after["default_library"].as_str(), Some("second"), "{both}");
 
     let _ = client.cancel().await;
     fx.stop().await;

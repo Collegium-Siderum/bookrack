@@ -26,8 +26,6 @@ use bookrack_core::queue::JobState;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::broadcast;
-#[cfg(test)]
-use ts_rs::TS;
 
 /// Default capacity for the event broadcast. Matches the `obs`
 /// log-event channel.
@@ -37,8 +35,6 @@ pub const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 512;
 /// Discrete daemon lifecycle state, exposed to clients through both
 /// the `status` method's `state` field and the `daemon.state` event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 #[serde(rename_all = "snake_case")]
 pub enum DaemonState {
     Idle,
@@ -105,8 +101,6 @@ impl Default for DaemonStateFlag {
 /// Aligned with the three top-level phases the ingest pipeline drives a
 /// book through.
 #[derive(Debug, Clone, Copy, Serialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
     Extract,
@@ -118,24 +112,14 @@ pub enum Stage {
 /// [`QueueTick::last_finished`] so subscribers can render the most
 /// recent outcome without re-fetching the queue document.
 #[derive(Debug, Clone, Serialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct JobOutcomeSummary {
     pub job_id: String,
     /// Which pipeline produced the finished job: `"book"` for ingest,
     /// `"paper"` for glean. Mirrored from the matching `QueueJob.kind`.
-    #[cfg_attr(test, ts(type = "\"book\" | \"paper\""))]
     pub kind: ItemKind,
-    #[cfg_attr(
-        test,
-        ts(
-            type = "\"pending\" | \"running\" | \"done\" | \"skipped_duplicate\" | \"needs_ocr\" | \"failed\" | \"cancelled\""
-        )
-    )]
     pub state: JobState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    #[cfg_attr(test, ts(type = "string"))]
     pub finished_at: DateTime<Utc>,
 }
 
@@ -143,8 +127,6 @@ pub struct JobOutcomeSummary {
 /// follows a `save_atomic` on the queue snapshot, so the values
 /// here are guaranteed to be derivable from the on-disk document.
 #[derive(Debug, Clone, Serialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct QueueTick {
     /// Id of the job currently in `Running`, when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -160,8 +142,6 @@ pub struct QueueTick {
 /// boundary. `stage_progress` is a 0.0..=1.0 fraction when measurable,
 /// otherwise omitted.
 #[derive(Debug, Clone, Serialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct WorkerProgress {
     pub job_id: String,
     pub stage: Stage,
@@ -177,28 +157,20 @@ pub struct WorkerProgress {
 /// `value`, so dispatchers can serialise the variant directly into an
 /// `event` notification.
 #[derive(Debug, Clone, Serialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 #[serde(tag = "channel", content = "value")]
 pub enum Event {
     #[serde(rename = "daemon.state")]
-    #[cfg_attr(test, ts(rename = "daemon.state"))]
     DaemonState(DaemonState),
     #[serde(rename = "queue.tick")]
-    #[cfg_attr(test, ts(rename = "queue.tick"))]
     QueueTick(QueueTick),
     #[serde(rename = "worker.progress")]
-    #[cfg_attr(test, ts(rename = "worker.progress"))]
     WorkerProgress(WorkerProgress),
     #[serde(rename = "library.changed")]
-    #[cfg_attr(test, ts(rename = "library.changed"))]
     LibraryChanged { library: String },
     #[serde(rename = "mcp.availability")]
-    #[cfg_attr(test, ts(rename = "mcp.availability"))]
     McpAvailability { paused: bool },
     #[serde(rename = "log")]
-    #[cfg_attr(test, ts(rename = "log"))]
-    Log(#[cfg_attr(test, ts(type = "Record<string, unknown>"))] bookrack_obs::stream::LogEvent),
+    Log(bookrack_obs::stream::LogEvent),
 }
 
 impl Event {
@@ -437,7 +409,6 @@ pub fn initiate_shutdown(event_stream: &EventStreamHandle, shutdown_tx: &broadca
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ts_rs::TS;
 
     #[test]
     fn shutdown_queues_stopping_ahead_of_the_broadcast() {
@@ -460,26 +431,74 @@ mod tests {
         );
     }
 
+    /// One sample per `Event` variant. The match forces a new variant to
+    /// add its sample here before the test compiles again.
+    fn event_samples() -> Vec<Event> {
+        let samples = vec![
+            Event::DaemonState(DaemonState::Idle),
+            Event::QueueTick(QueueTick {
+                current: None,
+                pending: 0,
+                running: 0,
+                last_finished: None,
+            }),
+            Event::WorkerProgress(WorkerProgress {
+                job_id: "job".to_string(),
+                stage: Stage::Extract,
+                stage_progress: None,
+                message: None,
+            }),
+            Event::LibraryChanged {
+                library: "main".to_string(),
+            },
+            Event::McpAvailability { paused: false },
+            Event::Log(bookrack_obs::stream::LogEvent {
+                ts: Utc::now(),
+                level: "INFO".to_string(),
+                target: "target".to_string(),
+                message: "message".to_string(),
+                fields: serde_json::Map::new(),
+            }),
+        ];
+        for sample in &samples {
+            match sample {
+                Event::DaemonState(_)
+                | Event::QueueTick(_)
+                | Event::WorkerProgress(_)
+                | Event::LibraryChanged { .. }
+                | Event::McpAvailability { .. }
+                | Event::Log(_) => {}
+            }
+        }
+        samples
+    }
+
+    /// The serialised `channel` tag of every variant equals
+    /// `Event::channel()`, and the six variants claim six distinct
+    /// channels.
     #[test]
-    fn event_ts_export_contains_every_channel() {
-        Event::export_all().expect("ts-rs export Event");
-        let dir = std::env::var("TS_RS_EXPORT_DIR").expect("TS_RS_EXPORT_DIR not set");
-        let path = std::path::PathBuf::from(dir).join("Event.ts");
-        let contents = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        for ch in [
+    fn every_event_serialises_under_its_own_channel() {
+        let mut seen = std::collections::BTreeSet::new();
+        for event in event_samples() {
+            let wire = serde_json::to_value(&event).expect("serialise event");
+            assert_eq!(wire["channel"], event.channel(), "{event:?} -> {wire}");
+            assert!(
+                seen.insert(event.channel()),
+                "channel {} is claimed by more than one variant",
+                event.channel()
+            );
+        }
+        let expected: std::collections::BTreeSet<&str> = [
             "daemon.state",
             "queue.tick",
             "worker.progress",
             "library.changed",
             "mcp.availability",
             "log",
-        ] {
-            assert!(
-                contents.contains(ch),
-                "Event.ts missing channel {ch}:\n{contents}"
-            );
-        }
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(seen, expected);
     }
 
     #[test]

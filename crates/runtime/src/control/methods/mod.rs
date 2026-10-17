@@ -25,9 +25,9 @@ use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::stream::LogStreamHandle;
 use bookrack_ops::reads::info::LibraryInfoContext;
-use bookrack_ops::registry::LibraryRegistry;
+use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use serde_json::Value;
-use tokio::sync::{Mutex as TokioMutex, Notify, OwnedMutexGuard, broadcast};
+use tokio::sync::{Mutex as TokioMutex, OwnedMutexGuard, broadcast};
 
 use super::error_map::rpc_from_problem;
 use super::events::{Event, EventStreamHandle};
@@ -95,7 +95,6 @@ pub mod reads;
 pub mod reads_library;
 pub mod remove;
 pub mod stamps;
-pub mod tray;
 pub mod vectors;
 pub mod verify;
 
@@ -133,12 +132,14 @@ pub struct MethodContext {
     pub started_at_rfc3339: String,
     pub selection: LibrarySelection,
     /// Name of the primary (bring-up-selected) library. A single-value
-    /// snapshot consumed by the queue worker's no-name fallback, the
-    /// `status` card, and the `library.changed` snapshot a subscriber
-    /// receives on connect; per-library status surfaces are a later
-    /// milestone. A `library.changed` published *by a write* names the
-    /// library that write touched instead — [`run_write`] takes it
-    /// from the handler's own handle.
+    /// snapshot consumed by the `status` card and the `library.changed`
+    /// snapshot a subscriber receives on connect; per-library status
+    /// surfaces are a later milestone. It is not a routing fallback:
+    /// a call that names no library resolves through
+    /// [`select_library`] to the registry's current default pointer.
+    /// A `library.changed` published *by a write* names the library
+    /// that write touched instead — [`run_write`] takes it from the
+    /// handler's own handle.
     pub library_name: String,
     /// Registry names bring-up registered for the selected root, in
     /// the order written; empty when it registered nothing. A fact
@@ -154,11 +155,6 @@ pub struct MethodContext {
     /// dispatch routes queue-bound write methods to a
     /// `-32002 not_ready` response without invoking the handler.
     pub queue_worker_enabled: bool,
-    /// Notification handle the GUI tray (if any) waits on. The
-    /// `tray.focus` method signals one waiter per call; with no GUI
-    /// attached the notification has no consumer and the call is a
-    /// no-op.
-    pub tray_focus_signal: Arc<Notify>,
     /// The supervised llama-server, when the effective profile enables
     /// a reranker and no operator URL overrides the backend. `doctor.
     /// gather` reads its state for the backend row.
@@ -258,9 +254,12 @@ use verify::VerifyParams;
 ///      is what makes the claim checkable rather than asserted.
 ///    * `process` — the method describes the process, not a library:
 ///      `daemon.*`, the queue verbs (whose job ids address one
-///      daemon-wide queue), `logs.tail`, `tray.focus`, `diagnose.run`.
-///      A selection is meaningless but harmless, so clients pass it
-///      through unchanged.
+///      daemon-wide queue), `logs.tail`. A selection is meaningless
+///      but harmless, so clients pass it through unchanged. The test
+///      is what the method gathers: a method whose answer carries one
+///      library's data — `doctor.gather`'s store rows, `diagnose.run`'s
+///      catalog snapshot — is routed, however much of the rest is
+///      process-wide.
 ///    * `unrouted` — the method answers about the daemon or about
 ///      every library at once, so a selection naming one library
 ///      cannot be honoured and must be refused rather than dropped.
@@ -343,7 +342,8 @@ methods! {
     write no_queue sidebar process                    "daemon.shutdown",
     read  no_queue sync    unrouted                   "status" => reads::status_rpc,
     read  no_queue sync    unrouted                   "daemon.status" => reads::status_rpc,
-    read  no_queue async   unrouted                   "doctor.gather" => reads::doctor_gather_rpc,
+    read  no_queue async   routed(reads::DoctorGatherParams)
+        "doctor.gather" => reads::doctor_gather_rpc,
     read  no_queue sync    process                    "daemon.methods" => meta::methods_rpc,
     read  no_queue sync    process                    "daemon.mcp_tools" => meta::mcp_tools_rpc,
 
@@ -496,10 +496,10 @@ methods! {
     write no_queue async   routed(PapersContributorRemoveParams)
         "papers.metadata.contributor_remove" => papers_metadata::contributor_remove,
 
-    // verify / diagnose / tray / logs
+    // verify / diagnose / logs
     read  no_queue async   routed(VerifyParams)       "verify.run" => verify::run_rpc,
-    read  no_queue async   process                    "diagnose.run" => diagnose::run,
-    write no_queue sync    process                    "tray.focus" => tray::focus_rpc,
+    read  no_queue async   routed(diagnose::DiagnoseRunParams)
+        "diagnose.run" => diagnose::run,
     read  no_queue sync    process                    "logs.tail" => logs::tail,
 }
 
@@ -608,6 +608,30 @@ pub fn refuses_library(method: &str) -> bool {
         .any(|sig| sig.name == method && sig.selection == "unrouted")
 }
 
+/// The handle a routed method acts on: the library `name` names, or
+/// the registry's current default when the caller named none. One
+/// lookup shared by every library-level method, so "unnamed means the
+/// current default pointer" is decided in one place; a name the
+/// registry does not hold is `-32010`.
+pub fn select_library(
+    ctx: &MethodContext,
+    name: Option<&str>,
+) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>, RpcError> {
+    ctx.registry
+        .get(name)
+        .map_err(super::error_map::registry_err)
+}
+
+/// The registry name a queue-submitting method writes into its job:
+/// [`select_library`]'s answer for `name`, so an unnamed submit is
+/// pinned to the registry's current default at enqueue time and a
+/// name the registry does not hold is `-32010` before any row exists.
+/// The job carries the resolved name from then on; moving the default
+/// pointer later does not move a queued job.
+pub fn resolve_submit_target(ctx: &MethodContext, name: Option<&str>) -> Result<String, RpcError> {
+    Ok(select_library(ctx, name)?.name().to_string())
+}
+
 /// RAII bundle owning the write mutex guard and the broadcast handle
 /// that raised the RPC write source / `McpAvailability { paused:
 /// true }`. Its [`Drop`] publishes `mcp.availability { paused: false }`
@@ -651,6 +675,11 @@ impl Drop for WriteSession {
 /// cannot leave the daemon stranded with the write source raised and
 /// MCP paused, or allow a second writer to enter while the blocking
 /// work is still running.
+///
+/// A success reply that is a JSON object names the library the write
+/// acted on: `library` is set to `library` unless `op` already put a
+/// `library` key there. A reply of any other shape, and every error,
+/// passes through unchanged.
 pub(crate) async fn run_write<F, Fut>(
     ctx: &MethodContext,
     library: &str,
@@ -676,7 +705,13 @@ where
     let library_name = library.to_string();
     let join = tokio::task::spawn_blocking(move || {
         let handle = tokio::runtime::Handle::current();
-        let result = handle.block_on(op());
+        let result = handle.block_on(op()).map(|mut value| {
+            if let Value::Object(map) = &mut value {
+                map.entry("library")
+                    .or_insert_with(|| Value::String(library_name.clone()));
+            }
+            value
+        });
         if result.is_ok() {
             event_stream.publish(Event::LibraryChanged {
                 library: library_name,
@@ -693,6 +728,26 @@ where
             format!("write command join failed: {e}"),
         )),
     }
+}
+
+/// A write's success reply built from the report its command returned:
+/// the report's fields with `ok: true` beside them. [`run_write`] adds
+/// `library` on the way out.
+pub(crate) fn ok_reply<T: serde::Serialize>(report: &T) -> Result<Value, RpcError> {
+    let mut value = serde_json::to_value(report).map_err(|e| {
+        RpcError::new(
+            crate::control::jsonrpc::INTERNAL_ERROR,
+            format!("could not serialize the write reply: {e}"),
+        )
+    })?;
+    let Some(map) = value.as_object_mut() else {
+        return Err(RpcError::new(
+            crate::control::jsonrpc::INTERNAL_ERROR,
+            "a write report must serialize to a JSON object",
+        ));
+    };
+    map.insert("ok".to_string(), Value::Bool(true));
+    Ok(value)
 }
 
 /// Workspace path forwarded into the dispatcher's selection. Exposed
@@ -775,7 +830,6 @@ pub(crate) fn test_method_context(
         auto_registered: Vec::new(),
         mcp_tools: Arc::new(Vec::new()),
         queue_worker_enabled: false,
-        tray_focus_signal: Arc::new(Notify::new()),
         rerank_supervisor: None,
         control_socket: None,
         queue_paused: Arc::new(AtomicBool::new(false)),
@@ -833,6 +887,86 @@ mod tests {
         }
         assert!(saw_unpaused, "expected McpAvailability paused:false");
         assert!(saw_idle, "expected DaemonState::Idle after paused:false");
+    }
+
+    /// Drive `op` through [`run_write`] on the handle `name` selects in
+    /// a single-library context served under `served`, so the library
+    /// name reaches `run_write` the way a handler hands it over.
+    async fn write_reply(
+        served: Option<&str>,
+        name: Option<&str>,
+        reply: Result<Value, RpcError>,
+    ) -> Result<Value, RpcError> {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_method_context(dir.path(), served);
+        let handle = select_library(&ctx, name).expect("the served library resolves");
+        run_write(&ctx, handle.name(), move || async move { reply }).await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_write_names_the_library_on_a_bare_ok_reply() {
+        let reply = write_reply(Some("alpha"), None, Ok(serde_json::json!({ "ok": true })))
+            .await
+            .expect("the write succeeds");
+        assert_eq!(reply, serde_json::json!({ "ok": true, "library": "alpha" }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_write_adds_library_beside_existing_fields() {
+        let reply = write_reply(
+            Some("alpha"),
+            Some("alpha"),
+            Ok(serde_json::json!({ "name": "x" })),
+        )
+        .await
+        .expect("the write succeeds");
+        assert_eq!(reply["name"], "x", "{reply}");
+        assert_eq!(reply["library"], "alpha", "{reply}");
+    }
+
+    /// A path-selected root is served under the handle name `default`,
+    /// the same name `daemon.rs` gives an unnamed configuration; the
+    /// reply reports that name as it is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_write_names_the_anonymous_root_default() {
+        let reply = write_reply(None, None, Ok(serde_json::json!({ "ok": true })))
+            .await
+            .expect("the write succeeds");
+        assert_eq!(reply["library"], "default", "{reply}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_write_keeps_an_existing_library_key() {
+        let reply = write_reply(
+            Some("alpha"),
+            None,
+            Ok(serde_json::json!({ "library": "keep" })),
+        )
+        .await
+        .expect("the write succeeds");
+        assert_eq!(reply, serde_json::json!({ "library": "keep" }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_write_leaves_a_non_object_reply_alone() {
+        let reply = write_reply(Some("alpha"), None, Ok(serde_json::json!([1, 2])))
+            .await
+            .expect("the write succeeds");
+        assert_eq!(reply, serde_json::json!([1, 2]));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_write_does_not_touch_an_error_reply() {
+        let err = write_reply(
+            Some("alpha"),
+            None,
+            Err(RpcError::new(INVALID_PARAMS, "refused as given")),
+        )
+        .await
+        .expect_err("the write fails");
+        assert_eq!(err.code, INVALID_PARAMS);
+        assert_eq!(err.message, "refused as given");
+        assert!(err.data.is_none(), "{err:?}");
     }
 
     #[test]
@@ -893,7 +1027,6 @@ mod tests {
             "papers.metadata.contributor_remove",
             "verify.run",
             "diagnose.run",
-            "tray.focus",
         ] {
             assert!(
                 !is_queue_bound_method(name),
@@ -942,6 +1075,28 @@ mod tests {
     /// macro). Kept in lockstep with the sidebar match in `dispatch`
     /// by `sidebar_methods_appear_in_registry` below.
     const SIDEBAR_METHODS: &[&str] = &["daemon.shutdown", "events.subscribe"];
+
+    /// `tray.focus` is not registered and the router answers a call to
+    /// it with the standard method-not-found error.
+    #[tokio::test]
+    async fn tray_focus_is_not_a_method() {
+        assert!(
+            !REGISTRY.iter().any(|sig| sig.name == "tray.focus"),
+            "tray.focus must not be in REGISTRY"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_method_context(dir.path(), None);
+        let req = Request {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tray.focus".to_string(),
+            params: None,
+        };
+        match dispatch(&req, &ctx).await {
+            Err(err) => assert_eq!(err.code, METHOD_NOT_FOUND, "{err:?}"),
+            Ok(_) => panic!("tray.focus must not dispatch"),
+        }
+    }
 
     #[test]
     fn sidebar_methods_appear_in_registry() {

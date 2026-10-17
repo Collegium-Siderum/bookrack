@@ -35,4 +35,4 @@ pub mod reranker_install;
 pub mod rlimit;
 pub mod wizard;
 
-pub use daemon::{DaemonRuntime, LaunchMode, RuntimeOpts};
+pub use daemon::{DaemonRuntime, RuntimeOpts};

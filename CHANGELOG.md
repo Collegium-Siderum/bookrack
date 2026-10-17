@@ -153,6 +153,160 @@ release workflow extracts the matching section verbatim from this file.
   the translation store's canonical location beside the other
   per-library databases; no new environment knob.
 
+- **A write's reply names the library it acted on.** Every control-plane
+  method that takes the write mutex — the `vectors`, `stamps`,
+  `corpus`, `metadata`, `remove`, and `dryrun` writes on both sides,
+  and `library.fork` / `mount` / `unmount` — answers with `library`:
+  the registry name the call resolved to, which for an unnamed call is
+  the default pointer at that moment. The reply kept no trace of it, so
+  an operator had nothing but memory to tell which library a write had
+  landed on once `library.set_default` had moved the pointer. A reply
+  that already carried fields keeps all of them; `library.fork`
+  reports the source library. `papers metadata` writes end their
+  sentence with `Library: <name>.`
+- **`ingest.cancel` returns the full id of the job it cancelled.** The
+  method takes a prefix and answered `{ ok: true }`, so the caller
+  could not tell which job the prefix had matched; the reply now
+  carries `job_id`.
+
+### Fixed
+
+- **`--audit-profile` is refused on `doctor`, `init`, `run`, and
+  `rpc`.** The gate that rejects the global flag on a subcommand that
+  does not consume it ran after those four had already dispatched, so
+  `bookrack --audit-profile strict doctor` printed its report with the
+  flag silently discarded, and `bookrack --audit-profile strict run`
+  started a daemon that ignored it. The gate now runs ahead of every
+  dispatch, and the refusal exits `2` as operator input instead of `1`.
+- **The offline `doctor` repairs fail closed on a session lock they
+  cannot read.** `--backfill-ocr-derivation` and
+  `--close-abandoned-runs` open the catalog for writing, so they are
+  refused while a daemon serves the library. The guard read every
+  error on the way to the daemon as "no daemon": a lock file that
+  could not be read, and a held lock whose daemon did not answer, both
+  let the repair open the catalog beside a session that may still hold
+  the write handle. The guard now reads the lock the way `bookrack
+  status` does. A lock nobody holds still lets the repair proceed; an
+  unreadable lock, or a held one naming no control socket, exits `1`;
+  a held lock whose daemon does not answer exits `3` with the stale-
+  lock remedy; and a daemon that answers refuses as operator input,
+  exit `2` where it was `1`. The guard also runs before
+  `--install-pdfium` / `--install-reranker`, so a refused repair no
+  longer downloads first.
+- **A queue submit resolves its library through the registry before the
+  job is written.** `ingest.submit`, `glean.submit`, and `intake.ocr`
+  took a missing `library` as the library the daemon was brought up
+  under, so on a daemon started under a non-default library an unnamed
+  submit landed on the primary while every other unnamed call reached
+  the registry's default, and a `library.set_default` moved at run time
+  never reached the queue. The three also wrote an explicit name into
+  the job unchecked, so a misspelt library was accepted with a job id
+  and failed at the worker. An unnamed submit now resolves to the
+  registry's current default pointer at enqueue time, the row carries
+  that name from then on, and a name the registry does not hold is
+  refused with `-32010` before any row exists.
+
+### Changed
+
+- **Book-side `metadata` writes return what they recorded.** Each
+  answered `{ ok: true }` and printed its sentence on the daemon's own
+  stdout, while the same ops call handed an MCP agent the audit row it
+  wrote. The control-plane reply now carries the same fields the MCP
+  write tools return — `audit_id`, `actor_kind`, `actor_detail`,
+  `changed` — plus `book`, the edited `field`, a new contributor's id,
+  a re-audit's verdict and confidence, and for `advance`, or an
+  `approve` that resumed a parked book, the chunk and batch counts with
+  `resumed` saying which. `bookrack metadata` words each as one line
+  naming the library, and shows a reply without those fields as it
+  came.
+- **The vector and stamp writes report what they did.** `vectors
+  rebuild`, `drop`, and `reset` and `stamps reconcile`, on both sides,
+  answered `{ ok: true }` and printed their result on the daemon's own
+  stdout, where a background daemon has nobody reading it. The reply
+  now carries it: the index configuration a rebuild built, the kind a
+  drop left, the counts a reset re-embedded — this pass's own, so a
+  resume reports what it picked up — and the stamps a reconcile wrote.
+  The CLI words each as one line naming the library, and shows a reply
+  without those fields as it came. A reset that fails partway adds the
+  `--resume` rerun to the error's hint instead of printing it on the
+  daemon's stderr; one that fails before it changed anything does not
+  suggest it.
+- **`doctor`'s repair flags are mutually exclusive.** `--rename-envelopes`,
+  `--backfill-ocr-derivation`, and `--close-abandoned-runs` each
+  return before the report, so two at once resolved by statement order
+  with the loser silently dropped; the grammar now refuses the pair
+  (exit `2`). `--dry-run` requires one of them: alone, it printed the
+  ordinary report as if the flag were absent.
+- **`doctor --json` reports its installs.** `--install-pdfium` and
+  `--install-reranker` printed nothing under `--json`, so a caller
+  could not tell an install from a no-op. Each artifact now prints one
+  JSON object ahead of the report: `{ "install": "pdfium" |
+  "reranker", "path", "downloaded" }`.
+- **`bookrack doctor` and `bookrack diagnose` honour `--library` on a
+  running daemon.** `doctor.gather` and `diagnose.run` take an
+  optional `library` and are routed like every other library-level
+  method: the data root, store, open-runs, backup-dir, and disk rows of
+  the doctor report, and the catalog snapshot, audit overlay, and
+  landing place of the diagnose bundle, are the named library's. Absent
+  a name they follow the registry's current default rather than the
+  library the daemon was brought up under. Both commands reported on
+  the bring-up library whatever `--library` said: `doctor` because its
+  own connection path never settled the flag into a name, `diagnose`
+  because the method was filed as process-level. The doctor report's
+  daemon-level rows and the bundle's logs and crash reports are the
+  process's whichever library is named. The `diagnose.run` result
+  echoes the resolved name as `library`.
+- **Diagnose bundle schema 5.** `manifest.json` and `env.txt` name the
+  library the bundle describes, and the scrubber folds the roots of
+  every library the daemon serves and the daemon state directory to
+  placeholders, not only the selected library's root — a shared log
+  line about one library carries that library's root into another's
+  bundle. See `docs/UPGRADE.md` for what an older bundle may carry.
+- **`doctor` writes nothing to stderr when it falls back.** A session
+  lock that could not be read, or a daemon that did not answer,
+  produced a line of prose on stderr before the in-process report. The
+  report's own reporter row already says which path produced it and
+  what it found at the lock, so the prose is gone and `--json` output
+  is the report alone.
+- **The MCP `session.info` card lists each mounted library with its own
+  root.** `libraries` was a list of names and `data_dir` the root of
+  the library the daemon was brought up under, while `default_library`
+  followed the registry's default pointer, so on a daemon started under
+  a library that is not the default, or after `library.set_default`,
+  the card paired one library's name with another's root. `libraries`
+  is now one row per library the session has mounted — `name`,
+  `data_dir`, `default` — and the top-level `data_dir` is gone;
+  `default_library` names the row marked `default`. A client that read
+  `data_dir` takes it from that row.
+- **`bookrack verify` checks the paper stores and `reference.db`.** The
+  report covered the book pipeline alone, so a paper store that did
+  not verify, a paper whose stored file was gone, or a `reference.db`
+  this build cannot read went unreported and the command exited 0.
+  `verify.run` now returns the paper pipeline's findings under
+  `papers`, under the same field names the book side keeps at the top
+  level, plus `reference_missing`, `reference_schema_ok`, and
+  `reference_schema_error`; the book-side fields are unchanged.
+  `bookrack verify` judges the paper side by the book side's table and
+  exits 1 on a `reference.db` that does not open read-only at this
+  build's schema version, an older one included. `not_initialised` now
+  means no database at all: a root holding only paper stores or only
+  `reference.db` was reported as uninitialised, and its stores went
+  unchecked.
+
+### Removed
+
+- **The desktop shell.** The `crates/app` Tauri shell, which never
+  shipped in a release artifact, is deleted together with its build
+  and CI dependencies. The CLI and the MCP server are the complete
+  front-end surface; the setup wizard keeps its `WizardDriver` trait
+  so another driver can reuse it.
+- **`tray.focus` and the GUI launch mode.** The `tray.focus`
+  control-plane method is gone: `daemon.methods` no longer lists it
+  and a call answers `-32601 method not found`. `RuntimeOpts.
+  launch_mode` and `LaunchMode` leave the runtime API, and the `gui`
+  caller is retired, so no new audit row carries
+  `actor_detail = "gui"`; rows already recorded keep the value.
+
 ## [0.12.0] - 2026-10-17
 
 ### Added

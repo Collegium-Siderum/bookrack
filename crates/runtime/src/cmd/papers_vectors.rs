@@ -8,19 +8,20 @@
 
 use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_config::Config;
-use bookrack_corpus::{Corpus, EMBED_MODEL_KEY, VECTOR_DIM_KEY};
+use bookrack_corpus::Corpus;
 use bookrack_vectors::ChunkStore;
 use eyre::{Context, Result};
 
+use crate::cmd::ResetInterrupted;
 use crate::cmd::input_error::CmdInputError;
-use crate::cmd::vectors::parse_ann_kind;
+use crate::cmd::vectors::{AnnDropReport, AnnRebuildReport, VectorsResetReport, parse_ann_kind};
 use crate::embed_helpers::embedder;
 use crate::pipeline_run_helpers::{close_run, open_run};
 
-/// Render `bookrack papers vectors rebuild` — build or rebuild the ANN
+/// Run `bookrack papers vectors rebuild` — build or rebuild the ANN
 /// index over `lancedb_papers` from CLI flags, falling back to the
 /// persisted meta or the C1 recommended default for any flag not
-/// supplied.
+/// supplied. Returns the configuration the index was built with.
 #[allow(clippy::too_many_arguments)]
 pub async fn rebuild(
     cfg: &Config,
@@ -30,7 +31,7 @@ pub async fn rebuild(
     num_bits: Option<u32>,
     nprobes: Option<u32>,
     refine_factor: Option<u32>,
-) -> Result<()> {
+) -> Result<AnnRebuildReport> {
     let lancedb_dir = cfg.papers_lancedb_dir();
     let corpus = Corpus::open(&cfg.papers_corpus_db()).context("open papers corpus")?;
     let dim = corpus
@@ -74,18 +75,13 @@ pub async fn rebuild(
         .build_ann_index(&base, &lancedb_dir, bookrack_ingest::now_rfc3339())
         .await
         .context("build papers ann index")?;
-    println!(
-        "rebuilt: kind={} np={}",
-        base.kind.as_str(),
-        base.num_partitions
-    );
-    Ok(())
+    Ok(AnnRebuildReport::from(&base))
 }
 
-/// Render `bookrack papers vectors drop` — drop any ANN index over
+/// Run `bookrack papers vectors drop` — drop any ANN index over
 /// `lancedb_papers` and stamp the meta as `kind = brute-force`. Search
 /// falls back to a full scan.
-pub async fn drop(cfg: &Config) -> Result<()> {
+pub async fn drop(cfg: &Config) -> Result<AnnDropReport> {
     let lancedb_dir = cfg.papers_lancedb_dir();
     let corpus = Corpus::open(&cfg.papers_corpus_db()).context("open papers corpus")?;
     let dim = corpus
@@ -104,18 +100,23 @@ pub async fn drop(cfg: &Config) -> Result<()> {
         .drop_ann_index(&lancedb_dir, bookrack_ingest::now_rfc3339())
         .await
         .context("drop papers ann index")?;
-    println!("dropped: kind=brute-force");
-    Ok(())
+    Ok(AnnDropReport::brute_force())
 }
 
-/// Render `bookrack papers vectors reset` — drop the papers chunks
+/// Run `bookrack papers vectors reset` — drop the papers chunks
 /// table, clear the papers_corpus stamps, and re-embed every paper's
 /// abstract leaf with the env-configured embedding model. The old
-/// vectors are unrecoverable.
-pub async fn reset<F>(cfg: &Config, yes: bool, resume: bool, ask: F) -> Result<()>
-where
-    F: FnOnce(&str) -> Result<bool>,
-{
+/// vectors are unrecoverable. The caller confirms; this function does
+/// not ask.
+///
+/// With `resume`, continue a reset that stopped partway: the
+/// destructive steps are skipped and the paper intakes still at
+/// `Extracted` are re-embedded. A resume with none at `Extracted` does
+/// nothing, registers no run, and reports zero.
+///
+/// A failure of the reset pass itself carries [`ResetInterrupted`]; a
+/// failure while setting it up does not.
+pub async fn reset(cfg: &Config, resume: bool) -> Result<VectorsResetReport> {
     let lancedb_dir = cfg.papers_lancedb_dir();
     let catalog = Catalog::open_with_backup(&cfg.papers_catalog_db(), &cfg.backup_dir())
         .context("open papers catalog")?;
@@ -123,75 +124,18 @@ where
     let embed_cfg = crate::profile::effective_embed_config(cfg)?;
     let embedder_client = embedder(cfg, &embed_cfg)?;
 
-    let embedded_intakes = catalog
-        .intakes_with_status(IntakeStatus::Embedded)
-        .context("count embedded paper intakes")?;
-    let extracted_intakes = catalog
-        .intakes_with_status(IntakeStatus::Extracted)
-        .context("count extracted paper intakes")?;
-    let current_model = corpus
-        .meta_get(EMBED_MODEL_KEY)
-        .context("read embed_model stamp")?;
-    let current_dim = corpus
-        .meta_get(VECTOR_DIM_KEY)
-        .context("read vector_dim stamp")?;
-    let store_dim = ChunkStore::try_open(&lancedb_dir)
-        .await
-        .context("probe papers chunk store")?
-        .map(|s| s.dimension());
-
-    if resume {
-        if extracted_intakes.is_empty() {
-            println!(
-                "nothing to resume: no paper intakes are in the Extracted state.\n\
-                 If you meant to start a fresh reset, drop --resume."
-            );
-            return Ok(());
-        }
-        println!(
-            "resume reset: {} paper intake(s) in Extracted will be re-embedded with model '{}'.",
-            extracted_intakes.len(),
-            embed_cfg.model
-        );
-    } else {
-        println!("papers vectors reset plan:");
-        match (current_model.as_deref(), current_dim.as_deref()) {
-            (Some(m), Some(d)) => println!("  current library: model='{m}', dim={d}"),
-            _ => println!("  current library: no stamps recorded"),
-        }
-        match store_dim {
-            Some(d) => println!("  chunks table:    dim={d}"),
-            None => println!("  chunks table:    absent"),
-        }
-        println!(
-            "  target model:    '{}' (probed dim deferred to first embed)",
-            embed_cfg.model
-        );
-        println!(
-            "  affected:        {} Embedded paper intake(s) -> will be re-embedded",
-            embedded_intakes.len()
-        );
-        if !extracted_intakes.is_empty() {
-            println!(
-                "  also pending:    {} Extracted paper intake(s) already waiting",
-                extracted_intakes.len()
-            );
-        }
-        println!(
-            "This drops the papers chunks table, clears the papers_corpus index\n\
-             stamps, and reembeds every paper's abstract leaf from the corpus\n\
-             node tree. The old vectors are unrecoverable. Restart the daemon\n\
-             after this completes so it picks up the new model."
-        );
-        let prompt = "Type RESET (exact, uppercase) to continue: ";
-        if !yes && !ask(prompt)? {
-            println!("aborted; no changes written");
-            return Ok(());
-        }
+    if resume
+        && catalog
+            .intakes_with_status(IntakeStatus::Extracted)
+            .context("count extracted paper intakes")?
+            .is_empty()
+    {
+        return Ok(VectorsResetReport {
+            resumed: true,
+            ..VectorsResetReport::default()
+        });
     }
 
-    // Registered past the confirmation prompt: a declined reset is not
-    // a pass and leaves no row behind.
     let run = open_run(
         &catalog,
         &cfg.papers_catalog_db(),
@@ -208,30 +152,15 @@ where
     )
     .await;
     close_run(&catalog, run, outcome.is_ok());
-
-    let report = match outcome {
-        Ok(report) => report,
-        Err(e) => {
-            // A mid-build failure leaves finished intakes at Embedded
-            // and the failing one at Extracted, so a resume continues
-            // where this run stopped.
-            eprintln!(
-                "reset did not finish; rerun with `bookrack papers vectors reset --resume` \
-                 once the cause is addressed"
-            );
-            return Err(e).context("papers reset_and_rechunk");
-        }
-    };
-
-    println!(
-        "reset complete: {} paper intake(s) re-embedded, {} chunk row(s) written",
-        report.intakes_reembedded, report.chunks_written,
-    );
-    if !report.skipped_empty.is_empty() {
-        println!("skipped (no abstract leaf): {:?}", report.skipped_empty);
-    }
-    println!("restart the daemon so the new model takes effect.");
-    Ok(())
+    // A failure here leaves finished intakes at Embedded and the
+    // failing one at Extracted, so a resume continues where it stopped.
+    let report = outcome.wrap_err(ResetInterrupted)?;
+    Ok(VectorsResetReport {
+        resumed: resume,
+        intakes_reembedded: report.intakes_reembedded,
+        chunks_written: report.chunks_written,
+        skipped_empty: report.skipped_empty,
+    })
 }
 
 /// Compute a papers reembed plan without writing anything. Returns
@@ -320,10 +249,11 @@ mod tests {
     async fn reset_registers_and_closes_one_run_on_the_paper_catalog() {
         let (_tmp, cfg) = temp_cfg();
 
-        reset(&cfg, true, false, |_| Ok(true))
+        let report = reset(&cfg, false)
             .await
             .expect("reset succeeds on an empty library");
 
+        assert_eq!(report, VectorsResetReport::default());
         assert_eq!(
             runs(&cfg),
             vec![("papers_reset".to_string(), Some("ok".to_string()))]
@@ -340,19 +270,22 @@ mod tests {
         );
     }
 
-    /// Declining the confirmation prompt is not a pass.
+    /// A resume with nothing at `Extracted` is not a pass: it reports
+    /// that it resumed and did nothing, and leaves no run row.
     #[tokio::test]
-    async fn a_declined_reset_registers_nothing() {
+    async fn a_resume_with_nothing_to_resume_reports_zero_and_registers_nothing() {
         let (_tmp, cfg) = temp_cfg();
 
-        reset(&cfg, false, false, |_| Ok(false))
-            .await
-            .expect("declining is not an error");
+        let report = reset(&cfg, true).await.expect("resume");
 
-        assert!(
-            runs(&cfg).is_empty(),
-            "no run row for a pass that never ran"
+        assert_eq!(
+            report,
+            VectorsResetReport {
+                resumed: true,
+                ..VectorsResetReport::default()
+            }
         );
+        assert!(runs(&cfg).is_empty(), "{:?}", runs(&cfg));
     }
 
     /// The reembed pass registers on its execute leg; the plan leg is

@@ -15,8 +15,6 @@ use std::path::PathBuf;
 use bookrack_config::{registry_target_path, set_default_library};
 use serde::Deserialize;
 use serde_json::{Value, json};
-#[cfg(test)]
-use ts_rs::TS;
 
 use super::super::error_map::{config_err, handler_err, mount_err, registry_err};
 use super::super::events::Event;
@@ -26,11 +24,8 @@ use super::run_write;
 use crate::cmd::libraries::CopyMode;
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct LibraryForkParams {
     pub new_name: String,
-    #[cfg_attr(test, ts(type = "string"))]
     pub data_dir: PathBuf,
     /// `"hardlink"` (default) or `"copy"`. Mirrors the cli's
     /// `--copy-mode` flag.
@@ -47,7 +42,6 @@ pub struct LibraryForkParams {
     /// source is named explicitly rather than inherited from whichever
     /// library the daemon came up under.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 

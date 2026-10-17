@@ -13,8 +13,6 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-#[cfg(test)]
-use ts_rs::TS;
 
 use super::MethodContext;
 use super::ingest::PriorityRepr;
@@ -23,10 +21,7 @@ use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 use crate::queue;
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct GleanSubmitParams {
-    #[cfg_attr(test, ts(type = "Array<string>"))]
     paths: Vec<PathBuf>,
     #[serde(default)]
     library: Option<String>,
@@ -48,7 +43,7 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
     if parsed.paths.is_empty() {
         return Err(RpcError::new(INVALID_PARAMS, "paths: must be non-empty"));
     }
-    let library = parsed.library.unwrap_or_else(|| ctx.library_name.clone());
+    let library = super::resolve_submit_target(ctx, parsed.library.as_deref())?;
     let priority = parsed
         .priority
         .map(PriorityRepr::into_priority)

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Write `env.txt`: bookrack version, host triple, generation
-//! timestamp, the time window, the home-redaction source, and the
-//! redacted data-dir hint.
+//! timestamp, the time window, the home-redaction source, the library
+//! the bundle describes, and the redacted data-dir hint.
 
 use std::fmt::Write;
 use std::path::Path;
@@ -18,6 +18,7 @@ use crate::{HomeSource, Options, Result};
 pub fn collect(
     cfg: &Config,
     opts: &Options,
+    library: Option<&str>,
     now: SystemTime,
     home_source: Option<HomeSource>,
     bundle_dir: &Path,
@@ -36,6 +37,7 @@ pub fn collect(
     writeln!(buf, "days window      : {}", opts.days).ok();
     writeln!(buf, "scrubbed         : {}", opts.scrub).ok();
     writeln!(buf, "home redaction   : {}", home_redaction(home_source)).ok();
+    writeln!(buf, "library          : {}", library.unwrap_or("(unnamed)")).ok();
     writeln!(
         buf,
         "data_dir         : {}",

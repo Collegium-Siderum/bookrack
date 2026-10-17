@@ -66,21 +66,6 @@ use crate::control::socket::{
 use crate::queue;
 use crate::rerank_supervisor::SupervisorState;
 
-/// Origin of a daemon bring-up, threaded into the second-launch
-/// handler so a CLI entry surfaces the recorded address while a GUI
-/// entry routes a `tray.focus` RPC at the live daemon before exiting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LaunchMode {
-    /// `bookrack run` or `bookrack-mcp`; a second launch prints the
-    /// recorded pid and control socket and exits zero.
-    #[default]
-    Cli,
-    /// Tauri-driven GUI entry; a second launch raises the existing
-    /// window through `tray.focus` and exits zero. Reserved for the
-    /// GUI Phase.
-    Gui,
-}
-
 /// Caller-facing bring-up options. Public fields keep construction
 /// declarative; helper constructors capture the two stable entry-point
 /// profiles.
@@ -116,13 +101,6 @@ pub struct RuntimeOpts {
     /// `daemon.mcp_tools` method can answer without spinning up an
     /// MCP transport.
     pub mcp_tools: Vec<crate::control::methods::meta::McpToolInfo>,
-    /// Origin of this daemon instance, threaded through to the
-    /// second-launch handler so the CLI prints the recorded address
-    /// while a GUI entry would instead route a `tray.focus` RPC at
-    /// the live daemon. Today every entry point passes
-    /// [`LaunchMode::Cli`]; the GUI entry that wires
-    /// [`LaunchMode::Gui`] arrives with the Tauri tray Phase.
-    pub launch_mode: LaunchMode,
 }
 
 impl RuntimeOpts {
@@ -138,7 +116,6 @@ impl RuntimeOpts {
             log_config: LogConfig::for_headless_daemon(),
             caller: Caller::cli(),
             mcp_tools: Vec::new(),
-            launch_mode: LaunchMode::Cli,
         }
     }
 }
@@ -187,20 +164,15 @@ pub struct DaemonRuntime {
     /// through `std::process::exit` instead of waiting for the
     /// foreground future to drain.
     pub signal_triggered: Arc<AtomicBool>,
-    /// Notification handle the GUI tray (if any) waits on. The
-    /// `tray.focus` control-plane method signals one waiter per call.
-    /// Held here so a GUI entry that builds a `DaemonRuntime` in the
-    /// same process can clone the handle and attach its own waiter.
-    pub tray_focus_signal: Arc<tokio::sync::Notify>,
     /// Worker-loop pause flag. `queue.pause` flips it to `true`, the
     /// worker idles instead of pulling pending jobs; `queue.resume`
     /// flips it back. Mirrors `QueueState::paused` so the on-disk
     /// snapshot and the in-memory worker behaviour agree.
     pub queue_paused: Arc<AtomicBool>,
     /// Bundle of cheap shared handles the control-plane dispatcher
-    /// runs against. A GUI host that builds the runtime in-process
-    /// clones this to route webview and tray calls through
-    /// `control::methods::dispatch` without a socket round-trip.
+    /// runs against. An in-process host clones this to route calls
+    /// through `control::methods::dispatch` without a socket
+    /// round-trip.
     pub method_context: MethodContext,
     /// The supervised llama-server behind the reranker stage, when
     /// the effective profile enables one and no operator URL takes
@@ -606,7 +578,6 @@ impl DaemonRuntime {
             let state = Arc::clone(&queue_state);
             let state_path = queue_state_path.clone();
             let shutdown_rx = shutdown_tx.subscribe();
-            let library_default = library_name.clone();
             let events_for_loop = event_stream.clone();
             let events_for_runner = event_stream.clone();
             let queue_paused_worker = Arc::clone(&queue_paused);
@@ -616,16 +587,20 @@ impl DaemonRuntime {
                 shutdown_rx,
                 move |job| {
                     let registry = Arc::clone(&registry);
-                    let library_default = library_default.clone();
                     let sink = EventProgressSink::new(job.id.clone(), events_for_runner.clone());
                     async move {
                         sink.report(Stage::Extract, None, None);
                         let outcome = tokio::task::spawn_blocking(move || {
                             let runtime = tokio::runtime::Handle::current();
-                            let library = if job.library.is_empty() {
-                                library_default
+                            // A submit pins the job to a registry name
+                            // at enqueue time. An empty name is a row
+                            // from a queue document written before the
+                            // field was filled, and reads as the
+                            // registry's current default.
+                            let library: Option<&str> = if job.library.is_empty() {
+                                None
                             } else {
-                                job.library.clone()
+                                Some(job.library.as_str())
                             };
                             let force = job.force;
                             let hold_for_metadata = job.hold_for_metadata;
@@ -635,7 +610,7 @@ impl DaemonRuntime {
                             let audit_profile = job.audit_profile.clone();
                             runtime.block_on(async move {
                                 let handle = registry
-                                    .get(Some(&library))
+                                    .get(library)
                                     .map_err(|e| queue::JobError::Book(format!("registry: {e}")))?;
                                 if let Some(ocr) = intake_ocr {
                                     let params = prepare_book_params(
@@ -762,7 +737,6 @@ impl DaemonRuntime {
         // so a `shutdown_tx.send(())` tears down both the loop and
         // every attached client.
         let mcp_tools = Arc::new(opts.mcp_tools);
-        let tray_focus_signal = Arc::new(tokio::sync::Notify::new());
         let plan_registry = Arc::new(crate::control::plan_registry::PlanRegistry::new());
         let method_ctx = MethodContext {
             registry: Arc::clone(&registry),
@@ -778,7 +752,6 @@ impl DaemonRuntime {
             auto_registered,
             mcp_tools,
             queue_worker_enabled: opts.spawn_queue_worker,
-            tray_focus_signal: Arc::clone(&tray_focus_signal),
             rerank_supervisor: rerank_supervisor.clone(),
             control_socket: Some(control_sock_guard.path().to_path_buf()),
             queue_paused: Arc::clone(&queue_paused),
@@ -838,7 +811,6 @@ impl DaemonRuntime {
             write_guard,
             control_sock,
             signal_triggered,
-            tray_focus_signal,
             queue_paused,
             method_context: method_ctx,
             rerank_supervisor,

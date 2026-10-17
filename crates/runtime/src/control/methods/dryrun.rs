@@ -8,8 +8,6 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::Value;
-#[cfg(test)]
-use ts_rs::TS;
 
 use super::{MethodContext, input_err, run_write};
 use crate::audit_helpers::require_known_profile;
@@ -18,13 +16,9 @@ use crate::control::error_map::{handler_err, registry_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct DryrunParams {
-    #[cfg_attr(test, ts(type = "string"))]
     path: PathBuf,
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     out: Option<PathBuf>,
     #[serde(default)]
     no_chunk: bool,
@@ -33,13 +27,11 @@ pub struct DryrunParams {
     /// built-in set (`default` / `trust-source` / `strict`) selects
     /// that built-in; any other name is refused as invalid params.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     audit_profile: Option<String>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 

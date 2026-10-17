@@ -5,14 +5,5 @@
 # include is marked optional, so a checkout without the file (CI, a
 # fresh clone) loads this tracked configuration alone. The tracked file
 # only carries cross-workspace settings.
-#
-# `TS_RS_EXPORT_DIR` reroutes every `#[ts(export, export_to = "...")]`
-# in the workspace under `crates/app/web/src/generated/`, where the
-# future Tauri shell's webview imports them. `relative = true` resolves
-# the path against this file's directory, i.e. the workspace root, so
-# the setting works on any contributor's machine.
 
 include = [{ path = "config.local.toml", optional = true }]
-
-[env]
-TS_RS_EXPORT_DIR = { value = "crates/app/web/src/generated", relative = true }

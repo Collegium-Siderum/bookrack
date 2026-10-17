@@ -14,9 +14,9 @@
 //!   declares (`library` everywhere but `library.info`, whose own
 //!   `name` parameter predates the shared spelling);
 //! * a method that describes the process rather than a library —
-//!   `daemon.*`, the queue verbs, `logs.tail`, `diagnose.run` — is left
-//!   alone: the selection is meaningless there, and meaningless is not
-//!   the same as wrong;
+//!   `daemon.*`, the queue verbs, `logs.tail` — is left alone: the
+//!   selection is meaningless there, and meaningless is not the same
+//!   as wrong;
 //! * a method that answers about the daemon or about every library at
 //!   once is **refused**. Sending the call and letting the selection
 //!   evaporate would answer a question the operator did not ask.
@@ -124,10 +124,6 @@ fn not_routable(name: &str, method: &str) -> Problem {
             "`bookrack libraries list` reports every registered library and marks \
              the ones the daemon serves; drop the flag."
         }
-        "doctor.gather" => {
-            "Stop the daemon and re-run `bookrack doctor` to diagnose another \
-             library's data root, or drop the flag to diagnose the running one."
-        }
         _ => "Drop the flag: this command does not act on a single library.",
     };
     Problem {
@@ -180,7 +176,7 @@ mod tests {
     /// injection, no refusal.
     #[test]
     fn process_methods_pass_through_untouched() {
-        for method in ["diagnose.run", "queue.list", "daemon.version", "logs.tail"] {
+        for method in ["queue.list", "daemon.version", "logs.tail"] {
             let params = apply_selection(Some("beta"), method, json!({"n": 5})).unwrap();
             assert_eq!(params, json!({"n": 5}), "{method} must not be rewritten");
         }
@@ -191,7 +187,7 @@ mod tests {
     /// about the daemon and a listing of every library.
     #[test]
     fn methods_that_cannot_route_are_refused_with_three_parts() {
-        for method in ["status", "daemon.status", "library.list", "doctor.gather"] {
+        for method in ["status", "daemon.status", "library.list"] {
             let err = apply_selection(Some("beta"), method, json!({}))
                 .expect_err("{method} must refuse an explicit selection");
             let BookrackCliError::LibraryNotRoutable { problem } = err else {
@@ -211,6 +207,17 @@ mod tests {
                 "the summary states the failure, not the method behind it: {}",
                 problem.summary
             );
+        }
+    }
+
+    /// The two diagnostics gather one library's data among the
+    /// process-wide rest, so a selection reaches them under `library`
+    /// rather than being dropped or refused.
+    #[test]
+    fn the_two_diagnostics_take_the_selection_under_library() {
+        for method in ["doctor.gather", "diagnose.run"] {
+            let params = apply_selection(Some("beta"), method, Value::Null).unwrap();
+            assert_eq!(params, json!({"library": "beta"}), "{method}");
         }
     }
 

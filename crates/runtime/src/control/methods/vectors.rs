@@ -5,24 +5,19 @@
 //! Mirrors the CLI subcommand surface, plumbing each through
 //! [`super::run_write`]. The control plane never prompts on the
 //! caller's behalf: any destructive method that exposes a `yes`
-//! parameter rejects requests with `yes = false` up front, and the
-//! `ask` closure handed to the cmd layer denies any prompt that
-//! does reach it.
+//! parameter rejects requests with `yes = false` up front. Each write
+//! answers with the report its command returned.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-#[cfg(test)]
-use ts_rs::TS;
 
-use super::{MethodContext, require_yes, run_write};
-use crate::cmd::vectors;
+use super::{MethodContext, ok_reply, require_yes, run_write};
+use crate::cmd::{ResetInterrupted, vectors};
 use crate::control::error_map::{handler_err, plan_lookup_err, registry_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::control::plan_registry::PlanId;
 
 #[derive(Debug, Default, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct VectorsRebuildParams {
     #[serde(default)]
     kind: Option<String>,
@@ -37,10 +32,9 @@ pub struct VectorsRebuildParams {
     #[serde(default)]
     refine_factor: Option<u32>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
@@ -52,7 +46,7 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
     run_write(ctx, handle.name(), move || async move {
-        vectors::rebuild(
+        let report = vectors::rebuild(
             &cfg,
             parsed.kind.as_deref(),
             parsed.num_partitions,
@@ -63,14 +57,12 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         )
         .await
         .map_err(|e| handler_err("vectors.rebuild", e))?;
-        Ok(json!({ "ok": true }))
+        ok_reply(&report)
     })
     .await
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct VectorsReembedParams {
     #[serde(default)]
     book: Option<i64>,
@@ -86,10 +78,9 @@ pub struct VectorsReembedParams {
     #[serde(default)]
     plan_id: Option<String>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
@@ -191,18 +182,15 @@ async fn reembed_execute_from_plan(
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct VectorsResetParams {
     #[serde(default)]
     yes: bool,
     #[serde(default)]
     resume: bool,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
@@ -215,25 +203,22 @@ pub async fn reset(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
     run_write(ctx, handle.name(), move || async move {
-        vectors::reset(&cfg, parsed.yes, parsed.resume, deny_destructive)
+        let report = vectors::reset(&cfg, parsed.resume)
             .await
-            .map_err(|e| handler_err("vectors.reset", e))?;
-        Ok(json!({ "ok": true }))
+            .map_err(|e| reset_err("vectors.reset", e))?;
+        ok_reply(&report)
     })
     .await
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct VectorsDropParams {
     #[serde(default)]
     yes: bool,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
@@ -246,10 +231,10 @@ pub async fn drop_index(params: &Option<Value>, ctx: &MethodContext) -> Result<V
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
     run_write(ctx, handle.name(), move || async move {
-        vectors::drop(&cfg)
+        let report = vectors::drop(&cfg)
             .await
             .map_err(|e| handler_err("vectors.drop", e))?;
-        Ok(json!({ "ok": true }))
+        ok_reply(&report)
     })
     .await
 }
@@ -265,8 +250,21 @@ fn parse<T: serde::de::DeserializeOwned + Default>(
     }
 }
 
-fn deny_destructive(_prompt: &str) -> eyre::Result<bool> {
-    Ok(false)
+/// The step a reset that stopped partway leaves the operator.
+const RESUME_STEP: &str =
+    "Once the cause is addressed, rerun the reset with `--resume` to continue where it stopped.";
+
+/// Map a reset failure like any other handler error, then, when the
+/// reset pass itself failed, add the resumed rerun to the hint. A
+/// failure while setting the reset up changed nothing, so a resume
+/// would skip a reset that never ran; those keep the hint they had.
+pub(super) fn reset_err(method: &str, e: eyre::Report) -> RpcError {
+    let resumable = e.downcast_ref::<ResetInterrupted>().is_some();
+    let mut err = handler_err(method, e);
+    if resumable {
+        err.append_hint(RESUME_STEP);
+    }
+    err
 }
 
 routed_params!(
@@ -275,3 +273,60 @@ routed_params!(
     VectorsResetParams,
     VectorsDropParams,
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookrack_embed::EmbedError;
+    use eyre::WrapErr;
+
+    fn overloaded() -> EmbedError {
+        EmbedError::Overloaded {
+            status: 503,
+            body: "busy".to_string(),
+        }
+    }
+
+    /// The marker is context on the chain, not a type the classifier
+    /// knows: the envelope keeps the code, summary, detail, and
+    /// retryable the leaf maps to, and the resume step follows the
+    /// leaf's own hint.
+    #[test]
+    fn a_failure_of_the_reset_pass_keeps_its_classification_and_gains_the_resume_step() {
+        let bare = handler_err("vectors.reset", eyre::Report::new(overloaded()));
+        let marked = Err::<(), _>(overloaded())
+            .wrap_err(ResetInterrupted)
+            .unwrap_err();
+        assert!(
+            marked.downcast_ref::<ResetInterrupted>().is_some(),
+            "the marker must be recoverable from the report"
+        );
+
+        let err = reset_err("vectors.reset", marked);
+
+        assert_eq!(err.code, bare.code);
+        assert_eq!(err.message, bare.message);
+        let (data, bare_data) = (
+            err.data.expect("data"),
+            bare.data.expect("the leaf maps to a data object"),
+        );
+        assert_eq!(data["detail"], bare_data["detail"]);
+        assert_eq!(data["retryable"], bare_data["retryable"]);
+        let leaf_hint = bare_data["hint"].as_str().expect("the leaf writes a hint");
+        assert_eq!(
+            data["hint"].as_str(),
+            Some(format!("{leaf_hint} {RESUME_STEP}").as_str())
+        );
+    }
+
+    /// A failure before the reset pass began changed nothing, so its
+    /// envelope is exactly what the classifier made of it.
+    #[test]
+    fn a_failure_ahead_of_the_reset_pass_is_left_as_classified() {
+        let bare = handler_err("vectors.reset", eyre::Report::new(overloaded()));
+        let err = reset_err("vectors.reset", eyre::Report::new(overloaded()));
+        assert_eq!(err.code, bare.code);
+        assert_eq!(err.message, bare.message);
+        assert_eq!(err.data, bare.data);
+    }
+}

@@ -141,6 +141,79 @@ async fn doctor_without_daemon_falls_back_to_local_probe() -> Result<()> {
     Ok(())
 }
 
+/// The global `--audit-profile` flag is consumed by six subcommands
+/// and refused on every other, so its value cannot drop silently. The
+/// refusal has to come before the subcommands that dispatch ahead of
+/// the shared resolver: `doctor` would otherwise print its report with
+/// the flag discarded, and `rpc` would reach for a daemon first.
+///
+/// Both cases run in a sandbox with no daemon. The discrimination is
+/// in what the two unfixed paths do instead: `doctor` exits on its own
+/// verdict with no mention of the flag, and `rpc list` exits 2 for the
+/// wrong reason, naming the missing daemon rather than the flag.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn audit_profile_is_refused_before_the_early_dispatches() -> Result<()> {
+    let sandbox = Sandbox::new();
+    for argv in [
+        &["--audit-profile", "strict", "doctor"][..],
+        &["--audit-profile", "strict", "rpc", "list"][..],
+    ] {
+        let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+            .args(argv.iter().copied())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{argv:?} should be refused as operator input (exit 2); stderr={stderr}",
+        );
+        assert!(
+            stderr.contains("--audit-profile is only consumed by"),
+            "{argv:?} should name the flag it refused: {stderr}",
+        );
+        assert!(
+            !stderr.contains("bookrack daemon not running"),
+            "{argv:?} must be refused before a daemon is looked for: {stderr}",
+        );
+    }
+    Ok(())
+}
+
+/// Under `--json`, stdout carries the report and stderr carries
+/// nothing. A session lock that cannot be read sends `doctor` down its
+/// in-process fallback; which path produced the report is a row of the
+/// report itself, so no prose on stderr precedes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doctor_json_keeps_stderr_clean_when_the_lock_cannot_be_read() -> Result<()> {
+    let sandbox = Sandbox::new();
+    std::fs::create_dir_all(sandbox.tty_lock_path())?;
+
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+        .args(["doctor", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let report: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("doctor --json is not JSON ({e}): {stdout}"));
+    assert!(
+        report.get("rows").is_some(),
+        "the fallback report landed: {stdout}"
+    );
+    assert!(
+        stderr.is_empty(),
+        "nothing on stderr under --json; the reporter row says which path answered: {stderr:?}",
+    );
+    Ok(())
+}
+
 /// `bookrack status` answers "not running" as a legal verdict: a
 /// fresh runtime directory with no lock renders the short card and
 /// exits 0, not the daemon-not-running code 2. `--json` keeps the

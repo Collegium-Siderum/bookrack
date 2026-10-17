@@ -1,26 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `metadata.{set,clear,ack,approve,reject}` JSON-RPC handlers.
+//! `metadata.*` JSON-RPC handlers.
 //!
 //! Each method maps onto the matching variant of
 //! [`crate::cmd::metadata::WriteMetadataAction`] and runs through
 //! [`super::run_write`] so the write mutex, daemon-state flag, and
-//! broadcast notifications are managed in one place.
+//! broadcast notifications are managed in one place. Each answers with
+//! the [`crate::cmd::metadata::MetadataWriteReport`] the write
+//! returned.
 
 use serde::Deserialize;
-use serde_json::{Value, json};
-#[cfg(test)]
-use ts_rs::TS;
+use serde_json::Value;
 
-use super::{MethodContext, input_err, run_write};
+use super::{MethodContext, input_err, ok_reply, run_write};
 use crate::audit_helpers::require_known_profile;
 use crate::cmd::metadata::{WriteMetadataAction, run_write as run_metadata};
 use crate::control::error_map::{handler_err, registry_err};
 use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataSetParams {
     book: i64,
     field: String,
@@ -30,48 +28,39 @@ pub struct MetadataSetParams {
     #[serde(default)]
     confirmed: bool,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataClearParams {
     book: i64,
     field: String,
     #[serde(default)]
     reason: Option<String>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataVoidParams {
     book: i64,
     field: String,
     #[serde(default)]
     reason: Option<String>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataReauditParams {
     book: i64,
     /// Optional book-side audit profile name. Resolves through the
@@ -79,19 +68,15 @@ pub struct MetadataReauditParams {
     /// outside it; absent means the daemon's overlay-resolved default
     /// profile.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     audit_profile: Option<String>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataContributorAddParams {
     book: i64,
     role: String,
@@ -101,75 +86,60 @@ pub struct MetadataContributorAddParams {
     #[serde(default)]
     reason: Option<String>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataContributorRemoveParams {
     book: i64,
     contributor_id: i64,
     #[serde(default)]
     reason: Option<String>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataAckParams {
     book: i64,
     reason: String,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataApproveParams {
     book: i64,
     #[serde(default)]
     reason: Option<String>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataRejectParams {
     book: i64,
     reason: String,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(TS))]
-#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataAdvanceParams {
     book: i64,
     /// Optional book-side audit profile name. Used when `advance`
@@ -178,13 +148,11 @@ pub struct MetadataAdvanceParams {
     /// invalid params on a name outside it, absent means the daemon's
     /// overlay-resolved default profile.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     audit_profile: Option<String>,
     /// The library this call acts on. Absent means the registry's
-    /// current default — the library the daemon was brought up under,
-    /// unless `library.set_default` has moved it since.
+    /// current default, the pointer `library.set_default` moves at run
+    /// time.
     #[serde(default)]
-    #[cfg_attr(test, ts(type = "string | null"))]
     library: Option<String>,
 }
 
@@ -328,10 +296,10 @@ async fn run_metadata_action(
     let handle = ctx.registry.get(library).map_err(registry_err)?;
     let cfg = handle.cfg_arc();
     run_write(ctx, handle.name(), move || async move {
-        run_metadata(&cfg, action, profile_name.as_deref())
+        let report = run_metadata(&cfg, action, profile_name.as_deref())
             .await
             .map_err(|e| handler_err("metadata.write", e))?;
-        Ok(json!({ "ok": true }))
+        ok_reply(&report)
     })
     .await
 }
