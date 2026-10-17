@@ -125,6 +125,16 @@ release workflow extracts the matching section verbatim from this file.
   report's own reporter row already says which path produced it and
   what it found at the lock, so the prose is gone and `--json` output
   is the report alone.
+- **The MCP `session.info` card lists each mounted library with its own
+  root.** `libraries` was a list of names and `data_dir` the root of
+  the library the daemon was brought up under, while `default_library`
+  followed the registry's default pointer, so on a daemon started under
+  a library that is not the default, or after `library.set_default`,
+  the card paired one library's name with another's root. `libraries`
+  is now one row per library the session has mounted — `name`,
+  `data_dir`, `default` — and the top-level `data_dir` is gone;
+  `default_library` names the row marked `default`. A client that read
+  `data_dir` takes it from that row.
 
 ### Removed
 
