@@ -18,8 +18,13 @@
 
 use std::path::Path;
 
+use std::io::Write;
+use std::time::Duration;
+
 use bookrack_catalog::{Catalog, RunLock, run_lock_path, run_locks_dir};
-use bookrack_test_support::{Sandbox, bookrack_cmd};
+use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
+use bookrack_test_support::{ProcessEnv, Sandbox, bookrack_cmd, process_env};
+use fs2::FileExt;
 use tokio::process::Command;
 
 /// Open a `running` row on a real catalog under `root` and return its id.
@@ -166,5 +171,173 @@ async fn runs_list_marks_what_the_repair_would_close() {
     assert!(
         text.contains("bookrack doctor --close-abandoned-runs"),
         "the table names the repair: {text}"
+    );
+}
+
+/// A data root holding one ownerless run, so an unrefused dry run has a
+/// plan to print.
+fn root_with_a_dead_run(sandbox: &Sandbox) -> std::path::PathBuf {
+    let root = sandbox.data_root("lib");
+    std::fs::create_dir_all(&root).expect("create data root");
+    let dead = open_run(&root, "glean");
+    leave_ownerless_record(&root, &dead);
+    root
+}
+
+/// Write session-lock content the way a daemon does. The returned file
+/// holds the `flock` for as long as the caller keeps it, so dropping it
+/// is what a daemon exiting looks like to the kernel.
+fn write_lock(sandbox: &Sandbox, hold: bool, control_sock: Option<&str>) -> std::fs::File {
+    let lock_path = sandbox.tty_lock_path();
+    std::fs::create_dir_all(lock_path.parent().expect("runtime dir")).expect("runtime dir");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&lock_path)
+        .expect("open lock");
+    if hold {
+        file.try_lock_exclusive().expect("hold the lock");
+    }
+    let mut writer = &file;
+    writeln!(writer, "pid=999999").expect("write");
+    writeln!(writer, "mcp=disabled").expect("write");
+    if let Some(sock) = control_sock {
+        writeln!(writer, "control_sock={sock}").expect("write");
+    }
+    writer.flush().expect("flush");
+    file
+}
+
+/// The offline repair's guard reads the session lock to decide whether
+/// a daemon may be serving the library. A lock it cannot read is not
+/// evidence of an absent daemon, so the repair is refused
+/// (`SessionLockUnreadable`, exit 1) instead of opening the catalog.
+///
+/// The lock path is made a directory rather than unreadable by mode:
+/// a `chmod` is inert for a root user, which is what CI runs as.
+#[tokio::test]
+async fn an_unreadable_session_lock_refuses_the_offline_repair() {
+    let sandbox = Sandbox::new();
+    let root = root_with_a_dead_run(&sandbox);
+    std::fs::create_dir_all(sandbox.tty_lock_path()).expect("lock path as a directory");
+
+    let (code, text) = close_abandoned_runs(&sandbox, &root, &["--dry-run"]).await;
+    assert_eq!(code, 1, "an unreadable lock refuses the repair: {text}");
+    assert!(
+        text.contains("session lock"),
+        "the refusal names the lock it could not read: {text}"
+    );
+    assert!(!text.contains("would close"), "no plan is computed: {text}");
+}
+
+/// A held lock whose control socket does not answer is the stale-lock
+/// state the exit-code table assigns `3`: the operator clears the lock
+/// first, and the repair does not run beside a daemon that may still be
+/// holding the write handle.
+#[tokio::test]
+async fn a_stale_lock_refuses_the_offline_repair() {
+    let sandbox = Sandbox::new();
+    let root = root_with_a_dead_run(&sandbox);
+    let missing = sandbox.runtime_dir().join("no-such-control.sock");
+    let _held = write_lock(&sandbox, true, Some(&missing.display().to_string()));
+
+    let (code, text) = close_abandoned_runs(&sandbox, &root, &["--dry-run"]).await;
+    assert_eq!(code, 3, "a stale lock is exit 3: {text}");
+    assert!(
+        text.contains("stale"),
+        "the refusal names the stale lock: {text}"
+    );
+    assert!(!text.contains("would close"), "no plan is computed: {text}");
+}
+
+/// A held lock that names no control socket cannot be probed. The
+/// status card treats that as no verdict and renders anyway; a write
+/// guard cannot afford the same latitude and refuses.
+#[tokio::test]
+async fn an_unprobeable_held_lock_refuses_the_offline_repair() {
+    let sandbox = Sandbox::new();
+    let root = root_with_a_dead_run(&sandbox);
+    let _held = write_lock(&sandbox, true, None);
+
+    let (code, text) = close_abandoned_runs(&sandbox, &root, &["--dry-run"]).await;
+    assert_eq!(
+        code, 1,
+        "an unprobeable held lock refuses the repair: {text}"
+    );
+    assert!(
+        text.contains("control socket"),
+        "the refusal says what the lock is missing: {text}"
+    );
+    assert!(!text.contains("would close"), "no plan is computed: {text}");
+}
+
+/// Lock content nobody holds is what a crashed daemon leaves behind.
+/// The kernel released the `flock`, the next `bookrack run` takes over
+/// without cleanup, and the offline repair proceeds the same way.
+#[tokio::test]
+async fn a_leftover_lock_nobody_holds_lets_the_repair_proceed() {
+    let sandbox = Sandbox::new();
+    let root = root_with_a_dead_run(&sandbox);
+    let unheld = write_lock(&sandbox, false, Some("/nonexistent/control.sock"));
+    drop(unheld);
+
+    let (code, text) = close_abandoned_runs(&sandbox, &root, &["--dry-run"]).await;
+    assert_eq!(code, 0, "a lock nobody holds is not a daemon: {text}");
+    assert!(text.contains("would close"), "the plan is printed: {text}");
+}
+
+/// A daemon that answers on its control socket is serving the library,
+/// and the refusal is operator input (exit 2): the repair was asked for
+/// at the wrong time, not broken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_daemon_refuses_the_offline_repair_as_operator_input() {
+    let sandbox = process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir().expect("data root");
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+
+    let mut opts = RuntimeOpts::headless(Some(data_root.path().into()), None);
+    opts.no_mcp = true;
+    opts.runtime_dir = Some(runtime_root.path().into());
+    let runtime = DaemonRuntime::start(opts).await.expect("daemon starts");
+    let shutdown_tx = runtime.shutdown_tx.clone();
+
+    let runtime_dir_for_child = runtime_root.path().to_path_buf();
+    let data_dir_for_child = data_root.path().to_path_buf();
+    let child = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        Command::from(
+            bookrack_cmd!(sandbox)
+                .runtime_dir(runtime_dir_for_child)
+                .data_dir(data_dir_for_child)
+                .build(),
+        )
+        .args(["doctor", "--close-abandoned-runs", "--dry-run"])
+        .output()
+        .await
+    });
+    let out = child.await.expect("join").expect("run bookrack doctor");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let _ = shutdown_tx.send(());
+    let repl_handle = tokio::task::spawn_blocking(|| -> eyre::Result<()> { Ok(()) });
+    runtime
+        .run_until_shutdown(None, repl_handle)
+        .await
+        .expect("daemon stops");
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a live daemon refuses the repair as operator input: {text}"
+    );
+    assert!(
+        text.contains("a daemon is serving this library"),
+        "the refusal says a daemon is serving the library: {text}"
     );
 }

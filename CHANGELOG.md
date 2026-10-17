@@ -17,6 +17,21 @@ release workflow extracts the matching section verbatim from this file.
   flag silently discarded, and `bookrack --audit-profile strict run`
   started a daemon that ignored it. The gate now runs ahead of every
   dispatch, and the refusal exits `2` as operator input instead of `1`.
+- **The offline `doctor` repairs fail closed on a session lock they
+  cannot read.** `--backfill-ocr-derivation` and
+  `--close-abandoned-runs` open the catalog for writing, so they are
+  refused while a daemon serves the library. The guard read every
+  error on the way to the daemon as "no daemon": a lock file that
+  could not be read, and a held lock whose daemon did not answer, both
+  let the repair open the catalog beside a session that may still hold
+  the write handle. The guard now reads the lock the way `bookrack
+  status` does. A lock nobody holds still lets the repair proceed; an
+  unreadable lock, or a held one naming no control socket, exits `1`;
+  a held lock whose daemon does not answer exits `3` with the stale-
+  lock remedy; and a daemon that answers refuses as operator input,
+  exit `2` where it was `1`. The guard also runs before
+  `--install-pdfium` / `--install-reranker`, so a refused repair no
+  longer downloads first.
 
 ### Removed
 
