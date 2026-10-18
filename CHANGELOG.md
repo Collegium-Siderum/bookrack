@@ -82,6 +82,13 @@ release workflow extracts the matching section verbatim from this file.
   reported that the library "still diverges", on every run; that
   report now names both dimensions, and an interrupted `apply` no
   longer offers `--resume` unless the error does.
+- **Profile validation catches three structural mistakes on its own.**
+  `index-profile validate`, `index-profile apply`, and `libraries config
+  <name> index_profile=<p>` refuse `embed.dim = 0`, an empty embed or
+  cross-encoder model name, and an embed backend other than `ollama`.
+  The first two were caught only by the model-registry check, so
+  `--allow-unknown-model` let them through; the backend was never
+  checked, and the daemon embedded through Ollama whatever it said.
 - **`index-profile apply` executes on a library named by `--library`,
   `--data-dir`, or `BOOKRACK_DATA_DIR`.** Before running a plan that
   has actions, apply reads the daemon's `status` for the worker flag

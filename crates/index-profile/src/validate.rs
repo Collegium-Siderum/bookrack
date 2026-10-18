@@ -88,6 +88,24 @@ pub fn has_errors(findings: &[Finding]) -> bool {
 }
 
 fn validate_embed(profile: &IndexProfile, allow_unknown_model: bool, findings: &mut Vec<Finding>) {
+    let embed = &profile.embed;
+    if embed.backend != "ollama" {
+        findings.push(Finding::error(
+            "embed.backend",
+            format!(
+                "unsupported embed backend '{}'; only ollama is implemented",
+                embed.backend
+            ),
+        ));
+    }
+    if embed.model.trim().is_empty() {
+        findings.push(Finding::error("embed.model", "model must not be empty"));
+        return;
+    }
+    if embed.dim == 0 {
+        findings.push(Finding::error("embed.dim", "dim must be greater than 0"));
+        return;
+    }
     if allow_unknown_model {
         return;
     }
@@ -191,6 +209,10 @@ fn validate_reranker(
             None => findings.push(Finding::error(
                 "reranker.model",
                 "a cross-encoder reranker requires a model",
+            )),
+            Some(model) if model.trim().is_empty() => findings.push(Finding::error(
+                "reranker.model",
+                "a cross-encoder reranker model must not be empty",
             )),
             Some(model) => validate_reranker_family(
                 models::embed_model(&profile.embed.model).map(|m| m.family),
@@ -524,5 +546,64 @@ mod tests {
         super::validate_reranker_family(Some("qwen3"), "Qwen3-Reranker-0.6B", false, &mut findings);
         super::validate_reranker_family(None, "Qwen3-Reranker-0.6B", false, &mut findings);
         assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// A profile outside the registry, so only the structural checks
+    /// speak when the registry check is skipped.
+    fn unlisted(dim: u32) -> IndexProfile {
+        let mut profile = pq_profile(dim, Some(dim.max(8) / 8));
+        profile.embed.model = "synthetic-embed:unlisted".to_string();
+        profile.ann.kind = AnnKind::BruteForce;
+        profile.ann.num_sub_vectors = None;
+        profile
+    }
+
+    fn errors_on(findings: &[super::Finding], field: &str) -> usize {
+        findings
+            .iter()
+            .filter(|f| f.severity == Severity::Error && f.field_path == field)
+            .count()
+    }
+
+    #[test]
+    fn zero_dim_is_an_error_even_with_the_registry_check_skipped() {
+        let findings = validate(&unlisted(0), true);
+        assert_eq!(errors_on(&findings, "embed.dim"), 1, "{findings:?}");
+    }
+
+    #[test]
+    fn an_embed_backend_other_than_ollama_is_an_error() {
+        let mut profile = unlisted(8);
+        profile.embed.backend = "synthetic-backend".to_string();
+        for allow_unknown_model in [false, true] {
+            let findings = validate(&profile, allow_unknown_model);
+            assert_eq!(errors_on(&findings, "embed.backend"), 1, "{findings:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_model_name_is_an_error_even_with_the_registry_check_skipped() {
+        for blank in ["", "  "] {
+            let mut profile = unlisted(8);
+            profile.embed.model = blank.to_string();
+            let findings = validate(&profile, true);
+            assert_eq!(
+                errors_on(&findings, "embed.model"),
+                1,
+                "{blank:?}: {findings:?}"
+            );
+
+            let mut profile = unlisted(8);
+            profile.reranker = RerankerSpec {
+                model: Some(blank.to_string()),
+                ..cross_encoder()
+            };
+            let findings = validate(&profile, true);
+            assert_eq!(
+                errors_on(&findings, "reranker.model"),
+                1,
+                "{blank:?}: {findings:?}"
+            );
+        }
     }
 }
