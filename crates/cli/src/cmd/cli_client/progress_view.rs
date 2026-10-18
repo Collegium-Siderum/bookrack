@@ -66,10 +66,18 @@ impl ViewState {
     /// State for a wait on the queue jobs in `job_ids`. A repeated id
     /// counts once.
     pub fn for_jobs(job_ids: &[String]) -> Self {
-        let pending: HashSet<String> = job_ids.iter().cloned().collect();
+        Self::for_jobs_after(&[], job_ids)
+    }
+
+    /// State for a wait on the queue jobs in `live` that also reports
+    /// `settled`, jobs that had already ended when the wait began. The
+    /// ended jobs count as finished from the start. A repeated live id
+    /// counts once.
+    pub fn for_jobs_after(settled: &[JobOutcomeRecord], live: &[String]) -> Self {
+        let pending: HashSet<String> = live.iter().cloned().collect();
         Self {
             scope: Scope::Jobs {
-                total: pending.len(),
+                total: settled.len() + pending.len(),
                 pending,
             },
             slot: None,
@@ -275,6 +283,26 @@ impl ProgressView {
     /// surface the render context selects.
     pub fn for_call(method: &str) -> Self {
         Self::with_surface(ViewState::for_call(method), default_surface())
+    }
+
+    /// View for a wait on the queue jobs in `live` that also reports
+    /// `settled`, drawn on `surface`. Each ended job gets its outcome
+    /// line up front, numbered before the live ones, when the batch
+    /// holds more than one job.
+    pub fn for_jobs_after(
+        settled: &[JobOutcomeRecord],
+        live: &[String],
+        surface: Box<dyn Surface>,
+    ) -> Self {
+        let mut view = Self::with_surface(ViewState::for_jobs_after(settled, live), surface);
+        if let Some((_, total)) = view.state.counts()
+            && total > 1
+        {
+            for (index, record) in settled.iter().enumerate() {
+                view.surface.notice(&outcome_line(index + 1, total, record));
+            }
+        }
+        view
     }
 
     pub fn with_surface(state: ViewState, mut surface: Box<dyn Surface>) -> Self {
@@ -599,5 +627,40 @@ mod tests {
         let ev = finished("a", "needs_ocr", None).value;
         let record = extract_finished(&ev, &pending).expect("needs_ocr terminal recognised");
         assert!(matches!(record.state, JobOutcomeState::NeedsOcr));
+    }
+
+    fn ended(job_id: &str, state: JobOutcomeState, error: Option<&str>) -> JobOutcomeRecord {
+        JobOutcomeRecord {
+            job_id: job_id.to_string(),
+            kind: "book".to_string(),
+            state,
+            error: error.map(String::from),
+            finished_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn for_jobs_after_counts_ended_jobs_and_draws_their_outcomes() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let view = ProgressView::for_jobs_after(
+            &[ended(A, JobOutcomeState::Failed, Some("boom"))],
+            &ids(&[B]),
+            Box::new(RecordingSurface(Arc::clone(&log))),
+        );
+        assert_eq!(view.pending(), 1);
+        assert!(!view.is_complete());
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["status: 1/2 waiting", "notice: 1/2 aaaaaaaa failed: boom"]
+        );
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let view = ProgressView::for_jobs_after(
+            &[ended(A, JobOutcomeState::Done, None)],
+            &[],
+            Box::new(RecordingSurface(Arc::clone(&log))),
+        );
+        assert!(view.is_complete());
+        assert_eq!(*log.lock().unwrap(), ["status: 1/1 waiting"]);
     }
 }

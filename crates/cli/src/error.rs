@@ -141,13 +141,15 @@ pub enum BookrackCliError {
         data: Option<Value>,
     },
 
-    /// Awaited a batch of ingest jobs and one or more reached a
-    /// non-`Done` terminal state (`Failed` or `Cancelled`). The
-    /// per-job summary on stdout has already named the offenders;
-    /// the binary only needs to surface a non-zero exit code so
-    /// scripts can branch on partial failure.
-    #[error("ingest: {failed} failed, {cancelled} cancelled of {total} job(s)")]
-    IngestPartialFailure {
+    /// Awaited a batch of queue jobs and one or more reached a failure
+    /// terminal state (`Failed` or `Cancelled`). `scope` names the
+    /// command that waited (`ingest`, `queue wait`). The per-job
+    /// summary on stdout has already named the offenders; the binary
+    /// only needs to surface a non-zero exit code so scripts can branch
+    /// on partial failure.
+    #[error("{scope}: {failed} failed, {cancelled} cancelled of {total} job(s)")]
+    JobBatchPartialFailure {
+        scope: &'static str,
         failed: u32,
         cancelled: u32,
         total: u32,
@@ -248,6 +250,14 @@ pub enum BookrackCliError {
     #[error("{}", .problem.summary)]
     InitRefused { problem: Problem },
 
+    /// `queue wait` refused before waiting: a `--job` fragment matched
+    /// no job or more than one, a selected job is pending on a paused
+    /// queue, or the daemon runs without a queue worker. Judged once,
+    /// from the queue as read when the wait attaches. Operator input,
+    /// not a bug: exit 2, and the reporter draws the three parts.
+    #[error("{}", .problem.summary)]
+    QueueWaitRefused { problem: Problem },
+
     /// `libraries detect <path>` determined the path is not a confirmed
     /// or probable bookrack data root — a plain not-a-library verdict or
     /// an unreadable manifest. The renderer already printed the verdict;
@@ -268,7 +278,7 @@ impl BookrackCliError {
             Self::RpcUserError { .. } | Self::RpcStateUnusable { .. } => 2,
             Self::RpcBusy { .. } | Self::RpcBackendUnavailable { .. } => 4,
             Self::RpcInternal { .. } => 1,
-            Self::IngestPartialFailure { .. } => 5,
+            Self::JobBatchPartialFailure { .. } => 5,
             Self::RpcParamsInvalid { .. } | Self::RpcMethodNotNamespaced { .. } => 2,
             Self::LocalUserError { .. } => 2,
             Self::ConfirmationUnanswerable { .. } => 2,
@@ -277,7 +287,8 @@ impl BookrackCliError {
             | Self::PreflightRefused { .. }
             | Self::ItemIdUnusable { .. }
             | Self::FilterOffItsSide { .. }
-            | Self::InitRefused { .. } => 2,
+            | Self::InitRefused { .. }
+            | Self::QueueWaitRefused { .. } => 2,
             Self::DetectNegative(_) => 1,
         }
     }
@@ -290,7 +301,7 @@ impl BookrackCliError {
             self,
             Self::DoctorUnhealthy
                 | Self::VerifyUnhealthy
-                | Self::IngestPartialFailure { .. }
+                | Self::JobBatchPartialFailure { .. }
                 | Self::DetectNegative(_)
         )
     }
@@ -358,7 +369,8 @@ impl BookrackCliError {
             | Self::PreflightRefused { problem }
             | Self::ItemIdUnusable { problem }
             | Self::FilterOffItsSide { problem }
-            | Self::InitRefused { problem } => {
+            | Self::InitRefused { problem }
+            | Self::QueueWaitRefused { problem } => {
                 return Some(problem.data.clone());
             }
             Self::RpcParamsInvalid { detail, .. } => {
@@ -597,8 +609,9 @@ mod tests {
     }
 
     #[test]
-    fn ingest_partial_failure_uses_exit_five_and_is_self_reported() {
-        let err = BookrackCliError::IngestPartialFailure {
+    fn job_batch_partial_failure_uses_exit_five_and_is_self_reported() {
+        let err = BookrackCliError::JobBatchPartialFailure {
+            scope: "queue wait",
             failed: 1,
             cancelled: 0,
             total: 3,
@@ -606,9 +619,31 @@ mod tests {
         assert_eq!(err.exit_code(), 5);
         assert!(err.is_self_reported());
         let s = err.to_string();
+        assert!(s.starts_with("queue wait: "), "{s}");
         assert!(s.contains("1 failed"));
         assert!(s.contains("0 cancelled"));
         assert!(s.contains("3 job"));
+    }
+
+    #[test]
+    fn queue_wait_refused_uses_exit_two_and_carries_its_hint() {
+        let hint = "Run `bookrack queue resume`, then wait again.";
+        let err = BookrackCliError::QueueWaitRefused {
+            problem: bookrack_core::Problem {
+                summary: "cannot wait on pending jobs while the queue is paused".into(),
+                data: ProblemData {
+                    detail: None,
+                    hint: Some(hint.into()),
+                    retryable: false,
+                },
+            },
+        };
+        assert_eq!(err.exit_code(), 2);
+        assert!(!err.is_self_reported());
+        assert_eq!(
+            err.problem_data().and_then(|d| d.hint).as_deref(),
+            Some(hint)
+        );
     }
 
     #[test]

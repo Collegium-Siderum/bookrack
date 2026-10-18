@@ -29,6 +29,7 @@ pub mod metadata;
 pub mod papers;
 pub(crate) mod progress_view;
 pub mod queue;
+pub mod queue_wait;
 pub mod quit;
 pub mod remove;
 pub mod rpc;

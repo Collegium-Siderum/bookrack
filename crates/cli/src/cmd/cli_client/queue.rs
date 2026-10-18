@@ -10,6 +10,7 @@
 //! - `queue clear`           → `queue.clear`
 //! - `queue cancel <id>`     → `ingest.cancel`
 //! - `queue retry`           → `queue.retry`
+//! - `queue wait`            → `queue.list` and the event stream
 //!
 //! `queue list` renders a table in human mode (id, kind, state,
 //! queued (relative), priority, path basename) and the daemon payload
@@ -22,8 +23,9 @@
 //! `queue retry --job` accept as printed; `--long` prints the full id. `queue retry`
 //! fills in the default selector (`failed`) on the client, so the
 //! params it sends always name one, and renders the ids the daemon
-//! flipped. The pause / resume / clear / cancel actions remain thin
-//! pass-throughs over the matching RPC.
+//! flipped. `queue wait` lives in [`super::queue_wait`]. The pause /
+//! resume / clear / cancel actions remain thin pass-throughs over the
+//! matching RPC.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -37,7 +39,7 @@ use bookrack_core::queue::JobState;
 use eyre::Result;
 use serde_json::{Value, json};
 
-use super::helpers;
+use super::{helpers, queue_wait};
 
 pub async fn run(action: QueueAction, runtime_dir: Option<PathBuf>) -> Result<()> {
     let client = helpers::connect(runtime_dir.as_deref()).await?;
@@ -80,6 +82,7 @@ pub async fn run(action: QueueAction, runtime_dir: Option<PathBuf>) -> Result<()
             print!("{}", render_retry(&response, state, job.as_deref()));
             Ok(())
         }
+        QueueAction::Wait { jobs } => queue_wait::run(&client, &jobs).await,
     }
 }
 

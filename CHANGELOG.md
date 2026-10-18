@@ -10,6 +10,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **`bookrack queue wait` re-attaches to queued work.** It waits on
+  every job that is pending or running when the queue is read — jobs
+  submitted later are not waited on — and ends with the summary and
+  exit code `ingest --wait` uses: `5` when any job failed or was
+  cancelled. `--job <id>` names jobs instead, by any part of their id,
+  and may repeat; a named job that has already finished is reported as
+  it ended, so `queue retry` followed by `queue wait --job` reports a
+  failure even when the retried job finished first. A paused queue
+  with selected pending jobs, or a daemon without a queue worker, is
+  refused up front with exit `2` instead of waiting on work nothing
+  will run. Both are checked once, when the wait attaches;
+  `docs/operating.md` lists what a wait does not see after that.
 - **Terminal queue jobs can be retried.** The new control-plane method
   `queue.retry` flips `failed`, `needs_ocr`, or `cancelled` rows back
   to `pending` in place — one row by its id or any part of it, or

@@ -120,6 +120,25 @@ pub enum QueueAction {
         #[arg(long, value_name = "JOB_ID", value_parser = clap::builder::NonEmptyStringValueParser::new())]
         job: Option<String>,
     },
+    /// Wait for queue jobs to finish and report how each ended.
+    ///
+    /// Without `--job`, waits on every job that is pending or running
+    /// when the queue is read; jobs submitted later are not waited on.
+    /// `--job` names a job by its id or any part of it, as `queue list`
+    /// prints it, and may repeat; a named job that has already finished
+    /// is reported as it ended. Exits 5 when any of the jobs failed or
+    /// was cancelled.
+    #[command(after_long_help = crate::examples![
+        "queue wait",
+        "queue wait --job a1b2c3d4 --job e5f6a7b8",
+        "queue wait --json",
+    ])]
+    Wait {
+        /// A job to wait on: its UUIDv7, or any part of it no other job
+        /// in the queue shares. Repeat for several jobs.
+        #[arg(long = "job", value_name = "JOB_ID", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        jobs: Vec<String>,
+    },
 }
 
 /// The job states `queue list --state` accepts, one per
@@ -1914,6 +1933,31 @@ mod tests {
             panic!("expected retry")
         };
         assert_eq!((state, job.as_deref()), (None, Some("ab")));
+    }
+
+    #[test]
+    fn queue_wait_without_a_job_names_none() {
+        assert_eq!(
+            parse_queue(&["queue", "wait"]),
+            QueueAction::Wait { jobs: Vec::new() }
+        );
+    }
+
+    #[test]
+    fn queue_wait_keeps_repeated_jobs_in_order() {
+        assert_eq!(
+            parse_queue(&["queue", "wait", "--job", "bb", "--job", "aa"]),
+            QueueAction::Wait {
+                jobs: vec!["bb".to_string(), "aa".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn queue_wait_refuses_an_empty_job() {
+        let err = TestCli::try_parse_from(["queue", "wait", "--job", ""])
+            .expect_err("an empty fragment is refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue, "{err}");
     }
 
     /// Every book-side position that takes an intake id, paired with

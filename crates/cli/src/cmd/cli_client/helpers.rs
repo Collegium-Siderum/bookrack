@@ -151,6 +151,24 @@ fn same_root(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Whether the daemon runs a queue worker, read off `status`.
+///
+/// The probe calls `status` directly rather than through [`dispatch`]:
+/// it serves the queue verbs, which act on the process rather than on a
+/// library and leave a `--library` selection unused, and `status` is one
+/// of the methods that refuses a selection. A `status` without the field
+/// reads as a worker present.
+pub(super) async fn queue_worker_enabled(client: &ControlClient) -> Result<bool> {
+    let status = client
+        .call_raw("status", Value::Null)
+        .await
+        .context("status rpc")?;
+    Ok(status
+        .get("queue_worker_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true))
+}
+
 /// Send one JSON-RPC request and return the `result` payload.
 ///
 /// Pure RPC: no event subscription, no rendering, no printing. The
@@ -267,7 +285,7 @@ pub async fn await_jobs(
 /// `stall_timeout` bounds the wait between consecutive events. The
 /// timer resets every time an event lands; a stretch with no events
 /// at all surfaces as an error instead of hanging the CLI.
-async fn await_jobs_from_rx(
+pub(super) async fn await_jobs_from_rx(
     mut rx: broadcast::Receiver<Event>,
     mut view: ProgressView,
     started_at: Instant,
@@ -339,16 +357,23 @@ pub fn emit_job_summary(report: &JobOutcomeReport, action: &str, label: &str) {
 }
 
 /// Render the per-batch summary and translate a non-success outcome
-/// into a typed [`BookrackCliError::IngestPartialFailure`] so the
+/// into a typed [`BookrackCliError::JobBatchPartialFailure`] so the
 /// binary exits with code `5` instead of `0`. Centralised here so
 /// every `await_jobs` caller shares the same surface; per-job
 /// detail in the rendered summary is the operator-facing diagnostic.
-pub fn finalize_job_batch(report: &JobOutcomeReport, action: &str, label: &str) -> Result<()> {
+/// `scope` names the waiting command in the error.
+pub fn finalize_job_batch(
+    report: &JobOutcomeReport,
+    scope: &'static str,
+    action: &str,
+    label: &str,
+) -> Result<()> {
     emit_job_summary(report, action, label);
     if report.all_succeeded() {
         Ok(())
     } else {
-        Err(BookrackCliError::IngestPartialFailure {
+        Err(BookrackCliError::JobBatchPartialFailure {
+            scope,
             failed: report.totals.failed,
             cancelled: report.totals.cancelled,
             total: report.jobs.len() as u32,
@@ -921,7 +946,8 @@ mod tests {
             ],
             Duration::from_millis(0),
         );
-        finalize_job_batch(&report, "Ingested", "label").expect("all-done batch returns Ok");
+        finalize_job_batch(&report, "ingest", "Ingested", "label")
+            .expect("all-done batch returns Ok");
     }
 
     #[test]
@@ -933,12 +959,13 @@ mod tests {
             ],
             Duration::from_millis(0),
         );
-        let err = finalize_job_batch(&report, "Ingested", "label").unwrap_err();
+        let err = finalize_job_batch(&report, "ingest", "Ingested", "label").unwrap_err();
         let cli = err
             .downcast_ref::<BookrackCliError>()
             .expect("typed CLI error must surface directly");
         match cli {
-            BookrackCliError::IngestPartialFailure {
+            BookrackCliError::JobBatchPartialFailure {
+                scope: "ingest",
                 failed,
                 cancelled,
                 total,
@@ -958,11 +985,12 @@ mod tests {
             vec![rec("a", JobOutcomeState::Cancelled)],
             Duration::from_millis(0),
         );
-        let err = finalize_job_batch(&report, "Ingested", "label").unwrap_err();
+        let err = finalize_job_batch(&report, "ingest", "Ingested", "label").unwrap_err();
         let cli = err.downcast_ref::<BookrackCliError>().unwrap();
         assert!(matches!(
             cli,
-            BookrackCliError::IngestPartialFailure {
+            BookrackCliError::JobBatchPartialFailure {
+                scope: "ingest",
                 failed: 0,
                 cancelled: 1,
                 total: 1,
@@ -978,14 +1006,14 @@ mod tests {
             vec![rec("a", JobOutcomeState::Failed)],
             Duration::from_millis(0),
         );
-        let err = finalize_job_batch(&report, "Ingested", "label")
+        let err = finalize_job_batch(&report, "ingest", "Ingested", "label")
             .unwrap_err()
             .wrap_err("await ingest jobs")
             .wrap_err("bookrack ingest");
         let cause = classify_eyre(&err).expect("typed CLI error must be reachable");
         assert!(matches!(
             cause.as_cli(),
-            BookrackCliError::IngestPartialFailure { .. }
+            BookrackCliError::JobBatchPartialFailure { .. }
         ));
         assert_eq!(cause.as_cli().exit_code(), 5);
     }
