@@ -82,6 +82,15 @@ release workflow extracts the matching section verbatim from this file.
   reported that the library "still diverges", on every run; that
   report now names both dimensions, and an interrupted `apply` no
   longer offers `--resume` unless the error does.
+- **`doctor` compares a library's stamps even when its profile fails
+  validation, and words the consequence by stamp.** A profile with a
+  validation error used to get only that row, with the index never
+  compared; both rows now appear, as `index-profile current` shows them.
+  The row no longer says the daemon will refuse to start for every
+  difference: a different model, algorithm version, or missing stamp
+  keeps the daemon from serving a non-empty index, while a different
+  declared dimension does not, and the row says a reset checks it
+  against the backend first.
 - **Profile validation catches three structural mistakes on its own.**
   `index-profile validate`, `index-profile apply`, and `libraries config
   <name> index_profile=<p>` refuse `embed.dim = 0`, an empty embed or

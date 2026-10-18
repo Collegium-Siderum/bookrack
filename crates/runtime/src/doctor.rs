@@ -1413,8 +1413,8 @@ fn index_profile_dir() -> Option<std::path::PathBuf> {
 /// it without a filesystem. `resolved` is `Ok(Some(embed_model, dim,
 /// has_errors))` for a profile that resolved, `Ok(None)` when the name
 /// does not resolve, and `Err(reason)` when the file failed to load.
-/// `None` means the reference itself is sound and the stamp comparison
-/// can proceed.
+/// `None` means the reference itself is sound. The stamp comparison is
+/// not gated on it: any profile that resolved is compared.
 fn reference_issue(
     entry_name: &str,
     profile_name: &str,
@@ -1478,8 +1478,19 @@ fn stamp_issue(
             if findings.is_empty() {
                 return None;
             }
-            let consequence = if vectors_built {
-                "; the daemon will refuse to start until the index is rebuilt"
+            // Opening a non-empty index compares the served model and this
+            // binary's algorithm versions with the stamps, and a missing
+            // stamp fails that comparison. The width it compares is the
+            // one the backend produces, not the profile's declaration, so
+            // a declared-dimension divergence alone refuses nothing.
+            let serving_refused = built.embed_model.as_deref() != Some(target.embed_model.as_str())
+                || built.vector_dim.is_none()
+                || built.chunk_version != Some(target.chunk_version)
+                || built.normalize_version != Some(target.normalize_version);
+            let consequence = if serving_refused && vectors_built {
+                "; the daemon refuses to serve a non-empty index stamped differently"
+            } else if built.vector_dim != Some(target.vector_dim) {
+                "; a reset checks the declared dimension against the backend before it runs"
             } else {
                 ""
             };
@@ -1625,11 +1636,12 @@ fn push_index_profile_coherence_rows_in(
                 status: Status::Warn { note },
             });
         }
-        // Only a profile that resolved cleanly has stamps to compare
-        // against; the arms above already reported the rest. One profile
-        // governs both pipelines, and each keeps its own corpus and
-        // stamp record, so each is compared on its own.
-        if let Ok(Some((model, dim, false, source))) = &resolved {
+        // Any profile that resolved has stamps to compare against,
+        // validation errors or not: the two are separate facts, reported
+        // on separate rows. One profile governs both pipelines, and each
+        // keeps its own corpus and stamp record, so each is compared on
+        // its own.
+        if let Ok(Some((model, dim, _, source))) = &resolved {
             let label = profile_label(profile_name, *source);
             for pipeline in crate::profile::Pipeline::ALL {
                 let note = stamp_issue(
@@ -2906,6 +2918,53 @@ mod tests {
     }
 
     #[test]
+    fn an_invalid_profile_still_gets_its_stamps_compared() {
+        // Validation and stamp coherence are two facts about a library;
+        // a profile that fails the first still has its index compared,
+        // the way `index-profile current` compares it.
+        let root = tempfile::tempdir().expect("tempdir");
+        let pipeline = crate::profile::Pipeline::Books;
+        let entry = root_with_built_stamps(root.path(), pipeline, |corpus, profile| {
+            let mut built = pipeline.target_stamps(&profile.embed.model, profile.embed.dim);
+            built.chunk_version += 1;
+            write_stamps(corpus, &built);
+        });
+        let profiles = tempfile::tempdir().expect("tempdir");
+        let name = bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT;
+        let source = bookrack_index_profile::builtin_toml(name).expect("the built-in source");
+        let broken = source.replace("backend = \"ollama\"", "backend = \"synthetic-backend\"");
+        assert_ne!(broken, source, "the fixture must break the embed backend");
+        std::fs::write(
+            bookrack_index_profile::user_profile_path(profiles.path(), name),
+            broken,
+        )
+        .expect("shadow the built-in with an invalid user profile");
+
+        let mut rows = Vec::new();
+        push_index_profile_coherence_rows_in(
+            &mut rows,
+            &RegistryProbe::Entries(vec![entry]),
+            Some(profiles.path()),
+        );
+
+        let notes: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match &row.status {
+                Status::Warn { note } => Some(note.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            notes.iter().any(|n| n.contains("has validation errors")),
+            "{rows:?}"
+        );
+        assert!(
+            notes.iter().any(|n| n.contains("chunk_version")),
+            "the stamps must still be compared: {rows:?}"
+        );
+    }
+
+    #[test]
     fn a_coherence_row_names_the_definition_that_answered() {
         // A user file and the built-in it shadows carry the same name,
         // so a row naming the name alone leaves the operator without the
@@ -3141,7 +3200,22 @@ mod tests {
             )
             .unwrap_or_else(|| panic!("a divergent {field} must be flagged"));
             assert!(note.contains(field), "{field}: {note}");
-            assert!(note.contains("refuse to start"), "{field}: {note}");
+            if field == "embed.dim" {
+                // Opening a library compares the width the backend
+                // produces with the stamp, never the profile's
+                // declaration, so a declared-dimension divergence
+                // predicts no refusal.
+                assert!(!note.contains("refuse"), "{field}: {note}");
+                assert!(
+                    note.contains("checks the declared dimension"),
+                    "{field}: {note}"
+                );
+            } else {
+                assert!(
+                    note.contains("refuses to serve a non-empty index"),
+                    "{field}: {note}"
+                );
+            }
         }
     }
 

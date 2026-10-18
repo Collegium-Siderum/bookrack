@@ -484,7 +484,11 @@ the two per-query variables above.
 cross-encoder reranker contract, and consults an offline model registry
 that `--allow-unknown-model` bypasses. `bookrack doctor` additionally
 compares each library's referenced profile against its built index
-stamps and warns on a mismatch that would keep the daemon from starting.
+stamps whenever the profile resolves, whether or not it validates, and
+warns on any mismatch. A different model or algorithm version keeps the
+daemon from serving a non-empty index; a different declared dimension
+does not — opening a library compares the width the backend produces
+with the stamp — and is checked against the backend before a reset.
 
 The sixth verb changes things rather than reporting them:
 
