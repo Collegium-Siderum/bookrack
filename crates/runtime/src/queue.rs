@@ -27,10 +27,12 @@ use tempfile::NamedTempFile;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use bookrack_core::queue::{
+    FragmentMiss, QueueOpenDecision, match_id_fragment, queue_open_decision,
+};
 pub use bookrack_core::queue::{
     IntakeOcrInfo, JobState, Priority, QUEUE_SCHEMA_VERSION, QueueJob, QueueState,
 };
-use bookrack_core::queue::{QueueOpenDecision, queue_open_decision};
 use bookrack_core::{Explain, ItemKind, Problem};
 
 use crate::control::events::{
@@ -592,31 +594,20 @@ pub fn enqueue_ocr_intake(
 /// empty fragment is rejected so a typo does not cancel the
 /// next-in-line by accident.
 pub fn cancel_matching(state: &mut QueueState, fragment: &str) -> Result<String> {
-    if fragment.is_empty() {
-        return Err(eyre!("queue cancel: id fragment must not be empty"));
-    }
-    let candidates: Vec<usize> = state
-        .jobs
-        .iter()
-        .enumerate()
-        .filter(|(_, j)| {
-            j.id.contains(fragment) && matches!(j.state, JobState::Pending | JobState::Running)
-        })
-        .map(|(i, _)| i)
-        .collect();
-    match candidates.len() {
-        0 => Err(eyre!(
-            "queue cancel: no pending or running job matches {fragment:?}"
-        )),
-        1 => {
-            let idx = candidates[0];
+    let live = |j: &QueueJob| matches!(j.state, JobState::Pending | JobState::Running);
+    match match_id_fragment(&state.jobs, fragment, live) {
+        Ok(idx) => {
             let job = &mut state.jobs[idx];
             job.state = JobState::Cancelled;
             job.finished_at = Some(Utc::now());
             Ok(job.id.clone())
         }
-        n => Err(eyre!(
-            "queue cancel: {fragment:?} is ambiguous, matches {n} jobs"
+        Err(FragmentMiss::Empty) => Err(eyre!("queue cancel: id fragment must not be empty")),
+        Err(FragmentMiss::NoMatch) => Err(eyre!(
+            "queue cancel: no pending or running job matches {fragment:?}"
+        )),
+        Err(FragmentMiss::Ambiguous { count }) => Err(eyre!(
+            "queue cancel: {fragment:?} is ambiguous, matches {count} jobs"
         )),
     }
 }
@@ -646,8 +637,9 @@ pub const RETRYABLE_STATES: [JobState; 3] =
     [JobState::Failed, JobState::NeedsOcr, JobState::Cancelled];
 
 /// Which rows a retry selects: every row in one retryable state, or
-/// the one row whose id contains a fragment, matched anywhere as
-/// [`cancel_matching`] matches it.
+/// the one row whose id contains a fragment, located by
+/// [`match_id_fragment`] over every row in the queue. [`cancel_matching`]
+/// uses the same matcher over the pending and running rows only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetrySelector {
     State(JobState),
@@ -700,22 +692,9 @@ pub fn retry_terminal(
             Ok(retried)
         }
         RetrySelector::IdFragment(fragment) => {
-            if fragment.is_empty() {
-                return Err(RetryRefusal::EmptyFragment);
-            }
-            let candidates: Vec<usize> = state
-                .jobs
-                .iter()
-                .enumerate()
-                .filter(|(_, j)| j.id.contains(fragment.as_str()))
-                .map(|(i, _)| i)
-                .collect();
-            match candidates.len() {
-                0 => Err(RetryRefusal::NoMatch {
-                    fragment: fragment.clone(),
-                }),
-                1 => {
-                    let job = &mut state.jobs[candidates[0]];
+            match match_id_fragment(&state.jobs, fragment, |_| true) {
+                Ok(idx) => {
+                    let job = &mut state.jobs[idx];
                     if !RETRYABLE_STATES.contains(&job.state) {
                         return Err(RetryRefusal::NotRetryable {
                             id: job.id.clone(),
@@ -725,7 +704,11 @@ pub fn retry_terminal(
                     reset_for_retry(job);
                     Ok(vec![job.id.clone()])
                 }
-                count => Err(RetryRefusal::Ambiguous {
+                Err(FragmentMiss::Empty) => Err(RetryRefusal::EmptyFragment),
+                Err(FragmentMiss::NoMatch) => Err(RetryRefusal::NoMatch {
+                    fragment: fragment.clone(),
+                }),
+                Err(FragmentMiss::Ambiguous { count }) => Err(RetryRefusal::Ambiguous {
                     fragment: fragment.clone(),
                     count,
                 }),
