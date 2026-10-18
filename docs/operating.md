@@ -140,6 +140,8 @@ fixed tick. `bookrack queue` inspects and steers it:
 
 ```
 bookrack queue list          # jobs plus a per-state count footer
+bookrack queue list --state failed      # one state, failures grouped by cause
+bookrack queue list --state pending --limit 20
 bookrack queue pause         # stop draining without losing the queue
 bookrack queue resume
 bookrack queue cancel <id>   # cancel by job-id prefix

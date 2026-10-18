@@ -10,6 +10,14 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **`queue list` can show one state, capped, with failures grouped by
+  cause.** `--state <s>` keeps the rows in that state and `--limit N`
+  shows at most N of them, oldest first; the per-state footer still
+  counts the whole queue, and a capped listing says `showing N of M`.
+  `--state failed` groups its rows under one header per cause with the
+  group's size, so a long failed set reads as a handful of reasons
+  instead of a wall of rows. Under `--json` the `jobs` array carries the
+  selected rows and the rest of the reply is the daemon's.
 - **`distill build` shows which stage of which book is running.** The
   build ran each book's pipeline without a word until the book's stage
   table printed. It now draws `2/5 <slug> [3/7] <stage>` on stderr,

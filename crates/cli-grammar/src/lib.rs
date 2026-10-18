@@ -36,16 +36,31 @@ macro_rules! examples {
 /// each variant to the matching control-plane RPC.
 #[derive(clap::Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum QueueAction {
-    /// List every row in the queue document, oldest first.
+    /// List the rows in the queue document, oldest first.
+    ///
+    /// `--state` keeps the rows in one state; `--limit` caps the
+    /// rows shown. The per-state count footer always counts the
+    /// whole queue, so a capped or filtered listing still reports
+    /// how many rows the queue holds in each state.
     #[command(after_long_help = crate::examples![
         "queue list",
         "queue list --long",
+        "queue list --state failed",
+        "queue list --state pending --limit 20",
     ])]
     List {
         /// Print full UUIDv7 job ids instead of the 8-character
         /// prefix the table shows by default.
         #[arg(long)]
         long: bool,
+        /// Show only the rows in this state. The `failed` listing
+        /// groups its rows by cause.
+        #[arg(long, value_name = "STATE")]
+        state: Option<QueueStateFilter>,
+        /// Show at most this many rows, the oldest first. With
+        /// `--state` the cap applies to the matching rows.
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        limit: Option<u32>,
     },
     /// Pause the worker loop. Running jobs run to completion; pending
     /// rows stay pending until `resume`.
@@ -80,6 +95,52 @@ pub enum QueueAction {
         /// characters listed by `queue list` are usually enough.
         job_id: String,
     },
+}
+
+/// The job states `queue list --state` accepts, one per
+/// [`bookrack_core::queue::JobState`] variant.
+///
+/// The flag spells the two-word states with a hyphen, as clap renders
+/// them; the `snake_case` token the wire carries is accepted as an
+/// alias so a value copied out of a `--json` listing parses too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum QueueStateFilter {
+    Pending,
+    Running,
+    Done,
+    #[value(alias = "skipped_duplicate")]
+    SkippedDuplicate,
+    #[value(alias = "needs_ocr")]
+    NeedsOcr,
+    Failed,
+    Cancelled,
+}
+
+impl QueueStateFilter {
+    /// The queue state this filter selects.
+    pub fn job_state(self) -> bookrack_core::queue::JobState {
+        use bookrack_core::queue::JobState;
+        match self {
+            QueueStateFilter::Pending => JobState::Pending,
+            QueueStateFilter::Running => JobState::Running,
+            QueueStateFilter::Done => JobState::Done,
+            QueueStateFilter::SkippedDuplicate => JobState::SkippedDuplicate,
+            QueueStateFilter::NeedsOcr => JobState::NeedsOcr,
+            QueueStateFilter::Failed => JobState::Failed,
+            QueueStateFilter::Cancelled => JobState::Cancelled,
+        }
+    }
+}
+
+impl std::fmt::Display for QueueStateFilter {
+    /// Renders the value clap accepts, read back off the derived
+    /// vocabulary so the two cannot disagree.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        clap::ValueEnum::to_possible_value(self)
+            .expect("no variant is skipped")
+            .get_name()
+            .fmt(f)
+    }
 }
 
 /// Positional + flag bundle for `ingest`. Lives in a standalone struct
@@ -1656,6 +1717,74 @@ mod tests {
             TestCommand::Intake { action } => action,
             other => panic!("expected intake, got {other:?}"),
         }
+    }
+
+    fn parse_queue(tokens: &[&str]) -> QueueAction {
+        match TestCli::try_parse_from(tokens).expect("parse").command {
+            TestCommand::Queue { action } => action,
+            other => panic!("expected queue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn queue_list_defaults_to_the_whole_queue() {
+        assert_eq!(
+            parse_queue(&["queue", "list"]),
+            QueueAction::List {
+                long: false,
+                state: None,
+                limit: None,
+            }
+        );
+    }
+
+    /// The hyphenated spelling clap renders and the `snake_case` token
+    /// the wire carries name the same state.
+    #[test]
+    fn queue_list_state_accepts_both_spellings() {
+        for spelling in ["needs-ocr", "needs_ocr"] {
+            let QueueAction::List { state, .. } =
+                parse_queue(&["queue", "list", "--state", spelling])
+            else {
+                panic!("expected list")
+            };
+            assert_eq!(state, Some(QueueStateFilter::NeedsOcr), "{spelling}");
+        }
+        for spelling in ["skipped-duplicate", "skipped_duplicate"] {
+            let QueueAction::List { state, .. } =
+                parse_queue(&["queue", "list", "--state", spelling])
+            else {
+                panic!("expected list")
+            };
+            assert_eq!(
+                state,
+                Some(QueueStateFilter::SkippedDuplicate),
+                "{spelling}"
+            );
+        }
+    }
+
+    /// Every filter value maps onto the wire token of its state, so a
+    /// client comparing the two strings selects the rows it names.
+    #[test]
+    fn queue_state_filter_names_its_wire_state() {
+        use clap::ValueEnum;
+        for filter in QueueStateFilter::value_variants() {
+            let wire = filter.job_state().as_wire_str();
+            assert_eq!(filter.to_string(), wire.replace('_', "-"), "{filter:?}");
+        }
+    }
+
+    #[test]
+    fn queue_list_rejects_a_zero_limit() {
+        let err = TestCli::try_parse_from(["queue", "list", "--limit", "0"])
+            .expect_err("a zero limit must be rejected");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation, "{err}");
+        let QueueAction::List { limit, .. } = parse_queue(&["queue", "list", "--limit", "20"])
+        else {
+            panic!("expected list")
+        };
+        assert_eq!(limit, Some(20));
     }
 
     /// Every book-side position that takes an intake id, paired with
