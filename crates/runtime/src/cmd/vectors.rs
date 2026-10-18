@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::cmd::ResetInterrupted;
 use crate::cmd::input_error::CmdInputError;
-use crate::embed_helpers::embedder;
+use crate::embed_helpers::{embedder, refuse_dimension_mismatch};
 use crate::pipeline_run_helpers::{close_run, open_run};
 
 /// The ANN configuration a rebuild built the index with.
@@ -245,6 +245,10 @@ pub async fn drop(cfg: &Config) -> Result<AnnDropReport> {
 /// for a non-destructive trial, use `libraries fork` instead. The
 /// caller confirms; this function does not ask.
 ///
+/// When an index profile is in effect, its `embed.dim` is checked
+/// against the backend before anything changes, and a dimension the
+/// backend does not produce is refused as caller input.
+///
 /// With `resume`, continue a reset that stopped partway: the
 /// destructive steps are skipped and the intakes still at `Extracted`
 /// are re-embedded. A resume with none at `Extracted` does nothing,
@@ -257,7 +261,7 @@ pub async fn reset(cfg: &Config, resume: bool) -> Result<VectorsResetReport> {
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
-    let embed_cfg = crate::profile::effective_embed_config(cfg)?;
+    let (embed_cfg, declaration) = crate::profile::effective_embed_declaration(cfg)?;
     let embedder_client = embedder(cfg, &embed_cfg)?;
 
     if resume
@@ -271,6 +275,8 @@ pub async fn reset(cfg: &Config, resume: bool) -> Result<VectorsResetReport> {
             ..VectorsResetReport::default()
         });
     }
+
+    refuse_dimension_mismatch(&embedder_client, &embed_cfg.model, declaration.as_ref()).await?;
 
     let run = open_run(
         &catalog,

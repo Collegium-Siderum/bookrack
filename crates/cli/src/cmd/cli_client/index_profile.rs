@@ -120,8 +120,9 @@ pub async fn run(
     let verify = plan_apply(name, selection, pipeline).await?;
     if !verify.is_noop() {
         eyre::bail!(
-            "every action completed but the library still diverges from '{name}'; \
+            "every action completed but the library still diverges from '{name}'{}; \
              `bookrack index-profile current` on {} shows the remaining findings",
+            dimension_divergence(&verify),
             plan.target.data_dir().display()
         );
     }
@@ -136,6 +137,36 @@ pub async fn run(
         println!("restart the daemon so it brings up the reranker backend.");
     }
     Ok(())
+}
+
+/// The stamped dimension of every selected pipeline whose index
+/// disagrees with the profile's `embed.dim`, as a clause for the
+/// self-check's refusal; empty when the dimensions agree. The actions
+/// stamp what the backend produced, so a declared dimension the backend
+/// does not produce is the one divergence a re-run cannot clear.
+fn dimension_divergence(plan: &ApplyPlan) -> String {
+    let declared = plan.profile.embed.dim;
+    let mut clauses = Vec::new();
+    for section in &plan.sections {
+        let pipeline = section.pipeline;
+        let stamped =
+            bookrack_runtime::profile::built_stamps(&pipeline.corpus_db(plan.target.data_dir()))
+                .ok()
+                .flatten()
+                .and_then(|built| built.vector_dim);
+        if let Some(stamped) = stamped.filter(|&d| d != declared) {
+            clauses.push(format!(
+                "the {} index is stamped {stamped} dimensions, but '{}' declares {declared}",
+                pipeline.as_str(),
+                plan.profile.name
+            ));
+        }
+    }
+    if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", clauses.join("; "))
+    }
 }
 
 /// Map a planning refusal to the CLI's user-error exit path; every
@@ -361,8 +392,9 @@ fn print_interruption(actions: &[(Pipeline, PlannedAction)], failed: usize, name
     );
     println!(
         "rerun `bookrack index-profile apply {name}` to re-derive the remaining actions; \
-         an interrupted reset can also be finished with `bookrack vectors reset --resume` \
-         (books) or `bookrack papers vectors reset --resume` (papers)"
+         when the error offers --resume, an interrupted reset can also be finished with \
+         `bookrack vectors reset --resume` (books) or `bookrack papers vectors reset --resume` \
+         (papers)"
     );
 }
 

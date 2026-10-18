@@ -15,10 +15,13 @@
 //! scan: the dimension differs from the stub's, which derives a reset,
 //! and the scan declares no index, so no ANN rebuild follows the reset.
 //!
-//! The stub's vectors are narrower than any registry model's, so the
-//! reset re-stamps the dimension it observed and the post-apply
-//! self-check still reports the divergence. The cases assert up to the
-//! completed action and leave the self-check verdict alone.
+//! The stub answers every model narrower than any registry model, and
+//! the reset checks the declared dimension against the backend before
+//! it changes anything. So every case ends in that refusal, and the
+//! refusal is the evidence: it names the profile only the selected
+//! library's manifest declares, which the daemon read for the library
+//! the action named. The library is left as it was, so each selector
+//! meets the same plan.
 
 #![cfg(unix)]
 
@@ -198,8 +201,8 @@ async fn apply_executes_under_each_library_selector() {
             !stderr.contains("cannot run this command against library"),
             "{selector}: the worker probe carried the selection into status: {stderr}",
         );
-        assert_ne!(code, Some(2), "{selector}: {stderr}");
-        assert_plan_executed(selector, &stdout, &root);
+        assert_reset_refused(selector, &stdout, &stderr, &root);
+        assert_eq!(code, Some(2), "{selector}: {stderr}");
     }
 
     if let Some(id) = daemon.id() {
@@ -213,8 +216,10 @@ async fn apply_executes_under_each_library_selector() {
 }
 
 /// The plan rendered against the selected library, the declaration
-/// written, and the one action run to completion.
-fn assert_plan_executed(selector: &str, stdout: &str, root: &Path) {
+/// written, and the reset refused by that library's handler on the
+/// dimension the profile declares, with the interruption pointing at the
+/// error rather than promising a resume.
+fn assert_reset_refused(selector: &str, stdout: &str, stderr: &str, root: &Path) {
     assert!(
         stdout.contains(&format!("library: {LIBRARY} ({})", root.display())),
         "{selector}: the plan must be rendered against the selected library: {stdout}",
@@ -223,12 +228,20 @@ fn assert_plan_executed(selector: &str, stdout: &str, root: &Path) {
         stdout.contains(&format!("declared: index_profile = '{PROFILE}'")),
         "{selector}: {stdout}",
     );
-    assert!(
-        stdout.contains("[1/1] books reset: done"),
-        "{selector}: the reset must run to completion: {stdout}",
+    let refusal = format!(
+        "profile '{PROFILE}' declares embed.dim {DEFAULT_MODEL_DIM}, but the backend returns {}-dimensional vectors",
+        EmbedStub::DIMENSION
     );
     assert!(
-        !stdout.contains("apply interrupted"),
+        stderr.contains(&refusal),
+        "{selector}: the reset must be refused on the declared dimension: {stderr}",
+    );
+    assert!(
+        stdout.contains("apply interrupted at books reset"),
         "{selector}: {stdout}"
+    );
+    assert!(
+        stdout.contains("when the error offers --resume"),
+        "{selector}: the interruption must defer to the error on resuming: {stdout}",
     );
 }

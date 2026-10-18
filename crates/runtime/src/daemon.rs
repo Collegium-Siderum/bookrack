@@ -448,9 +448,8 @@ impl DaemonRuntime {
         }
 
         // 5. Effective embed configuration for the served library. The
-        //    model resolves by the full chain (env > config.toml >
-        //    index profile > default), so a profile-reference or
-        //    embed-model conflict and an undefined profile each refuse
+        //    model resolves from the index profile, else the built-in
+        //    default, so an undefined or unloadable profile refuses
         //    startup here with the repair spelled out, rather than
         //    embedding under a combination the operator never
         //    declared. `build_library_handle` below re-runs the same
@@ -1047,11 +1046,10 @@ pub(crate) async fn build_library_handle(
     mount_guard: Option<MountGuard>,
 ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>> {
     let cfg = cfg_arc.as_ref();
-    // The embed model resolves per library by the full chain
-    // (env > config.toml > index profile > default); a conflict or an
-    // undefined profile refuses the handle with the repair spelled
-    // out, rather than embedding under a combination the operator
-    // never declared.
+    // The embed model resolves per library from the index profile,
+    // else the built-in default; an undefined or unloadable profile
+    // refuses the handle with the repair spelled out, rather than
+    // embedding under a combination the operator never declared.
     let embed_cfg = crate::profile::effective_embed_config(cfg)
         .context("resolve effective embed configuration")?;
     let embedder = OllamaEmbedClient::new(

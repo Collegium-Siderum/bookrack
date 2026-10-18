@@ -698,7 +698,14 @@ the exit-code bucket does not distinguish the two.
     a resume with nothing waiting at `Extracted` reports zeros. A
     failure inside the reset pass appends to the error's hint the
     step to rerun with `resume = true`; a failure while the reset is
-    being set up — before anything changed — does not.
+    being set up — before anything changed — does not. When the
+    library's index profile declares `embed.dim`, the reset checks it
+    against the backend's output dimension before it changes anything,
+    confirming a mismatch with a request the dimension cache cannot
+    answer, and refuses a mismatch with `-32602` and no resume step.
+    The code alone does not say whether a reset changed anything — a
+    model that goes missing mid-pass is `-32602` too — only the resume
+    step in the hint does.
 - `corpus.rebuild` — `{ include_vectors?, book?, stale_only?, dry_run?,
   yes?, library? }`.
 - `stamps.reconcile` — `{ library? }` → `{ ok: true, embed_model,

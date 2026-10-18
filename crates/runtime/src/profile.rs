@@ -149,10 +149,42 @@ fn effective_index_profile_in(
 /// when the profile does not resolve, so a handler cannot embed under a
 /// configuration the daemon would refuse to start with.
 pub fn effective_embed_config(cfg: &Config) -> Result<EmbedConfig> {
+    effective_embed_declaration(cfg).map(|(embed, _)| embed)
+}
+
+/// The embed dimension the effective index profile declares. Carries the
+/// whole profile: a refusal quotes its name, and its hint re-validates
+/// the profile at the dimension the backend produces.
+#[derive(Debug, Clone)]
+pub struct EmbedDeclaration {
+    /// The effective profile.
+    pub profile: IndexProfile,
+}
+
+impl EmbedDeclaration {
+    /// The declaring profile's name.
+    pub fn name(&self) -> &str {
+        &self.profile.name
+    }
+
+    /// The declared `embed.dim`.
+    pub fn dim(&self) -> u32 {
+        self.profile.embed.dim
+    }
+}
+
+/// [`effective_embed_config`] together with the profile that declared
+/// it, `None` when no profile is in effect and the model is the
+/// built-in default. Reads the manifest once for both.
+pub fn effective_embed_declaration(
+    cfg: &Config,
+) -> Result<(EmbedConfig, Option<EmbedDeclaration>)> {
     let manifest_ref = fresh_manifest_profile_ref(cfg);
     let effective = effective_index_profile_in(cfg, manifest_ref.as_deref())?;
     let model = effective.as_ref().map(|e| e.profile.embed.model.as_str());
-    Ok(EmbedConfig::resolve(model))
+    let embed = EmbedConfig::resolve(model);
+    let declaration = effective.map(|e| EmbedDeclaration { profile: e.profile });
+    Ok((embed, declaration))
 }
 
 /// Write gate for an `index_profile` reference: the name must resolve

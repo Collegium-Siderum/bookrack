@@ -71,6 +71,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A reset refuses a dimension the backend does not produce.** When
+  the library's index profile declares `embed.dim`, `vectors reset`,
+  `papers vectors reset`, and the resets `index-profile apply` runs
+  check the backend's output dimension against it before clearing
+  anything — confirming a mismatch with a fresh request — and refuse
+  with exit `2` when they differ. The hint names a dimension only when
+  the profile would validate at it. Previously the reset re-embedded
+  the whole library at the backend's dimension and `apply` then
+  reported that the library "still diverges", on every run; that
+  report now names both dimensions, and an interrupted `apply` no
+  longer offers `--resume` unless the error does.
 - **`index-profile apply` executes on a library named by `--library`,
   `--data-dir`, or `BOOKRACK_DATA_DIR`.** Before running a plan that
   has actions, apply reads the daemon's `status` for the worker flag
