@@ -20,9 +20,9 @@ release workflow extracts the matching section verbatim from this file.
   queue worker embeds a book, `worker.progress` carries `stage: embed`
   with `stage_progress` set to the fraction of the book's chunks
   written to the vector store — always for the first and the last
-  batch, throttled in between — so `ingest` shows a percentage
-  during the longest stage instead of a bare spinner. Paper jobs and
-  `intake ocr` jobs report `processing` only.
+  batch, throttled in between — so `ingest` and `intake ocr` show a
+  percentage during the longest stage instead of a bare spinner. Paper
+  jobs report `processing` only.
 - **A write's reply names the library it acted on.** Every control-plane
   method that takes the write mutex — the `vectors`, `stamps`,
   `corpus`, `metadata`, `remove`, and `dryrun` writes on both sides,

@@ -3,15 +3,18 @@
 //! End-to-end check of the `worker.progress` contract: the queue
 //! worker reports a pulled job as `processing`, tagged with the job's
 //! pipeline `kind`, and names no pipeline stage it cannot observe. A
-//! book job carried through the real ingest pipeline and a paper job
-//! that fails on a missing source each publish exactly one
-//! `processing` marker before their closing `queue.tick`; the job's
-//! terminal state travels on that tick, not on `worker.progress`.
+//! book job carried through the real ingest pipeline, and an OCR
+//! intake carried through the same book pipeline, publish one
+//! `processing` marker and then the embedding pass's fraction; a paper
+//! job that fails on a missing source publishes the marker alone. The
+//! job's terminal state travels on its closing `queue.tick`, not on
+//! `worker.progress`.
 //!
 //! The embedder probe and the embedding pass are both answered by the
 //! loopback stub in `common`, so no Ollama daemon is required. The
-//! paper job never reaches PDF parsing, so no PDFium library is
-//! required either.
+//! book and paper cases never reach PDF parsing; only the OCR case
+//! needs a PDFium library, and it skips through the extract crate's
+//! gate when none is loadable.
 
 #![cfg(unix)]
 
@@ -101,10 +104,12 @@ fn stage_kind_pairs(progress: &[Value]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Starts a daemon with a live queue worker, submits `path` through
-/// `submit_method`, and returns every `worker.progress` payload for
-/// the resulting job together with the job's closing `last_finished`.
-async fn drive_one_job(submit_method: &'static str, path: PathBuf) -> Result<(Vec<Value>, Value)> {
+/// Starts a daemon with a live queue worker, submits one job through
+/// `submit_method` with `params`, and returns every `worker.progress`
+/// payload for the resulting job together with the job's closing
+/// `last_finished`. The submit reply is read as `job_ids[0]` or, for a
+/// single-job method, `job_id`.
+async fn drive_one_job(submit_method: &'static str, params: Value) -> Result<(Vec<Value>, Value)> {
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
@@ -137,12 +142,14 @@ async fn drive_one_job(submit_method: &'static str, path: PathBuf) -> Result<(Ve
             "jsonrpc": "2.0",
             "id": 2,
             "method": submit_method,
-            "params": {"paths": [path]},
+            "params": params,
         });
         send(&mut wr_w, &submit.to_string()).await?;
         let submit_resp = recv(&mut wr_reader).await?;
-        let job_id = submit_resp["result"]["job_ids"][0]
+        let result = &submit_resp["result"];
+        let job_id = result["job_ids"][0]
             .as_str()
+            .or_else(|| result["job_id"].as_str())
             .with_context(|| format!("missing job id: {submit_resp}"))?
             .to_string();
 
@@ -172,35 +179,46 @@ async fn a_book_job_reports_processing_and_no_stage_it_cannot_observe() -> Resul
     let book_path = book_dir.path().join("synthetic-ledger.txt");
     std::fs::write(&book_path, BOOK_TEXT)?;
 
-    let (progress, last_finished) = drive_one_job("ingest.submit", book_path).await?;
+    let (progress, last_finished) =
+        drive_one_job("ingest.submit", json!({"paths": [book_path]})).await?;
+    assert_book_pipeline_progress("book", &progress, &last_finished)
+}
 
+/// Asserts the progress a job carried through the book pipeline
+/// publishes: one `processing` marker on pull, then the embedding
+/// pass's measured fraction, both under `kind = "book"`.
+fn assert_book_pipeline_progress(
+    what: &str,
+    progress: &[Value],
+    last_finished: &Value,
+) -> Result<()> {
     // The job must have succeeded, so the progress below covers a
     // full pipeline run rather than an early failure.
     assert_eq!(
         last_finished["state"].as_str(),
         Some("done"),
-        "job did not finish clean: {last_finished}"
+        "{what} job did not finish clean: {last_finished}"
     );
     // One marker on pull, then the embedding pass's measured fraction;
     // nothing claims a stage the worker cannot see, and nothing repeats
     // the terminal state the closing tick already carries.
-    let pairs = stage_kind_pairs(&progress);
+    let pairs = stage_kind_pairs(progress);
     let (first, rest) = pairs
         .split_first()
-        .with_context(|| format!("book job published no worker.progress: {progress:?}"))?;
+        .with_context(|| format!("{what} job published no worker.progress: {progress:?}"))?;
     assert_eq!(
         first,
         &("processing".to_string(), "book".to_string()),
-        "book job's first worker.progress is not the pull marker: {progress:?}"
+        "{what} job's first worker.progress is not the pull marker: {progress:?}"
     );
     assert!(
         !rest.is_empty(),
-        "book job reported no embed progress: {progress:?}"
+        "{what} job reported no embed progress: {progress:?}"
     );
     assert!(
         rest.iter()
             .all(|pair| pair == &("embed".to_string(), "book".to_string())),
-        "book job reported something other than embed after the pull marker: {progress:?}"
+        "{what} job reported something other than embed after the pull marker: {progress:?}"
     );
     let fractions: Vec<f64> = progress[1..]
         .iter()
@@ -218,6 +236,35 @@ async fn a_book_job_reports_processing_and_no_stage_it_cannot_observe() -> Resul
     Ok(())
 }
 
+/// Path to a fixture under the extract crate's OCR v1 fixture
+/// directory, resolved relative to this crate's manifest dir.
+fn ocr_fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../extract/tests/fixtures/ocr/v1")
+        .join(name)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ocr_intake_reports_embed_progress_like_a_book() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    // The OCR ingest reads the scan PDF's outline through PDFium. The
+    // gate skips when no library is loadable and fails when the
+    // environment declares one mandatory.
+    if !bookrack_extract::pdfium_gate::available() {
+        return Ok(());
+    }
+
+    let (progress, last_finished) = drive_one_job(
+        "intake.ocr",
+        json!({
+            "ocr_md": ocr_fixture("sample.bookrack-ocr.v1.md"),
+            "from_pdf": ocr_fixture("sample.pdf"),
+        }),
+    )
+    .await?;
+    assert_book_pipeline_progress("ocr", &progress, &last_finished)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_paper_job_reports_processing_under_its_own_kind() -> Result<()> {
     process_env(ProcessEnv::daemon());
@@ -227,7 +274,8 @@ async fn a_paper_job_reports_processing_under_its_own_kind() -> Result<()> {
     // and the job then fails on its own.
     let paper_path = paper_dir.path().join("absent-paper.pdf");
 
-    let (progress, last_finished) = drive_one_job("glean.submit", paper_path).await?;
+    let (progress, last_finished) =
+        drive_one_job("glean.submit", json!({"paths": [paper_path]})).await?;
 
     assert_eq!(
         last_finished["kind"].as_str(),

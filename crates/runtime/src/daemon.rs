@@ -615,6 +615,11 @@ impl DaemonRuntime {
                                 let handle = registry
                                     .get(library)
                                     .map_err(|e| queue::JobError::Book(format!("registry: {e}")))?;
+                                // Both book-pipeline legs below report
+                                // their embedding pass through one
+                                // throttled reporter on the job's sink.
+                                let on_embed_batch =
+                                    embed_batch_reporter(&sink, EMBED_PROGRESS_INTERVAL);
                                 if let Some(ocr) = intake_ocr {
                                     let params = prepare_book_params(
                                         &handle.templates().ingest,
@@ -628,7 +633,13 @@ impl DaemonRuntime {
                                         allow_partial: ocr.allow_partial,
                                     };
                                     let report = handle
-                                        .ingest_ocr(&path, &ocr.from_pdf, &ocr_params, &params)
+                                        .ingest_ocr(
+                                            &path,
+                                            &ocr.from_pdf,
+                                            &ocr_params,
+                                            &params,
+                                            &on_embed_batch,
+                                        )
                                         .await
                                         .map_err(|e| queue::classify_ingest_error(&e))?;
                                     return Ok::<queue::JobSuccess, queue::JobError>(
@@ -655,8 +666,6 @@ impl DaemonRuntime {
                                         // terminal carrying that anchor id.
                                         // Recognize it before `classify_ingest_error`
                                         // erases the typed error into a message.
-                                        let on_embed_batch =
-                                            embed_batch_reporter(&sink, EMBED_PROGRESS_INTERVAL);
                                         let report = match handle
                                             .ingest_book(&path, &params, &on_embed_batch)
                                             .await

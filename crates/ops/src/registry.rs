@@ -24,7 +24,7 @@ use bookrack_config::Config;
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_glean::{GleanParams, GleanReport};
-use bookrack_ingest::ocr::{OcrIngestParams, OcrIngestReport, ingest_ocr_intake};
+use bookrack_ingest::ocr::{OcrIngestParams, OcrIngestReport, ingest_ocr_intake_with_progress};
 use bookrack_ingest::{IngestParams, IngestReport, OnEmbedBatch};
 use eyre::WrapErr;
 use tokio::sync::Mutex as AsyncMutex;
@@ -304,10 +304,12 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
     /// Mirrors [`Self::ingest_book`]: holds the per-library ingest
     /// mutex, opens fresh [`Catalog`] and [`Corpus`] handles from the
     /// library's stored paths, then forwards to
-    /// [`bookrack_ingest::ocr::ingest_ocr_intake`] with the library's
-    /// warm embedder. Refreshes the book-side [`Library`] store so the
-    /// first OCR intake into a previously empty data dir lights up the
-    /// read path on the same lock.
+    /// [`bookrack_ingest::ocr::ingest_ocr_intake_with_progress`] with
+    /// the library's warm embedder, reporting each EMBED batch to
+    /// `on_embed_batch` as [`Self::ingest_book`] does. Refreshes the
+    /// book-side [`Library`] store so the first OCR intake into a
+    /// previously empty data dir lights up the read path on the same
+    /// lock.
     ///
     /// Returns an error when this handle was built catalog-only, since
     /// the OCR ingest path requires the embedder that lives on the
@@ -318,6 +320,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
         from_pdf: &Path,
         ocr_params: &OcrIngestParams,
         params: &IngestParams,
+        on_embed_batch: &OnEmbedBatch<'_>,
     ) -> eyre::Result<OcrIngestReport> {
         let embedder = self
             .ops
@@ -328,7 +331,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
             Corpus::open(self.ops.corpus_db()).context("open corpus for OCR intake write")?;
         let mut catalog = Catalog::open_with_backup(self.ops.catalog_db(), self.ops.backup_dir())
             .context("open catalog for OCR intake write")?;
-        let report = ingest_ocr_intake(
+        let report = ingest_ocr_intake_with_progress(
             &mut corpus,
             &mut catalog,
             self.ops.lancedb_dir(),
@@ -338,6 +341,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
             embedder,
             params,
             ocr_params,
+            on_embed_batch,
         )
         .await
         .context("registry-mediated OCR intake")?;
