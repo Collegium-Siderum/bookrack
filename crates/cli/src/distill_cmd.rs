@@ -33,6 +33,7 @@
 //! `list` take the read-only one, which refuses a database at any
 //! other revision instead of migrating it on a read command's behalf.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -51,6 +52,7 @@ use eyre::{Context as _, Result, bail, eyre};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 
 use crate::render::ctx;
+use crate::render::progress::{Surface, SurfaceKind};
 use crate::render::table::RowTable;
 
 /// One-shot resolver for the data root paths the distill commands
@@ -368,6 +370,37 @@ fn finalize_pipeline_run(paths: &DistillPaths, run: RunHandle, ok: bool, dry_run
     }
 }
 
+/// Stage progress for one book's pipeline run, drawn on a [`Surface`]
+/// and cleared when dropped.
+struct BookProgress {
+    surface: RefCell<Box<dyn Surface>>,
+    book: String,
+}
+
+impl BookProgress {
+    /// Progress for the book at 1-based `position` of `count`.
+    fn new(surface: Box<dyn Surface>, position: usize, count: usize, slug: &str) -> Self {
+        Self {
+            surface: RefCell::new(surface),
+            book: format!("{position}/{count} {slug}"),
+        }
+    }
+
+    /// Shows that stage `i` of `n`, `name`, is running.
+    fn stage(&self, i: usize, n: usize, name: &str) {
+        let line = format!("{} [{i}/{n}] {name}", self.book);
+        let mut surface = self.surface.borrow_mut();
+        surface.status(&line);
+        surface.transition(&line);
+    }
+}
+
+impl Drop for BookProgress {
+    fn drop(&mut self) {
+        self.surface.get_mut().clear();
+    }
+}
+
 fn run_books(
     paths: &DistillPaths,
     books: &[ResolvedBook],
@@ -375,7 +408,7 @@ fn run_books(
     distill_run_id: &str,
     pipeline_run_id: Option<&str>,
 ) -> Result<()> {
-    for book in books {
+    for (position, book) in books.iter().enumerate() {
         let parsed = BookToml::load(&book.book_toml)
             .with_context(|| format!("load {}", book.book_toml.display()))?;
         let pipeline = load_pipeline(&book.book_toml)
@@ -384,9 +417,16 @@ fn run_books(
             .with_context(|| format!("read OCR source for {}", book.slug))?;
         let extras = compose_extras(&book.slug, distill_run_id);
         let started_at = chrono::Utc::now();
+        let progress = BookProgress::new(
+            SurfaceKind::from_context().build(),
+            position + 1,
+            books.len(),
+            &book.slug,
+        );
         let (drafts, coverage) = pipeline
-            .run_with_extras(source, extras)
+            .run_with_progress(source, extras, &|i, n, name| progress.stage(i, n, name))
             .with_context(|| format!("run pipeline for {}", book.slug))?;
+        drop(progress);
         let finished_at = chrono::Utc::now();
 
         print_stage_table(&book.slug, &coverage.stage_reports);
@@ -1034,7 +1074,45 @@ impl ListRow {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
+
+    /// Surface that records every call in order.
+    struct Recording(Arc<Mutex<Vec<String>>>);
+
+    impl Surface for Recording {
+        fn status(&mut self, line: &str) {
+            self.0.lock().unwrap().push(format!("status: {line}"));
+        }
+        fn transition(&mut self, line: &str) {
+            self.0.lock().unwrap().push(format!("transition: {line}"));
+        }
+        fn notice(&mut self, line: &str) {
+            self.0.lock().unwrap().push(format!("notice: {line}"));
+        }
+        fn clear(&mut self) {
+            self.0.lock().unwrap().push("clear".to_string());
+        }
+    }
+
+    #[test]
+    fn book_progress_labels_each_stage_and_clears_when_dropped() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let progress = BookProgress::new(Box::new(Recording(Arc::clone(&log))), 2, 5, "lexicon");
+        progress.stage(1, 3, "split_pages");
+        progress.stage(2, 3, "segment");
+        drop(progress);
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                "status: 2/5 lexicon [1/3] split_pages",
+                "transition: 2/5 lexicon [1/3] split_pages",
+                "status: 2/5 lexicon [2/3] segment",
+                "transition: 2/5 lexicon [2/3] segment",
+                "clear",
+            ]
+        );
+    }
 
     /// Pins the refs-side lookup fallback projection to the distill-side
     /// key normalizer. The two crates do not depend on each other; this

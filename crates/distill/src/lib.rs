@@ -54,7 +54,7 @@ pub use extractor::{
 };
 pub use finalize::{FtsComposer, KeyNormalizer, to_entry_draft};
 pub use patterns::{BracketKind, PatternMatch, PatternRef, match_pattern};
-pub use pipeline::{Pipeline, Stage};
+pub use pipeline::{OnStage, Pipeline, Stage};
 pub use segment::{
     one_block_per_page, pair_bilingual_entries, split_bilingual_blocks, split_pages, walk_anchors,
     walk_anchors_per_lang,

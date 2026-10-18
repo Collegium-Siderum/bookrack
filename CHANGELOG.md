@@ -10,6 +10,12 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **`distill build` shows which stage of which book is running.** The
+  build ran each book's pipeline without a word until the book's stage
+  table printed. It now draws `2/5 <slug> [3/7] <stage>` on stderr,
+  naming a stage as it starts; with stderr not a terminal it appends
+  one such line per stage, and under `--json` or `--quiet` it draws
+  nothing. `distill lint` and `distill verify` are unchanged.
 - **A book's embedding pass reports how far it has got.** While the
   queue worker embeds a book, `worker.progress` carries `stage: embed`
   with `stage_progress` set to the fraction of the book's chunks

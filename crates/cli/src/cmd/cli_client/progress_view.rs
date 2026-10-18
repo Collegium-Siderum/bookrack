@@ -12,20 +12,12 @@
 //! it drew, on every exit from the wait.
 
 use std::collections::HashSet;
-use std::time::Duration;
 
 use bookrack_cli::render::human::short_id;
 use bookrack_cli::render::job_report::{JobOutcomeRecord, JobOutcomeState, state_word};
-use bookrack_cli::render::progress::SpinnerWithStage;
-use bookrack_cli::render::{OutputMode, ctx, stderr_is_tty};
+use bookrack_cli::render::progress::{Surface, SurfaceKind};
 use bookrack_control_client::Event;
 use serde_json::Value;
-
-/// Delay before the spinner draws its first frame, so a wait that
-/// ends quickly leaves nothing on the terminal.
-// setting: internal -- when a progress line first appears, not what it
-// reports; the wait itself is unaffected
-const REVEAL_AFTER: Duration = Duration::from_millis(500);
 
 const LAG_NOTICE: &str = "bookrack: event stream lagged; progress may be incomplete";
 
@@ -265,88 +257,6 @@ fn outcome_line(done: usize, total: usize, record: &JobOutcomeRecord) -> String 
     line
 }
 
-/// Where a [`ProgressView`] draws.
-pub(crate) trait Surface: Send {
-    /// Replaces the status line. A surface that cannot redraw ignores
-    /// it.
-    fn status(&mut self, line: &str);
-    /// Records a stage transition. A surface that redraws ignores it;
-    /// its status line already shows the stage.
-    fn transition(&mut self, line: &str);
-    /// Prints a line that stays.
-    fn notice(&mut self, line: &str);
-    /// Removes whatever the surface drew.
-    fn clear(&mut self);
-}
-
-/// The surface a wait draws on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SurfaceKind {
-    /// Draws nothing.
-    Hidden,
-    /// Appends a line per stage transition and notice; never rewrites.
-    Plain,
-    /// Redraws one status line next to a spinner.
-    Spinner,
-}
-
-impl SurfaceKind {
-    /// `Quiet` and `Json` draw nothing. A human-mode wait redraws one
-    /// line on a terminal and appends lines anywhere else.
-    pub fn select(mode: OutputMode, stderr_tty: bool) -> Self {
-        match mode {
-            OutputMode::Quiet | OutputMode::Json => Self::Hidden,
-            OutputMode::Human if stderr_tty => Self::Spinner,
-            OutputMode::Human => Self::Plain,
-        }
-    }
-
-    pub fn build(self) -> Box<dyn Surface> {
-        match self {
-            Self::Hidden => Box::new(HiddenSurface),
-            Self::Plain => Box::new(PlainSurface),
-            Self::Spinner => Box::new(SpinnerSurface(SpinnerWithStage::new(REVEAL_AFTER))),
-        }
-    }
-}
-
-struct HiddenSurface;
-
-impl Surface for HiddenSurface {
-    fn status(&mut self, _line: &str) {}
-    fn transition(&mut self, _line: &str) {}
-    fn notice(&mut self, _line: &str) {}
-    fn clear(&mut self) {}
-}
-
-struct PlainSurface;
-
-impl Surface for PlainSurface {
-    fn status(&mut self, _line: &str) {}
-    fn transition(&mut self, line: &str) {
-        eprintln!("{line}");
-    }
-    fn notice(&mut self, line: &str) {
-        eprintln!("{line}");
-    }
-    fn clear(&mut self) {}
-}
-
-struct SpinnerSurface(SpinnerWithStage);
-
-impl Surface for SpinnerSurface {
-    fn status(&mut self, line: &str) {
-        self.0.set_line(line);
-    }
-    fn transition(&mut self, _line: &str) {}
-    fn notice(&mut self, line: &str) {
-        self.0.print_above(line);
-    }
-    fn clear(&mut self) {
-        self.0.finish_and_clear();
-    }
-}
-
 /// A [`ViewState`] drawn on a [`Surface`]. Dropping it clears the
 /// surface.
 pub(crate) struct ProgressView {
@@ -404,7 +314,7 @@ impl Drop for ProgressView {
 }
 
 fn default_surface() -> Box<dyn Surface> {
-    SurfaceKind::select(ctx().output(), stderr_is_tty()).build()
+    SurfaceKind::from_context().build()
 }
 
 #[cfg(test)]
@@ -493,26 +403,6 @@ mod tests {
             .slot
             .as_ref()
             .map(|s| (s.job_id.clone(), s.stage.clone(), s.percent))
-    }
-
-    #[test]
-    fn quiet_and_json_draw_nothing_and_a_human_wait_appends_off_a_terminal() {
-        assert_eq!(
-            SurfaceKind::select(OutputMode::Quiet, true),
-            SurfaceKind::Hidden
-        );
-        assert_eq!(
-            SurfaceKind::select(OutputMode::Json, true),
-            SurfaceKind::Hidden
-        );
-        assert_eq!(
-            SurfaceKind::select(OutputMode::Human, true),
-            SurfaceKind::Spinner
-        );
-        assert_eq!(
-            SurfaceKind::select(OutputMode::Human, false),
-            SurfaceKind::Plain
-        );
     }
 
     #[test]

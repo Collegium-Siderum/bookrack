@@ -630,9 +630,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::cli_client::progress_view::ViewState;
     use crate::cmd::cli_client::progress_view::testing::RecordingSurface;
-    use crate::cmd::cli_client::progress_view::{SurfaceKind, ViewState};
     use bookrack_cli::render::job_report::JobOutcomeState;
+    use bookrack_cli::render::progress::SurfaceKind;
     use bookrack_runtime::control::methods::REGISTRY;
     use serde_json::json;
 

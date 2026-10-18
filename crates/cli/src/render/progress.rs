@@ -1,19 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Status spinner used by the CLI's async-wait renderers.
+//! Progress drawing shared by the CLI's long-running commands.
 //!
-//! Wraps [`indicatif::ProgressBar`] behind a small, opinionated API:
-//! one status line drawn next to the spinner, lines printed above it,
-//! and a clear on finish. The bar stays hidden until a reveal delay
-//! has elapsed, so a wait that ends quickly never draws a frame. The
-//! wrapper centralises the formatting so individual subcommand modules
-//! do not write `\r` rewrites by hand.
+//! [`SurfaceKind`] picks where a progress line goes from the output
+//! mode and whether stderr is a terminal, and builds the [`Surface`]
+//! that draws it: nothing, appended lines, or a [`SpinnerWithStage`].
+//!
+//! [`SpinnerWithStage`] wraps [`indicatif::ProgressBar`] behind a
+//! small, opinionated API: one status line drawn next to the spinner,
+//! lines printed above it, and a clear on finish. The bar stays hidden
+//! until a reveal delay has elapsed, so a wait that ends quickly never
+//! draws a frame. The wrapper centralises the formatting so individual
+//! subcommand modules do not write `\r` rewrites by hand.
 
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
-use super::ctx;
+use super::{OutputMode, ctx, stderr_is_tty};
+
+/// Delay before the spinner draws its first frame, so a wait that
+/// ends quickly leaves nothing on the terminal.
+// setting: internal -- when a progress line first appears, not what it
+// reports; the wait itself is unaffected
+const REVEAL_AFTER: Duration = Duration::from_millis(500);
 
 /// Redraw interval of the spinner glyph.
 // setting: internal -- the animation rate of a glyph that carries no
@@ -81,9 +91,117 @@ fn spinner_style() -> ProgressStyle {
         .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", ""])
 }
 
+/// Where a progress line draws: a redrawn status line, an appended
+/// log, or nothing.
+pub trait Surface: Send {
+    /// Replaces the status line. A surface that cannot redraw ignores
+    /// it.
+    fn status(&mut self, line: &str);
+    /// Records a stage transition. A surface that redraws ignores it;
+    /// its status line already shows the stage.
+    fn transition(&mut self, line: &str);
+    /// Prints a line that stays.
+    fn notice(&mut self, line: &str);
+    /// Removes whatever the surface drew.
+    fn clear(&mut self);
+}
+
+/// The kind of [`Surface`] a progress line draws on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceKind {
+    /// Draws nothing.
+    Hidden,
+    /// Appends a line per stage transition and notice; never rewrites.
+    Plain,
+    /// Redraws one status line next to a spinner.
+    Spinner,
+}
+
+impl SurfaceKind {
+    /// `Quiet` and `Json` draw nothing. Human output redraws one line
+    /// on a terminal and appends lines anywhere else.
+    pub fn select(mode: OutputMode, stderr_tty: bool) -> Self {
+        match mode {
+            OutputMode::Quiet | OutputMode::Json => Self::Hidden,
+            OutputMode::Human if stderr_tty => Self::Spinner,
+            OutputMode::Human => Self::Plain,
+        }
+    }
+
+    /// The kind the installed render context and stderr call for.
+    pub fn from_context() -> Self {
+        Self::select(ctx().output(), stderr_is_tty())
+    }
+
+    pub fn build(self) -> Box<dyn Surface> {
+        match self {
+            Self::Hidden => Box::new(HiddenSurface),
+            Self::Plain => Box::new(PlainSurface),
+            Self::Spinner => Box::new(SpinnerSurface(SpinnerWithStage::new(REVEAL_AFTER))),
+        }
+    }
+}
+
+struct HiddenSurface;
+
+impl Surface for HiddenSurface {
+    fn status(&mut self, _line: &str) {}
+    fn transition(&mut self, _line: &str) {}
+    fn notice(&mut self, _line: &str) {}
+    fn clear(&mut self) {}
+}
+
+struct PlainSurface;
+
+impl Surface for PlainSurface {
+    fn status(&mut self, _line: &str) {}
+    fn transition(&mut self, line: &str) {
+        eprintln!("{line}");
+    }
+    fn notice(&mut self, line: &str) {
+        eprintln!("{line}");
+    }
+    fn clear(&mut self) {}
+}
+
+struct SpinnerSurface(SpinnerWithStage);
+
+impl Surface for SpinnerSurface {
+    fn status(&mut self, line: &str) {
+        self.0.set_line(line);
+    }
+    fn transition(&mut self, _line: &str) {}
+    fn notice(&mut self, line: &str) {
+        self.0.print_above(line);
+    }
+    fn clear(&mut self) {
+        self.0.finish_and_clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quiet_and_json_draw_nothing_and_human_output_appends_off_a_terminal() {
+        assert_eq!(
+            SurfaceKind::select(OutputMode::Quiet, true),
+            SurfaceKind::Hidden
+        );
+        assert_eq!(
+            SurfaceKind::select(OutputMode::Json, true),
+            SurfaceKind::Hidden
+        );
+        assert_eq!(
+            SurfaceKind::select(OutputMode::Human, true),
+            SurfaceKind::Spinner
+        );
+        assert_eq!(
+            SurfaceKind::select(OutputMode::Human, false),
+            SurfaceKind::Plain
+        );
+    }
 
     #[test]
     fn quiet_mode_builds_no_progress_bar() {
