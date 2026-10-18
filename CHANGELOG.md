@@ -10,6 +10,13 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **A book's embedding pass reports how far it has got.** While the
+  queue worker embeds a book, `worker.progress` carries `stage: embed`
+  with `stage_progress` set to the fraction of the book's chunks
+  written to the vector store — always for the first and the last
+  batch, throttled in between — so `ingest` shows a percentage
+  during the longest stage instead of a bare spinner. Paper jobs and
+  `intake ocr` jobs report `processing` only.
 - **A write's reply names the library it acted on.** Every control-plane
   method that takes the write mutex — the `vectors`, `stamps`,
   `corpus`, `metadata`, `remove`, and `dryrun` writes on both sides,
@@ -85,8 +92,8 @@ release workflow extracts the matching section verbatim from this file.
   and a paper job was shown under the same two book-pipeline names.
   It now carries the job's `kind` and announces `processing` once, on
   pull; the job's outcome is read from the `queue.tick` that closes
-  it. A subscriber matching on `extract` or `embed` sees neither
-  again; `ingest` was never emitted.
+  it. `extract` is gone, `embed` now arrives only while a book is
+  being embedded (see Added), and `ingest` was never emitted.
 - **Book-side `metadata` writes return what they recorded.** Each
   answered `{ ok: true }` and printed its sentence on the daemon's own
   stdout, while the same ops call handed an MCP agent the audit row it

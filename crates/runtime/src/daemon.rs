@@ -59,7 +59,9 @@ use crate::control::events::{
     EventStreamHandle, Stage,
 };
 use crate::control::methods::MethodContext;
-use crate::control::progress::{EventProgressSink, ProgressSink};
+use crate::control::progress::{
+    EMBED_PROGRESS_INTERVAL, EventProgressSink, ProgressSink, embed_batch_reporter,
+};
 use crate::control::socket::{
     ControlSocketGuard, ControlSocketPath, bind as bind_control_socket, run_accept_loop,
 };
@@ -653,7 +655,11 @@ impl DaemonRuntime {
                                         // terminal carrying that anchor id.
                                         // Recognize it before `classify_ingest_error`
                                         // erases the typed error into a message.
-                                        let report = match handle.ingest_book(&path, &params).await
+                                        let on_embed_batch =
+                                            embed_batch_reporter(&sink, EMBED_PROGRESS_INTERVAL);
+                                        let report = match handle
+                                            .ingest_book(&path, &params, &on_embed_batch)
+                                            .await
                                         {
                                             Ok(report) => report,
                                             Err(e) => {

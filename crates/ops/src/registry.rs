@@ -25,7 +25,7 @@ use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_glean::{GleanParams, GleanReport};
 use bookrack_ingest::ocr::{OcrIngestParams, OcrIngestReport, ingest_ocr_intake};
-use bookrack_ingest::{IngestParams, IngestReport};
+use bookrack_ingest::{IngestParams, IngestReport, OnEmbedBatch};
 use eyre::WrapErr;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -246,10 +246,11 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
     ///
     /// Holds the per-library ingest mutex for the duration of the call,
     /// opens fresh [`Catalog`] and [`Corpus`] handles from the library's
-    /// stored paths, then forwards to [`bookrack_ingest::ingest_book`]
-    /// with the library's warm embedder. The caller — currently the
-    /// `bookrack run` REPL's queue worker — never opens a database on
-    /// its own.
+    /// stored paths, then forwards to
+    /// [`bookrack_ingest::ingest_book_with_progress`] with the library's
+    /// warm embedder, passing `on_embed_batch` through. The caller —
+    /// currently the `bookrack run` REPL's queue worker — never opens a
+    /// database on its own.
     ///
     /// Returns an error when this handle was built catalog-only, since
     /// ingest requires the embedder that lives on the
@@ -258,6 +259,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
         &self,
         path: &Path,
         params: &IngestParams,
+        on_embed_batch: &OnEmbedBatch<'_>,
     ) -> eyre::Result<IngestReport> {
         let embedder = self
             .ops
@@ -268,7 +270,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
             Corpus::open(self.ops.corpus_db()).context("open corpus for ingest write")?;
         let mut catalog = Catalog::open_with_backup(self.ops.catalog_db(), self.ops.backup_dir())
             .context("open catalog for ingest write")?;
-        let report = bookrack_ingest::ingest_book(
+        let report = bookrack_ingest::ingest_book_with_progress(
             path,
             &mut corpus,
             &mut catalog,
@@ -276,6 +278,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
             self.ops.books_dir(),
             embedder,
             params,
+            on_embed_batch,
         )
         .await
         .context("registry-mediated ingest")?;
@@ -940,7 +943,11 @@ mod tests {
     async fn ingest_book_on_catalog_only_handle_errors_without_running_ingest() {
         let h = handle("books");
         let err = h
-            .ingest_book(Path::new("/does/not/exist.epub"), &IngestParams::default())
+            .ingest_book(
+                Path::new("/does/not/exist.epub"),
+                &IngestParams::default(),
+                &|_, _| {},
+            )
             .await
             .expect_err("catalog-only handle has no embedder");
         let msg = format!("{err}");

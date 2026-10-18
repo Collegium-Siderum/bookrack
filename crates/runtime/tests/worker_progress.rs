@@ -181,13 +181,39 @@ async fn a_book_job_reports_processing_and_no_stage_it_cannot_observe() -> Resul
         Some("done"),
         "job did not finish clean: {last_finished}"
     );
-    // One marker on pull, tagged with the pipeline; nothing claims a
-    // stage the worker cannot see, and nothing repeats the terminal
-    // state the closing tick already carries.
+    // One marker on pull, then the embedding pass's measured fraction;
+    // nothing claims a stage the worker cannot see, and nothing repeats
+    // the terminal state the closing tick already carries.
+    let pairs = stage_kind_pairs(&progress);
+    let (first, rest) = pairs
+        .split_first()
+        .with_context(|| format!("book job published no worker.progress: {progress:?}"))?;
     assert_eq!(
-        stage_kind_pairs(&progress),
-        vec![("processing".to_string(), "book".to_string())],
-        "book job's worker.progress drifted from the documented contract: {progress:?}"
+        first,
+        &("processing".to_string(), "book".to_string()),
+        "book job's first worker.progress is not the pull marker: {progress:?}"
+    );
+    assert!(
+        !rest.is_empty(),
+        "book job reported no embed progress: {progress:?}"
+    );
+    assert!(
+        rest.iter()
+            .all(|pair| pair == &("embed".to_string(), "book".to_string())),
+        "book job reported something other than embed after the pull marker: {progress:?}"
+    );
+    let fractions: Vec<f64> = progress[1..]
+        .iter()
+        .map(|v| v["stage_progress"].as_f64().unwrap_or(f64::NAN))
+        .collect();
+    assert!(
+        fractions.iter().all(|f| (0.0..=1.0).contains(f)),
+        "embed progress outside 0.0..=1.0 or missing: {fractions:?}"
+    );
+    assert_eq!(
+        fractions.last().copied(),
+        Some(1.0),
+        "the last batch was not reported: {fractions:?}"
     );
     Ok(())
 }

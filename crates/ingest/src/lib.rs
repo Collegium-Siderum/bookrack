@@ -31,7 +31,9 @@ pub use dryrun::{
     BiblioOut, ChunkStatsOut, DryrunBookReport, DryrunParams, DryrunSummary, FieldOut,
     StructureOut, TocStatsOut, collect_files, dryrun_book, dryrun_path, summarize,
 };
-pub use embed_run::{EmbedRunReport, embed_book_chunks, now_rfc3339};
+pub use embed_run::{
+    EmbedRunReport, OnEmbedBatch, embed_book_chunks, embed_book_chunks_with_progress, now_rfc3339,
+};
 
 use std::path::Path;
 
@@ -403,11 +405,6 @@ pub struct IngestReport {
 /// than duplicating them. `lancedb_dir` is the vector store directory;
 /// `embedder` turns chunk text into vectors. A file whose text layer is
 /// unusable yields [`IngestError::NeedsOcr`].
-#[tracing::instrument(
-    name = "book",
-    skip_all,
-    fields(file = %file.display(), intake_id = tracing::field::Empty)
-)]
 pub async fn ingest_book<E: Embedder>(
     file: &Path,
     corpus: &mut Corpus,
@@ -416,6 +413,41 @@ pub async fn ingest_book<E: Embedder>(
     books_dir: &Path,
     embedder: &E,
     params: &IngestParams,
+) -> Result<IngestReport> {
+    ingest_book_with_progress(
+        file,
+        corpus,
+        catalog,
+        lancedb_dir,
+        books_dir,
+        embedder,
+        params,
+        &|_, _| {},
+    )
+    .await
+}
+
+/// [`ingest_book`], reporting each EMBED batch to `on_embed_batch` once
+/// it is written. Only the EMBED stage reports; the stages before it
+/// run without callbacks.
+#[tracing::instrument(
+    name = "book",
+    skip_all,
+    fields(file = %file.display(), intake_id = tracing::field::Empty)
+)]
+// `ingest_book`'s seven parameters plus the callback; folding the
+// callback into `IngestParams` would put a borrowed closure into a
+// plain configuration value that callers clone and build from defaults.
+#[allow(clippy::too_many_arguments)]
+pub async fn ingest_book_with_progress<E: Embedder>(
+    file: &Path,
+    corpus: &mut Corpus,
+    catalog: &mut Catalog,
+    lancedb_dir: &Path,
+    books_dir: &Path,
+    embedder: &E,
+    params: &IngestParams,
+    on_embed_batch: &OnEmbedBatch<'_>,
 ) -> Result<IngestReport> {
     // One run id ties every audit row from this invocation together; the
     // whole-file hash anchors the rows to a source that survives deletion.
@@ -706,6 +738,7 @@ pub async fn ingest_book<E: Embedder>(
         &run_id,
         &source_sha,
         &parsed_at,
+        on_embed_batch,
     )
     .await?;
 
@@ -799,6 +832,9 @@ fn noop_if_up_to_date(
 /// prose leaves out of `corpus` and feeds them straight into the
 /// chunker. A book whose STRUCTURE never ran first cannot be advanced
 /// through this entry point.
+///
+/// `on_embed_batch` receives each EMBED batch once it is written; see
+/// [`OnEmbedBatch`].
 #[allow(clippy::too_many_arguments)]
 pub async fn resume_from_chunk<E: Embedder>(
     corpus: &mut Corpus,
@@ -811,6 +847,7 @@ pub async fn resume_from_chunk<E: Embedder>(
     run_id: &str,
     source_sha: &str,
     parsed_at: &str,
+    on_embed_batch: &OnEmbedBatch<'_>,
 ) -> Result<EmbedRunReport> {
     let book_root_raw = book_root_id.get();
 
@@ -858,35 +895,41 @@ pub async fn resume_from_chunk<E: Embedder>(
 
     // EMBED.
     let started = std::time::Instant::now();
-    let embed =
-        match embed_run::embed_book_chunks(&plans, embedder, corpus, lancedb_dir, &params.embed)
-            .instrument(tracing::info_span!("operation", stage = "embed"))
-            .await
-        {
-            Ok(report) => report,
-            Err(e) => {
-                audit(
-                    catalog,
-                    run_id,
-                    source_sha,
-                    Some(book_root_raw),
-                    "embed",
-                    "embed",
-                    "fail",
-                    started,
-                    None,
-                    Some(&error_chain(&e)),
-                );
-                set_state(
-                    catalog,
-                    NewItemState::new(book_root_raw, intake_id, "embed")
-                        .parsed_at(parsed_at)
-                        .embed_model(&params.embed.model)
-                        .last_error(error_chain(&e)),
-                );
-                return Err(e);
-            }
-        };
+    let embed = match embed_run::embed_book_chunks_with_progress(
+        &plans,
+        embedder,
+        corpus,
+        lancedb_dir,
+        &params.embed,
+        on_embed_batch,
+    )
+    .instrument(tracing::info_span!("operation", stage = "embed"))
+    .await
+    {
+        Ok(report) => report,
+        Err(e) => {
+            audit(
+                catalog,
+                run_id,
+                source_sha,
+                Some(book_root_raw),
+                "embed",
+                "embed",
+                "fail",
+                started,
+                None,
+                Some(&error_chain(&e)),
+            );
+            set_state(
+                catalog,
+                NewItemState::new(book_root_raw, intake_id, "embed")
+                    .parsed_at(parsed_at)
+                    .embed_model(&params.embed.model)
+                    .last_error(error_chain(&e)),
+            );
+            return Err(e);
+        }
+    };
     let metric = format!(
         r#"{{"chunks":{},"batches":{},"shrink_events":{},"chars":{}}}"#,
         embed.chunks_written, embed.batches, embed.shrink_events, embed.total_chars
@@ -3104,6 +3147,7 @@ mod book_pipeline_tests {
             "advance-test",
             "test-sha",
             state.parsed_at.as_deref().unwrap_or("now"),
+            &|_, _| {},
         )
         .await
         .expect("resume");

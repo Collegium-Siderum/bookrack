@@ -102,12 +102,15 @@ impl Default for DaemonStateFlag {
 /// A variant names only a position the worker can observe. A pipeline
 /// stage gets a variant once the worker can see that stage begin;
 /// until then a running job reports [`Stage::Processing`].
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
     /// The worker has pulled the job and handed it to its pipeline;
     /// which stage the pipeline is in is not reported.
     Processing,
+    /// A book's embedding pass, reported as batches land in the vector
+    /// store; `stage_progress` is the fraction of chunks written.
+    Embed,
 }
 
 /// Per-job snapshot of a terminal queue transition, attached to

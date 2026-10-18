@@ -371,6 +371,7 @@ pub async fn ingest_ocr_intake<E: Embedder>(
         &run_id,
         &source_sha_ocr,
         &parsed_at,
+        &|_, _| {},
     )
     .await?;
 

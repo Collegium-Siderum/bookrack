@@ -38,6 +38,11 @@ pub struct EmbedRunReport {
     pub total_chars: usize,
 }
 
+/// Callback an EMBED run invokes after each batch lands in the store,
+/// with `(consumed, total)`: the chunk plans written so far and the
+/// number the run was given. The last call has `consumed == total`.
+pub type OnEmbedBatch<'a> = dyn Fn(usize, usize) + Send + Sync + 'a;
+
 /// Embed a book's chunk plans and write them to the store under
 /// `lancedb_dir`. Returns the run's [`EmbedRunReport`].
 ///
@@ -50,6 +55,19 @@ pub async fn embed_book_chunks<E: Embedder>(
     corpus: &Corpus,
     lancedb_dir: &Path,
     cfg: &EmbedConfig,
+) -> Result<EmbedRunReport> {
+    embed_book_chunks_with_progress(plans, embedder, corpus, lancedb_dir, cfg, &|_, _| {}).await
+}
+
+/// [`embed_book_chunks`], reporting each batch to `on_batch` once it
+/// is written. An empty `plans` writes nothing and reports nothing.
+pub async fn embed_book_chunks_with_progress<E: Embedder>(
+    plans: &[ChunkPlan],
+    embedder: &E,
+    corpus: &Corpus,
+    lancedb_dir: &Path,
+    cfg: &EmbedConfig,
+    on_batch: &OnEmbedBatch<'_>,
 ) -> Result<EmbedRunReport> {
     if plans.is_empty() {
         return Ok(EmbedRunReport::default());
@@ -120,6 +138,7 @@ pub async fn embed_book_chunks<E: Embedder>(
         report.shrink_events += shrinks;
         report.total_chars += batch_chars;
         start = end;
+        on_batch(start, total);
 
         if ticker.should_emit(Instant::now()) {
             tracing::info!(
@@ -446,6 +465,48 @@ mod tests {
 
         let store = ChunkStore::open(dir.path(), 8).await.expect("reopen");
         assert_eq!(store.count_rows().await.expect("count"), 5);
+    }
+
+    #[tokio::test]
+    async fn each_written_batch_is_reported_ending_at_the_plan_count() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some prose text")).collect();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let cfg = EmbedConfig {
+            batch_max_chunks: 2,
+            ..EmbedConfig::default()
+        };
+        let calls = std::sync::Mutex::new(Vec::new());
+        let report = embed_book_chunks_with_progress(
+            &plans,
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &cfg,
+            &|consumed, total| calls.lock().unwrap().push((consumed, total)),
+        )
+        .await
+        .expect("embed");
+        assert_eq!(report.batches, 3);
+        assert_eq!(*calls.lock().unwrap(), vec![(2, 5), (4, 5), (5, 5)]);
+    }
+
+    #[tokio::test]
+    async fn an_empty_plan_list_reports_nothing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let calls = std::sync::Mutex::new(Vec::new());
+        embed_book_chunks_with_progress(
+            &[],
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &EmbedConfig::default(),
+            &|consumed, total| calls.lock().unwrap().push((consumed, total)),
+        )
+        .await
+        .expect("embed");
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[test]
