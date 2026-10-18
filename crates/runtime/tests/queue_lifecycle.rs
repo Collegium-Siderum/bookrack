@@ -65,6 +65,11 @@ async fn pause_resume_clear_round_trip_through_control_plane() -> Result<()> {
         .await?;
         let pause_resp = recv(&mut wr_reader).await?;
         assert_eq!(
+            pause_resp["result"]["ok"],
+            Value::Bool(true),
+            "{pause_resp}"
+        );
+        assert_eq!(
             pause_resp["result"]["paused"],
             Value::Bool(true),
             "{pause_resp}"
@@ -115,6 +120,11 @@ async fn pause_resume_clear_round_trip_through_control_plane() -> Result<()> {
         )
         .await?;
         let clear_resp = recv(&mut wr_reader).await?;
+        assert_eq!(
+            clear_resp["result"]["ok"],
+            Value::Bool(true),
+            "{clear_resp}"
+        );
         assert!(
             clear_resp["result"]["cleared"].as_u64().unwrap_or(0) >= 2,
             "{clear_resp}"
@@ -135,6 +145,11 @@ async fn pause_resume_clear_round_trip_through_control_plane() -> Result<()> {
         )
         .await?;
         let resume_resp = recv(&mut wr_reader).await?;
+        assert_eq!(
+            resume_resp["result"]["ok"],
+            Value::Bool(true),
+            "{resume_resp}"
+        );
         assert_eq!(
             resume_resp["result"]["paused"],
             Value::Bool(false),

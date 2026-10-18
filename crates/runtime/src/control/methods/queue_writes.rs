@@ -24,13 +24,19 @@ use crate::control::events::{DegradedCause, Event, EventStreamHandle, QueueTick}
 use crate::control::jsonrpc::{INTERNAL_ERROR, RpcError};
 use crate::queue::{cancel_all_pending, derive_tick, save_atomic};
 
+/// Reply to `queue.pause` / `queue.resume`. `ok` is the write-method
+/// acknowledgement every control-plane write carries.
 #[derive(Debug, Clone, Serialize)]
 pub struct PauseResponse {
+    pub ok: bool,
     pub paused: bool,
 }
 
+/// Reply to `queue.clear`: the pause flag as it stands after the trim
+/// and the number of pending rows turned into `cancelled`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClearResponse {
+    pub ok: bool,
     pub paused: bool,
     pub cleared: usize,
 }
@@ -64,7 +70,12 @@ pub async fn clear(_params: &Option<Value>, ctx: &MethodContext) -> Result<Value
     };
     ctx.event_stream.publish(Event::QueueTick(tick));
     let paused = ctx.queue_paused.load(Ordering::Acquire);
-    serde_json::to_value(ClearResponse { paused, cleared }).map_err(|e| {
+    serde_json::to_value(ClearResponse {
+        ok: true,
+        paused,
+        cleared,
+    })
+    .map_err(|e| {
         RpcError::new(
             INTERNAL_ERROR,
             format!("serialise queue.clear response: {e}"),
@@ -81,7 +92,7 @@ fn set_paused(ctx: &MethodContext, paused: bool) -> Result<Value, RpcError> {
         &ctx.event_stream,
     )?;
     ctx.event_stream.publish(Event::QueueTick(tick));
-    serde_json::to_value(PauseResponse { paused }).map_err(|e| {
+    serde_json::to_value(PauseResponse { ok: true, paused }).map_err(|e| {
         RpcError::new(
             INTERNAL_ERROR,
             format!("serialise queue.pause response: {e}"),

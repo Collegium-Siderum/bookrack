@@ -49,6 +49,11 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **`queue.pause`, `queue.resume`, and `queue.clear` answer with
+  `ok: true`.** The three replies carried only `paused` (and `cleared`),
+  so a client branching on the `ok` field every other write reply
+  carries read `null`; `queue.clear` also reports `paused`, which the
+  reply always included and the control-plane document now lists.
 - **A one-job wait says why the job failed.** `ingest`, `papers
   ingest`, and `intake ocr` on a single source ended with `(failed)`
   and nothing else: the per-job outcome line that carries the error

@@ -445,8 +445,9 @@ the exit-code bucket does not distinguish the two.
   picking up new jobs; a running job finishes. The pause is persisted in
   the queue document, so it survives a restart.
 - `queue.resume` — `{ ok: true, paused: false }`.
-- `queue.clear` — `{ ok: true, cleared }`. Drops every not-yet-running
-  job; a running job is untouched.
+- `queue.clear` — `{ ok: true, paused, cleared }`. Drops every
+  not-yet-running job; a running job is untouched. `paused` reports the
+  pause flag as it stands after the trim.
 - `library.list` — array of `{ name, default, dimension }` entries,
   one per mounted library: the daemon's served set.
 - `library.info` — full status card for one library;
