@@ -118,17 +118,27 @@ impl JobOutcomeReport {
     /// One-line human summary for a single-job report.
     ///
     /// `action` is the verb stem (e.g. `"Ingested"`). `label` is the
-    /// noun the operator can recognise (typically a basename). The
-    /// report degrades gracefully when more than one job is present
-    /// (falls back to the aggregate counts).
+    /// noun the operator can recognise (typically a basename). A
+    /// single job's state word carries the job's error after a colon
+    /// when the outcome recorded one. The report degrades gracefully
+    /// when more than one job is present (falls back to the aggregate
+    /// counts).
     pub fn format_one_line(&self, action: &str, label: &str) -> String {
         let elapsed = format_elapsed(self.elapsed_secs);
         match self.jobs.as_slice() {
-            [only] => format!(
-                "{action} {label} as {id} in {elapsed} ({verb})",
-                id = short_id(&only.job_id),
-                verb = state_word(only.state),
-            ),
+            // A one-job batch prints no per-job outcome line, so the
+            // error travels on the summary itself.
+            [only] => {
+                let mut verb = state_word(only.state).to_string();
+                if let Some(error) = &only.error {
+                    verb.push_str(": ");
+                    verb.push_str(error);
+                }
+                format!(
+                    "{action} {label} as {id} in {elapsed} ({verb})",
+                    id = short_id(&only.job_id),
+                )
+            }
             many => {
                 let mut parts = Vec::new();
                 if self.totals.done > 0 {
@@ -255,6 +265,30 @@ mod tests {
         assert!(line.contains("Ingested sample.epub as 0190f6c0"));
         assert!(line.contains("12.4s"));
         assert!(line.contains("done"));
+    }
+
+    #[test]
+    fn one_line_names_the_error_of_a_single_failed_job() {
+        let mut failed = rec("0190f6c0-ac42-7e05-7000-deadbeef", JobOutcomeState::Failed);
+        failed.error = Some("source unreadable".to_string());
+        let r = JobOutcomeReport::new(vec![failed], Duration::from_millis(3_200));
+        assert_eq!(
+            r.format_one_line("Ingested", "sample.epub"),
+            "Ingested sample.epub as 0190f6c0 in 3.2s (failed: source unreadable)"
+        );
+
+        // A terminal that carries no error keeps the bare state word.
+        let r = JobOutcomeReport::new(
+            vec![rec(
+                "0190f6c0-ac42-7e05-7000-deadbeef",
+                JobOutcomeState::Cancelled,
+            )],
+            Duration::from_millis(3_200),
+        );
+        assert_eq!(
+            r.format_one_line("Ingested", "sample.epub"),
+            "Ingested sample.epub as 0190f6c0 in 3.2s (cancelled)"
+        );
     }
 
     #[test]

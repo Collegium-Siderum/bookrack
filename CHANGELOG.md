@@ -41,6 +41,12 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A one-job wait says why the job failed.** `ingest`, `papers
+  ingest`, and `intake ocr` on a single source ended with `(failed)`
+  and nothing else: the per-job outcome line that carries the error
+  is printed only for a batch of several, and the one-job summary
+  named the state alone, so the reason was reachable only through
+  `--json` or `queue list`. The summary now reads `(failed: <error>)`.
 - **`--audit-profile` is refused on `doctor`, `init`, `run`, and
   `rpc`.** The gate that rejects the global flag on a subcommand that
   does not consume it ran after those four had already dispatched, so
