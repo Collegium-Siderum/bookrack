@@ -71,6 +71,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **`index-profile apply` executes on a library named by `--library`,
+  `--data-dir`, or `BOOKRACK_DATA_DIR`.** Before running a plan that
+  has actions, apply reads the daemon's `status` for the worker flag
+  and the queue depth, and that read carried the selection; `status`
+  refuses one, so every selected apply with work to do exited `2`
+  with `cannot run this command against library` before rendering the
+  plan, and only the registry default could be reconciled. The read
+  now carries no selection; each action still names the plan's own
+  library.
 - **`queue.pause`, `queue.resume`, and `queue.clear` answer with
   `ok: true`.** The three replies carried only `paused` (and `cleared`),
   so a client branching on the `ok` field every other write reply

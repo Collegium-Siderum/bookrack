@@ -151,22 +151,33 @@ fn same_root(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Whether the daemon runs a queue worker, read off `status`.
+/// The daemon's `status` payload.
 ///
-/// The probe calls `status` directly rather than through [`dispatch`]:
-/// it serves the queue verbs, which act on the process rather than on a
-/// library and leave a `--library` selection unused, and `status` is one
-/// of the methods that refuses a selection. A `status` without the field
-/// reads as a worker present.
-pub(super) async fn queue_worker_enabled(client: &ControlClient) -> Result<bool> {
-    let status = client
+/// Calls `status` directly rather than through [`dispatch`]: `status`
+/// reports on the process itself and is one of the methods that refuses
+/// a library selection. Its callers read process-level fields only —
+/// the queue verbs act on the process, and `index-profile apply` names
+/// its own target on every action it sends afterwards — so a selection
+/// has nowhere to go here.
+pub(super) async fn daemon_status(client: &ControlClient) -> Result<Value> {
+    client
         .call_raw("status", Value::Null)
         .await
-        .context("status rpc")?;
-    Ok(status
+        .context("status rpc")
+}
+
+/// Whether a `status` payload reports a queue worker. A payload without
+/// the field reads as a worker present.
+pub(super) fn reports_queue_worker(status: &Value) -> bool {
+    status
         .get("queue_worker_enabled")
         .and_then(Value::as_bool)
-        .unwrap_or(true))
+        .unwrap_or(true)
+}
+
+/// Whether the daemon runs a queue worker, read off [`daemon_status`].
+pub(super) async fn queue_worker_enabled(client: &ControlClient) -> Result<bool> {
+    Ok(reports_queue_worker(&daemon_status(client).await?))
 }
 
 /// Send one JSON-RPC request and return the `result` payload.

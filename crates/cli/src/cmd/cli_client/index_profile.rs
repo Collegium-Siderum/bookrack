@@ -87,12 +87,8 @@ pub async fn run(
     );
 
     let client = helpers::connect(runtime_dir).await?;
-    let status = helpers::dispatch(&client, "status", Value::Null).await?;
-    if !status
-        .get("queue_worker_enabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
-    {
+    let status = helpers::daemon_status(&client).await?;
+    if !helpers::reports_queue_worker(&status) {
         return Err(BookrackCliError::LocalUserError {
             message: "queue worker unavailable: the daemon runs headless without one, so \
                       apply cannot execute any action; restart the daemon with a queue \
