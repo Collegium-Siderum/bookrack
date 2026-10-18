@@ -1740,7 +1740,10 @@ async fn push_reranker_rows(
     let model_tag = spec.model.as_deref().unwrap_or_default();
     rows.push(reranker_model_row(
         model_tag,
-        bookrack_config::reranker_model_pin::locate_reranker_model(model_tag).path,
+        &crate::rerank_supervisor::reranker_model_state(
+            model_tag,
+            bookrack_config::reranker_model_pin::locate_reranker_model(model_tag),
+        ),
     ));
     rows.push(match supervisor {
         Some(supervisor) => {
@@ -1767,29 +1770,43 @@ fn reranker_binary_row(path: Option<std::path::PathBuf>) -> Row {
     }
 }
 
-fn reranker_model_row(model_tag: &str, path: Option<std::path::PathBuf>) -> Row {
-    match path {
-        Some(path) => Row {
+fn reranker_model_row(
+    model_tag: &str,
+    state: &crate::rerank_supervisor::RerankerModelState,
+) -> Row {
+    use crate::rerank_supervisor::RerankerModelState;
+    let missing = |note: String| Row {
+        label: "reranker model".to_string(),
+        value: format!("{model_tag} missing"),
+        status: Status::Fail { note },
+    };
+    match state {
+        RerankerModelState::Found(path) => Row {
             label: "reranker model".to_string(),
             value: format!("{model_tag} ({})", path.display()),
             status: Status::Ok { note: None },
         },
-        None => Row {
-            label: "reranker model".to_string(),
-            value: format!("{model_tag} missing"),
-            status: Status::Fail {
-                // The size comes from the pin the installer downloads,
-                // so an operator on a metered link or a full volume
-                // learns what the command costs before running it.
-                note: match bookrack_config::reranker_model_pin::reranker_model_pin(model_tag) {
-                    Some(pin) => format!(
-                        "install with `bookrack doctor --install-reranker` ({} download)",
-                        bytes_human(pin.bytes)
-                    ),
-                    None => "install with `bookrack doctor --install-reranker`".to_string(),
-                },
+        RerankerModelState::ExplicitPathMissing(path) => missing(format!(
+            "{} names {}, which does not exist; fix or unset it",
+            bookrack_config::RERANKER_MODEL_ENV,
+            path.display()
+        )),
+        // The size comes from the pin the installer downloads, so an
+        // operator on a metered link or a full volume learns what the
+        // command costs before running it.
+        RerankerModelState::NotInstalled { .. } => missing(
+            match bookrack_config::reranker_model_pin::reranker_model_pin(model_tag) {
+                Some(pin) => format!(
+                    "install with `bookrack doctor --install-reranker` ({} download)",
+                    bytes_human(pin.bytes)
+                ),
+                None => "install with `bookrack doctor --install-reranker`".to_string(),
             },
-        },
+        ),
+        RerankerModelState::Unpinned { .. } => missing(format!(
+            "no pinned download; point {} at its GGUF file, or serve it and set reranker.url",
+            bookrack_config::RERANKER_MODEL_ENV
+        )),
     }
 }
 
@@ -2248,7 +2265,9 @@ mod tests {
         assert!(matches!(found.status, Status::Ok { .. }), "{found:?}");
         let model = reranker_model_row(
             "Qwen3-Reranker-0.6B",
-            Some(std::path::PathBuf::from("/managed/m.gguf")),
+            &crate::rerank_supervisor::RerankerModelState::Found(std::path::PathBuf::from(
+                "/managed/m.gguf",
+            )),
         );
         assert!(model.value.starts_with("Qwen3-Reranker-0.6B"), "{model:?}");
         let ready = supervised_backend_row(&crate::rerank_supervisor::SupervisorState::Ready, 2);
@@ -2260,7 +2279,12 @@ mod tests {
         // missing: both artifact rows fail with the install hint.
         for missing in [
             reranker_binary_row(None),
-            reranker_model_row("Qwen3-Reranker-0.6B", None),
+            reranker_model_row(
+                "Qwen3-Reranker-0.6B",
+                &crate::rerank_supervisor::RerankerModelState::NotInstalled {
+                    tag: "Qwen3-Reranker-0.6B".to_string(),
+                },
+            ),
         ] {
             assert!(
                 matches!(&missing.status, Status::Fail { note } if note.contains("--install-reranker")),
@@ -2811,7 +2835,12 @@ mod tests {
         // say so is one an operator on a metered link or a nearly full
         // volume cannot act on.
         let pin = &bookrack_config::reranker_model_pin::RERANKER_MODEL_PINS[0];
-        let row = reranker_model_row(pin.tag, None);
+        let row = reranker_model_row(
+            pin.tag,
+            &crate::rerank_supervisor::RerankerModelState::NotInstalled {
+                tag: pin.tag.to_string(),
+            },
+        );
         let Status::Fail { note } = &row.status else {
             panic!("a missing model is a failure: {row:?}");
         };
@@ -2915,6 +2944,40 @@ mod tests {
             panic!("a stamp divergence is a warning, not a pass: {rows:?}");
         };
         assert!(note.contains("chunk_version"), "{note}");
+    }
+
+    #[test]
+    fn a_reranker_model_the_installer_cannot_provide_is_not_sent_to_it() {
+        use crate::rerank_supervisor::RerankerModelState;
+        let tag = "synthetic-reranker:unpinned";
+        for state in [
+            RerankerModelState::Unpinned {
+                tag: tag.to_string(),
+            },
+            RerankerModelState::ExplicitPathMissing(std::path::PathBuf::from(
+                "explicit/model.gguf",
+            )),
+        ] {
+            let row = reranker_model_row(tag, &state);
+            let Status::Fail { note } = &row.status else {
+                panic!("a missing model fails the row: {row:?}");
+            };
+            assert!(
+                !note.contains("--install-reranker"),
+                "the installer downloads only pinned models into the managed directory: {note}"
+            );
+            assert!(note.contains(bookrack_config::RERANKER_MODEL_ENV), "{note}");
+        }
+        let row = reranker_model_row(
+            "Qwen3-Reranker-0.6B",
+            &RerankerModelState::NotInstalled {
+                tag: "Qwen3-Reranker-0.6B".to_string(),
+            },
+        );
+        let Status::Fail { note } = &row.status else {
+            panic!("a missing model fails the row: {row:?}");
+        };
+        assert!(note.contains("--install-reranker"), "{note}");
     }
 
     #[test]

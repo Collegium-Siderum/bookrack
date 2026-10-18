@@ -82,6 +82,16 @@ release workflow extracts the matching section verbatim from this file.
   reported that the library "still diverges", on every run; that
   report now names both dimensions, and an interrupted `apply` no
   longer offers `--resume` unless the error does.
+- **A missing reranker model is no longer always sent to
+  `--install-reranker`.** The installer downloads only the pinned
+  model into the managed directory, so for a model with no pinned
+  download, or a `BOOKRACK_RERANKER_MODEL` naming a file that is not
+  there, `bookrack run` and `doctor` used to point at a command that
+  could not help. Bring-up now refuses with exit `2` and the route that
+  does: fix or unset the explicit path, or point it at the model's GGUF
+  file, or serve the model and set `reranker.url`. The model is checked
+  before the `llama-server` binary, so this refusal is not hidden behind
+  the binary's.
 - **`doctor` compares a library's stamps even when its profile fails
   validation, and words the consequence by stamp.** A profile with a
   validation error used to get only that row, with the index never
