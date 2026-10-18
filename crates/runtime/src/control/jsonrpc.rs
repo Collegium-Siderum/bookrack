@@ -36,8 +36,8 @@ pub const NOT_READY: i32 = -32002;
 /// field that does not exist in the registry.
 #[allow(dead_code)]
 pub const INVALID_LIBRARY: i32 = -32010;
-/// bookrack-specific: `ingest.cancel` referenced a job id no longer
-/// in the queue document.
+/// bookrack-specific: `ingest.cancel` or `queue.retry` named a job id,
+/// or a fragment of one, that matches no row or more than one.
 pub const JOB_NOT_FOUND: i32 = -32011;
 /// bookrack-specific: a destructive RPC was issued without the
 /// caller-side confirmation flag. The control plane never prompts

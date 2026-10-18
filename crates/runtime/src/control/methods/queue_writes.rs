@@ -108,10 +108,10 @@ pub struct RetryResponse {
 }
 
 /// Flip terminal rows back to `pending` in place — every row in one
-/// retryable state, or the one row an id prefix resolves to. A prefix
-/// that matches no row or several is `JOB_NOT_FOUND`; a selection that
+/// retryable state, or the one row an id fragment resolves to. A
+/// fragment that matches no row or several is `JOB_NOT_FOUND`; a selection that
 /// is not exactly one of `state` / `job_id`, a state outside the
-/// retryable set, or a prefix landing on a row in another state is
+/// retryable set, or a fragment landing on a row in another state is
 /// `INVALID_PARAMS`.
 pub async fn retry(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: QueueRetryParams = match params {
@@ -122,7 +122,7 @@ pub async fn retry(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
     };
     let selector = match (parsed.state, parsed.job_id) {
         (Some(state), None) => RetrySelector::State(state),
-        (None, Some(job_id)) => RetrySelector::Prefix(job_id),
+        (None, Some(job_id)) => RetrySelector::IdFragment(job_id),
         _ => {
             return Err(RpcError::new(
                 INVALID_PARAMS,
@@ -136,7 +136,7 @@ pub async fn retry(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
                 let code = match refusal {
                     RetryRefusal::NoMatch { .. } | RetryRefusal::Ambiguous { .. } => JOB_NOT_FOUND,
                     RetryRefusal::StateNotRetryable(_)
-                    | RetryRefusal::EmptyPrefix
+                    | RetryRefusal::EmptyFragment
                     | RetryRefusal::NotRetryable { .. } => INVALID_PARAMS,
                 };
                 RpcError::new(code, format!("queue.retry: {refusal}"))

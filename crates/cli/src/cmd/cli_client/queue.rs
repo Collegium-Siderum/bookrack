@@ -8,17 +8,18 @@
 //! - `queue pause`           → `queue.pause`
 //! - `queue resume`          → `queue.resume`
 //! - `queue clear`           → `queue.clear`
-//! - `queue cancel <prefix>` → `ingest.cancel`
+//! - `queue cancel <id>`     → `ingest.cancel`
 //! - `queue retry`           → `queue.retry`
 //!
-//! `queue list` renders a table in human mode (id8, kind, state,
+//! `queue list` renders a table in human mode (id, kind, state,
 //! queued (relative), priority, path basename) and the daemon payload
 //! under `--json`. `--state` keeps the rows in one state and `--limit`
 //! caps the rows, both applied to the `jobs` array in either mode;
 //! the summary counts stay those of the whole queue. A `failed`
 //! listing is grouped by cause, one header per distinct cause with
-//! the rows beneath it. `--long` prints the full UUIDv7 in the id
-//! column when the operator needs a copy-paste-able id. `queue retry`
+//! the rows beneath it. The id column shows the last eight characters
+//! of the UUIDv7, its random tail, which `queue cancel` and
+//! `queue retry --job` accept as printed; `--long` prints the full id. `queue retry`
 //! fills in the default selector (`failed`) on the client, so the
 //! params it sends always name one, and renders the ids the daemon
 //! flipped. The pause / resume / clear / cancel actions remain thin

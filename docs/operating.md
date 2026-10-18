@@ -144,7 +144,7 @@ bookrack queue list --state failed      # one state, failures grouped by cause
 bookrack queue list --state pending --limit 20
 bookrack queue pause         # stop draining without losing the queue
 bookrack queue resume
-bookrack queue cancel <id>   # cancel by job-id prefix
+bookrack queue cancel <id>   # cancel by job id, or any unique part of it
 bookrack queue clear         # drop every not-yet-running job
 bookrack queue retry                    # re-run every failed job
 bookrack queue retry --state needs-ocr  # or one state, or --job <id>

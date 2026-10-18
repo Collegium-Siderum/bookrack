@@ -127,7 +127,9 @@ pub struct IntakeOcrInfo {
 /// One row in the persistent queue.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct QueueJob {
-    /// UUIDv7 string. Prefix matching is a plain `str::starts_with`.
+    /// UUIDv7 string. A job is located by any fragment of it
+    /// (`str::contains`); the leading characters are the millisecond
+    /// timestamp, shared by every job queued within the same minute.
     pub id: String,
     /// Library name the job runs against, as registered in the
     /// `LibraryRegistry`.

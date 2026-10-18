@@ -49,8 +49,8 @@ pub enum QueueAction {
         "queue list --state pending --limit 20",
     ])]
     List {
-        /// Print full UUIDv7 job ids instead of the 8-character
-        /// prefix the table shows by default.
+        /// Print full UUIDv7 job ids instead of the last eight
+        /// characters the table shows by default.
         #[arg(long)]
         long: bool,
         /// Show only the rows in this state. The `failed` listing
@@ -82,24 +82,26 @@ pub enum QueueAction {
         "queue clear --json",
     ])]
     Clear,
-    /// Cancel the unique job whose id starts with `<JOB_ID>`.
+    /// Cancel the one pending or running job whose id contains `<JOB_ID>`.
     ///
-    /// Empty prefixes are rejected. An ambiguous prefix returns an
+    /// The id `queue list` prints, the full id, or any other part of it
+    /// that no second pending or running job shares will do. An empty
+    /// fragment is rejected; one that matches several jobs returns an
     /// error without cancelling anything.
     #[command(after_long_help = crate::examples![
         "queue cancel a1b2c3d4",
         "queue cancel a1b2c3d4 --json",
     ])]
     Cancel {
-        /// Prefix of the job's UUIDv7 to cancel. The first eight
-        /// characters listed by `queue list` are usually enough.
+        /// The job's UUIDv7, or any part of it no other pending or
+        /// running job shares, such as the id `queue list` prints.
         job_id: String,
     },
     /// Flip terminal jobs back to pending so the worker runs them again.
     ///
     /// Without a selector, every `failed` row is retried. `--state`
     /// retries every row in one of the three retryable states;
-    /// `--job` retries the one row whose id starts with the prefix.
+    /// `--job` retries the one row whose id contains the fragment.
     /// The row keeps its id and place in the queue; `done` and
     /// `skipped-duplicate` rows are not retryable — re-ingest those
     /// with `ingest --force`.
@@ -113,7 +115,8 @@ pub enum QueueAction {
         /// Retry every row in this state. Defaults to `failed`.
         #[arg(long, value_name = "STATE", conflicts_with = "job")]
         state: Option<RetryStateFilter>,
-        /// Retry the one row whose UUIDv7 starts with this prefix.
+        /// Retry the one row whose UUIDv7 contains this fragment, such
+        /// as the id `queue list` prints.
         #[arg(long, value_name = "JOB_ID", value_parser = clap::builder::NonEmptyStringValueParser::new())]
         job: Option<String>,
     },

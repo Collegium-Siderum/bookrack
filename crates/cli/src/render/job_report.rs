@@ -262,7 +262,7 @@ mod tests {
             Duration::from_millis(12_400),
         );
         let line = r.format_one_line("Ingested", "sample.epub");
-        assert!(line.contains("Ingested sample.epub as 0190f6c0"));
+        assert!(line.contains("Ingested sample.epub as deadbeef"));
         assert!(line.contains("12.4s"));
         assert!(line.contains("done"));
     }
@@ -274,7 +274,7 @@ mod tests {
         let r = JobOutcomeReport::new(vec![failed], Duration::from_millis(3_200));
         assert_eq!(
             r.format_one_line("Ingested", "sample.epub"),
-            "Ingested sample.epub as 0190f6c0 in 3.2s (failed: source unreadable)"
+            "Ingested sample.epub as deadbeef in 3.2s (failed: source unreadable)"
         );
 
         // A terminal that carries no error keeps the bare state word.
@@ -287,7 +287,7 @@ mod tests {
         );
         assert_eq!(
             r.format_one_line("Ingested", "sample.epub"),
-            "Ingested sample.epub as 0190f6c0 in 3.2s (cancelled)"
+            "Ingested sample.epub as deadbeef in 3.2s (cancelled)"
         );
     }
 

@@ -2,21 +2,24 @@
 
 //! Human-readable formatters reused across subcommand renderers.
 
-/// Number of leading characters of a UUID kept as a memorable
-/// job-id surrogate in human output. Matches the prefix that
-/// `queue cancel <prefix>` accepts.
+/// Number of trailing characters of a UUID kept as a job-id surrogate
+/// in human output. A UUIDv7 leads with its millisecond timestamp, so
+/// jobs queued within the same minute share their leading characters;
+/// the trailing ones are random. `queue cancel` and `queue retry --job`
+/// match a fragment anywhere in the id, so the printed form is accepted
+/// as it stands.
 // setting: internal -- how wide an id is printed, not what it identifies
 pub const SHORT_ID_LEN: usize = 8;
 
-/// Returns the first [`SHORT_ID_LEN`] characters of a UUID-like
+/// Returns the last [`SHORT_ID_LEN`] characters of a UUID-like
 /// identifier. Inputs shorter than the cutoff pass through unchanged.
 pub fn short_id(id: &str) -> &str {
-    let end = id
+    let start = id
         .char_indices()
-        .map(|(i, _)| i)
-        .nth(SHORT_ID_LEN)
-        .unwrap_or(id.len());
-    &id[..end]
+        .rev()
+        .nth(SHORT_ID_LEN - 1)
+        .map_or(0, |(i, _)| i);
+    &id[start..]
 }
 
 /// Trims `s` to at most `max_chars` Unicode scalar values, swapping
@@ -52,9 +55,15 @@ pub fn basename_or_dash(path: Option<&str>) -> &str {
 mod tests {
     use super::*;
 
+    /// Two ids generated within the same minute share their leading
+    /// timestamp characters; the short form is the random tail, which
+    /// tells them apart.
     #[test]
-    fn short_id_truncates() {
-        assert_eq!(short_id("0190f6c0-ac42-7e05-7000-123456789abc"), "0190f6c0");
+    fn short_id_keeps_the_random_tail() {
+        let first = "019a1b2c-3d4e-7f00-8a11-0123456789ab";
+        let second = "019a1b2c-3d4e-7f00-8a11-fedcba987654";
+        assert_eq!(short_id(first), "456789ab");
+        assert_eq!(short_id(second), "ba987654");
     }
 
     #[test]

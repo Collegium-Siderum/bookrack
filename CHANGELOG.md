@@ -12,13 +12,13 @@ release workflow extracts the matching section verbatim from this file.
 
 - **Terminal queue jobs can be retried.** The new control-plane method
   `queue.retry` flips `failed`, `needs_ocr`, or `cancelled` rows back
-  to `pending` in place — one row by id prefix, or every row in one
-  state — clearing the previous run's error and timestamps, so the
+  to `pending` in place — one row by its id or any part of it, or
+  every row in one state — clearing the previous run's error and timestamps, so the
   worker re-runs them as fresh submissions. Nothing else in the queue
   document moves, and a paused queue holds the rows until `resume`.
   `bookrack queue retry` is the verb: with no flag it retries every
   `failed` row, `--state needs-ocr` or `--state cancelled` picks another
-  state, `--job <prefix>` picks one row, and the human output lists the
+  state, `--job <id>` picks one row, and the human output lists the
   ids it flipped.
 - **`queue list` can show one state, capped, with failures grouped by
   cause.** `--state <s>` keeps the rows in that state and `--limit N`
@@ -107,6 +107,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **Human output prints a job id's last eight characters, and
+  `queue cancel` takes any part of an id.** The short id in
+  `queue list`, the `ingest --wait` progress lines, and the one-job
+  summary was the id's first eight characters, which in a UUIDv7 are
+  the high bits of the millisecond timestamp: every job queued within
+  the same minute or so printed the same short id, a batch's progress
+  lines could not tell its jobs apart, and pasting a listed id into
+  `queue cancel` was refused as ambiguous whenever a neighbour was
+  still queued. The short form is now the id's random tail, and
+  `queue cancel` and `queue retry --job` — `ingest.cancel` and
+  `queue.retry` on the control plane — match a fragment anywhere in the
+  id, so the full id, its head, and the printed tail all locate a job.
 - **A waiting command draws one progress line, about what it waits
   on.** `ingest`, `papers ingest`, and `intake ocr` drew progress by
   rewriting stderr with carriage returns: the queue counts and the job

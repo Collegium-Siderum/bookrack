@@ -580,29 +580,33 @@ pub fn enqueue_ocr_intake(
     id
 }
 
-/// Cancel the unique pending or running job whose id starts with
-/// `prefix`. The matched job moves to [`JobState::Cancelled`] and its
-/// `finished_at` is stamped.
+/// Cancel the unique pending or running job whose id contains
+/// `fragment` anywhere: the full id or any part of it. A UUIDv7 leads
+/// with its millisecond timestamp, so jobs queued within the same
+/// minute share their leading characters and a fragment of the random
+/// tail is what tells them apart. The matched job moves to
+/// [`JobState::Cancelled`] and its `finished_at` is stamped.
 ///
 /// Returns the cancelled job's full id on success, or an error if no
-/// job (or more than one) matches the prefix. Empty prefixes are
-/// rejected so a typo does not cancel the next-in-line by accident.
-pub fn cancel_with_prefix(state: &mut QueueState, prefix: &str) -> Result<String> {
-    if prefix.is_empty() {
-        return Err(eyre!("queue cancel: id prefix must not be empty"));
+/// pending or running job (or more than one) contains the fragment. An
+/// empty fragment is rejected so a typo does not cancel the
+/// next-in-line by accident.
+pub fn cancel_matching(state: &mut QueueState, fragment: &str) -> Result<String> {
+    if fragment.is_empty() {
+        return Err(eyre!("queue cancel: id fragment must not be empty"));
     }
     let candidates: Vec<usize> = state
         .jobs
         .iter()
         .enumerate()
         .filter(|(_, j)| {
-            j.id.starts_with(prefix) && matches!(j.state, JobState::Pending | JobState::Running)
+            j.id.contains(fragment) && matches!(j.state, JobState::Pending | JobState::Running)
         })
         .map(|(i, _)| i)
         .collect();
     match candidates.len() {
         0 => Err(eyre!(
-            "queue cancel: no pending or running job matches prefix {prefix:?}"
+            "queue cancel: no pending or running job matches {fragment:?}"
         )),
         1 => {
             let idx = candidates[0];
@@ -612,7 +616,7 @@ pub fn cancel_with_prefix(state: &mut QueueState, prefix: &str) -> Result<String
             Ok(job.id.clone())
         }
         n => Err(eyre!(
-            "queue cancel: prefix {prefix:?} is ambiguous, matches {n} jobs"
+            "queue cancel: {fragment:?} is ambiguous, matches {n} jobs"
         )),
     }
 }
@@ -642,11 +646,12 @@ pub const RETRYABLE_STATES: [JobState; 3] =
     [JobState::Failed, JobState::NeedsOcr, JobState::Cancelled];
 
 /// Which rows a retry selects: every row in one retryable state, or
-/// the one row whose id starts with a prefix.
+/// the one row whose id contains a fragment, matched anywhere as
+/// [`cancel_matching`] matches it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetrySelector {
     State(JobState),
-    Prefix(String),
+    IdFragment(String),
 }
 
 /// Why a retry did nothing. Each variant is a distinct refusal the
@@ -655,12 +660,12 @@ pub enum RetrySelector {
 pub enum RetryRefusal {
     #[error("state {} is not retryable; retryable states are failed, needs_ocr, cancelled", .0.as_wire_str())]
     StateNotRetryable(JobState),
-    #[error("id prefix must not be empty")]
-    EmptyPrefix,
-    #[error("no job matches prefix {prefix:?}")]
-    NoMatch { prefix: String },
-    #[error("prefix {prefix:?} is ambiguous, matches {count} jobs")]
-    Ambiguous { prefix: String, count: usize },
+    #[error("id fragment must not be empty")]
+    EmptyFragment,
+    #[error("no job matches {fragment:?}")]
+    NoMatch { fragment: String },
+    #[error("{fragment:?} is ambiguous, matches {count} jobs")]
+    Ambiguous { fragment: String, count: usize },
     #[error("job {id} is {state}, not failed, needs_ocr, or cancelled")]
     NotRetryable { id: String, state: &'static str },
 }
@@ -672,10 +677,10 @@ pub enum RetryRefusal {
 /// ids of the rows flipped, in queue order. A state selection that
 /// matches no row returns an empty vector, not an error.
 ///
-/// A prefix is matched against every row, whatever its state, before
-/// the state check: a prefix that lands on one `done` row is refused
+/// A fragment is matched against every row, whatever its state, before
+/// the state check: a fragment that lands on one `done` row is refused
 /// as `NotRetryable`, which is a different answer from `NoMatch`. An
-/// ambiguous prefix changes nothing.
+/// ambiguous fragment changes nothing.
 pub fn retry_terminal(
     state: &mut QueueState,
     selector: &RetrySelector,
@@ -694,20 +699,20 @@ pub fn retry_terminal(
             }
             Ok(retried)
         }
-        RetrySelector::Prefix(prefix) => {
-            if prefix.is_empty() {
-                return Err(RetryRefusal::EmptyPrefix);
+        RetrySelector::IdFragment(fragment) => {
+            if fragment.is_empty() {
+                return Err(RetryRefusal::EmptyFragment);
             }
             let candidates: Vec<usize> = state
                 .jobs
                 .iter()
                 .enumerate()
-                .filter(|(_, j)| j.id.starts_with(prefix.as_str()))
+                .filter(|(_, j)| j.id.contains(fragment.as_str()))
                 .map(|(i, _)| i)
                 .collect();
             match candidates.len() {
                 0 => Err(RetryRefusal::NoMatch {
-                    prefix: prefix.clone(),
+                    fragment: fragment.clone(),
                 }),
                 1 => {
                     let job = &mut state.jobs[candidates[0]];
@@ -721,49 +726,12 @@ pub fn retry_terminal(
                     Ok(vec![job.id.clone()])
                 }
                 count => Err(RetryRefusal::Ambiguous {
-                    prefix: prefix.clone(),
+                    fragment: fragment.clone(),
                     count,
                 }),
             }
         }
     }
-}
-
-/// Render the queue as a fixed-width table, one row per job. Columns:
-/// short id (first 8 chars), state, library, file name, queued-at
-/// timestamp.
-pub fn render_list(state: &QueueState) -> String {
-    use std::fmt::Write as _;
-
-    let mut out = String::new();
-    if state.paused {
-        out.push_str("queue: PAUSED\n");
-    }
-    if state.jobs.is_empty() {
-        out.push_str("(queue is empty)\n");
-        return out;
-    }
-    let _ = writeln!(
-        out,
-        "{:<10}  {:<17}  {:<12}  {:<40}  QUEUED",
-        "ID", "STATE", "LIBRARY", "FILE",
-    );
-    for job in &state.jobs {
-        let short_id: String = job.id.chars().take(8).collect();
-        let state_label = job.state.as_wire_str();
-        let file = job
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| job.path.display().to_string());
-        let queued = job.queued_at.format("%Y-%m-%d %H:%M:%S");
-        let _ = writeln!(
-            out,
-            "{:<10}  {:<9}  {:<12}  {:<40}  {queued}",
-            short_id, state_label, job.library, file,
-        );
-    }
-    out
 }
 
 pub async fn worker_loop<R, Fut>(
@@ -1279,7 +1247,7 @@ mod tests {
                 job("bbbb2222", Priority::Normal, JobState::Pending),
             ],
         };
-        let id = cancel_with_prefix(&mut state, "aaaa").unwrap();
+        let id = cancel_matching(&mut state, "aaaa").unwrap();
         assert_eq!(id, "aaaa1111");
         assert_eq!(state.jobs[0].state, JobState::Cancelled);
         assert!(state.jobs[0].finished_at.is_some());
@@ -1296,10 +1264,40 @@ mod tests {
                 job("abcd2222", Priority::Normal, JobState::Pending),
             ],
         };
-        let err = cancel_with_prefix(&mut state, "abcd").unwrap_err();
+        let err = cancel_matching(&mut state, "abcd").unwrap_err();
         assert!(format!("{err}").contains("ambiguous"));
         assert_eq!(state.jobs[0].state, JobState::Pending);
         assert_eq!(state.jobs[1].state, JobState::Pending);
+    }
+
+    /// Two ids queued within the same minute share their leading
+    /// timestamp characters and differ in the random tail. The shared
+    /// head is ambiguous; a fragment of the tail locates one job.
+    #[test]
+    fn cancel_matches_a_fragment_anywhere_in_the_id() {
+        let mut state = QueueState {
+            schema_version: QUEUE_SCHEMA_VERSION,
+            paused: false,
+            jobs: vec![
+                job(
+                    "019a1b2c-3d4e-7f00-8a11-0000aaaa1111",
+                    Priority::Normal,
+                    JobState::Pending,
+                ),
+                job(
+                    "019a1b2c-3d4e-7f00-8a11-0000bbbb2222",
+                    Priority::Normal,
+                    JobState::Pending,
+                ),
+            ],
+        };
+        let err = cancel_matching(&mut state, "019a1b2c").unwrap_err();
+        assert!(format!("{err}").contains("ambiguous"), "{err}");
+
+        let id = cancel_matching(&mut state, "bbbb2222").unwrap();
+        assert_eq!(id, "019a1b2c-3d4e-7f00-8a11-0000bbbb2222");
+        assert_eq!(state.jobs[1].state, JobState::Cancelled);
+        assert_eq!(state.jobs[0].state, JobState::Pending);
     }
 
     #[test]
@@ -1312,7 +1310,7 @@ mod tests {
                 job("aaaa2222", Priority::Normal, JobState::Pending),
             ],
         };
-        let id = cancel_with_prefix(&mut state, "aaaa").unwrap();
+        let id = cancel_matching(&mut state, "aaaa").unwrap();
         assert_eq!(id, "aaaa2222");
     }
 
@@ -1431,7 +1429,7 @@ mod tests {
     }
 
     #[test]
-    fn retry_by_prefix_distinguishes_no_match_ambiguous_and_not_retryable() {
+    fn retry_by_fragment_distinguishes_no_match_ambiguous_and_not_retryable() {
         let mut state = QueueState {
             schema_version: QUEUE_SCHEMA_VERSION,
             paused: false,
@@ -1443,22 +1441,22 @@ mod tests {
         };
         let before = state.jobs.clone();
 
-        let err = retry_terminal(&mut state, &RetrySelector::Prefix("zz".into())).unwrap_err();
+        let err = retry_terminal(&mut state, &RetrySelector::IdFragment("zz".into())).unwrap_err();
         assert_eq!(
             err,
             RetryRefusal::NoMatch {
-                prefix: "zz".into()
+                fragment: "zz".into()
             }
         );
-        let err = retry_terminal(&mut state, &RetrySelector::Prefix("a".into())).unwrap_err();
+        let err = retry_terminal(&mut state, &RetrySelector::IdFragment("a".into())).unwrap_err();
         assert_eq!(
             err,
             RetryRefusal::Ambiguous {
-                prefix: "a".into(),
-                count: 2
+                fragment: "a".into(),
+                count: 3
             }
         );
-        let err = retry_terminal(&mut state, &RetrySelector::Prefix("ba".into())).unwrap_err();
+        let err = retry_terminal(&mut state, &RetrySelector::IdFragment("ba".into())).unwrap_err();
         assert_eq!(
             err,
             RetryRefusal::NotRetryable {
@@ -1467,12 +1465,49 @@ mod tests {
             }
         );
         assert!(format!("{err}").contains("is done"));
-        let err = retry_terminal(&mut state, &RetrySelector::Prefix(String::new())).unwrap_err();
-        assert_eq!(err, RetryRefusal::EmptyPrefix);
+        let err =
+            retry_terminal(&mut state, &RetrySelector::IdFragment(String::new())).unwrap_err();
+        assert_eq!(err, RetryRefusal::EmptyFragment);
         assert_eq!(state.jobs, before, "a refusal changes nothing");
 
-        let retried = retry_terminal(&mut state, &RetrySelector::Prefix("ab".into())).unwrap();
+        let retried = retry_terminal(&mut state, &RetrySelector::IdFragment("ab".into())).unwrap();
         assert_eq!(retried, vec!["ab222222".to_string()]);
+        assert_eq!(state.jobs[1].state, JobState::Pending);
+        assert_eq!(state.jobs[0].state, JobState::Failed);
+    }
+
+    /// The retry counterpart of `cancel_matches_a_fragment_anywhere_in_the_id`.
+    #[test]
+    fn retry_matches_a_fragment_anywhere_in_the_id() {
+        let mut state = QueueState {
+            schema_version: QUEUE_SCHEMA_VERSION,
+            paused: false,
+            jobs: vec![
+                job(
+                    "019a1b2c-3d4e-7f00-8a11-0000aaaa1111",
+                    Priority::Normal,
+                    JobState::Failed,
+                ),
+                job(
+                    "019a1b2c-3d4e-7f00-8a11-0000bbbb2222",
+                    Priority::Normal,
+                    JobState::Failed,
+                ),
+            ],
+        };
+        let err =
+            retry_terminal(&mut state, &RetrySelector::IdFragment("019a1b2c".into())).unwrap_err();
+        assert!(
+            matches!(err, RetryRefusal::Ambiguous { count: 2, .. }),
+            "{err}"
+        );
+
+        let retried =
+            retry_terminal(&mut state, &RetrySelector::IdFragment("bbbb2222".into())).unwrap();
+        assert_eq!(
+            retried,
+            vec!["019a1b2c-3d4e-7f00-8a11-0000bbbb2222".to_string()]
+        );
         assert_eq!(state.jobs[1].state, JobState::Pending);
         assert_eq!(state.jobs[0].state, JobState::Failed);
     }
@@ -1495,7 +1530,8 @@ mod tests {
             JobOutcome::Failed("extract error".into()),
         );
 
-        let retried = retry_terminal(&mut state, &RetrySelector::Prefix("first".into())).unwrap();
+        let retried =
+            retry_terminal(&mut state, &RetrySelector::IdFragment("first".into())).unwrap();
         assert_eq!(retried, vec!["first111".to_string()]);
         assert_eq!(state.jobs.len(), 2, "retry flips in place, never appends");
 

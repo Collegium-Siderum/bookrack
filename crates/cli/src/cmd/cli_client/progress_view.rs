@@ -358,9 +358,11 @@ mod tests {
     use super::testing::RecordingSurface;
     use super::*;
 
-    const A: &str = "aaaaaaaa-0000-0000-0000-000000000001";
-    const B: &str = "bbbbbbbb-0000-0000-0000-000000000002";
-    const OTHER: &str = "cccccccc-0000-0000-0000-000000000003";
+    // Three ids as one batch generates them: the same timestamp head,
+    // distinct random tails. The progress lines name a job by its tail.
+    const A: &str = "019a1b2c-3d4e-7f00-8a11-0000aaaaaaaa";
+    const B: &str = "019a1b2c-3d4e-7f00-8a11-0000bbbbbbbb";
+    const OTHER: &str = "019a1b2c-3d4e-7f00-8a11-0000cccccccc";
 
     fn ids(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
