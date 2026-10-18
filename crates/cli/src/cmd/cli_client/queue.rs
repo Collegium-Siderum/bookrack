@@ -9,6 +9,7 @@
 //! - `queue resume`          → `queue.resume`
 //! - `queue clear`           → `queue.clear`
 //! - `queue cancel <prefix>` → `ingest.cancel`
+//! - `queue retry`           → `queue.retry`
 //!
 //! `queue list` renders a table in human mode (id8, kind, state,
 //! queued (relative), priority, path basename) and the daemon payload
@@ -17,9 +18,11 @@
 //! the summary counts stay those of the whole queue. A `failed`
 //! listing is grouped by cause, one header per distinct cause with
 //! the rows beneath it. `--long` prints the full UUIDv7 in the id
-//! column when the operator needs a copy-paste-able id. The pause /
-//! resume / clear / cancel actions remain thin pass-throughs over
-//! the matching RPC.
+//! column when the operator needs a copy-paste-able id. `queue retry`
+//! fills in the default selector (`failed`) on the client, so the
+//! params it sends always name one, and renders the ids the daemon
+//! flipped. The pause / resume / clear / cancel actions remain thin
+//! pass-throughs over the matching RPC.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -28,7 +31,7 @@ use bookrack_cli::render::ctx;
 use bookrack_cli::render::human::{basename_or_dash, short_id};
 use bookrack_cli::render::table::RowTable;
 use bookrack_cli::render::time::relative_from_iso;
-use bookrack_cli_grammar::{QueueAction, QueueStateFilter};
+use bookrack_cli_grammar::{QueueAction, QueueStateFilter, RetryStateFilter};
 use bookrack_core::queue::JobState;
 use eyre::Result;
 use serde_json::{Value, json};
@@ -59,7 +62,60 @@ pub async fn run(action: QueueAction, runtime_dir: Option<PathBuf>) -> Result<()
         QueueAction::Cancel { job_id } => {
             helpers::call_and_print(&client, "ingest.cancel", json!({ "job_id": job_id })).await
         }
+        QueueAction::Retry { state, job } => {
+            let state = state.unwrap_or(RetryStateFilter::Failed);
+            let params = match job.as_deref() {
+                Some(prefix) => json!({ "job_id": prefix }),
+                None => json!({ "state": state.job_state().as_wire_str() }),
+            };
+            let response = helpers::dispatch(&client, "queue.retry", params).await?;
+            if ctx().is_json() {
+                helpers::print_value(&response);
+                return Ok(());
+            }
+            if ctx().is_quiet() {
+                return Ok(());
+            }
+            print!("{}", render_retry(&response, state, job.as_deref()));
+            Ok(())
+        }
     }
+}
+
+/// The human rendering of a `queue.retry` reply. A prefix retry names
+/// the one id it flipped; a state retry counts the rows and lists
+/// their ids beneath, or says there were none. A paused queue gets a
+/// closing line, since the rows will not move until `queue resume`.
+fn render_retry(response: &Value, state: RetryStateFilter, job: Option<&str>) -> String {
+    let mut out = String::new();
+    let retried: Vec<&str> = response
+        .get("retried")
+        .and_then(Value::as_array)
+        .map(|ids| ids.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    match (job, retried.as_slice()) {
+        (Some(_), [id]) => {
+            let _ = writeln!(out, "retried {id}");
+        }
+        (_, []) => {
+            let _ = writeln!(out, "no {state} jobs to retry");
+        }
+        (_, ids) => {
+            let noun = if ids.len() == 1 { "job" } else { "jobs" };
+            let _ = writeln!(out, "retried {} {state} {noun}", ids.len());
+            for id in ids {
+                let _ = writeln!(out, "  {id}");
+            }
+        }
+    }
+    if response
+        .get("paused")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let _ = writeln!(out, "queue is paused; run queue resume to start them");
+    }
+    out
 }
 
 /// The params `queue.list` is called with. The daemon's `limit` caps
@@ -539,6 +595,54 @@ mod tests {
         assert!(header.contains("state"), "{out}");
         assert!(out.contains("cancelled-1"), "{out}");
         assert!(!out.contains("showing "), "{out}");
+    }
+
+    #[test]
+    fn a_prefix_retry_names_the_one_id() {
+        let reply = json!({ "ok": true, "retried": ["0d-full-id"], "paused": false });
+        assert_eq!(
+            render_retry(&reply, RetryStateFilter::Failed, Some("0d")),
+            "retried 0d-full-id\n"
+        );
+    }
+
+    /// A state retry counts the rows in the daemon's order and lists
+    /// every id; one row takes the singular.
+    #[test]
+    fn a_state_retry_counts_and_lists_the_ids_in_reply_order() {
+        let reply = json!({ "ok": true, "retried": ["second", "first"], "paused": false });
+        assert_eq!(
+            render_retry(&reply, RetryStateFilter::NeedsOcr, None),
+            "retried 2 needs-ocr jobs\n  second\n  first\n"
+        );
+        let one = json!({ "ok": true, "retried": ["only"], "paused": false });
+        assert_eq!(
+            render_retry(&one, RetryStateFilter::Cancelled, None),
+            "retried 1 cancelled job\n  only\n"
+        );
+    }
+
+    #[test]
+    fn an_empty_state_retry_names_the_state() {
+        let reply = json!({ "ok": true, "retried": [], "paused": false });
+        assert_eq!(
+            render_retry(&reply, RetryStateFilter::Failed, None),
+            "no failed jobs to retry\n"
+        );
+    }
+
+    #[test]
+    fn a_paused_queue_adds_the_resume_hint_once() {
+        let paused = json!({ "ok": true, "retried": ["x"], "paused": true });
+        let out = render_retry(&paused, RetryStateFilter::Failed, None);
+        assert!(
+            out.ends_with("queue is paused; run queue resume to start them\n"),
+            "{out}"
+        );
+        assert_eq!(out.matches("queue is paused").count(), 1, "{out}");
+        let running = json!({ "ok": true, "retried": ["x"], "paused": false });
+        let out = render_retry(&running, RetryStateFilter::Failed, None);
+        assert!(!out.contains("queue is paused"), "{out}");
     }
 
     #[test]

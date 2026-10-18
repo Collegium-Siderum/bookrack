@@ -146,6 +146,8 @@ bookrack queue pause         # stop draining without losing the queue
 bookrack queue resume
 bookrack queue cancel <id>   # cancel by job-id prefix
 bookrack queue clear         # drop every not-yet-running job
+bookrack queue retry                    # re-run every failed job
+bookrack queue retry --state needs-ocr  # or one state, or --job <id>
 ```
 
 ### The OCR worklist

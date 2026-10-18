@@ -95,6 +95,28 @@ pub enum QueueAction {
         /// characters listed by `queue list` are usually enough.
         job_id: String,
     },
+    /// Flip terminal jobs back to pending so the worker runs them again.
+    ///
+    /// Without a selector, every `failed` row is retried. `--state`
+    /// retries every row in one of the three retryable states;
+    /// `--job` retries the one row whose id starts with the prefix.
+    /// The row keeps its id and place in the queue; `done` and
+    /// `skipped-duplicate` rows are not retryable — re-ingest those
+    /// with `ingest --force`.
+    #[command(after_long_help = crate::examples![
+        "queue retry",
+        "queue retry --state needs-ocr",
+        "queue retry --job a1b2c3d4",
+        "queue retry --json",
+    ])]
+    Retry {
+        /// Retry every row in this state. Defaults to `failed`.
+        #[arg(long, value_name = "STATE", conflicts_with = "job")]
+        state: Option<RetryStateFilter>,
+        /// Retry the one row whose UUIDv7 starts with this prefix.
+        #[arg(long, value_name = "JOB_ID", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        job: Option<String>,
+    },
 }
 
 /// The job states `queue list --state` accepts, one per
@@ -133,6 +155,43 @@ impl QueueStateFilter {
 }
 
 impl std::fmt::Display for QueueStateFilter {
+    /// Renders the value clap accepts, read back off the derived
+    /// vocabulary so the two cannot disagree.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        clap::ValueEnum::to_possible_value(self)
+            .expect("no variant is skipped")
+            .get_name()
+            .fmt(f)
+    }
+}
+
+/// The job states `queue retry --state` accepts: the three terminals
+/// the daemon flips back to pending. A separate vocabulary from
+/// [`QueueStateFilter`] so `--help` lists only the values that work.
+///
+/// The flag spells `needs-ocr` with a hyphen, as clap renders it; the
+/// `snake_case` token the wire carries is accepted as an alias.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum RetryStateFilter {
+    Failed,
+    #[value(alias = "needs_ocr")]
+    NeedsOcr,
+    Cancelled,
+}
+
+impl RetryStateFilter {
+    /// The queue state this filter selects.
+    pub fn job_state(self) -> bookrack_core::queue::JobState {
+        use bookrack_core::queue::JobState;
+        match self {
+            RetryStateFilter::Failed => JobState::Failed,
+            RetryStateFilter::NeedsOcr => JobState::NeedsOcr,
+            RetryStateFilter::Cancelled => JobState::Cancelled,
+        }
+    }
+}
+
+impl std::fmt::Display for RetryStateFilter {
     /// Renders the value clap accepts, read back off the derived
     /// vocabulary so the two cannot disagree.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1785,6 +1844,73 @@ mod tests {
             panic!("expected list")
         };
         assert_eq!(limit, Some(20));
+    }
+
+    /// The default state is filled in at dispatch, not here, so the
+    /// params a `--json` call sends always name the state explicitly.
+    #[test]
+    fn queue_retry_defaults_to_no_selector() {
+        assert_eq!(
+            parse_queue(&["queue", "retry"]),
+            QueueAction::Retry {
+                state: None,
+                job: None,
+            }
+        );
+    }
+
+    #[test]
+    fn queue_retry_state_accepts_both_spellings() {
+        for spelling in ["needs-ocr", "needs_ocr"] {
+            let QueueAction::Retry { state, .. } =
+                parse_queue(&["queue", "retry", "--state", spelling])
+            else {
+                panic!("expected retry")
+            };
+            assert_eq!(state, Some(RetryStateFilter::NeedsOcr), "{spelling}");
+        }
+    }
+
+    /// Every retry value maps onto the wire token of its state, and
+    /// the set is exactly the three terminals the daemon retries. The
+    /// grammar crate cannot see the daemon's constant; the two sets are
+    /// matched end to end by the CLI's `queue retry` test.
+    #[test]
+    fn retry_state_filter_names_its_wire_state() {
+        use bookrack_core::queue::JobState;
+        use clap::ValueEnum;
+        let mut states = Vec::new();
+        for filter in RetryStateFilter::value_variants() {
+            let wire = filter.job_state().as_wire_str();
+            assert_eq!(filter.to_string(), wire.replace('_', "-"), "{filter:?}");
+            states.push(filter.job_state());
+        }
+        assert_eq!(
+            states,
+            [JobState::Failed, JobState::NeedsOcr, JobState::Cancelled]
+        );
+    }
+
+    #[test]
+    fn queue_retry_rejects_done_and_a_state_with_a_job() {
+        let err = TestCli::try_parse_from(["queue", "retry", "--state", "done"])
+            .expect_err("done is not retryable");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue, "{err}");
+        let err = TestCli::try_parse_from(["queue", "retry", "--state", "failed", "--job", "ab"])
+            .expect_err("the two selectors are exclusive");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "{err}"
+        );
+        let err = TestCli::try_parse_from(["queue", "retry", "--job", ""])
+            .expect_err("an empty prefix is refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue, "{err}");
+        let QueueAction::Retry { state, job } = parse_queue(&["queue", "retry", "--job", "ab"])
+        else {
+            panic!("expected retry")
+        };
+        assert_eq!((state, job.as_deref()), (None, Some("ab")));
     }
 
     /// Every book-side position that takes an intake id, paired with
