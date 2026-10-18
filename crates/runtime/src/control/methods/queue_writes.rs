@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `queue.pause` / `queue.resume` / `queue.clear` JSON-RPC handlers.
+//! `queue.pause` / `queue.resume` / `queue.clear` / `queue.retry`
+//! JSON-RPC handlers.
 //!
 //! Each method mutates either the worker-loop pause flag, the on-disk
 //! queue document, or both, and emits a single
@@ -10,19 +11,23 @@
 //! REPL `queue clear` once called directly, keeping the trim semantics
 //! in one place: only `Pending` rows are turned into `Cancelled`; rows
 //! already `Running`, `Done`, `Failed`, or `Cancelled` are left alone.
+//! `queue.retry` goes through [`mutate_jobs_and_persist`], the same
+//! persist-or-roll-back path `ingest.cancel` takes.
 
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use bookrack_core::queue::QueueState;
-use serde::Serialize;
+use bookrack_core::queue::{JobState, QueueState};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::MethodContext;
 use crate::control::events::{DegradedCause, Event, EventStreamHandle, QueueTick};
-use crate::control::jsonrpc::{INTERNAL_ERROR, RpcError};
-use crate::queue::{cancel_all_pending, derive_tick, save_atomic};
+use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, JOB_NOT_FOUND, RpcError};
+use crate::queue::{
+    RetryRefusal, RetrySelector, cancel_all_pending, derive_tick, retry_terminal, save_atomic,
+};
 
 /// Reply to `queue.pause` / `queue.resume`. `ok` is the write-method
 /// acknowledgement every control-plane write carries.
@@ -79,6 +84,75 @@ pub async fn clear(_params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         RpcError::new(
             INTERNAL_ERROR,
             format!("serialise queue.clear response: {e}"),
+        )
+    })
+}
+
+/// Parameters of `queue.retry`: exactly one of the two selectors.
+#[derive(Debug, Deserialize)]
+pub struct QueueRetryParams {
+    #[serde(default)]
+    state: Option<JobState>,
+    #[serde(default)]
+    job_id: Option<String>,
+}
+
+/// Reply to `queue.retry`: the full ids flipped back to `pending`, in
+/// queue order, and the pause flag that decides whether the worker
+/// picks them up now or after `queue.resume`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RetryResponse {
+    pub ok: bool,
+    pub retried: Vec<String>,
+    pub paused: bool,
+}
+
+/// Flip terminal rows back to `pending` in place — every row in one
+/// retryable state, or the one row an id prefix resolves to. A prefix
+/// that matches no row or several is `JOB_NOT_FOUND`; a selection that
+/// is not exactly one of `state` / `job_id`, a state outside the
+/// retryable set, or a prefix landing on a row in another state is
+/// `INVALID_PARAMS`.
+pub async fn retry(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let parsed: QueueRetryParams = match params {
+        Some(v) if !v.is_null() => serde_json::from_value(v.clone()).map_err(|e| {
+            RpcError::new(INVALID_PARAMS, format!("invalid queue.retry params: {e}"))
+        })?,
+        _ => return Err(RpcError::new(INVALID_PARAMS, "missing queue.retry params")),
+    };
+    let selector = match (parsed.state, parsed.job_id) {
+        (Some(state), None) => RetrySelector::State(state),
+        (None, Some(job_id)) => RetrySelector::Prefix(job_id),
+        _ => {
+            return Err(RpcError::new(
+                INVALID_PARAMS,
+                "queue.retry takes exactly one of `state` or `job_id`",
+            ));
+        }
+    };
+    let (retried, tick) =
+        mutate_jobs_and_persist(&ctx.queue_state, &ctx.queue_state_path, |guard| {
+            retry_terminal(guard, &selector).map_err(|refusal| {
+                let code = match refusal {
+                    RetryRefusal::NoMatch { .. } | RetryRefusal::Ambiguous { .. } => JOB_NOT_FOUND,
+                    RetryRefusal::StateNotRetryable(_)
+                    | RetryRefusal::EmptyPrefix
+                    | RetryRefusal::NotRetryable { .. } => INVALID_PARAMS,
+                };
+                RpcError::new(code, format!("queue.retry: {refusal}"))
+            })
+        })?;
+    ctx.event_stream.publish(Event::QueueTick(tick));
+    let paused = ctx.queue_paused.load(Ordering::Acquire);
+    serde_json::to_value(RetryResponse {
+        ok: true,
+        retried,
+        paused,
+    })
+    .map_err(|e| {
+        RpcError::new(
+            INTERNAL_ERROR,
+            format!("serialise queue.retry response: {e}"),
         )
     })
 }

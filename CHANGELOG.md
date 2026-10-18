@@ -10,6 +10,12 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **Terminal queue jobs can be retried.** The new control-plane method
+  `queue.retry` flips `failed`, `needs_ocr`, or `cancelled` rows back
+  to `pending` in place — one row by id prefix, or every row in one
+  state — clearing the previous run's error and timestamps, so the
+  worker re-runs them as fresh submissions. Nothing else in the queue
+  document moves, and a paused queue holds the rows until `resume`.
 - **`queue list` can show one state, capped, with failures grouped by
   cause.** `--state <s>` keeps the rows in that state and `--limit N`
   shows at most N of them, oldest first; the per-state footer still

@@ -107,8 +107,9 @@ systems. bookrack is a local-first system and does not probe for it.
   `library.info` against its own `name` key — so a client branches on
   the code alone, without knowing which class it called. The message
   names the library it could not resolve and the names it could.
-- `-32011` job not found (bookrack-specific; `ingest.cancel` named a
-  job id no longer in the queue document)
+- `-32011` job not found (bookrack-specific; `ingest.cancel` or
+  `queue.retry` named a job-id prefix that matches no row, or more than
+  one)
 - `-32012` confirmation required (bookrack-specific; a destructive
   method that exposes a `yes` parameter was called without
   `yes = true`. The control plane never prompts on the caller's
@@ -448,6 +449,22 @@ the exit-code bucket does not distinguish the two.
 - `queue.clear` — `{ ok: true, paused, cleared }`. Drops every
   not-yet-running job; a running job is untouched. `paused` reports the
   pause flag as it stands after the trim.
+- `queue.retry` — `{ state?, job_id? }` → `{ ok: true, retried,
+  paused }`. Exactly one of the two selects the rows: `state` is one of
+  `failed`, `needs_ocr`, `cancelled` and selects every row in that
+  state; `job_id` is a prefix that must resolve to one row, which must
+  be in one of those three states. Each selected row is flipped back
+  to `pending` in place — same id, same position, same submit-time
+  flags — with `started_at`, `finished_at`, `error`, and `merged_into`
+  cleared, so the worker's next tick picks it up as a fresh
+  submission. `retried` lists the full ids flipped, in queue order; a
+  `state` that matches no row returns an empty list. `paused` mirrors
+  the queue flag: a paused queue holds the rows until `queue.resume`.
+  The queue spans libraries, so the reply carries no `library`.
+  Refusals: `-32602` for a selection that is not exactly one of the
+  two, a `state` outside the three, or a prefix that resolves to a row
+  in another state (the message names that state); `-32011` for a
+  prefix that matches no row or more than one. Emits one `queue.tick`.
 - `library.list` — array of `{ name, default, dimension }` entries,
   one per mounted library: the daemon's served set.
 - `library.info` — full status card for one library;
