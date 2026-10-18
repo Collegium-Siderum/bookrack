@@ -18,6 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
+use bookrack_config::advice_record::{advice_record_path, record_seen, seen_keys};
 use bookrack_config::{
     Config, EmbedConfig, effective_profile_reference, list_libraries, load_manifest,
     profile_reference_drift, registry_profile_ref_in, registry_target_path,
@@ -30,8 +31,8 @@ use bookrack_corpus::{
     CHUNK_VERSION_KEY, Corpus, EMBED_MODEL_KEY, IndexStamps, NORMALIZE_VERSION_KEY, VECTOR_DIM_KEY,
 };
 use bookrack_index_profile::{
-    AnnKind, AnnSpec, IndexProfile, ProfileOrigin, USER_PROFILE_DIR_NAME, has_errors,
-    list_profiles, resolve, validate,
+    Advice, AnnKind, AnnSpec, IndexProfile, ProfileOrigin, USER_PROFILE_DIR_NAME, advise,
+    has_errors, list_profiles, resolve, validate,
 };
 use bookrack_vectors::AnnConfig;
 use eyre::{Result, eyre};
@@ -185,6 +186,76 @@ pub fn effective_embed_declaration(
     let embed = EmbedConfig::resolve(model);
     let declaration = effective.map(|e| EmbedDeclaration { profile: e.profile });
     Ok((embed, declaration))
+}
+
+/// The profile `name` resolves to — a user file over a built-in — or
+/// `None` when it does not resolve or fails to load.
+pub fn resolve_named_profile(name: &str) -> Option<IndexProfile> {
+    let dir = user_profile_dir();
+    resolve(dir.as_deref(), name)
+        .ok()
+        .flatten()
+        .map(|(profile, _)| profile)
+}
+
+/// The registry's remarks on `profile` that the library at `data_dir`
+/// has not been shown. A write that points the library at `profile`
+/// prints these; `None` — dropping the reference — has none. A library
+/// with no manifest has no identity to record against, so everything is
+/// pending.
+pub fn pending_advice(data_dir: &Path, profile: Option<&IndexProfile>) -> Vec<Advice> {
+    pending_advice_in(advice_record_path().as_deref(), data_dir, profile)
+}
+
+/// [`pending_advice`] against an explicit record location.
+fn pending_advice_in(
+    record: Option<&Path>,
+    data_dir: &Path,
+    profile: Option<&IndexProfile>,
+) -> Vec<Advice> {
+    let Some(profile) = profile else {
+        return Vec::new();
+    };
+    let all = advise(profile);
+    let Some((record, uuid)) = advice_record_target(record, data_dir) else {
+        return all;
+    };
+    let seen = seen_keys(&record, &uuid);
+    all.into_iter()
+        .filter(|a| !seen.contains(&a.key()))
+        .collect()
+}
+
+/// Record that the library at `data_dir` has been shown the remarks on
+/// `profile`, replacing what it was shown before; `None` clears the
+/// record. Called once a write has printed its remarks and committed.
+/// A failure only warns: the write itself stands, and the cost is one
+/// remark printed again.
+pub fn acknowledge_advice(data_dir: &Path, profile: Option<&IndexProfile>) {
+    acknowledge_advice_in(advice_record_path().as_deref(), data_dir, profile);
+}
+
+/// [`acknowledge_advice`] against an explicit record location.
+fn acknowledge_advice_in(record: Option<&Path>, data_dir: &Path, profile: Option<&IndexProfile>) {
+    let Some((record, uuid)) = advice_record_target(record, data_dir) else {
+        return;
+    };
+    let keys = profile
+        .map(|p| advise(p).iter().map(Advice::key).collect())
+        .unwrap_or_default();
+    if let Err(e) = record_seen(&record, &uuid, &keys) {
+        eprintln!(
+            "warning: could not record the notes shown for this library in {}: {e}",
+            record.display()
+        );
+    }
+}
+
+/// The record file and the library's manifest uuid, when both exist.
+fn advice_record_target(record: Option<&Path>, data_dir: &Path) -> Option<(PathBuf, String)> {
+    let record = record?.to_path_buf();
+    let manifest = load_manifest(data_dir).ok().flatten()?;
+    Some((record, manifest.uuid))
 }
 
 /// Write gate for an `index_profile` reference: the name must resolve
@@ -616,6 +687,95 @@ mod tests {
         assert!(
             detail.contains(PROFILE_QWEN3_06B_DEFAULT),
             "the built-ins are always defined: {detail}"
+        );
+    }
+
+    /// A profile naming an embed model and a cross-encoder model the
+    /// registry does not list.
+    fn unlisted_profile(reranker: &str) -> IndexProfile {
+        let mut profile =
+            IndexProfile::from_named(bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT)
+                .expect("the built-in resolves");
+        profile.embed.model = "synthetic-embed:unlisted".to_string();
+        profile.embed.dim = 8;
+        profile.reranker = bookrack_index_profile::RerankerSpec {
+            kind: bookrack_index_profile::RerankerKind::CrossEncoder,
+            backend: Some("llama-server".to_string()),
+            model: Some(reranker.to_string()),
+            top_k_in: Some(50),
+            top_k_out: Some(10),
+        };
+        profile
+    }
+
+    fn declared_root() -> tempfile::TempDir {
+        let root = tempfile::tempdir().expect("tempdir");
+        bookrack_config::set_manifest_index_profile(
+            root.path(),
+            Some("p"),
+            bookrack_config::ManifestIdentitySeed {
+                name: "lib",
+                kind: bookrack_config::LibraryKind::Test,
+                description: None,
+            },
+        )
+        .expect("write a manifest");
+        root
+    }
+
+    fn record_in(dir: &tempfile::TempDir) -> PathBuf {
+        dir.path()
+            .join(bookrack_config::advice_record::ADVICE_RECORD_FILENAME)
+    }
+
+    #[test]
+    fn advice_is_pending_until_acknowledged_and_again_when_it_changes() {
+        let records = tempfile::tempdir().expect("tempdir");
+        let record = record_in(&records);
+        let root = declared_root();
+        let first = unlisted_profile("synthetic-reranker:a");
+
+        let pending = pending_advice_in(Some(&record), root.path(), Some(&first));
+        assert_eq!(pending.len(), 2, "{pending:?}");
+        acknowledge_advice_in(Some(&record), root.path(), Some(&first));
+        assert!(pending_advice_in(Some(&record), root.path(), Some(&first)).is_empty());
+
+        // The same profile with another reranker: only that remark.
+        let second = unlisted_profile("synthetic-reranker:b");
+        assert_eq!(
+            pending_advice_in(Some(&record), root.path(), Some(&second)),
+            vec![Advice::UnlistedReranker {
+                model: "synthetic-reranker:b".to_string()
+            }]
+        );
+
+        // Dropping the reference clears what was shown.
+        acknowledge_advice_in(Some(&record), root.path(), None);
+        assert_eq!(
+            pending_advice_in(Some(&record), root.path(), Some(&first)).len(),
+            2
+        );
+        assert!(pending_advice_in(Some(&record), root.path(), None).is_empty());
+    }
+
+    #[test]
+    fn a_root_without_a_manifest_has_been_shown_nothing_and_records_nothing() {
+        let records = tempfile::tempdir().expect("tempdir");
+        let record = record_in(&records);
+        let root = tempfile::tempdir().expect("tempdir");
+        let profile = unlisted_profile("synthetic-reranker:a");
+        acknowledge_advice_in(Some(&record), root.path(), Some(&profile));
+        assert!(!record.exists(), "no identity to record against");
+        assert_eq!(
+            pending_advice_in(Some(&record), root.path(), Some(&profile)).len(),
+            2
+        );
+        // No record location at all: everything stays pending.
+        let declared = declared_root();
+        acknowledge_advice_in(None, declared.path(), Some(&profile));
+        assert_eq!(
+            pending_advice_in(None, declared.path(), Some(&profile)).len(),
+            2
         );
     }
 

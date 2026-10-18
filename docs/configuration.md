@@ -487,7 +487,17 @@ about the qualified models rather than which models may be used: a
 listed model must be declared at the dimension it emits, while a model
 it does not list validates on structure alone, and `index-profile
 apply` and `libraries config` accept it. `--allow-unknown-model` is
-deprecated and has no effect. `bookrack doctor` additionally
+deprecated and has no effect.
+
+What the registry does not know — an unlisted embed or cross-encoder
+model, a pairing across model families — those two write entrances say
+in a `note:` line, once per library: a note already shown for a library
+is not shown again until what it says changes. The record of what each
+library was shown is `advice-seen.toml` beside the registry file;
+deleting it shows every note again. A write under `--json` or `--quiet`
+prints no note and records none.
+
+`bookrack doctor` additionally
 compares each library's referenced profile against its built index
 stamps whenever the profile resolves, whether or not it validates, and
 warns on any mismatch. A different model or algorithm version keeps the

@@ -22,6 +22,13 @@
 //! reset` — and each selector meets a plan with work in it, which is the
 //! only kind that reaches the daemon.
 //!
+//! The model is outside the registry, so a write that points the
+//! library at the profile notes it once: the dry run and the confirmed
+//! apply each print it, an apply under `--quiet` or `--json` prints it
+//! nowhere and records it as shown nowhere, and an apply after the
+//! confirmed one does not print it again. Dropping the reference clears
+//! what was shown.
+//!
 //! The reset's re-embed builds the cold-start ANN index, which the
 //! brute-force profile then plans to drop; the post-apply self-check
 //! therefore still reports a divergence, and the cases assert up to the
@@ -41,6 +48,10 @@ use crate::common::{DaemonProcess, wait_for_lock};
 
 const LIBRARY: &str = "main";
 const PROFILE: &str = "scan-alternate-model";
+
+/// The note a write prints for a profile naming the stub's second model,
+/// which the model registry does not list.
+const NOTE: &str = "is not in the model registry";
 
 /// The per-user profile directory, beside the registry file.
 const USER_PROFILE_DIR: &str = "index-profiles";
@@ -183,6 +194,63 @@ async fn apply_executes_under_each_library_selector() {
         );
         assert_plan_executed(selector, &stdout, &root);
         assert_ne!(code, Some(2), "{selector}: {stderr}");
+        assert_eq!(
+            stdout.matches(NOTE).count(),
+            1,
+            "{selector}: the confirmed apply notes the unlisted model once: {stdout}"
+        );
+    }
+
+    // The library already runs the profile and was told: no note.
+    let (code, stdout, stderr) = run(
+        bookrack_cmd!(&sandbox).without_data_dir(),
+        &[
+            "--library",
+            LIBRARY,
+            "index-profile",
+            "apply",
+            PROFILE,
+            "--yes",
+        ],
+    )
+    .await;
+    assert_ne!(code, Some(2), "{stderr}");
+    assert!(!stdout.contains(NOTE), "a note already shown: {stdout}");
+
+    // A quiet or JSON apply prints no note and records none.
+    for mode in ["--quiet", "--json"] {
+        restore_default_model(&sandbox).await;
+        let (code, stdout, stderr) = run(
+            bookrack_cmd!(&sandbox).without_data_dir(),
+            &[
+                mode,
+                "--library",
+                LIBRARY,
+                "index-profile",
+                "apply",
+                PROFILE,
+                "--yes",
+            ],
+        )
+        .await;
+        assert_ne!(code, Some(2), "{mode}: {stderr}");
+        assert!(!stdout.contains(NOTE), "{mode}: {stdout}");
+        let (_, stdout, _) = run(
+            bookrack_cmd!(&sandbox).without_data_dir(),
+            &[
+                "--library",
+                LIBRARY,
+                "index-profile",
+                "apply",
+                PROFILE,
+                "--dry-run",
+            ],
+        )
+        .await;
+        assert!(
+            stdout.contains(NOTE),
+            "{mode} recorded a note it did not print: {stdout}"
+        );
     }
 
     if let Some(id) = daemon.id() {
@@ -241,6 +309,10 @@ async fn assert_plan_is_one_reset(sandbox: &Sandbox, selector: &str) {
     assert!(
         stdout.contains("[papers]\n  skipped"),
         "{selector}: {stdout}"
+    );
+    assert!(
+        stdout.contains(NOTE),
+        "{selector}: the dry run notes the unlisted model: {stdout}"
     );
 }
 

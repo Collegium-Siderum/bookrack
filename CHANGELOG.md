@@ -175,6 +175,10 @@ release workflow extracts the matching section verbatim from this file.
   dimension of such a model is checked against the backend before a
   reset. A listed model must still be declared at the dimension it
   emits, and validation findings no longer name a command-line flag.
+  Each write notes what the registry does not know in a `note:` line,
+  once per library: a note already shown is not repeated until what it
+  says changes, and a `--json` or `--quiet` write neither prints nor
+  records it. The record is `advice-seen.toml` beside the registry.
 
 - **Human output prints a job id's last eight characters, and
   `queue cancel` takes any part of an id.** The short id in

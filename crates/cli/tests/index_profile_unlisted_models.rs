@@ -7,6 +7,11 @@
 //! entrances accept it. What the registry does know stays binding: a
 //! listed model must be declared at the dimension it emits, and the
 //! deprecated `--allow-unknown-model` no longer waives that.
+//!
+//! A write entrance says what the registry does not know once per
+//! library: a remark already shown for a library is not shown again
+//! until what it says changes, and a remark a `--json` or `--quiet`
+//! write did not print counts as not shown.
 
 #![cfg(unix)]
 
@@ -55,14 +60,15 @@ fn unlisted_cross_encoder() -> String {
     )
 }
 
-/// A registry with one library, `alpha`, and the user profile directory
-/// beside it.
+/// A registry with two libraries, `alpha` and `beta`, and the user
+/// profile directory beside it.
 struct Fixture {
     sandbox: Sandbox,
     _registry_dir: tempfile::TempDir,
     registry_path: PathBuf,
     profiles: PathBuf,
     data_dir: tempfile::TempDir,
+    _beta_dir: tempfile::TempDir,
 }
 
 impl Fixture {
@@ -70,14 +76,20 @@ impl Fixture {
         let sandbox = Sandbox::new();
         let registry_dir = tempfile::tempdir()?;
         let data_dir = tempfile::tempdir()?;
+        let beta_dir = tempfile::tempdir()?;
         let registry_path = registry_dir.path().join("registry.toml");
         std::fs::write(
             &registry_path,
             format!(
                 "[libraries.alpha]\n\
                  data_dir = \"{}\"\n\
+                 kind = \"test\"\n\
+                 \n\
+                 [libraries.beta]\n\
+                 data_dir = \"{}\"\n\
                  kind = \"test\"\n",
-                data_dir.path().display()
+                data_dir.path().display(),
+                beta_dir.path().display()
             ),
         )?;
         let profiles = registry_dir.path().join("index-profiles");
@@ -88,12 +100,23 @@ impl Fixture {
             registry_path,
             profiles,
             data_dir,
+            _beta_dir: beta_dir,
         })
     }
 
     fn write_profile(&self, name: &str, body: &str) -> Result<()> {
         std::fs::write(self.profiles.join(format!("{name}.toml")), body)?;
         Ok(())
+    }
+
+    /// `libraries config <library> index_profile=<profile>`.
+    async fn set_profile(
+        &self,
+        library: &str,
+        profile: &str,
+    ) -> Result<(Option<i32>, String, String)> {
+        let arg = format!("index_profile={profile}");
+        self.run(&["libraries", "config", library, &arg]).await
     }
 
     fn data_dir(&self) -> &Path {
@@ -222,5 +245,93 @@ async fn both_write_entrances_accept_unlisted_models() -> Result<()> {
         Some(0),
         "apply must accept an unlisted model: {stdout} {stderr}"
     );
+    Ok(())
+}
+
+/// The note naming an unlisted embed model.
+fn embed_note(model: &str) -> String {
+    format!("note: embed model '{model}' is not in the model registry")
+}
+
+/// The note naming an unlisted cross-encoder model.
+fn reranker_note(model: &str) -> String {
+    format!("note: reranker model '{model}' is not in the model registry")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_config_notes_each_remark_once_per_library() -> Result<()> {
+    let fx = Fixture::new()?;
+    fx.write_profile(
+        "unlisted-stack",
+        &profile_toml(
+            "unlisted-stack",
+            UNLISTED_EMBED,
+            8,
+            &unlisted_cross_encoder(),
+        ),
+    )?;
+
+    let (code, stdout, stderr) = fx.set_profile("alpha", "unlisted-stack").await?;
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(
+        stdout.contains(&embed_note(UNLISTED_EMBED)),
+        "first write: {stdout}"
+    );
+    assert!(
+        stdout.contains(&reranker_note(UNLISTED_RERANKER)),
+        "first write: {stdout}"
+    );
+
+    let (_, stdout, _) = fx.set_profile("alpha", "unlisted-stack").await?;
+    assert!(
+        !stdout.contains("not in the model registry"),
+        "a remark already shown for this library: {stdout}"
+    );
+
+    // The same file, its reranker swapped: only the remark that changed.
+    let other = "synthetic-reranker:other";
+    fx.write_profile(
+        "unlisted-stack",
+        &profile_toml(
+            "unlisted-stack",
+            UNLISTED_EMBED,
+            8,
+            &unlisted_cross_encoder().replace(UNLISTED_RERANKER, other),
+        ),
+    )?;
+    let (_, stdout, _) = fx.set_profile("alpha", "unlisted-stack").await?;
+    assert!(stdout.contains(&reranker_note(other)), "{stdout}");
+    assert!(!stdout.contains(&embed_note(UNLISTED_EMBED)), "{stdout}");
+
+    // Another library has been told nothing.
+    let (_, stdout, _) = fx.set_profile("beta", "unlisted-stack").await?;
+    assert!(stdout.contains(&embed_note(UNLISTED_EMBED)), "{stdout}");
+    assert!(stdout.contains(&reranker_note(other)), "{stdout}");
+
+    // A machine-readable or quiet write prints no note and records none.
+    for (mode, model) in [
+        ("--json", "synthetic-embed:json"),
+        ("--quiet", "synthetic-embed:quiet"),
+    ] {
+        let name = format!("unlisted{mode}");
+        fx.write_profile(&name, &profile_toml(&name, model, 8, NO_RERANKER))?;
+        let arg = format!("index_profile={name}");
+        let (code, stdout, stderr) = fx
+            .run(&[mode, "libraries", "config", "alpha", &arg])
+            .await?;
+        assert_eq!(code, Some(0), "{mode}: {stderr}");
+        assert!(!stdout.contains("note:"), "{mode}: {stdout}");
+        if mode == "--json" {
+            serde_json::from_str::<serde_json::Value>(stdout.trim())
+                .unwrap_or_else(|e| panic!("--json stdout must stay JSON ({e}): {stdout}"));
+        } else {
+            assert!(stdout.trim().is_empty(), "{mode}: {stdout}");
+        }
+        let (_, stdout, _) = fx.run(&["libraries", "config", "alpha", &arg]).await?;
+        assert!(
+            stdout.contains(&embed_note(model)),
+            "{mode} recorded a note it did not print: {stdout}"
+        );
+    }
     Ok(())
 }

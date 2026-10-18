@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::render::confirm::{ConfirmMode, Confirmation, confirm_destructive};
+use bookrack_cli::render::ctx;
 use bookrack_config::{
     LibraryEntryFields, LibrarySelection, ManifestIdentitySeed, load_manifest,
     registry_target_path, set_manifest_index_profile, upsert_library_entry,
@@ -27,7 +28,7 @@ use bookrack_control_client::ControlClient;
 use bookrack_runtime::cmd::index_profile::{
     ApplyPlan, ApplyRefusal, PipelineFilter, plan_apply, render_apply_plan,
 };
-use bookrack_runtime::profile::{Pipeline, PlannedAction};
+use bookrack_runtime::profile::{Pipeline, PlannedAction, acknowledge_advice};
 use eyre::{Context, Result};
 use serde_json::{Value, json};
 
@@ -43,9 +44,16 @@ pub async fn run(
 ) -> Result<()> {
     // Plan derivation is offline and read-only; refusals that are the
     // operator's to fix map to the user-error exit code.
-    let plan = plan_apply(name, selection, pipeline)
+    let mut plan = plan_apply(name, selection, pipeline)
         .await
         .map_err(as_user_error)?;
+    // The registry's remarks are for a person reading the plan: a
+    // machine-readable or quiet run neither prints them nor records them
+    // as shown, so the next human-facing write still does.
+    let show_advice = !ctx().is_json() && !ctx().is_quiet();
+    if !show_advice {
+        plan.advice.clear();
+    }
 
     if dry_run {
         render_apply_plan(&plan, None);
@@ -66,6 +74,9 @@ pub async fn run(
     if plan.is_noop() {
         render_apply_plan(&plan, None);
         declare_target(&plan, name)?;
+        if show_advice {
+            acknowledge_advice(plan.target.data_dir(), Some(&plan.profile));
+        }
         println!("nothing else to do: the built index already matches '{name}'");
         // The reranker is query-time behaviour: no index action, but a
         // running daemon supervises its backend per the profile it
@@ -112,6 +123,9 @@ pub async fn run(
     }
 
     declare_target(&plan, name)?;
+    if show_advice {
+        acknowledge_advice(plan.target.data_dir(), Some(&plan.profile));
+    }
     execute_plan(&client, &plan, name).await?;
 
     // Self-check: re-derive against the on-disk state the actions left
