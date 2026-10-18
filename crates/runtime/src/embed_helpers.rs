@@ -94,7 +94,7 @@ fn dimension_refusal(model: &str, declared: &EmbedDeclaration, observed: u32) ->
     let mut at_observed = declared.profile.clone();
     at_observed.embed.dim = observed;
     let errors_at = |profile| {
-        validate(profile, false)
+        validate(profile)
             .into_iter()
             .filter(|f| f.severity == Severity::Error)
             .collect::<Vec<_>>()
@@ -248,7 +248,7 @@ mod tests {
         let dim = recommended_dim(&hint).unwrap_or_else(|| panic!("no dimension in {hint:?}"));
         let mut fixed = decl.profile.clone();
         fixed.embed.dim = dim;
-        let findings = validate(&fixed, true);
+        let findings = validate(&fixed);
         assert!(!has_errors(&findings), "{hint:?} leads to {findings:?}");
     }
 
@@ -259,7 +259,7 @@ mod tests {
         let dim = recommended_dim(&hint).unwrap_or_else(|| panic!("no dimension in {hint:?}"));
         let mut fixed = decl.profile.clone();
         fixed.embed.dim = dim;
-        let findings = validate(&fixed, false);
+        let findings = validate(&fixed);
         assert!(!has_errors(&findings), "{hint:?} leads to {findings:?}");
     }
 
@@ -276,13 +276,13 @@ mod tests {
     async fn a_dimension_the_ann_shape_rejects_names_the_ann_section() {
         // 16 / 2 = 8 validates; 15 is not divisible by 2.
         let decl = declaration(UNLISTED, 16, pq(2));
-        assert!(!has_errors(&validate(&decl.profile, true)));
+        assert!(!has_errors(&validate(&decl.profile)));
         let (_, hint) = refusal(&Split::uniform(15), &decl).await;
         assert!(hint.contains("[ann]"), "{hint:?}");
         let dim = recommended_dim(&hint).unwrap_or_else(|| panic!("no dimension in {hint:?}"));
         let mut fixed = decl.profile.clone();
         fixed.embed.dim = dim;
-        let findings = validate(&fixed, true);
+        let findings = validate(&fixed);
         assert!(
             findings
                 .iter()

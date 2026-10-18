@@ -200,7 +200,7 @@ pub fn refuse_bad_profile_reference(name: &str) -> Option<String> {
             "index profile '{name}' is not defined; \
              `bookrack index-profile list` shows the available names"
         )),
-        Ok(Some((profile, _))) => has_errors(&validate(&profile, false)).then(|| {
+        Ok(Some((profile, _))) => has_errors(&validate(&profile)).then(|| {
             format!(
                 "index profile '{name}' has validation errors; \
                  run `bookrack index-profile validate {name}`"

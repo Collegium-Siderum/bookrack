@@ -165,6 +165,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **Models outside the built-in registry can be applied.** The offline
+  model registry records what is known about the qualified models, not
+  which models may be used. A profile naming an embed model or a
+  cross-encoder model it does not list validates on its structure
+  alone, and `index-profile apply` and `libraries config <name>
+  index_profile=<p>` accept it instead of refusing with `has validation
+  errors` and a pointer to a flag neither command takes. The declared
+  dimension of such a model is checked against the backend before a
+  reset. A listed model must still be declared at the dimension it
+  emits, and validation findings no longer name a command-line flag.
+
 - **Human output prints a job id's last eight characters, and
   `queue cancel` takes any part of an id.** The short id in
   `queue list`, the `ingest --wait` progress lines, and the one-job
@@ -283,6 +294,14 @@ release workflow extracts the matching section verbatim from this file.
   means no database at all: a root holding only paper stores or only
   `reference.db` was reported as uninitialised, and its stores went
   unchecked.
+
+### Deprecated
+
+- **`index-profile validate --allow-unknown-model` has no effect.** A
+  model outside the registry is no longer a validation error, so the
+  flag only prints a deprecation warning; it is removed in the next
+  minor release. It used to skip the dimension check for listed models
+  as well, and that check now applies with or without it.
 
 ### Removed
 

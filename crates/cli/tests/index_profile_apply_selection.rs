@@ -9,19 +9,23 @@
 //! reports on the process and refuses a library selection, so that read
 //! carries none; each action that follows names the plan's own target.
 //!
-//! The library holds one synthetic book ingested against [`EmbedStub`],
-//! so the plan has work to do. The target is a user profile declaring
-//! the default embed model at its registry dimension with an exhaustive
-//! scan: the dimension differs from the stub's, which derives a reset,
-//! and the scan declares no index, so no ANN rebuild follows the reset.
+//! The library holds one synthetic book ingested against [`EmbedStub`]
+//! under the default model. The target is a user profile declaring the
+//! stub's other advertised model at the stub's width with an exhaustive
+//! scan: the model differs from the stamp, which derives a reset, and
+//! the scan declares no index, so no ANN rebuild follows the reset. The
+//! model is outside the registry, which the profile may name.
 //!
-//! The stub answers every model narrower than any registry model, and
-//! the reset checks the declared dimension against the backend before
-//! it changes anything. So every case ends in that refusal, and the
-//! refusal is the evidence: it names the profile only the selected
-//! library's manifest declares, which the daemon read for the library
-//! the action named. The library is left as it was, so each selector
-//! meets the same plan.
+//! An applied plan changes the library, so before each selector the
+//! library is put back under the default model with no reference —
+//! through the public verbs, `libraries config --unset` and `vectors
+//! reset` — and each selector meets a plan with work in it, which is the
+//! only kind that reaches the daemon.
+//!
+//! The reset's re-embed builds the cold-start ANN index, which the
+//! brute-force profile then plans to drop; the post-apply self-check
+//! therefore still reports a divergence, and the cases assert up to the
+//! completed reset and leave the self-check verdict alone.
 
 #![cfg(unix)]
 
@@ -30,33 +34,27 @@ mod common;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use bookrack_config::DEFAULT_EMBED_MODEL;
 use bookrack_test_support::{EmbedStub, Sandbox, Spawn, bookrack_cmd};
 use tokio::process::Command;
 
 use crate::common::{DaemonProcess, wait_for_lock};
 
 const LIBRARY: &str = "main";
-const PROFILE: &str = "scan-default-model";
+const PROFILE: &str = "scan-alternate-model";
 
 /// The per-user profile directory, beside the registry file.
 const USER_PROFILE_DIR: &str = "index-profiles";
-
-/// The registry dimension of [`DEFAULT_EMBED_MODEL`]. A profile that
-/// declares anything else is refused by validation before a plan is
-/// derived.
-const DEFAULT_MODEL_DIM: u32 = 1024;
 
 fn profile_toml() -> String {
     format!(
         "schema_version = 1\n\
          name = \"{PROFILE}\"\n\
-         description = \"The default embed model with an exhaustive scan.\"\n\
+         description = \"The stub's second model with an exhaustive scan.\"\n\
          \n\
          [embed]\n\
          backend = \"ollama\"\n\
-         model = \"{DEFAULT_EMBED_MODEL}\"\n\
-         dim = {DEFAULT_MODEL_DIM}\n\
+         model = \"{model}\"\n\
+         dim = {dim}\n\
          \n\
          [ann]\n\
          kind = \"brute-force\"\n\
@@ -66,7 +64,9 @@ fn profile_toml() -> String {
          refine_factor = 1\n\
          \n\
          [reranker]\n\
-         kind = \"none\"\n"
+         kind = \"none\"\n",
+        model = EmbedStub::ALTERNATE_MODEL,
+        dim = EmbedStub::DIMENSION,
     )
 }
 
@@ -153,30 +153,7 @@ async fn apply_executes_under_each_library_selector() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    // The plan the cases execute: one reset on the book pipeline. A
-    // rebuild in it would fail on a one-book library for reasons of its
-    // own, and an empty plan would never reach the daemon.
     let root_arg = root.to_str().expect("utf-8 path");
-    let (code, stdout, stderr) = run(
-        bookrack_cmd!(&sandbox).without_data_dir(),
-        &[
-            "--library",
-            LIBRARY,
-            "index-profile",
-            "apply",
-            PROFILE,
-            "--dry-run",
-        ],
-    )
-    .await;
-    assert_eq!(code, Some(0), "the dry run plans offline: {stderr}");
-    assert!(stdout.contains("vectors reset"), "{stdout}");
-    assert!(
-        !stdout.contains("vectors rebuild"),
-        "a scan profile plans no rebuild: {stdout}"
-    );
-    assert!(stdout.contains("[papers]\n  skipped"), "{stdout}");
-
     let cases: [(&str, Spawn, Vec<&str>); 3] = [
         (
             "--library",
@@ -195,14 +172,17 @@ async fn apply_executes_under_each_library_selector() {
         ),
     ];
     for (selector, spawn, mut args) in cases {
+        restore_default_model(&sandbox).await;
+        assert_plan_is_one_reset(&sandbox, selector).await;
+
         args.extend(["index-profile", "apply", PROFILE, "--yes"]);
         let (code, stdout, stderr) = run(spawn, &args).await;
         assert!(
             !stderr.contains("cannot run this command against library"),
             "{selector}: the worker probe carried the selection into status: {stderr}",
         );
-        assert_reset_refused(selector, &stdout, &stderr, &root);
-        assert_eq!(code, Some(2), "{selector}: {stderr}");
+        assert_plan_executed(selector, &stdout, &root);
+        assert_ne!(code, Some(2), "{selector}: {stderr}");
     }
 
     if let Some(id) = daemon.id() {
@@ -215,11 +195,58 @@ async fn apply_executes_under_each_library_selector() {
     let _ = daemon.wait_with_output(Duration::from_secs(10)).await;
 }
 
+/// Put the library back under the default model with no reference, so
+/// the next apply has a reset to run.
+async fn restore_default_model(sandbox: &Sandbox) {
+    let (code, _, stderr) = run(
+        bookrack_cmd!(sandbox).without_data_dir(),
+        &["libraries", "config", LIBRARY, "--unset", "index_profile"],
+    )
+    .await;
+    assert_eq!(code, Some(0), "drop the reference: {stderr}");
+    let (code, _, stderr) = run(
+        bookrack_cmd!(sandbox).without_data_dir(),
+        &["--library", LIBRARY, "vectors", "reset", "--yes"],
+    )
+    .await;
+    assert_eq!(code, Some(0), "rebuild under the default model: {stderr}");
+}
+
+/// The plan each case executes: one reset on the book pipeline. A
+/// rebuild in it would fail on a one-book library for reasons of its
+/// own, and an empty plan would never reach the daemon.
+async fn assert_plan_is_one_reset(sandbox: &Sandbox, selector: &str) {
+    let (code, stdout, stderr) = run(
+        bookrack_cmd!(sandbox).without_data_dir(),
+        &[
+            "--library",
+            LIBRARY,
+            "index-profile",
+            "apply",
+            PROFILE,
+            "--dry-run",
+        ],
+    )
+    .await;
+    assert_eq!(
+        code,
+        Some(0),
+        "{selector}: the dry run plans offline: {stderr}"
+    );
+    assert!(stdout.contains("vectors reset"), "{selector}: {stdout}");
+    assert!(
+        !stdout.contains("vectors rebuild"),
+        "{selector}: a scan profile plans no rebuild: {stdout}"
+    );
+    assert!(
+        stdout.contains("[papers]\n  skipped"),
+        "{selector}: {stdout}"
+    );
+}
+
 /// The plan rendered against the selected library, the declaration
-/// written, and the reset refused by that library's handler on the
-/// dimension the profile declares, with the interruption pointing at the
-/// error rather than promising a resume.
-fn assert_reset_refused(selector: &str, stdout: &str, stderr: &str, root: &Path) {
+/// written, and the one action run to completion.
+fn assert_plan_executed(selector: &str, stdout: &str, root: &Path) {
     assert!(
         stdout.contains(&format!("library: {LIBRARY} ({})", root.display())),
         "{selector}: the plan must be rendered against the selected library: {stdout}",
@@ -228,20 +255,12 @@ fn assert_reset_refused(selector: &str, stdout: &str, stderr: &str, root: &Path)
         stdout.contains(&format!("declared: index_profile = '{PROFILE}'")),
         "{selector}: {stdout}",
     );
-    let refusal = format!(
-        "profile '{PROFILE}' declares embed.dim {DEFAULT_MODEL_DIM}, but the backend returns {}-dimensional vectors",
-        EmbedStub::DIMENSION
+    assert!(
+        stdout.contains("[1/1] books reset: done"),
+        "{selector}: the reset must run to completion: {stdout}",
     );
     assert!(
-        stderr.contains(&refusal),
-        "{selector}: the reset must be refused on the declared dimension: {stderr}",
-    );
-    assert!(
-        stdout.contains("apply interrupted at books reset"),
+        !stdout.contains("apply interrupted"),
         "{selector}: {stdout}"
-    );
-    assert!(
-        stdout.contains("when the error offers --resume"),
-        "{selector}: the interruption must defer to the error on resuming: {stdout}",
     );
 }

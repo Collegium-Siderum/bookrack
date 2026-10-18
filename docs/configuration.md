@@ -481,8 +481,13 @@ running system can still move are `nprobes` and `refine_factor`, through
 the two per-query variables above.
 
 `validate` enforces the product-quantization constraints, checks the
-cross-encoder reranker contract, and consults an offline model registry
-that `--allow-unknown-model` bypasses. `bookrack doctor` additionally
+cross-encoder reranker contract and the embed section's structure, and
+consults an offline model registry. The registry records what is known
+about the qualified models rather than which models may be used: a
+listed model must be declared at the dimension it emits, while a model
+it does not list validates on structure alone, and `index-profile
+apply` and `libraries config` accept it. `--allow-unknown-model` is
+deprecated and has no effect. `bookrack doctor` additionally
 compares each library's referenced profile against its built index
 stamps whenever the profile resolves, whether or not it validates, and
 warns on any mismatch. A different model or algorithm version keeps the

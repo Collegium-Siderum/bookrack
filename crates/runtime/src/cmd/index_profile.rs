@@ -61,14 +61,13 @@ pub enum IndexProfileAction {
     /// an error.
     #[command(after_long_help = bookrack_cli_grammar::examples![
         "index-profile validate qwen3-0.6b-default",
-        "index-profile validate qwen3-0.6b-default --allow-unknown-model",
+        "index-profile validate my-profile",
     ])]
     Validate {
         /// Profile name.
         name: String,
-        /// Skip the "model is known" and "declared dimension matches"
-        /// registry checks so an out-of-tree model can still be checked
-        /// structurally.
+        /// Deprecated; has no effect. A model outside the registry is
+        /// not a validation error.
         #[arg(long)]
         allow_unknown_model: bool,
     },
@@ -265,7 +264,7 @@ fn show(name: &str) -> Result<()> {
     let (profile, _) = resolve(dir.as_deref(), name)?
         .ok_or_else(|| eyre::eyre!("unknown index profile '{name}'"))?;
     println!();
-    render_findings(&validate(&profile, false));
+    render_findings(&validate(&profile));
     Ok(())
 }
 
@@ -273,7 +272,13 @@ fn validate_cmd(name: &str, allow_unknown_model: bool) -> Result<()> {
     let dir = user_profile_dir();
     let (profile, _source) = resolve(dir.as_deref(), name)?
         .ok_or_else(|| eyre::eyre!("unknown index profile '{name}'"))?;
-    let findings = validate(&profile, allow_unknown_model);
+    if allow_unknown_model {
+        eprintln!(
+            "warning: --allow-unknown-model is deprecated and has no effect; models outside \
+             the registry are accepted"
+        );
+    }
+    let findings = validate(&profile);
     render_findings(&findings);
     if has_errors(&findings) {
         let errors = findings

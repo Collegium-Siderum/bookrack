@@ -1620,7 +1620,7 @@ fn push_index_profile_coherence_rows_in(
                 Ok(Some((profile, source))) => Ok(Some((
                     profile.embed.model.clone(),
                     profile.embed.dim,
-                    has_errors(&validate(&profile, false)),
+                    has_errors(&validate(&profile)),
                     source,
                 ))),
                 Ok(None) => Ok(None),
