@@ -13,8 +13,9 @@
 //! under the default model. The target is a user profile declaring the
 //! stub's other advertised model at the stub's width with an exhaustive
 //! scan: the model differs from the stamp, which derives a reset, and
-//! the scan declares no index, so no ANN rebuild follows the reset. The
-//! model is outside the registry, which the profile may name.
+//! the reset's re-embed builds the cold-start ANN index, so a drop
+//! follows the reset to realize the scan. The model is outside the
+//! registry, which the profile may name.
 //!
 //! An applied plan changes the library, so before each selector the
 //! library is put back under the default model with no reference —
@@ -29,10 +30,8 @@
 //! confirmed one does not print it again. Dropping the reference clears
 //! what was shown.
 //!
-//! The reset's re-embed builds the cold-start ANN index, which the
-//! brute-force profile then plans to drop; the post-apply self-check
-//! therefore still reports a divergence, and the cases assert up to the
-//! completed reset and leave the self-check verdict alone.
+//! Every apply converges in one run: the post-apply self-check passes,
+//! and an apply after it finds nothing to execute.
 
 #![cfg(unix)]
 
@@ -184,7 +183,7 @@ async fn apply_executes_under_each_library_selector() {
     ];
     for (selector, spawn, mut args) in cases {
         restore_default_model(&sandbox).await;
-        assert_plan_is_one_reset(&sandbox, selector).await;
+        assert_plan_is_reset_then_drop(&sandbox, selector).await;
 
         args.extend(["index-profile", "apply", PROFILE, "--yes"]);
         let (code, stdout, stderr) = run(spawn, &args).await;
@@ -193,7 +192,11 @@ async fn apply_executes_under_each_library_selector() {
             "{selector}: the worker probe carried the selection into status: {stderr}",
         );
         assert_plan_executed(selector, &stdout, &root);
-        assert_ne!(code, Some(2), "{selector}: {stderr}");
+        assert_eq!(code, Some(0), "{selector}: {stderr}");
+        assert!(
+            stdout.contains("profile applied and verified"),
+            "{selector}: the self-check must find the library converged: {stdout}",
+        );
         assert_eq!(
             stdout.matches(NOTE).count(),
             1,
@@ -201,7 +204,8 @@ async fn apply_executes_under_each_library_selector() {
         );
     }
 
-    // The library already runs the profile and was told: no note.
+    // The library already runs the profile and was told: nothing to
+    // execute, and no note.
     let (code, stdout, stderr) = run(
         bookrack_cmd!(&sandbox).without_data_dir(),
         &[
@@ -214,7 +218,11 @@ async fn apply_executes_under_each_library_selector() {
         ],
     )
     .await;
-    assert_ne!(code, Some(2), "{stderr}");
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(
+        stdout.contains("nothing else to do"),
+        "a converged library has no action left: {stdout}"
+    );
     assert!(!stdout.contains(NOTE), "a note already shown: {stdout}");
 
     // A quiet or JSON apply prints no note and records none.
@@ -233,7 +241,7 @@ async fn apply_executes_under_each_library_selector() {
             ],
         )
         .await;
-        assert_ne!(code, Some(2), "{mode}: {stderr}");
+        assert_eq!(code, Some(0), "{mode}: {stderr}");
         assert!(!stdout.contains(NOTE), "{mode}: {stdout}");
         let (_, stdout, _) = run(
             bookrack_cmd!(&sandbox).without_data_dir(),
@@ -280,10 +288,11 @@ async fn restore_default_model(sandbox: &Sandbox) {
     assert_eq!(code, Some(0), "rebuild under the default model: {stderr}");
 }
 
-/// The plan each case executes: one reset on the book pipeline. A
-/// rebuild in it would fail on a one-book library for reasons of its
-/// own, and an empty plan would never reach the daemon.
-async fn assert_plan_is_one_reset(sandbox: &Sandbox, selector: &str) {
+/// The plan each case executes: a reset on the book pipeline, then the
+/// drop of the index its re-embed builds. A rebuild in it would fail on
+/// a one-book library for reasons of its own, and an empty plan would
+/// never reach the daemon.
+async fn assert_plan_is_reset_then_drop(sandbox: &Sandbox, selector: &str) {
     let (code, stdout, stderr) = run(
         bookrack_cmd!(sandbox).without_data_dir(),
         &[
@@ -303,6 +312,11 @@ async fn assert_plan_is_one_reset(sandbox: &Sandbox, selector: &str) {
     );
     assert!(stdout.contains("vectors reset"), "{selector}: {stdout}");
     assert!(
+        stdout.contains("vectors drop"),
+        "{selector}: the reset's re-embed builds the cold-start index, which a scan \
+         profile plans to drop: {stdout}"
+    );
+    assert!(
         !stdout.contains("vectors rebuild"),
         "{selector}: a scan profile plans no rebuild: {stdout}"
     );
@@ -317,7 +331,7 @@ async fn assert_plan_is_one_reset(sandbox: &Sandbox, selector: &str) {
 }
 
 /// The plan rendered against the selected library, the declaration
-/// written, and the one action run to completion.
+/// written, and both actions run to completion.
 fn assert_plan_executed(selector: &str, stdout: &str, root: &Path) {
     assert!(
         stdout.contains(&format!("library: {LIBRARY} ({})", root.display())),
@@ -328,8 +342,12 @@ fn assert_plan_executed(selector: &str, stdout: &str, root: &Path) {
         "{selector}: {stdout}",
     );
     assert!(
-        stdout.contains("[1/1] books reset: done"),
+        stdout.contains("[1/2] books reset: done"),
         "{selector}: the reset must run to completion: {stdout}",
+    );
+    assert!(
+        stdout.contains("[2/2] books drop-index: done"),
+        "{selector}: the drop must run to completion: {stdout}",
     );
     assert!(
         !stdout.contains("apply interrupted"),

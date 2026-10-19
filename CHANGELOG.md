@@ -71,6 +71,13 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **`index-profile apply` converges in one run when a `brute-force`
+  profile changes the model or dimension.** The reset's re-embed builds
+  an ANN index on a library that records none, while the plan took the
+  reset to leave an exhaustive scan, so apply ran the reset, reported
+  that the library "still diverges", and exited `1`; a second apply
+  then dropped the index. The plan now follows the reset with `vectors
+  drop`, and the self-check passes.
 - **A reset refuses a dimension the backend does not produce.** When
   the library's index profile declares `embed.dim`, `vectors reset`,
   `papers vectors reset`, and the resets `index-profile apply` runs

@@ -561,9 +561,13 @@ pub enum PipelinePlan {
 /// 1. A stamped embed model or vector dimension that differs from the
 ///    profile derives a [`PlannedAction::Reset`]. The reset re-chunks
 ///    and re-embeds everything — absorbing any re-embed or reconcile —
-///    but it also removes `vectors_meta.json` with the chunks table, so
-///    a profile that declares an index gets the follow-up
-///    [`PlannedAction::Rebuild`] that realizes it.
+///    but it also removes `vectors_meta.json` with the chunks table, and
+///    a book re-embed that finds no meta builds the cold-start index.
+///    The ANN state after a reset is therefore never the declared one,
+///    and a follow-up action realizes it: a [`PlannedAction::Rebuild`]
+///    for a profile that declares an index, a
+///    [`PlannedAction::DropIndex`] for a `brute-force` profile (a no-op
+///    over a store with no index, which still records the scan state).
 /// 2. A stamped chunk or normalize version that differs from this
 ///    binary derives a [`PlannedAction::Reembed`].
 /// 3. The declared ANN state is realized: an index-declaring profile
@@ -592,11 +596,12 @@ pub fn derive_pipeline_plan(
         .is_some_and(|m| m != target.embed_model);
     let dim_diverges = built.vector_dim.is_some_and(|d| d != target.vector_dim);
     if model_diverges || dim_diverges {
-        let mut actions = vec![PlannedAction::Reset];
-        if profile.ann.kind != AnnKind::BruteForce {
-            actions.push(PlannedAction::Rebuild);
-        }
-        return PipelinePlan::Run(actions);
+        let realize_ann = if profile.ann.kind == AnnKind::BruteForce {
+            PlannedAction::DropIndex
+        } else {
+            PlannedAction::Rebuild
+        };
+        return PipelinePlan::Run(vec![PlannedAction::Reset, realize_ann]);
     }
 
     let mut actions = Vec::new();
@@ -931,13 +936,13 @@ mod tests {
         );
 
         // A model change under a brute-force profile: the reset's
-        // post-state (no index, exhaustive scan) is the declared state,
-        // so nothing follows it.
+        // re-embed finds no ANN meta and builds the cold-start index,
+        // so the drop that realizes the declared scan follows it.
         let mut scan_profile = profile.clone();
         scan_profile.ann.kind = AnnKind::BruteForce;
         assert_eq!(
             derive_pipeline_plan(&scan_profile, &target, &other_model),
-            PipelinePlan::Run(vec![PlannedAction::Reset])
+            PipelinePlan::Run(vec![PlannedAction::Reset, PlannedAction::DropIndex])
         );
 
         // A brute-force profile over a built index: drop it; over a
