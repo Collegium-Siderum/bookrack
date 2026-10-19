@@ -10,6 +10,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **MCP `session.queue_status` says why a job failed, and can list one
+  state.** A `recent` row carries `finished_at` once the job has ended
+  and `error` when it failed, with a dependency source location
+  crate-relative as on the error envelope. The new optional `state`
+  argument lists only jobs in that state, under the same cap of ten,
+  newest enqueued first; the counts still cover the whole queue, so
+  `{"state": "failed"}` reaches a failure that has scrolled out of the
+  unfiltered window. A state no row can be in is refused as invalid
+  params, with the accepted names in the hint.
 - **`bookrack queue wait` re-attaches to queued work.** It waits on
   every job that is pending or running when the queue is read — jobs
   submitted later are not waited on — and ends with the summary and

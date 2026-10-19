@@ -18,7 +18,9 @@ use bookrack_core::queue::{JobState, QueueState};
 use bookrack_core::{ItemKind, KindedNodeId, NodeId};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::{LogEvent, LogStreamHandle};
-use bookrack_ops::dto::{BookFilter, MetadataFilter, PaperFilter, parse_statuses};
+use bookrack_ops::dto::{
+    BookFilter, MetadataFilter, PaperFilter, UnknownFilterValue, parse_statuses,
+};
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, OpsError, SearchOptions, reads, with_caller_override, writes};
@@ -555,9 +557,18 @@ pub struct SessionLogsTailResult {
     pub returned: usize,
 }
 
-/// Arguments for `session.queue_status`. The tool takes no inputs.
+/// Arguments for `session.queue_status`.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
-pub struct SessionQueueStatusArgs {}
+pub struct SessionQueueStatusArgs {
+    /// List only jobs in this lifecycle state in `recent`, under the
+    /// same cap and order. The names are the ones a row reports in its
+    /// `state`: `pending`, `running`, `done`, `skipped_duplicate`,
+    /// `needs_ocr`, `failed`, `cancelled`. The counts cover the whole
+    /// queue either way. An unrecognised name is refused rather than
+    /// dropped.
+    #[serde(default)]
+    pub state: Option<String>,
+}
 
 /// Compact projection of one queued ingest job, used in the `recent`
 /// list returned by `session.queue_status`.
@@ -571,6 +582,16 @@ pub struct QueueJobSummary {
     pub library: String,
     /// Source file path the job ingests.
     pub path: String,
+    /// When the job reached its terminal state; absent while it has not
+    /// reached one, as for a pending or running job.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The failure the job recorded — a `failed` job's cause, as one
+    /// flattened chain — or absent when it recorded none. A dependency
+    /// source location in it is crate-relative
+    /// ([`bookrack_core::redact_source_paths`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Response shape returned by `session.queue_status`: counts by state
@@ -596,14 +617,28 @@ pub struct SessionQueueStatusResult {
     pub failed: usize,
     /// Jobs in `Cancelled` state.
     pub cancelled: usize,
-    /// The most-recent [`SESSION_QUEUE_STATUS_RECENT`] jobs, newest
-    /// first.
+    /// The [`SESSION_QUEUE_STATUS_RECENT`] most recently enqueued jobs,
+    /// newest first; with `state`, the most recently enqueued jobs in
+    /// that state.
     pub recent: Vec<QueueJobSummary>,
 }
 
 /// Cap on the `recent` field returned by `session.queue_status`.
 // setting: mcp.queue_status_recent
 pub const SESSION_QUEUE_STATUS_RECENT: usize = 10;
+
+/// Parse a `session.queue_status` `state` filter from the wire token a
+/// row reports ([`JobState::as_wire_str`]).
+fn parse_job_state(value: &str) -> Result<JobState, UnknownFilterValue> {
+    JobState::ALL
+        .into_iter()
+        .find(|state| state.as_wire_str() == value)
+        .ok_or_else(|| UnknownFilterValue {
+            parameter: "state",
+            value: value.to_string(),
+            accepted: JobState::ALL.map(JobState::as_wire_str).to_vec(),
+        })
+}
 
 /// Arguments for `session.shutdown`. The tool takes no inputs.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
@@ -1670,20 +1705,31 @@ impl BookrackServer {
     }
 
     /// Snapshot the daemon-REPL's ingest queue: counts by lifecycle
-    /// state plus the most recent jobs.
+    /// state plus the most recent jobs, optionally only those in one
+    /// state. The filter applies before the cap, so an early failure in
+    /// a long batch stays reachable.
     ///
     /// The headless `bookrack-mcp` binary does not drive a queue
     /// worker; against it this tool reports an inert empty state.
     #[tool(
         name = "session.queue_status",
-        description = "Snapshot of the ingest queue: counts by lifecycle state plus the \
-                       most recent jobs (newest first, capped at 10). Returns an empty \
+        description = "Snapshot of the ingest queue: counts by lifecycle state across the \
+                       whole queue, plus the most recently enqueued jobs (newest first, \
+                       capped at 10). `state` lists only jobs in that state, so \
+                       `{\"state\": \"failed\"}` finds failures however early they were \
+                       enqueued; a failed job carries its `error`. Returns an empty \
                        snapshot when run against a daemon that does not host a queue worker."
     )]
     async fn session_queue_status(
         &self,
-        Parameters(_): Parameters<SessionQueueStatusArgs>,
+        Parameters(args): Parameters<SessionQueueStatusArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let wanted = args
+            .state
+            .as_deref()
+            .map(parse_job_state)
+            .transpose()
+            .map_err(|unknown| unknown_filter_value_to_mcp(&unknown))?;
         let state = self
             .queue_state
             .lock()
@@ -1705,6 +1751,7 @@ impl BookrackServer {
             .jobs
             .iter()
             .rev()
+            .filter(|j| wanted.is_none_or(|state| j.state == state))
             .take(SESSION_QUEUE_STATUS_RECENT)
             .map(|j| QueueJobSummary {
                 id: j.id.clone(),
@@ -1714,6 +1761,11 @@ impl BookrackServer {
                 state: j.state.as_wire_str().to_string(),
                 library: j.library.clone(),
                 path: j.path.display().to_string(),
+                finished_at: j.finished_at,
+                error: j
+                    .error
+                    .as_deref()
+                    .map(|text| bookrack_core::redact_source_paths(text).into_owned()),
             })
             .collect();
         let result = SessionQueueStatusResult {

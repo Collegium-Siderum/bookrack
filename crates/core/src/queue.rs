@@ -86,6 +86,18 @@ pub enum JobState {
 }
 
 impl JobState {
+    /// Every lifecycle state, in declaration order. Lets a caller walk
+    /// the vocabulary instead of transcribing it.
+    pub const ALL: [JobState; 7] = [
+        JobState::Pending,
+        JobState::Running,
+        JobState::Done,
+        JobState::SkippedDuplicate,
+        JobState::NeedsOcr,
+        JobState::Failed,
+        JobState::Cancelled,
+    ];
+
     /// The stable wire token for this state — the same `snake_case`
     /// string serde emits. Kept as an explicit map so string consumers
     /// (queue rendering, the MCP session tool) share one source of
@@ -310,6 +322,15 @@ mod tests {
         );
         let job: QueueJob = serde_json::from_str(&missing).expect("deserialize null");
         assert_eq!(job.error, None);
+    }
+
+    #[test]
+    fn every_listed_state_round_trips_through_its_wire_token() {
+        for state in JobState::ALL {
+            let token = serde_json::Value::String(state.as_wire_str().to_string());
+            let read: JobState = serde_json::from_value(token).expect("serde reads the wire token");
+            assert_eq!(read, state);
+        }
     }
 
     #[test]

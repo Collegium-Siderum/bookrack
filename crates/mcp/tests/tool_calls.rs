@@ -23,7 +23,10 @@
 //!   root and name, not the ones of the library the daemon came up
 //!   on;
 //! * `session.info` lists each mounted library with its own root and
-//!   default mark, and its default name follows the registry's pointer.
+//!   default mark, and its default name follows the registry's pointer;
+//! * `session.queue_status` filters `recent` on a state before capping
+//!   it, counts the whole queue, refuses a state no job can be in, and
+//!   carries a failure's cause without build-machine source prefixes.
 //!
 //! The registry carries two libraries on two roots so a card whose
 //! identity and counts came from different libraries is observable.
@@ -36,7 +39,7 @@ use std::time::{Duration, Instant};
 use bookrack_catalog::{Catalog, IntakeStatus, NewIntake};
 use bookrack_config::{Config, LibrarySelection};
 use bookrack_core::ItemKind;
-use bookrack_core::queue::QueueState;
+use bookrack_core::queue::{JobState, Priority, QueueJob, QueueState};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::LogStreamHandle;
 use bookrack_ops::reads::info::LibraryInfoContext;
@@ -62,6 +65,8 @@ struct Fixture {
     /// The registry `serve` routes through, held so a test can move the
     /// default pointer while the server runs.
     registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
+    /// The queue snapshot `serve` reads, held so a test can seed jobs.
+    queue_state: Arc<Mutex<QueueState>>,
     addr: SocketAddr,
     shutdown_tx: broadcast::Sender<()>,
     server: tokio::task::JoinHandle<eyre::Result<()>>,
@@ -137,13 +142,15 @@ impl Fixture {
         };
         let serve_tx = shutdown_tx.clone();
         let serve_registry = registry.clone();
+        let queue_state = Arc::new(Mutex::new(QueueState::default()));
+        let serve_queue = queue_state.clone();
         let server = tokio::spawn(async move {
             bookrack_mcp::serve(
                 serve_registry,
                 info_context,
                 Instant::now(),
                 LogStreamHandle::default(),
-                Arc::new(Mutex::new(QueueState::default())),
+                serve_queue,
                 serve_tx,
                 listener,
                 shutdown_rx,
@@ -169,6 +176,7 @@ impl Fixture {
             catalog_db,
             intake_id,
             registry,
+            queue_state,
             addr,
             shutdown_tx,
             server,
@@ -188,6 +196,12 @@ impl Fixture {
             .set_intake_status(ItemKind::Book, intake_id, status)
             .expect("set status");
         intake_id
+    }
+
+    /// Replace the queue snapshot with `jobs`, in enqueue order.
+    fn seed_queue(&self, jobs: impl IntoIterator<Item = QueueJob>) {
+        let mut queue = self.queue_state.lock().expect("queue state lock");
+        queue.jobs = jobs.into_iter().collect();
     }
 
     async fn connect(&self) -> RunningService<RoleClient, ()> {
@@ -229,6 +243,39 @@ fn handle(name: &str, cfg: Arc<Config>) -> Arc<LibraryHandle<OllamaEmbedClient>>
         Caller::cli(),
     );
     LibraryHandle::new(name, cfg, ops)
+}
+
+/// A finished book job `job-<n>` in `state`, enqueued `n` seconds after
+/// a fixed origin so that seeding jobs in order of `n` is enqueue order.
+fn finished_job(n: u32, state: JobState, error: Option<&str>) -> QueueJob {
+    let at = chrono::DateTime::from_timestamp(1_700_000_000 + i64::from(n), 0).expect("timestamp");
+    QueueJob {
+        id: format!("job-{n:02}"),
+        library: "fixture".to_string(),
+        path: PathBuf::from(format!("/srv/books/{n:02}.epub")),
+        priority: Priority::Normal,
+        force: false,
+        hold_for_metadata: false,
+        kind: ItemKind::Book,
+        intake_ocr: None,
+        audit_profile: None,
+        state,
+        queued_at: at,
+        started_at: Some(at),
+        finished_at: Some(at),
+        error: error.map(str::to_string),
+        merged_into: None,
+    }
+}
+
+/// The ids of a `session.queue_status` body's `recent` rows, in order.
+fn recent_ids(body: &serde_json::Value) -> Vec<String> {
+    body["recent"]
+        .as_array()
+        .expect("recent list")
+        .iter()
+        .map(|row| row["id"].as_str().expect("row id").to_string())
+        .collect()
 }
 
 /// A tool call: `name` with a JSON-object argument payload.
@@ -661,6 +708,200 @@ async fn list_metadata_refuses_a_confidence_grade_no_audit_writes() {
         data.message.contains("review_status_in"),
         "the refusal must name the parameter: {}",
         data.message
+    );
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+/// Twelve finished jobs, the earliest of them failed. Without a filter
+/// the failure has scrolled out of the ten-row `recent` window; `state`
+/// brings it back with its cause, and the counts still cover the whole
+/// queue rather than the filtered rows.
+#[tokio::test]
+async fn queue_status_filters_on_state_before_capping_recent() {
+    let fx = Fixture::start().await;
+    fx.seed_queue(
+        std::iter::once(finished_job(
+            0,
+            JobState::Failed,
+            Some("ingest: extract error: no body blocks"),
+        ))
+        .chain((1..=11).map(|n| finished_job(n, JobState::Done, None))),
+    );
+    let client = fx.connect().await;
+
+    let body = body_json(
+        &client
+            .call_tool(call(
+                "session.queue_status",
+                serde_json::json!({ "state": "failed" }),
+            ))
+            .await
+            .expect("session.queue_status for failed jobs"),
+    );
+    assert_eq!(
+        recent_ids(&body),
+        ["job-00"],
+        "`state: failed` must list the one failed job, however early it was enqueued: {body}"
+    );
+    let row = &body["recent"][0];
+    assert_eq!(row["state"], "failed", "{body}");
+    assert_eq!(
+        row["error"], "ingest: extract error: no body blocks",
+        "a failed row must say why it failed: {body}"
+    );
+    assert_eq!(
+        row["finished_at"], "2023-11-14T22:13:20Z",
+        "a finished row must say when it finished: {body}"
+    );
+    assert_eq!(
+        (body["failed"].as_u64(), body["done"].as_u64()),
+        (Some(1), Some(11)),
+        "the counts cover the whole queue, not the filtered rows: {body}"
+    );
+
+    // Unfiltered, `recent` is the ten newest jobs, newest first, and a
+    // job that did not fail carries no error.
+    let body = body_json(
+        &client
+            .call_tool(call("session.queue_status", serde_json::json!({})))
+            .await
+            .expect("unfiltered session.queue_status"),
+    );
+    let newest: Vec<String> = (2..=11).rev().map(|n| format!("job-{n:02}")).collect();
+    assert_eq!(recent_ids(&body), newest, "{body}");
+    assert!(
+        body["recent"][0].get("error").is_none(),
+        "a done row carries no error field: {body}"
+    );
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+/// More failures than the cap: the filtered list is still capped, and
+/// holds the newest failures, newest first.
+#[tokio::test]
+async fn queue_status_caps_a_filtered_list_at_the_newest_matches() {
+    let fx = Fixture::start().await;
+    // Even jobs failed, odd jobs done: twelve of each, interleaved, so
+    // capping before filtering keeps only five of the failures.
+    fx.seed_queue((0..24).map(|n| {
+        if n % 2 == 0 {
+            finished_job(n, JobState::Failed, Some("ingest: extract error"))
+        } else {
+            finished_job(n, JobState::Done, None)
+        }
+    }));
+    let client = fx.connect().await;
+
+    let body = body_json(
+        &client
+            .call_tool(call(
+                "session.queue_status",
+                serde_json::json!({ "state": "failed" }),
+            ))
+            .await
+            .expect("session.queue_status for failed jobs"),
+    );
+    let newest_failures: Vec<String> = (4..24)
+        .rev()
+        .filter(|n| n % 2 == 0)
+        .map(|n| format!("job-{n:02}"))
+        .collect();
+    assert_eq!(
+        recent_ids(&body),
+        newest_failures,
+        "the filtered list must be the ten newest failures: {body}"
+    );
+    assert_eq!(body["failed"].as_u64(), Some(12), "{body}");
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+#[tokio::test]
+async fn queue_status_refuses_a_state_no_job_can_be_in() {
+    // Dropping an unrecognised state would answer with the unfiltered
+    // window, which reads as "no job in that state" whenever the
+    // window happens to hold none.
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+
+    let err = client
+        .call_tool(call(
+            "session.queue_status",
+            serde_json::json!({ "state": "faild" }),
+        ))
+        .await
+        .expect_err("a misspelled state must be rejected");
+    let data = rpc_error(err);
+    assert_eq!(data.code, ErrorCode::INVALID_PARAMS, "{}", data.message);
+    assert!(
+        data.message.contains("faild") && data.message.contains("state"),
+        "the refusal must name the parameter and the value: {}",
+        data.message
+    );
+    let problem: bookrack_core::ProblemData =
+        serde_json::from_value(data.data.expect("data slot filled")).expect("ProblemData");
+    let hint = problem.hint.expect("a refused state has a next step");
+    for state in JobState::ALL {
+        assert!(
+            hint.contains(state.as_wire_str()),
+            "the hint must state the accepted set, missing {}: {hint}",
+            state.as_wire_str()
+        );
+    }
+
+    // Every state a row reports is accepted, including on an empty
+    // queue.
+    for state in JobState::ALL {
+        let body = body_json(
+            &client
+                .call_tool(call(
+                    "session.queue_status",
+                    serde_json::json!({ "state": state.as_wire_str() }),
+                ))
+                .await
+                .unwrap_or_else(|e| panic!("state {} refused: {e:?}", state.as_wire_str())),
+        );
+        assert_eq!(recent_ids(&body), Vec::<String>::new(), "{body}");
+    }
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+/// A failure's text leaves through `recent` with a dependency source
+/// location crate-relative, as the error envelope carries it, even when
+/// the text reached the queue snapshot unredacted.
+#[tokio::test]
+async fn queue_status_reports_a_failure_without_build_prefixes() {
+    let fx = Fixture::start().await;
+    fx.seed_queue([
+        finished_job(0, JobState::Done, None),
+        finished_job(
+            1,
+            JobState::Failed,
+            Some(
+                "ingest: train failed, /disk/cache/cargo/registry/src/\
+                 index.crates.io-0123456789abcdef/dep-1.0.0/src/train.rs:10:4: train failed",
+            ),
+        ),
+    ]);
+    let client = fx.connect().await;
+
+    let body = body_json(
+        &client
+            .call_tool(call("session.queue_status", serde_json::json!({})))
+            .await
+            .expect("session.queue_status"),
+    );
+    assert_eq!(
+        body["recent"][0]["error"],
+        "ingest: train failed, dep-1.0.0/src/train.rs:10:4: train failed",
+        "the newest job failed, and its cause must arrive without the build prefix: {body}"
     );
 
     let _ = client.cancel().await;
