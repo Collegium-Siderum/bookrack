@@ -1210,6 +1210,12 @@ fn role_str(role: ContributorRole) -> &'static str {
 
 /// Plan the chunks for an abstract leaf. The abstract is almost always
 /// one chunk under the default 1000-character target.
+///
+/// Each chunk's char offsets locate it within `text`: the splitter
+/// reports the byte position of the trimmed chunk, so overlap with the
+/// previous chunk and whitespace trimmed between chunks are both
+/// accounted for, and slicing `text` by the offsets reproduces the
+/// chunk text.
 pub(crate) fn plan_chunks(leaf_id: NodeId, text: &str, params: &ChunkParams) -> Vec<PlannedChunk> {
     let splitter = text_splitter::TextSplitter::new(
         text_splitter::ChunkConfig::new(params.target_chars)
@@ -1217,23 +1223,19 @@ pub(crate) fn plan_chunks(leaf_id: NodeId, text: &str, params: &ChunkParams) -> 
             .expect("valid chunk config"),
     );
     let mut out = Vec::new();
-    let mut cursor = 0i32;
-    for piece in splitter.chunks(text) {
-        let trimmed = piece.trim();
-        if trimmed.is_empty() {
+    for (byte_start, chunk) in splitter.chunk_indices(text) {
+        if chunk.is_empty() {
             continue;
         }
-        let len = trimmed.chars().count() as i32;
-        let start = cursor;
-        let end = cursor + len;
-        cursor = end;
+        let start = text[..byte_start].chars().count() as i32;
+        let end = start + chunk.chars().count() as i32;
         out.push(PlannedChunk {
             start_node_id: leaf_id,
             start_char_offset: start,
             end_node_id: leaf_id,
             end_char_offset: end,
-            text: trimmed.to_string(),
-            norm_chunk_sha256: norm_text_sha256(trimmed),
+            text: chunk.to_string(),
+            norm_chunk_sha256: norm_text_sha256(chunk),
         });
     }
     out
@@ -1897,5 +1899,41 @@ mod tests {
         // Auto-opened Section carries only the Subsection — no leading
         // Heading leaf, since no Heading{1} text existed.
         assert_eq!(kinds, vec![NodeType::Subsection]);
+    }
+
+    #[test]
+    fn plan_chunks_offsets_reconstruct_every_chunk_of_a_long_abstract() {
+        // An abstract past the default target splits into overlapping
+        // chunks whose boundaries fall on trimmed whitespace; slicing the
+        // leaf text by each chunk's recorded char offsets must reproduce
+        // that chunk's text. Multi-byte characters keep byte and char
+        // positions apart.
+        let text: String = (0..60)
+            .map(|i| format!("Sentence {i} of the r\u{e9}sum\u{e9} keeps going.  "))
+            .collect();
+        let text = text.trim_end();
+        let leaf = NodeId::new(7);
+        let plans = plan_chunks(leaf, text, &ChunkParams::default());
+        assert!(
+            plans.len() > 2,
+            "the abstract must split into several chunks, got {}",
+            plans.len()
+        );
+        let chars: Vec<char> = text.chars().collect();
+        for (i, p) in plans.iter().enumerate() {
+            assert_eq!(p.start_node_id, leaf);
+            assert_eq!(p.end_node_id, leaf);
+            let (start, end) = (p.start_char_offset as usize, p.end_char_offset as usize);
+            assert!(
+                start <= end && end <= chars.len(),
+                "chunk {i}: span {start}..{end} lies outside the {}-char leaf",
+                chars.len()
+            );
+            let slice: String = chars[start..end].iter().collect();
+            assert_eq!(
+                slice, p.text,
+                "chunk {i}: offsets {start}..{end} do not reproduce the chunk text"
+            );
+        }
     }
 }

@@ -71,6 +71,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **Paper hits in a long abstract point at the passage they matched.**
+  An abstract longer than one chunk — about 1000 characters — is split
+  into overlapping chunks, and every chunk after the first recorded a
+  `start_char_offset` / `end_char_offset` that counted neither the
+  overlap nor the whitespace between chunks, so the span drifted further
+  into the abstract with each chunk and could run past its end. Papers
+  ingested from now on record the right span. Rows already in a papers
+  store keep the old offsets, and `papers vectors reembed` copies them as
+  they are: run `bookrack papers vectors reset` once to re-chunk every
+  paper from the corpus.
 - **Errors, job failures, and logs no longer carry the build machine's
   paths.** A LanceDB error printed the absolute path of the dependency
   source it was raised in, which named the machine that built the
