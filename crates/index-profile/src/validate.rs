@@ -11,7 +11,7 @@
 //! Its silence — a model it does not list, a pairing it has not seen —
 //! is [`Advice`]: a remark for the operator, never a reason to refuse.
 
-use crate::{IndexProfile, RerankerKind, models};
+use crate::{AnnKind, IndexProfile, RerankerKind, models};
 
 /// How serious one validation finding is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,7 +217,48 @@ fn validate_ann(profile: &IndexProfile, findings: &mut Vec<Finding>) {
     let ann = &profile.ann;
     let dim = profile.embed.dim;
 
+    // A scan builds nothing, so none of the build parameters apply.
+    if ann.kind == AnnKind::BruteForce {
+        return;
+    }
+    if ann.num_partitions == 0 {
+        findings.push(Finding::error(
+            "ann.num_partitions",
+            "num_partitions must be greater than 0",
+        ));
+    }
+    if ann.nprobes == 0 {
+        findings.push(Finding::error(
+            "ann.nprobes",
+            "nprobes must be greater than 0",
+        ));
+    }
+    if ann.refine_factor == Some(0) {
+        findings.push(Finding::error(
+            "ann.refine_factor",
+            "refine_factor must be greater than 0 when set",
+        ));
+    }
+
     if ann.kind.is_pq() {
+        if let Some(bits) = ann.num_bits
+            && bits != 4
+            && bits != 8
+        {
+            findings.push(Finding::error(
+                "ann.num_bits",
+                format!("num_bits must be 4 or 8, got {bits}"),
+            ));
+        }
+        if ann.num_bits == Some(4)
+            && let Some(nsv) = ann.num_sub_vectors
+            && !nsv.is_multiple_of(2)
+        {
+            findings.push(Finding::error(
+                "ann.num_sub_vectors",
+                format!("num_sub_vectors must be even with 4-bit codes, got {nsv}"),
+            ));
+        }
         match ann.num_sub_vectors {
             None => findings.push(Finding::error(
                 "ann.num_sub_vectors",
@@ -400,6 +441,83 @@ mod tests {
             .unwrap_or_else(|| panic!("{findings:?}"));
         assert_eq!(finding.severity, Severity::Error);
         assert!(!finding.message.contains("--"), "{finding:?}");
+    }
+
+    /// The `ann.*` error fields `validate` reports for `profile`.
+    fn ann_error_fields(profile: &IndexProfile) -> Vec<String> {
+        validate(profile)
+            .into_iter()
+            .filter(|f| f.severity == Severity::Error && f.field_path.starts_with("ann."))
+            .map(|f| f.field_path)
+            .collect()
+    }
+
+    /// An IvfPq profile over an unlisted 24-wide model: 24 divides by
+    /// the odd 3 without passing the coarseness bound, which a
+    /// registry dimension cannot offer.
+    fn narrow_pq_profile(nsv: u32, num_bits: Option<u32>) -> IndexProfile {
+        let mut profile = pq_profile(24, Some(nsv));
+        profile.embed.model = "synthetic-embed:narrow".to_string();
+        profile.ann.num_bits = num_bits;
+        profile
+    }
+
+    #[test]
+    fn partition_and_probe_counts_must_be_positive() {
+        let mut profile = pq_profile(1024, Some(128));
+        assert!(ann_error_fields(&profile).is_empty());
+        profile.ann.num_partitions = 0;
+        assert_eq!(ann_error_fields(&profile), ["ann.num_partitions"]);
+
+        let mut profile = pq_profile(1024, Some(128));
+        profile.ann.nprobes = 0;
+        assert_eq!(ann_error_fields(&profile), ["ann.nprobes"]);
+    }
+
+    #[test]
+    fn a_refine_factor_when_set_must_be_positive() {
+        let mut profile = pq_profile(1024, Some(128));
+        for ok in [None, Some(1)] {
+            profile.ann.refine_factor = ok;
+            assert!(ann_error_fields(&profile).is_empty(), "{ok:?}");
+        }
+        profile.ann.refine_factor = Some(0);
+        assert_eq!(ann_error_fields(&profile), ["ann.refine_factor"]);
+    }
+
+    #[test]
+    fn a_pq_code_width_must_be_four_or_eight_bits() {
+        for ok in [None, Some(4), Some(8)] {
+            let profile = narrow_pq_profile(4, ok);
+            assert!(ann_error_fields(&profile).is_empty(), "{ok:?}");
+        }
+        for bad in [2, 16] {
+            let profile = narrow_pq_profile(4, Some(bad));
+            assert_eq!(ann_error_fields(&profile), ["ann.num_bits"], "{bad} bits");
+        }
+    }
+
+    #[test]
+    fn four_bit_codes_need_an_even_sub_vector_count() {
+        assert!(ann_error_fields(&narrow_pq_profile(3, Some(8))).is_empty());
+        assert_eq!(
+            ann_error_fields(&narrow_pq_profile(3, Some(4))),
+            ["ann.num_sub_vectors"]
+        );
+    }
+
+    #[test]
+    fn brute_force_skips_every_build_parameter() {
+        let mut profile = pq_profile(1024, None);
+        profile.ann = AnnSpec {
+            kind: AnnKind::BruteForce,
+            num_partitions: 0,
+            num_sub_vectors: None,
+            num_bits: Some(16),
+            nprobes: 0,
+            refine_factor: Some(0),
+        };
+        assert!(ann_error_fields(&profile).is_empty());
     }
 
     #[test]

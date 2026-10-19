@@ -8,6 +8,10 @@
 //! they wrote, beside `ok` and `library`. Each claim is read back from
 //! the store it describes rather than from the reply alone.
 //!
+//! A rebuild the store cannot train is refused as caller input with a
+//! next step, and the refusal leaves the index it found and its sidecar
+//! as they were.
+//!
 //! The libraries are filled through the real submit path: a synthetic
 //! text goes through `ingest.submit` or `glean.submit`, and the queue
 //! worker carries it to `Embedded` against
@@ -28,7 +32,7 @@ use bookrack_corpus::{
     CHUNK_VERSION_KEY, Corpus, EMBED_MODEL_KEY, NORMALIZE_VERSION_KEY, VECTOR_DIM_KEY,
 };
 use bookrack_test_support::{EmbedStub, ProcessEnv, process_env};
-use bookrack_vectors::ChunkStore;
+use bookrack_vectors::{ChunkStore, META_FILENAME};
 use eyre::{ContextCompat, Result, eyre};
 use serde_json::{Value, json};
 
@@ -38,6 +42,7 @@ use crate::common::{Reader, Writer, build_opts, connect, join_with_deadline, rec
 #[derive(Clone, Copy)]
 struct Side {
     submit: &'static str,
+    rebuild: &'static str,
     drop: &'static str,
     reset: &'static str,
     reconcile: &'static str,
@@ -52,6 +57,7 @@ struct Side {
 
 const BOOKS: Side = Side {
     submit: "ingest.submit",
+    rebuild: "vectors.rebuild",
     drop: "vectors.drop",
     reset: "vectors.reset",
     reconcile: "stamps.reconcile",
@@ -64,6 +70,7 @@ const BOOKS: Side = Side {
 
 const PAPERS: Side = Side {
     submit: "glean.submit",
+    rebuild: "papers.vectors_rebuild",
     drop: "papers.vectors_drop",
     reset: "papers.vectors_reset",
     reconcile: "papers.stamps_reconcile",
@@ -451,6 +458,99 @@ async fn reset_resume_reports_this_runs_share_only(
         "the item already embedded must not be processed by the resume"
     );
     Ok(())
+}
+
+/// The index names on `side`'s chunks table and its sidecar bytes.
+async fn index_state(root: &Path, side: Side) -> Result<(Vec<String>, Vec<u8>)> {
+    let dir = root.join(side.lancedb);
+    let indices = ChunkStore::try_open(&dir)
+        .await?
+        .context("the chunks table exists")?
+        .list_indices()
+        .await?;
+    Ok((indices, std::fs::read(dir.join(META_FILENAME))?))
+}
+
+/// A one-partition index builds on a one-source library; asking the
+/// same library for 256 partitions is refused as caller input with a
+/// next step, and the index and sidecar the first build left are still
+/// there byte for byte.
+async fn rebuild_too_large_for_the_store_keeps_the_index(
+    side: Side,
+    sock: PathBuf,
+    root: PathBuf,
+) -> Result<()> {
+    let (mut r, mut w) = connect(&sock).await?;
+    let mut id = 0;
+    let sources = tempfile::tempdir()?;
+    fill(
+        &mut r,
+        &mut w,
+        &mut id,
+        side,
+        &[write_source(sources.path(), "a")?],
+    )
+    .await?;
+
+    id += 1;
+    ok_result(
+        &mut r,
+        &mut w,
+        id,
+        side.rebuild,
+        json!({ "kind": "ivf-flat", "num_partitions": 1 }),
+    )
+    .await?;
+    let before = index_state(&root, side).await?;
+    assert!(
+        !before.0.is_empty(),
+        "{}: the first build leaves an index: {:?}",
+        side.rebuild,
+        before.0
+    );
+
+    id += 1;
+    let refused = call(
+        &mut r,
+        &mut w,
+        id,
+        side.rebuild,
+        json!({ "kind": "ivf-flat", "num_partitions": 256 }),
+    )
+    .await?;
+    assert_eq!(
+        refused["error"]["code"].as_i64(),
+        Some(-32602),
+        "{}: a store too small for the index is caller input: {refused}",
+        side.rebuild
+    );
+    let hint = refused["error"]["data"]["hint"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        hint.contains("num_partitions"),
+        "{}: the hint names the way forward: {refused}",
+        side.rebuild
+    );
+    assert_eq!(
+        index_state(&root, side).await?,
+        before,
+        "{}: the refused rebuild must leave the index and its sidecar",
+        side.rebuild
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn vectors_rebuild_too_large_for_the_store_keeps_the_index() -> Result<()> {
+    with_daemon(|sock, root| rebuild_too_large_for_the_store_keeps_the_index(BOOKS, sock, root))
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn papers_vectors_rebuild_too_large_for_the_store_keeps_the_index() -> Result<()> {
+    with_daemon(|sock, root| rebuild_too_large_for_the_store_keeps_the_index(PAPERS, sock, root))
+        .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

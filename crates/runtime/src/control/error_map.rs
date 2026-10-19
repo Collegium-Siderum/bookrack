@@ -67,7 +67,7 @@ use bookrack_ops::OpsError;
 use bookrack_ops::dto::UnknownFilterValue;
 use bookrack_ops::registry::RegistryError;
 use bookrack_query::QueryError;
-use bookrack_vectors::VectorsError;
+use bookrack_vectors::{TrainingLimit, VectorsError};
 use eyre::Report;
 
 use super::jsonrpc::{
@@ -416,7 +416,59 @@ fn from_vectors(e: &VectorsError) -> RpcError {
                 dim.div_ceil(8)
             )),
         ),
+        InvalidAnnConfig { field, .. } => rpc_from_problem(
+            INVALID_PARAMS,
+            problem.hint(format!(
+                "Correct `{field}` in the index profile, or the `--{}` flag passed to \
+                 `vectors rebuild`.",
+                field.replace('_', "-")
+            )),
+        ),
+        TooFewVectors {
+            rows,
+            required,
+            limit,
+            ..
+        } => rpc_from_problem(
+            INVALID_PARAMS,
+            problem.hint(too_few_vectors_hint(*rows, *required, limit)),
+        ),
         _ => rpc_from_problem(INTERNAL_ERROR, problem),
+    }
+}
+
+/// The way forward from a store too small for the requested index:
+/// only the routes that can succeed on `rows` vectors.
+fn too_few_vectors_hint(rows: u64, required: u64, limit: &TrainingLimit) -> String {
+    const KEEP_SCAN: &str = "To keep searching by exhaustive scan instead, run `bookrack vectors \
+                             drop` (`bookrack papers vectors drop` for papers).";
+    if rows == 0 {
+        return format!(
+            "The store holds no vectors yet; ingest before building an index. {KEEP_SCAN}"
+        );
+    }
+    match limit {
+        TrainingLimit::Partitions { .. } => format!(
+            "Lower `num_partitions` to at most {rows}, or ingest more before rebuilding. \
+             {KEEP_SCAN}"
+        ),
+        TrainingLimit::PqCodebook {
+            num_bits,
+            num_sub_vectors,
+        } => {
+            let narrower = *num_bits == 8
+                && rows >= 16
+                && num_sub_vectors.is_some_and(|nsv| nsv.is_multiple_of(2));
+            let narrower = if narrower {
+                " Setting `num_bits = 4` lowers the floor to 16 vectors."
+            } else {
+                ""
+            };
+            format!(
+                "A {num_bits}-bit PQ codebook needs at least {required} vectors. Choose a kind \
+                 without PQ, or ingest more before rebuilding.{narrower} {KEEP_SCAN}"
+            )
+        }
     }
 }
 
@@ -952,6 +1004,26 @@ mod tests {
                 .into(),
             ),
             (
+                "InvalidAnnConfig",
+                VectorsError::InvalidAnnConfig {
+                    field: "nprobes",
+                    reason: "must be greater than 0, got 0".into(),
+                }
+                .into(),
+            ),
+            (
+                "TooFewVectors",
+                VectorsError::TooFewVectors {
+                    kind: bookrack_vectors::AnnKind::IvfFlat,
+                    rows: 4,
+                    required: 256,
+                    limit: TrainingLimit::Partitions {
+                        num_partitions: 256,
+                    },
+                }
+                .into(),
+            ),
+            (
                 "InvalidIntakeId",
                 bookrack_corpus::CorpusError::InvalidIntakeId(0).into(),
             ),
@@ -977,6 +1049,81 @@ mod tests {
             );
             assert!(!data.retryable, "{label}");
         }
+    }
+
+    /// The hint for a store too small for its index names only routes
+    /// that can succeed on the rows it has: no partition count when
+    /// there are no rows, and 4-bit codes only where 16 vectors and an
+    /// even sub-vector count make them buildable.
+    #[test]
+    fn too_few_vectors_hints_follow_the_binding_limit() {
+        use bookrack_vectors::{AnnKind, VectorsError};
+        let hint = |rows: u64, required: u64, limit: TrainingLimit| {
+            let err: Report = VectorsError::TooFewVectors {
+                kind: AnnKind::IvfPq,
+                rows,
+                required,
+                limit,
+            }
+            .into();
+            let rpc = handler_err("vectors.rebuild", err);
+            assert_eq!(rpc.code, INVALID_PARAMS);
+            let data: bookrack_core::ProblemData =
+                serde_json::from_value(rpc.data.expect("data")).expect("ProblemData");
+            data.hint.expect("hint")
+        };
+        let partitions = TrainingLimit::Partitions {
+            num_partitions: 256,
+        };
+        let codebook = |num_bits, num_sub_vectors| TrainingLimit::PqCodebook {
+            num_bits,
+            num_sub_vectors,
+        };
+
+        let empty = hint(0, 256, partitions);
+        assert!(empty.contains("no vectors yet"), "{empty}");
+        assert!(!empty.contains("num_partitions"), "{empty}");
+        assert!(empty.contains("`bookrack vectors drop`"), "{empty}");
+
+        let small = hint(4, 256, partitions);
+        assert!(small.contains("`num_partitions` to at most 4"), "{small}");
+        assert!(small.contains("`bookrack papers vectors drop`"), "{small}");
+
+        let even = hint(100, 256, codebook(8, Some(2)));
+        assert!(
+            even.contains("8-bit PQ codebook needs at least 256"),
+            "{even}"
+        );
+        assert!(even.contains("`num_bits = 4`"), "{even}");
+        for (label, rows, limit) in [
+            ("odd sub-vectors", 100, codebook(8, Some(3))),
+            ("unknown sub-vectors", 100, codebook(8, None)),
+            ("fewer than 16 rows", 10, codebook(8, Some(2))),
+            ("already 4-bit", 10, codebook(4, Some(2))),
+        ] {
+            let text = hint(rows, 256, limit);
+            assert!(!text.contains("num_bits = 4"), "{label}: {text}");
+        }
+    }
+
+    #[test]
+    fn an_invalid_ann_field_hint_names_the_profile_field_and_the_flag() {
+        let err: Report = bookrack_vectors::VectorsError::InvalidAnnConfig {
+            field: "refine_factor",
+            reason: "must be greater than 0 when set, got 0".into(),
+        }
+        .into();
+        let rpc = handler_err("vectors.rebuild", err);
+        assert_eq!(rpc.code, INVALID_PARAMS);
+        assert_eq!(
+            rpc.message,
+            "invalid ANN configuration: refine_factor must be greater than 0 when set, got 0"
+        );
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(rpc.data.expect("data")).expect("ProblemData");
+        let hint = data.hint.expect("hint");
+        assert!(hint.contains("`refine_factor`"), "{hint}");
+        assert!(hint.contains("`--refine-factor`"), "{hint}");
     }
 
     /// Delegation must not widen the caller-input bucket: a leaf fault

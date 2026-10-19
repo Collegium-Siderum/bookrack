@@ -71,6 +71,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A rebuild on a store too small for the index keeps the index it
+  had.** `vectors rebuild`, `papers vectors rebuild`, and the rebuilds
+  `index-profile apply` runs now check the table against the index's
+  training floor — at least one vector per partition, and `2^num_bits`
+  vectors for a PQ codebook — before touching the existing index, and
+  refuse with exit `2` and a hint that names what can work on that
+  many vectors. Previously the old index was dropped first and the
+  build then failed as an internal error carrying LanceDB's own
+  message.
 - **`index-profile apply` converges in one run when a `brute-force`
   profile changes the model or dimension.** The reset's re-embed builds
   an ANN index on a library that records none, while the plan took the
@@ -172,6 +181,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **Index profiles and `vectors rebuild` refuse more ANN settings no
+  build accepts.** `index-profile validate` now rejects zero
+  `num_partitions`, zero `nprobes`, a `refine_factor` of zero, a PQ
+  `num_bits` other than 4 or 8, and an odd `num_sub_vectors` with
+  4-bit codes; a profile carrying one is refused by `index-profile
+  apply` and `libraries config <name> index_profile=<p>` as well. `vectors
+  rebuild` and `papers vectors rebuild` refuse the same settings, plus
+  a `num_sub_vectors` that does not divide the embedding dimension,
+  with exit `2` and the field to correct. Previously a zero probe count
+  built an index whose searches returned no results, a zero refine
+  factor one whose searches failed, and zero partitions crashed the
+  build.
 - **Models outside the built-in registry can be applied.** The offline
   model registry records what is known about the qualified models, not
   which models may be used. A profile naming an embed model or a

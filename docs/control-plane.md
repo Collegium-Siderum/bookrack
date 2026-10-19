@@ -269,12 +269,23 @@ onto.
   plan pinned. It is the one `CmdInputError` variant with its own
   code, because a client recovers from it differently: by minting a
   fresh plan rather than by correcting a parameter.
-- **A store refusing what the caller passed** (`-32602`): three
+- **A store refusing what the caller passed** (`-32602`): five
   vector-store refusals — an ANN build asked of the brute-force kind,
   an IvfPq build missing a required parameter, an IvfPq quantization
-  too coarse for the embedding dimension — plus a non-positive intake
-  id (`CorpusError::InvalidIntakeId`) and an attempt to re-point a
-  derived text at a different source (`CatalogError::DerivedFromConflict`).
+  too coarse for the embedding dimension, an ANN configuration no
+  build accepts (`VectorsError::InvalidAnnConfig`: zero partitions,
+  probes, or refine factor; a PQ code width other than 4 or 8; a
+  sub-vector count that does not divide the dimension, or an odd one
+  with 4-bit codes), and a store holding too few vectors to train the
+  requested index (`VectorsError::TooFewVectors`: fewer rows than
+  partitions, or fewer than `2^num_bits` for a PQ codebook) — plus a
+  non-positive intake id (`CorpusError::InvalidIntakeId`) and an
+  attempt to re-point a derived text at a different source
+  (`CatalogError::DerivedFromConflict`). A rebuild refused by one of
+  the vector-store checks leaves the existing index and its
+  `vectors_meta.json` as they were; clearing them does not guarantee
+  training succeeds, and a rebuild that fails after that point may
+  already have dropped the old index.
   Each carries the next step in `error.data.hint`. The mapping is
   recursive, so the code is the same whether the command raised the
   store error bare or a pipeline wrapper carried it

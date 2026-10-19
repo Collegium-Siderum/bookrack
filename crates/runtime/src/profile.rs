@@ -1019,4 +1019,170 @@ mod tests {
             PipelinePlan::Run(vec![PlannedAction::Reembed])
         );
     }
+
+    /// The field a vector-store refusal names, under the profile's
+    /// field names.
+    fn refused_field(err: &bookrack_vectors::VectorsError) -> &'static str {
+        use bookrack_vectors::VectorsError;
+        match err {
+            VectorsError::InvalidAnnConfig { field, .. } => field,
+            VectorsError::MissingPqParam(param) => param,
+            VectorsError::IvfPqQuantizationTooCoarse { .. } => "num_sub_vectors",
+            other => panic!("not a static ANN refusal: {other:?}"),
+        }
+    }
+
+    /// One row of the ANN parity table: a profile's dimension and ANN
+    /// knob, set by chained overrides so each row reads on one line.
+    #[derive(Clone, Copy)]
+    struct AnnRow {
+        kind: bookrack_index_profile::AnnKind,
+        dim: u32,
+        partitions: u32,
+        nsv: Option<u32>,
+        bits: Option<u32>,
+        probes: u32,
+        refine: Option<u32>,
+    }
+
+    impl AnnRow {
+        fn new(kind: bookrack_index_profile::AnnKind, dim: u32) -> AnnRow {
+            AnnRow {
+                kind,
+                dim,
+                partitions: 1,
+                nsv: None,
+                bits: None,
+                probes: 1,
+                refine: None,
+            }
+        }
+        fn partitions(self, partitions: u32) -> AnnRow {
+            AnnRow { partitions, ..self }
+        }
+        fn nsv(self, nsv: u32) -> AnnRow {
+            AnnRow {
+                nsv: Some(nsv),
+                ..self
+            }
+        }
+        fn bits(self, bits: u32) -> AnnRow {
+            AnnRow {
+                bits: Some(bits),
+                ..self
+            }
+        }
+        fn probes(self, probes: u32) -> AnnRow {
+            AnnRow { probes, ..self }
+        }
+        fn refine(self, refine: u32) -> AnnRow {
+            AnnRow {
+                refine: Some(refine),
+                ..self
+            }
+        }
+        fn profile(self) -> IndexProfile {
+            let mut p = profile();
+            p.embed.model = "synthetic-embed:parity".to_string();
+            p.embed.dim = self.dim;
+            p.ann = bookrack_index_profile::AnnSpec {
+                kind: self.kind,
+                num_partitions: self.partitions,
+                num_sub_vectors: self.nsv,
+                num_bits: self.bits,
+                nprobes: self.probes,
+                refine_factor: self.refine,
+            };
+            p
+        }
+    }
+
+    /// Profile validation and the vector store hold the same static ANN
+    /// rules, written once in each crate. Every row states its own
+    /// expectation, so a rule both sides forget fails here instead of
+    /// agreeing quietly.
+    #[test]
+    fn profile_validation_and_the_store_refuse_the_same_ann_settings() {
+        use bookrack_index_profile::AnnKind::{BruteForce, IvfFlat, IvfHnswPq, IvfHnswSq, IvfPq};
+
+        let flat = AnnRow::new(IvfFlat, 4);
+        // 24 divides by the odd 3 within the coarseness bound.
+        let pq = AnnRow::new(IvfPq, 24).nsv(3);
+        let rows: [(&str, AnnRow, Option<&'static str>); 19] = [
+            ("flat", flat, None),
+            (
+                "flat, zero partitions",
+                flat.partitions(0),
+                Some("num_partitions"),
+            ),
+            ("flat, zero probes", flat.probes(0), Some("nprobes")),
+            ("flat, zero refine", flat.refine(0), Some("refine_factor")),
+            ("flat, refine 1", flat.refine(1), None),
+            ("flat ignores PQ fields", flat.nsv(3).bits(16), None),
+            (
+                "pq, no sub-vectors",
+                AnnRow::new(IvfPq, 24),
+                Some("num_sub_vectors"),
+            ),
+            ("pq, zero sub-vectors", pq.nsv(0), Some("num_sub_vectors")),
+            ("pq, indivisible", pq.nsv(5), Some("num_sub_vectors")),
+            ("pq, too coarse", pq.nsv(1), Some("num_sub_vectors")),
+            ("pq, width omitted", pq, None),
+            ("pq, 8 bits", pq.bits(8), None),
+            ("pq, 2 bits", pq.bits(2), Some("num_bits")),
+            ("pq, 16 bits", pq.bits(16), Some("num_bits")),
+            ("pq, 4 bits, odd", pq.bits(4), Some("num_sub_vectors")),
+            ("pq, 4 bits, even", pq.nsv(4).bits(4), None),
+            (
+                "hnsw-pq, 16 bits",
+                AnnRow {
+                    kind: IvfHnswPq,
+                    ..pq
+                }
+                .bits(16),
+                Some("num_bits"),
+            ),
+            ("hnsw-sq", AnnRow::new(IvfHnswSq, 24).refine(5), None),
+            (
+                "scan with zeros",
+                AnnRow::new(BruteForce, 4)
+                    .partitions(0)
+                    .probes(0)
+                    .refine(0)
+                    .bits(16),
+                None,
+            ),
+        ];
+
+        let mut cases: Vec<(String, IndexProfile, Option<&'static str>)> = rows
+            .into_iter()
+            .map(|(case, row, refused)| (case.to_string(), row.profile(), refused))
+            .collect();
+        for name in bookrack_index_profile::ALL_BUILT_IN_NAMES {
+            let p = IndexProfile::from_named(name).expect("built-in");
+            cases.push((format!("built-in {name}"), p, None));
+        }
+
+        for (case, p, refused) in cases {
+            let profile_fields: Vec<String> = validate(&p)
+                .into_iter()
+                .filter(|f| {
+                    f.severity == bookrack_index_profile::Severity::Error
+                        && f.field_path.starts_with("ann.")
+                })
+                .map(|f| f.field_path)
+                .collect();
+            let expected: Vec<String> = refused.map(|f| format!("ann.{f}")).into_iter().collect();
+            assert_eq!(profile_fields, expected, "{case}: profile validation");
+
+            let store = matching_ann(&p).validate(p.embed.dim as usize);
+            match refused {
+                None => assert!(store.is_ok(), "{case}: the store refused {store:?}"),
+                Some(field) => {
+                    let err = store.expect_err(&case);
+                    assert_eq!(refused_field(&err), field, "{case}: {err:?}");
+                }
+            }
+        }
+    }
 }
