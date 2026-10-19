@@ -40,7 +40,9 @@ use lancedb::DistanceType;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::table::OptimizeAction;
 
-use bookrack_core::{NODE_CAPACITY, NODE_PARTITION_FACTOR, NodeId, PartitionIdx};
+use bookrack_core::{
+    NODE_CAPACITY, NODE_PARTITION_FACTOR, NodeId, PartitionIdx, VectorDefect, vector_defect,
+};
 
 /// Name of the single table this crate manages.
 const TABLE: &str = "chunks";
@@ -85,6 +87,18 @@ pub enum VectorsError {
         got: usize,
         /// The dimension the store was opened with.
         expected: usize,
+    },
+
+    /// A row's vector cannot be indexed: a component is NaN or
+    /// infinite, or its length is zero or overflows. An embedder is
+    /// expected to refuse such a vector first; this is the store's own
+    /// invariant, and the whole batch is rejected before any write.
+    #[error("chunk row {row} carries an unusable vector: {}", .defect.describe())]
+    UnusableVector {
+        /// The row's position in the batch.
+        row: usize,
+        /// What makes it unusable.
+        defect: VectorDefect,
     },
 
     /// A query result was missing an expected column, or it held an
@@ -786,17 +800,22 @@ impl ChunkStore {
 
     /// Append chunk rows to the table in one batch. Returns the number
     /// written; an empty input is a no-op. Every vector must match the
-    /// store dimension, or the whole batch is rejected before any write.
+    /// store dimension and be usable for cosine search
+    /// ([`bookrack_core::vector_defect`]), or the whole batch is
+    /// rejected before any write.
     pub async fn append(&self, rows: &[ChunkRow]) -> Result<usize> {
         if rows.is_empty() {
             return Ok(0);
         }
-        for row in rows {
+        for (index, row) in rows.iter().enumerate() {
             if row.vector.len() != self.dim {
                 return Err(VectorsError::DimensionMismatch {
                     got: row.vector.len(),
                     expected: self.dim,
                 });
+            }
+            if let Some(defect) = vector_defect(&row.vector) {
+                return Err(VectorsError::UnusableVector { row: index, defect });
             }
         }
         let batch = build_batch(rows, self.dim)?;
@@ -2343,6 +2362,61 @@ mod tests {
             ),
             "got {err:?}"
         );
+    }
+
+    /// An unusable vector anywhere in a batch rejects the whole batch
+    /// before it is written: the rows ahead of it do not land, and the
+    /// rows written earlier stay.
+    #[tokio::test]
+    async fn an_unusable_vector_rejects_its_whole_batch() {
+        let cases = [
+            (f32::NAN, VectorDefect::NonFinite),
+            (f32::INFINITY, VectorDefect::NonFinite),
+            (f32::NEG_INFINITY, VectorDefect::NonFinite),
+        ];
+        for (bad, defect) in cases {
+            let (_dir, store) = fresh_store().await;
+            store
+                .append(&[row(1, 1, [1.0, 0.0, 0.0, 0.0])])
+                .await
+                .expect("first batch");
+            let batch = [
+                row(2, 1, [0.0, 1.0, 0.0, 0.0]),
+                row(2, 2, [0.0, 0.0, 1.0, 0.0]),
+                row(2, 3, [0.5, bad, 0.5, 0.5]),
+            ];
+            let err = store.append(&batch).await.unwrap_err();
+            assert!(
+                matches!(err, VectorsError::UnusableVector { row: 2, defect: d } if d == defect),
+                "{bad}: got {err:?}"
+            );
+            assert_eq!(store.count_rows().await.expect("count"), 1, "{bad}");
+            assert!(
+                store
+                    .scan_partition(PartitionIdx::new(2))
+                    .await
+                    .expect("scan")
+                    .is_empty(),
+                "{bad}: no row of the rejected batch lands"
+            );
+        }
+
+        let (_dir, store) = fresh_store().await;
+        let err = store
+            .append(&[row(1, 1, [0.0, 0.0, 0.0, 0.0])])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                VectorsError::UnusableVector {
+                    row: 0,
+                    defect: VectorDefect::DegenerateNorm
+                }
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(store.count_rows().await.expect("count"), 0);
     }
 
     #[tokio::test]

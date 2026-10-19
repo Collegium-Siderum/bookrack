@@ -259,6 +259,9 @@ fn from_embed(e: &EmbedError) -> RpcError {
         // The request body is assembled here, so the operator cannot
         // have written either of these.
         BadRequest { .. } | MalformedResponse(_) => INTERNAL_ERROR,
+        // The backend broke its response contract; the hint still names
+        // the operator's way around it.
+        UnusableVector { .. } => INTERNAL_ERROR,
         _ => INTERNAL_ERROR,
     };
     rpc_from_problem(code, e.explain())
@@ -1049,6 +1052,32 @@ mod tests {
             );
             assert!(!data.retryable, "{label}");
         }
+    }
+
+    /// An embedding backend returning an unusable vector broke its
+    /// response contract, so the code is the fault code; the wording
+    /// is the variant's own, with the way around it as the hint.
+    #[test]
+    fn an_unusable_embed_vector_is_a_fault_with_a_hint() {
+        let err: Report = EmbedError::UnusableVector {
+            index: 1,
+            defect: bookrack_core::VectorDefect::NonFinite,
+        }
+        .into();
+        let rpc = handler_err("vectors.reembed", err);
+        assert_eq!(rpc.code, INTERNAL_ERROR);
+        assert_eq!(
+            rpc.message,
+            "cannot embed: Ollama returned an unusable vector"
+        );
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(rpc.data.expect("data")).expect("ProblemData");
+        assert!(
+            data.hint.as_deref().is_some_and(|h| !h.trim().is_empty()),
+            "{:?}",
+            data.hint
+        );
+        assert!(!data.retryable);
     }
 
     /// The hint for a store too small for its index names only routes

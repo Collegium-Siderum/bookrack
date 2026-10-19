@@ -308,7 +308,7 @@ mod tests {
             .node_id(offset)
             .expect("offset in range");
         ChunkRow {
-            vector: vec![0.0; 4],
+            vector: vec![1.0, 0.0, 0.0, 0.0],
             text: text.to_string(),
             start_node_id: node,
             start_char_offset: 0,

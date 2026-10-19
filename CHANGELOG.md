@@ -181,6 +181,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **A vector search cannot use fails the ingest instead of being
+  stored.** When the embedding backend returns a vector with an
+  infinite component, or one whose length is zero or overflows, the
+  ingest, re-embed, or reset fails with an error naming the vector's
+  position and the backend as the fault, and the batch carrying it is
+  not written; batches written before it stay. Such vectors used to be
+  stored silently and could not be retrieved by cosine search. A NaN
+  component, which the store already refused with an internal error,
+  now gets the same reason.
 - **Index profiles and `vectors rebuild` refuse more ANN settings no
   build accepts.** `index-profile validate` now rejects zero
   `num_partitions`, zero `nprobes`, a `refine_factor` of zero, a PQ
