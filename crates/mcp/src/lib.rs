@@ -34,8 +34,8 @@ use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
 mod error_map;
 mod reference;
 use error_map::{
-    invalid_params_err, ops_error_to_mcp, reference_error_to_mcp, report_to_mcp, respond_with,
-    unknown_filter_value_to_mcp,
+    internal_message, invalid_params_err, invalid_params_message, ops_error_to_mcp,
+    reference_error_to_mcp, report_to_mcp, respond_with, unknown_filter_value_to_mcp,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -870,12 +870,9 @@ impl BookrackServer {
             .await
             .map_err(ops_error_to_mcp)?,
             other => {
-                return Err(ErrorData::invalid_params(
-                    format!(
-                        "library.search: kind={other:?} is not one of \"book\", \"paper\", \"all\""
-                    ),
-                    None,
-                ));
+                return Err(invalid_params_message(format!(
+                    "library.search: kind={other:?} is not one of \"book\", \"paper\", \"all\""
+                )));
             }
         };
         tracing::info!(kind = kind, hits = hits.len(), "mcp library.search");
@@ -1626,7 +1623,7 @@ impl BookrackServer {
         let libraries: Vec<SessionLibrary> = self
             .registry
             .list()
-            .map_err(|e| ErrorData::internal_error(format!("read library registry: {e}"), None))?
+            .map_err(|e| internal_message(format!("read library registry: {e}")))?
             .into_iter()
             .map(|s| SessionLibrary {
                 name: s.name,
@@ -1690,7 +1687,7 @@ impl BookrackServer {
         let state = self
             .queue_state
             .lock()
-            .map_err(|e| ErrorData::internal_error(format!("queue state lock: {e}"), None))?;
+            .map_err(|e| internal_message(format!("queue state lock: {e}")))?;
         let mut counts = [0usize; 7];
         for job in &state.jobs {
             let idx = match job.state {
@@ -2023,7 +2020,7 @@ impl BookrackServer {
         let handle = self.resolve_handle(args.library.as_deref())?;
         let refs_path = handle.ops().reference_db_path();
         let refs = bookrack_refs::Refs::open_read_only(&refs_path)
-            .map_err(|e| ErrorData::internal_error(format!("open reference.db: {e}"), None))?;
+            .map_err(|e| internal_message(format!("open reference.db: {e}")))?;
         let catalogs = reference::catalogs().map_err(reference_error_to_mcp)?;
         let result = reference::reference_lookup_logic(&refs, catalogs, &args)
             .map_err(reference_error_to_mcp)?;
@@ -2047,7 +2044,7 @@ impl BookrackServer {
         let handle = self.resolve_handle(Some(args.library.as_str()))?;
         let refs_path = handle.ops().reference_db_path();
         let refs = bookrack_refs::Refs::open(&refs_path)
-            .map_err(|e| ErrorData::internal_error(format!("open reference.db: {e}"), None))?;
+            .map_err(|e| internal_message(format!("open reference.db: {e}")))?;
         let edited_at = chrono::Utc::now().to_rfc3339();
         let catalogs = reference::catalogs().map_err(reference_error_to_mcp)?;
         let receipt = reference::reference_overlay_set_logic(&refs, catalogs, &args, edited_at)

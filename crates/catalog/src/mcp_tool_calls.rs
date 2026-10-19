@@ -95,7 +95,7 @@ impl McpToolCall {
             duration_ms: row.get("duration_ms")?,
             session_id: row.get("session_id")?,
             error_type: row.get("error_type")?,
-            error_msg: row.get("error_msg")?,
+            error_msg: crate::diagnostic_text::redacted(row.get("error_msg")?),
             args: row.get("args")?,
             timings_ms: row.get("timings_ms")?,
             extras: row.get("extras")?,
@@ -245,6 +245,25 @@ mod tests {
         call.timings_ms = Some(r#"{"embed":4.0}"#.into());
         call.extras = Some(r#"{"retries":2}"#.into());
         call
+    }
+
+    /// An error message stored with a build-machine prefix reads back
+    /// without it; the stored text is left as it was.
+    #[test]
+    fn an_error_msg_reads_back_redacted() {
+        use crate::diagnostic_text::fixture::{READ, STORED};
+        let catalog = Catalog::open_in_memory().expect("open");
+        let mut call = fully_populated();
+        call.error_msg = Some(STORED.into());
+        catalog.record_tool_call(&call).expect("record");
+
+        let rows = catalog.tool_calls_for_tool("search_library").expect("read");
+        assert_eq!(rows[0].error_msg.as_deref(), Some(READ));
+        let stored: String = catalog
+            .conn
+            .query_row("SELECT error_msg FROM mcp_tool_calls", [], |r| r.get(0))
+            .expect("raw");
+        assert_eq!(stored, STORED);
     }
 
     #[test]

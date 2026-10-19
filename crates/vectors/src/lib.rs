@@ -70,9 +70,10 @@ fn ensure_lance_env() {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum VectorsError {
-    /// The underlying LanceDB layer reported an error.
-    #[error("LanceDB error")]
-    Lance(#[from] lancedb::Error),
+    /// The underlying LanceDB layer reported an error. The text is the
+    /// whole LanceDB chain, already redacted: see [`LanceError`].
+    #[error("LanceDB error: {0}")]
+    Lance(LanceError),
 
     /// An Arrow record batch could not be built or decoded.
     #[error("Arrow error")]
@@ -201,6 +202,56 @@ pub const MIN_READER_VERSION: u32 = 1;
 
 /// A fallible `vectors` operation.
 pub type Result<T> = std::result::Result<T, VectorsError>;
+
+/// A LanceDB error with its message flattened and the build-machine
+/// prefix of any dependency source location removed
+/// ([`bookrack_core::redact_source_paths`]).
+///
+/// Every LanceDB error enters bookrack through [`VectorsError::Lance`],
+/// so this is where its text is made fit to leave the process. `Display`
+/// and `Debug` both print the redacted chain — `Debug` is what
+/// `tracing`'s `?e` writes — and `source()` is `None`, so walking the
+/// chain cannot reach the original text. [`LanceError::inner`] keeps
+/// the original error for code that has to match on it.
+pub struct LanceError {
+    inner: lancedb::Error,
+    text: String,
+}
+
+impl LanceError {
+    /// The LanceDB error as raised, unredacted.
+    pub fn inner(&self) -> &lancedb::Error {
+        &self.inner
+    }
+}
+
+impl From<lancedb::Error> for LanceError {
+    fn from(inner: lancedb::Error) -> LanceError {
+        let text =
+            bookrack_core::redact_source_paths(&bookrack_core::error_chain(&inner)).into_owned();
+        LanceError { inner, text }
+    }
+}
+
+impl std::fmt::Display for LanceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl std::fmt::Debug for LanceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl std::error::Error for LanceError {}
+
+impl From<lancedb::Error> for VectorsError {
+    fn from(e: lancedb::Error) -> VectorsError {
+        VectorsError::Lance(LanceError::from(e))
+    }
+}
 
 /// The training requirement behind a [`VectorsError::TooFewVectors`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2054,6 +2105,56 @@ mod tests {
             assert_eq!(
                 stored.num_bits, num_bits,
                 "{kind:?}: the meta records the given width"
+            );
+        }
+    }
+
+    /// The text up to `registry/src/` from the last space or quote
+    /// before it: the build machine's cargo home, as an error prints it.
+    fn registry_prefix(text: &str) -> Option<&str> {
+        let marker = text.find("registry/src/")?;
+        let start = text[..marker].rfind([' ', '"']).map_or(0, |p| p + 1);
+        Some(&text[start..marker])
+    }
+
+    /// A LanceDB error raised by a real table carries the absolute
+    /// source location of the dependency that raised it. Once it is a
+    /// `VectorsError`, every way bookrack formats it keeps the
+    /// crate-relative location and drops the build-machine prefix.
+    #[tokio::test]
+    async fn a_lance_error_formats_without_the_build_machine_prefix() {
+        use lancedb::index::Index;
+        use lancedb::index::vector::IvfFlatIndexBuilder;
+
+        let (_dir, store) = fresh_store().await;
+        store.append(&varied_rows(4)).await.expect("append");
+        // Straight to LanceDB, past `build_ann_index`'s own floor, so
+        // the error is LanceDB's.
+        let raw = store
+            .table
+            .create_index(
+                &["vector"],
+                Index::IvfFlat(IvfFlatIndexBuilder::default().num_partitions(256)),
+            )
+            .execute()
+            .await
+            .expect_err("k-means cannot train 256 centroids on 4 rows");
+        let unredacted = format!("{raw:?}");
+        let prefix = registry_prefix(&unredacted)
+            .filter(|p| p.starts_with('/') || p.contains(":\\"))
+            .unwrap_or_else(|| panic!("the raw error carries no absolute location: {unredacted}"))
+            .to_string();
+
+        let err = VectorsError::from(raw);
+        for (form, text) in [
+            ("error_chain", bookrack_core::error_chain(&err)),
+            ("Debug", format!("{err:?}")),
+            ("Display", err.to_string()),
+        ] {
+            assert!(!text.contains(&prefix), "{form} keeps {prefix:?}: {text}");
+            assert!(
+                text.contains("/src/vector/kmeans.rs:"),
+                "{form} keeps the crate-relative location: {text}"
             );
         }
     }

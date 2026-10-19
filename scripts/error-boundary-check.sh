@@ -30,8 +30,19 @@
 #
 # Escape hatch: append `// error-boundary-check: allow` to a line that
 # must keep `to_string()` (test fixtures pinning the unflattened text).
+#
+# A second rule: an MCP error envelope is built only in
+# `crates/mcp/src/error_map.rs`, whose single constructor removes the
+# build-machine prefix of dependency source paths before the envelope
+# leaves the process. An `ErrorData::` call anywhere else in the crate's
+# sources would skip that, so it fails here.
 set -eu
 fail=0
+
+if grep -rn 'ErrorData::' crates/mcp/src | grep -v '^crates/mcp/src/error_map.rs:'; then
+  echo "BOUNDARY: ErrorData built outside crates/mcp/src/error_map.rs -- use its helpers"
+  fail=1
+fi
 
 boundary_files="
 crates/runtime/src/control/error_map.rs

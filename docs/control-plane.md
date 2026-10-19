@@ -193,6 +193,14 @@ wording falls back to a flattened cause chain as the summary and sends
 `data` with `retryable` alone. `data` is additive — a client that
 ignores it sees exactly what it saw before the slot was filled.
 
+A source location inside a dependency appears crate-relative
+(`lance-index-7.0.0/src/vector/kmeans.rs:1365:20`), never with the
+absolute path of the machine that built the binary. That holds for the
+error envelope, for the failure text `queue.list` and `queue.tick`
+carry — including failures recorded by an older build — and for
+`logs.tail` and the `log` event. A book's text, and so a search hit,
+is returned as stored.
+
 #### Error mapping
 
 Write-class RPCs — `metadata.*`, `corpus.rebuild`, `vectors.*`,

@@ -2,6 +2,7 @@
 
 //! Source-chain formatting for error values crossing a string boundary.
 
+use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::Write;
 
@@ -14,6 +15,10 @@ use std::fmt::Write;
 /// errors) that store a plain string must flatten the chain themselves
 /// or the root cause is lost. This is the one place that flattening is
 /// implemented.
+///
+/// The line leaves the process, so the build-machine prefix of any
+/// dependency source location in it is removed
+/// ([`crate::redact_source_paths`]).
 pub fn error_chain(err: &(dyn Error + 'static)) -> String {
     let mut out = err.to_string();
     let mut cursor = err.source();
@@ -21,7 +26,10 @@ pub fn error_chain(err: &(dyn Error + 'static)) -> String {
         let _ = write!(out, ": {cause}");
         cursor = cause.source();
     }
-    out
+    match crate::redact_source_paths(&out) {
+        Cow::Borrowed(_) => out,
+        Cow::Owned(redacted) => redacted,
+    }
 }
 
 #[cfg(test)]
@@ -62,6 +70,45 @@ mod tests {
     #[test]
     fn wrapped_error_appends_each_source() {
         assert_eq!(error_chain(&Wrapper(Leaf)), "outer context: root cause");
+    }
+
+    /// A source deep in the chain whose text carries a dependency source
+    /// location, as a third-party error would.
+    #[derive(Debug)]
+    struct Located;
+
+    impl std::fmt::Display for Located {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(
+                "train failed, /disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/\
+                 dep-1.0.0/src/train.rs:10:4: train failed",
+            )
+        }
+    }
+
+    impl Error for Located {}
+
+    #[derive(Debug)]
+    struct Outer(Located);
+
+    impl std::fmt::Display for Outer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("store error")
+        }
+    }
+
+    impl Error for Outer {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn a_flattened_chain_drops_the_build_prefix_of_a_source_location() {
+        assert_eq!(
+            error_chain(&Outer(Located)),
+            "store error: train failed, dep-1.0.0/src/train.rs:10:4: train failed"
+        );
     }
 
     #[test]

@@ -71,6 +71,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **Errors, job failures, and logs no longer carry the build machine's
+  paths.** A LanceDB error printed the absolute path of the dependency
+  source it was raised in, which named the machine that built the
+  binary; it reached control-plane and MCP error replies, the failure
+  text of queue jobs, `logs.tail`, and the `log` event. Such locations
+  now appear crate-relative, and failure text recorded by an older
+  build — in the queue document and in the catalog's error columns —
+  is shown the same way when it is read. A book's text is left as it
+  is.
 - **A rebuild on a store too small for the index keeps the index it
   had.** `vectors rebuild`, `papers vectors rebuild`, and the rebuilds
   `index-profile apply` runs now check the table against the index's

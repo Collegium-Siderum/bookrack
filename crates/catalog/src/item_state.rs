@@ -95,7 +95,7 @@ impl ItemState {
             parsed_at: row.get("parsed_at")?,
             embedded_at: row.get("embedded_at")?,
             ocr_marker_finished_at: row.get("ocr_marker_finished_at")?,
-            last_error: row.get("last_error")?,
+            last_error: crate::diagnostic_text::redacted(row.get("last_error")?),
         })
     }
 }
@@ -211,6 +211,28 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A last error stored with a build-machine prefix reads back
+    /// without it; the stored text is left as it was.
+    #[test]
+    fn a_last_error_reads_back_redacted() {
+        use crate::diagnostic_text::fixture::{READ, STORED};
+        let catalog = Catalog::open_in_memory().expect("open");
+        catalog
+            .upsert_book_state(&NewItemState::new(100_000_001, 1, "embed").last_error(STORED))
+            .expect("write");
+
+        let read = catalog
+            .book_state(100_000_001)
+            .expect("read")
+            .expect("present");
+        assert_eq!(read.last_error.as_deref(), Some(READ));
+        let stored: String = catalog
+            .conn
+            .query_row("SELECT last_error FROM item_state", [], |r| r.get(0))
+            .expect("raw");
+        assert_eq!(stored, STORED);
+    }
 
     #[test]
     fn book_state_round_trips_every_field() {

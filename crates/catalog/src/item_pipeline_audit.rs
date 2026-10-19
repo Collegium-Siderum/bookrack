@@ -122,7 +122,7 @@ impl ItemPipelineAudit {
             outcome: row.get("outcome")?,
             adapter: row.get("adapter")?,
             metric_summary: row.get("metric_summary")?,
-            error_message: row.get("error_message")?,
+            error_message: crate::diagnostic_text::redacted(row.get("error_message")?),
             duration_ms: row.get("duration_ms")?,
             ts: row.get("ts")?,
             pipeline_run_id: row.get("pipeline_run_id")?,
@@ -290,6 +290,27 @@ mod tests {
         audit.actor_detail = Some("ingest".into());
         audit.session_id = Some("sess-1".into());
         audit
+    }
+
+    /// A message stored with a build-machine prefix reads back without
+    /// it; the stored text is left as it was.
+    #[test]
+    fn an_error_message_reads_back_redacted() {
+        use crate::diagnostic_text::fixture::{READ, STORED};
+        let catalog = Catalog::open_in_memory().expect("open");
+        let mut audit = fully_populated();
+        audit.error_message = Some(STORED.into());
+        catalog.record_pipeline_audit(&audit).expect("record");
+
+        let rows = catalog.pipeline_audit_for_run("run-1").expect("read");
+        assert_eq!(rows[0].error_message.as_deref(), Some(READ));
+        let stored: String = catalog
+            .conn
+            .query_row("SELECT error_message FROM item_pipeline_audit", [], |r| {
+                r.get(0)
+            })
+            .expect("raw");
+        assert_eq!(stored, STORED);
     }
 
     #[test]

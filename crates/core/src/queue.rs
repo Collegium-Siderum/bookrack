@@ -181,7 +181,11 @@ pub struct QueueJob {
     /// When the worker transitioned this job to `Done`,
     /// `SkippedDuplicate`, `NeedsOcr`, `Failed`, or `Cancelled`.
     pub finished_at: Option<DateTime<Utc>>,
-    /// Failure message recorded when `state == Failed`.
+    /// Failure message recorded when `state == Failed`. Redacted as
+    /// it loads ([`crate::redact_source_paths`]), so a message recorded
+    /// before errors were redacted at their source leaves the process
+    /// as clean as a new one.
+    #[serde(default, deserialize_with = "deserialize_redacted")]
     pub error: Option<String>,
     /// Intake id this job resolved to: the existing catalog row when the
     /// worker skipped the source as a duplicate (`SkippedDuplicate`), or
@@ -192,6 +196,18 @@ pub struct QueueJob {
     /// matching the previous single-`done` terminal.
     #[serde(default)]
     pub merged_into: Option<i64>,
+}
+
+/// An optional string, redacted of build-machine source prefixes.
+fn deserialize_redacted<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let text = Option::<String>::deserialize(deserializer)?;
+    Ok(text.map(|t| match crate::redact_source_paths(&t) {
+        std::borrow::Cow::Borrowed(_) => t,
+        std::borrow::Cow::Owned(redacted) => redacted,
+    }))
 }
 
 /// The full document persisted to disk.
@@ -259,6 +275,42 @@ pub fn match_id_fragment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failure recorded before errors were redacted at their source
+    /// is redacted as it loads: the failure text reaches `queue.list`,
+    /// the queue snapshot, and the next save only through this field.
+    #[test]
+    fn a_recorded_failure_loads_without_build_prefixes() {
+        let failed = r#"{
+            "id": "0",
+            "library": "default",
+            "path": "/srv/books/example.epub",
+            "kind": "book",
+            "priority": "normal",
+            "force": false,
+            "state": "failed",
+            "queued_at": "2026-01-02T03:04:05Z",
+            "started_at": "2026-01-02T03:04:06Z",
+            "finished_at": "2026-01-02T03:04:07Z",
+            "error": "ingest: train failed, /disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/train.rs:10:4: train failed"
+        }"#;
+        let job: QueueJob = serde_json::from_str(failed).expect("deserialize");
+        assert_eq!(
+            job.error.as_deref(),
+            Some("ingest: train failed, dep-1.0.0/src/train.rs:10:4: train failed")
+        );
+        assert_eq!(
+            job.path,
+            std::path::PathBuf::from("/srv/books/example.epub")
+        );
+
+        let missing = failed.replace(
+            r#""error": "ingest: train failed, /disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/train.rs:10:4: train failed""#,
+            r#""error": null"#,
+        );
+        let job: QueueJob = serde_json::from_str(&missing).expect("deserialize null");
+        assert_eq!(job.error, None);
+    }
 
     #[test]
     fn queue_job_without_kind_loads_as_book() {
