@@ -2529,6 +2529,166 @@ mod book_pipeline_tests {
         assert!(after > baseline, "forced ingest must add new audit rows");
     }
 
+    /// Ingest the sample, then rewrite its catalog row as if an older
+    /// extractor had produced it. Returns the first report and the
+    /// stale version written.
+    async fn ingest_then_mark_stale(
+        file: &Path,
+        dir: &Path,
+        corpus: &mut Corpus,
+        catalog: &mut Catalog,
+    ) -> (IngestReport, u32) {
+        let first = ingest_book(
+            file,
+            corpus,
+            catalog,
+            dir,
+            dir,
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("first ingest");
+        let intake = catalog
+            .intake_by_id(first.intake_id)
+            .expect("intake")
+            .expect("present");
+        let stale = bookrack_extract::EXTRACTOR_VERSION - 1;
+        catalog
+            .set_extraction(
+                ItemKind::Book,
+                first.intake_id,
+                intake.adapter.as_deref().expect("adapter stamped"),
+                stale,
+            )
+            .expect("stale extractor_version stamp");
+        assert_eq!(
+            catalog
+                .stale_partitions(bookrack_extract::EXTRACTOR_VERSION)
+                .expect("stale partitions"),
+            [first.intake_id],
+        );
+        (first, stale)
+    }
+
+    #[tokio::test]
+    async fn re_ingest_without_force_refreshes_a_stale_extractor_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let (first, _) = ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
+        let baseline = catalog
+            .pipeline_audit_for_book(first.book_root_id.get())
+            .expect("audit")
+            .len();
+        // Damage the cached envelope: only a fresh extraction can put a
+        // readable one back.
+        let envelope_path = dir
+            .path()
+            .join(envelope_filename(ItemKind::Book, first.intake_id));
+        std::fs::write(&envelope_path, b"not an envelope").expect("overwrite envelope");
+
+        let again = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("re-ingest");
+        assert!(
+            !again.no_op,
+            "a stale extractor_version must not take the no-op path"
+        );
+        assert!(!again.forced);
+        assert!(again.already_registered);
+        assert_eq!(again.intake_id, first.intake_id);
+        assert!(again.chunks_written > 0, "the chunks must be re-derived");
+        let after = catalog
+            .pipeline_audit_for_book(first.book_root_id.get())
+            .expect("audit")
+            .len();
+        assert!(after > baseline, "every stage must run again");
+
+        let intake = catalog
+            .intake_by_id(first.intake_id)
+            .expect("intake")
+            .expect("present");
+        assert_eq!(
+            intake.extractor_version,
+            bookrack_extract::EXTRACTOR_VERSION
+        );
+        assert_eq!(intake.status, bookrack_catalog::IntakeStatus::Embedded);
+        assert!(
+            catalog
+                .stale_partitions(bookrack_extract::EXTRACTOR_VERSION)
+                .expect("stale partitions")
+                .is_empty(),
+            "the re-ingested intake must no longer read as stale"
+        );
+        let envelope = read_envelope(&envelope_path).expect("envelope replaced");
+        assert_eq!(
+            envelope.extraction.provenance.extractor_version,
+            bookrack_extract::EXTRACTOR_VERSION
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_only_rebuild_and_reembed_leave_the_extractor_version_stale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let (first, stale) =
+            ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
+
+        let rebuilt = crate::rebuild::rebuild_from_intakes(
+            &mut corpus,
+            &catalog,
+            &crate::rebuild::RebuildParams {
+                stale_only: true,
+                ..Default::default()
+            },
+        )
+        .expect("rebuild");
+        assert_eq!(rebuilt.rebuilt, [first.intake_id]);
+        let reembedded = crate::reembed::reembed_all(
+            &catalog,
+            &corpus,
+            dir.path(),
+            &IngestParams::default().embed,
+            &Fake { dim: 8 },
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("reembed");
+        let ids: Vec<i64> = reembedded.intakes.iter().map(|o| o.intake_id).collect();
+        assert_eq!(
+            ids,
+            [first.intake_id],
+            "the rebuild must leave the intake stale for the reembed's filter"
+        );
+
+        let intake = catalog
+            .intake_by_id(first.intake_id)
+            .expect("intake")
+            .expect("present");
+        assert_eq!(intake.extractor_version, stale);
+        assert_eq!(
+            catalog
+                .stale_partitions(bookrack_extract::EXTRACTOR_VERSION)
+                .expect("stale partitions"),
+            [first.intake_id],
+            "neither sweep re-extracts, so the intake must still read as stale"
+        );
+    }
+
     #[tokio::test]
     async fn ingest_writes_envelope_and_records_stored_path() {
         let dir = tempfile::tempdir().expect("tempdir");

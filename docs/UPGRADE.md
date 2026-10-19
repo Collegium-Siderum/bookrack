@@ -59,7 +59,7 @@ earlier ones already happened.
 | Dependency or constant bumped | Stamp it advances | Layers that go stale | Refresh command |
 |---|---|---|---|
 | `rbook`, `scraper`, `encoding_rs`, `unicode-normalization`, `pdfium-render` | `extractor_version` | extract → structure → chunks → vectors | re-ingest the affected sources |
-| `bookrack_extract::EXTRACTOR_VERSION` (manual bump) | `extractor_version` | same as above | re-ingest the affected sources (book-side); re-glean the affected papers (paper-side — the no-op fast path now invalidates on a stamp mismatch) |
+| `bookrack_extract::EXTRACTOR_VERSION` (manual bump) | `extractor_version` | same as above | re-ingest the affected sources: `bookrack ingest` (books), `bookrack papers ingest` (papers) — see *Re-ingesting a source file* below |
 | Externalised extract-side knobs (HTML block / skip tags, PDF quality thresholds, language codes / ratios) — bumped 3 → 4 | `extractor_version` | same as above | re-ingest the affected sources |
 | `Block` carries per-paragraph `BlockStyle` geometry on the PDF path (font-size median / p90, bold-majority flag, line count, first-line left, normalized above-gap) — bumped 5 → 6 | `extractor_version` | same as above | re-ingest the affected PDF sources (book-side TXT / EPUB / OCR partitions read fine without a refresh, as their `style` is `None` on both old and new envelopes) |
 | `bookrack_extract::OCR_INTAKE_VERSION` (manual bump) | `extractor_version` on OCR rows only | OCR extract → structure → chunks → vectors | re-run `bookrack intake ocr` against each affected OCR product |
@@ -161,22 +161,54 @@ accumulated to make the current index a bad fit. The chunks
 themselves are not touched.
 
 Re-ingesting a source file — the only path that refreshes
-`extractor_version`. Drop the catalog row's `Embedded` state and
-ingest the file again; the L0 envelope is replaced and a fresh chunk
-plan + reembed follow. Use `bookrack corpus rebuild --stale-only` and
-`bookrack vectors reembed --stale-only` to scope a sweep to the
-partitions actually behind, identified by their stored
-`extractor_version` not matching this binary's.
+`extractor_version`. Run `bookrack ingest <path>` for a book, or
+`bookrack papers ingest <path>` for a paper, against the original
+file. No `--force` is needed and no catalog state has to be cleared
+first: ingest skips a source already on file only when it is
+`Embedded` and its stored stamps match this binary's, so a row whose
+`extractor_version` is behind runs the full pipeline. The source is
+extracted again, its envelope in the intake store is replaced, and the
+corpus tree, chunks, and vectors are derived afresh. Pointing
+`--recursive` at the original source directory therefore refreshes
+every stale file under it: the files whose stamps are current finish
+as `skipped_duplicate` jobs without doing any work. `--force` runs the
+full pipeline for the current files as well.
+
+The intake is keyed on the file's SHA-256, so the refresh needs the
+bytes the library first saw. A book's intake store keeps the extraction
+envelope, not the source file, so the original has to still be on
+disk; a file whose bytes have changed registers as a new intake instead
+of refreshing the old one.
+
+Re-ingesting resets the item's metadata review. Every ingest writes the
+review row as `pending`, attributed to the ingest, over whatever the row
+held: a book or paper that was `approved`, `acknowledged`, or `rejected`
+is back in the review queue afterwards, and the earlier reviewer is no
+longer recorded. A `--force` re-ingest does the same. Note the verdicts
+that matter before a library-wide sweep.
+
+`corpus rebuild --stale-only` and `vectors reembed --stale-only`, and
+their `papers` counterparts, do not refresh the stamp. Both re-derive
+from what is already stored — the rebuild from the envelope the older
+extractor wrote, the reembed from the chunk text already in the vector
+store — and neither touches `extractor_version`, so every intake they
+process still reads as stale when they finish. With `--dry-run` they
+are a read-only list of intake ids whose stored `extractor_version` is
+behind, within each command's own target set: the rebuild considers
+intakes that are `Extracted`, `DedupHold`, or `Embedded`, and the
+reembed only `Embedded` intakes whose partition holds chunks. An intake
+that stopped short of those states is on neither list, so neither is
+the full set a refresh has to cover.
 
 OCR intakes carry their own version dimension and sit on a sibling
 track: `OCR_INTAKE_VERSION` advances them, `EXTRACTOR_VERSION` does
-not. `corpus rebuild --stale-only` and `vectors reembed --stale-only`
-target born-digital partitions and skip OCR rows, so a bump to
-`OCR_INTAKE_VERSION` is refreshed by re-running `bookrack intake ocr`
-against the OCR markdown the user produced — the original product is
-the source of truth for the OCR side. `Catalog::stale_ocr_partitions`
-is the catalog-level equivalent of `stale_partitions` for the OCR
-side; it is exposed as a query but not yet wired to a CLI sweep.
+not, and the `--stale-only` lists above never include an OCR row. A
+bump to `OCR_INTAKE_VERSION` is refreshed by re-running
+`bookrack intake ocr` against the OCR markdown the user produced — the
+original product is the source of truth for the OCR side.
+`Catalog::stale_ocr_partitions` is the catalog-level equivalent of
+`stale_partitions` for the OCR side; it is exposed as a query but not
+yet wired to a CLI sweep.
 
 `bookrack doctor --backfill-ocr-derivation` — a one-time offline repair
 for libraries upgraded across the catalog v14 boundary. v14 added the
@@ -494,11 +526,13 @@ section with nothing to report writes no such file.
 
 bookrack never decides, on its own, that derived content is stale and
 re-derives it in the background. The decision is the operator's: run
-the refresh command at a time of their choosing. `bookrack corpus
-rebuild --stale-only` and the matching `vectors reembed --stale-only`
-flag fold the on-disk `extractor_version` against this binary's,
-which is the closest the tool gets to "tell me what needs work";
-neither command runs without the operator typing it.
+the refresh command at a time of their choosing. Nothing re-extracts a
+source the operator did not name: `extractor_version` moves only when
+the source file is ingested again. The `--dry-run` of
+`bookrack corpus rebuild --stale-only` or `vectors reembed --stale-only`
+compares the on-disk `extractor_version` with this binary's, which is
+the closest the tool gets to "tell me what needs work" — a partial
+list, as *Re-ingesting a source file* describes, and not a refresh.
 
 ## Switching the embedding model
 

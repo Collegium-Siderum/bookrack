@@ -12,6 +12,7 @@ use bookrack_catalog::{Catalog, FLAG_COLUMNS, GRADE_COLUMNS, IntakeStatus};
 use bookrack_core::{ItemKind, NodeType, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, Result as EmbedResult};
+use bookrack_extract::EXTRACTOR_VERSION;
 use bookrack_glean::{GleanParams, glean_paper};
 use bookrack_vectors::ChunkStore;
 
@@ -334,6 +335,43 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
     catalog
         .set_extraction(ItemKind::Paper, report.intake_id, "pdf", 0)
         .expect("stale extractor_version stamp");
+    // The stale-only sweeps re-derive from what is already stored, so
+    // neither of them refreshes the stamp.
+    let rebuilt = bookrack_glean::rebuild::rebuild_from_intakes(
+        &mut corpus,
+        &catalog,
+        &bookrack_glean::rebuild::RebuildParams {
+            stale_only: true,
+            ..Default::default()
+        },
+    )
+    .expect("stale-only rebuild");
+    assert_eq!(rebuilt.rebuilt, [report.intake_id]);
+    let reembedded = bookrack_glean::reembed::reembed_all(
+        &catalog,
+        &mut corpus,
+        &lancedb_dir,
+        &GleanParams::default().embed,
+        &embedder,
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("stale-only reembed");
+    let reembedded: Vec<i64> = reembedded.intakes.iter().map(|o| o.intake_id).collect();
+    assert_eq!(
+        reembedded,
+        [report.intake_id],
+        "the rebuild must leave the intake stale for the reembed's filter"
+    );
+    assert_eq!(
+        catalog
+            .stale_partitions(EXTRACTOR_VERSION)
+            .expect("stale partitions"),
+        [report.intake_id],
+        "neither sweep re-extracts, so the intake must still read as stale"
+    );
     let after_bump = glean_paper(
         &fixture_path(),
         &mut corpus,
@@ -349,7 +387,25 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
         !after_bump.no_op,
         "stale extractor_version must invalidate the no-op path",
     );
+    assert!(!after_bump.forced);
     assert_eq!(after_bump.intake_id, report.intake_id);
+    assert!(
+        after_bump.chunks_written > 0,
+        "the chunks must be re-derived"
+    );
+    let refreshed = catalog
+        .intake_by_id(report.intake_id)
+        .expect("read intake")
+        .expect("present");
+    assert_eq!(refreshed.extractor_version, EXTRACTOR_VERSION);
+    assert_eq!(refreshed.status, IntakeStatus::Embedded);
+    assert!(
+        catalog
+            .stale_partitions(EXTRACTOR_VERSION)
+            .expect("stale partitions")
+            .is_empty(),
+        "the re-gleaned intake must no longer read as stale"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
