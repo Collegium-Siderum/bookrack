@@ -2,8 +2,11 @@
 
 //! The `node_reviews` table — per-node review status.
 //!
-//! One row per reviewed node, keyed by `(intake_id, scope)` and rewritten
-//! on each pass.
+//! One row per reviewed node, keyed by `(intake_id, scope)`. Each
+//! pipeline pass rewrites the row's `notes` with its audit report
+//! through [`Catalog::record_pipeline_review`]; the status moves only
+//! through [`Catalog::upsert_review`], and a pass never moves it off a
+//! verdict a human or LLM has given.
 //!
 //! Status is **strictly a human/LLM judgement**. The audit's plausibility
 //! verdict lives elsewhere (`node_publication_attrs.confidence` and the
@@ -19,7 +22,8 @@
 //! `bookrack-ingest:default` or `bookrack-ingest:trust-source`) so a
 //! query can tell apart the audit-profile flavours of a `pending` row.
 //! Human and LLM advancers overwrite this column with their own
-//! namespaced token (`human:<email>`, `llm:<model>@<version>`).
+//! namespaced token (`human:<email>`, `llm:<model>@<version>`), and a
+//! later pipeline pass leaves their token in place.
 //!
 //! There is no DDL CHECK on `status`; the column carries one of four
 //! tokens by convention:
@@ -104,6 +108,23 @@ const UPSERT_SQL: &str = "INSERT INTO node_reviews \
        reviewed_by = excluded.reviewed_by, \
        status = excluded.status, \
        notes = COALESCE(excluded.notes, node_reviews.notes)";
+
+/// Open a `pending` row, or refresh the row already there. A `pending`
+/// row takes the new reviewer token and timestamp; any other row keeps
+/// its verdict, reviewer, and timestamp. `notes` is replaced on both.
+/// `:pending` binds [`STATUS_PENDING`]; `RETURNING` yields the status
+/// the row holds after the write.
+const PIPELINE_REVIEW_SQL: &str = "INSERT INTO node_reviews \
+     (intake_id, scope, reviewed_at, reviewed_by, status, notes) \
+     VALUES (:intake_id, :scope, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), \
+             :reviewed_by, :pending, :notes) \
+     ON CONFLICT(intake_id, scope) DO UPDATE SET \
+       reviewed_at = CASE WHEN node_reviews.status = :pending \
+                     THEN excluded.reviewed_at ELSE node_reviews.reviewed_at END, \
+       reviewed_by = CASE WHEN node_reviews.status = :pending \
+                     THEN excluded.reviewed_by ELSE node_reviews.reviewed_by END, \
+       notes = excluded.notes \
+     RETURNING status";
 
 /// Replace `notes` on an existing row and nothing else. No `INSERT`
 /// leg: see [`Catalog::update_review_notes`].
@@ -199,6 +220,43 @@ impl Catalog {
             },
         )?;
         Ok(())
+    }
+
+    /// Write the review row for a node the pipeline has just derived,
+    /// with `notes` carrying its audit report. Returns the status the
+    /// row holds afterwards.
+    ///
+    /// - No row: a [`STATUS_PENDING`] row attributed to `reviewed_by`
+    ///   is inserted.
+    /// - A [`STATUS_PENDING`] row: `reviewed_by` and `reviewed_at` are
+    ///   re-stamped, so the row names the run that last wrote it.
+    /// - Any other status: only `notes` is replaced. The verdict, its
+    ///   reviewer, and its timestamp stay, as with
+    ///   [`Catalog::update_review_notes`], and the returned status is
+    ///   that verdict.
+    ///
+    /// A verdict is kept whether or not the re-derived content differs
+    /// from what was reviewed. [`Catalog::upsert_review`] is the write
+    /// that moves a status.
+    pub fn record_pipeline_review(
+        &self,
+        intake_id: i64,
+        kind: ItemKind,
+        reviewed_by: &str,
+        notes: &str,
+    ) -> Result<String> {
+        let status = self.conn.query_row(
+            PIPELINE_REVIEW_SQL,
+            named_params! {
+                ":intake_id": intake_id,
+                ":scope": kind.as_scope_str(),
+                ":reviewed_by": reviewed_by,
+                ":pending": STATUS_PENDING,
+                ":notes": notes,
+            },
+            |row| row.get(0),
+        )?;
+        Ok(status)
     }
 
     /// Replace one review row's `notes`, leaving `status`,
@@ -367,6 +425,85 @@ mod tests {
             "a missing row must report as untouched",
         );
         assert!(catalog.review(404, KIND).expect("read").is_none());
+    }
+
+    /// A `reviewed_at` no write in a test run can generate.
+    const BACKDATED: &str = "2000-01-01T00:00:00Z";
+
+    /// Move a row's `reviewed_at` to [`BACKDATED`], so a kept timestamp
+    /// reads apart from a re-stamped one.
+    fn backdate(catalog: &Catalog, intake_id: i64) {
+        catalog
+            .conn
+            .execute(
+                "UPDATE node_reviews SET reviewed_at = :at WHERE intake_id = :intake_id",
+                named_params! { ":at": BACKDATED, ":intake_id": intake_id },
+            )
+            .expect("backdate");
+    }
+
+    #[test]
+    fn record_pipeline_review_opens_a_pending_row() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let status = catalog
+            .record_pipeline_review(1, KIND, "bookrack-ingest:default", "report")
+            .expect("write");
+        assert_eq!(status, STATUS_PENDING);
+
+        let read = catalog.review(1, KIND).expect("read").expect("present");
+        assert_eq!(read.status, STATUS_PENDING);
+        assert_eq!(read.reviewed_by, "bookrack-ingest:default");
+        assert!(!read.reviewed_at.is_empty());
+        assert_eq!(read.notes.as_deref(), Some("report"));
+    }
+
+    /// A row still waiting for a reviewer names the run that last
+    /// wrote it.
+    #[test]
+    fn record_pipeline_review_restamps_a_pending_row() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        catalog
+            .record_pipeline_review(1, KIND, "bookrack-ingest:default", "first report")
+            .expect("first pass");
+        backdate(&catalog, 1);
+
+        let status = catalog
+            .record_pipeline_review(1, KIND, "bookrack-ingest:trust-source", "second report")
+            .expect("second pass");
+        assert_eq!(status, STATUS_PENDING);
+
+        let read = catalog.review(1, KIND).expect("read").expect("present");
+        assert_eq!(read.status, STATUS_PENDING);
+        assert_eq!(read.reviewed_by, "bookrack-ingest:trust-source");
+        assert_ne!(read.reviewed_at, BACKDATED, "the row must be re-stamped");
+        assert_eq!(read.notes.as_deref(), Some("second report"));
+    }
+
+    /// A pipeline pass refreshes the report under a verdict and leaves
+    /// the verdict, its reviewer, and its timestamp alone.
+    #[test]
+    fn record_pipeline_review_keeps_a_verdict_and_refreshes_its_report() {
+        for verdict in [STATUS_APPROVED, STATUS_ACKNOWLEDGED, STATUS_REJECTED] {
+            let catalog = Catalog::open_in_memory().expect("open");
+            catalog
+                .record_pipeline_review(1, KIND, "bookrack-ingest:default", "first report")
+                .expect("first pass");
+            catalog
+                .upsert_review(&NewReview::new(1, KIND, "human:reviewer", verdict))
+                .expect("verdict");
+            backdate(&catalog, 1);
+
+            let status = catalog
+                .record_pipeline_review(1, KIND, "bookrack-ingest:default", "second report")
+                .expect("second pass");
+            assert_eq!(status, verdict, "the returned status is the kept verdict");
+
+            let read = catalog.review(1, KIND).expect("read").expect("present");
+            assert_eq!(read.status, verdict, "{verdict}: the verdict must not move");
+            assert_eq!(read.reviewed_by, "human:reviewer", "{verdict}");
+            assert_eq!(read.reviewed_at, BACKDATED, "{verdict}");
+            assert_eq!(read.notes.as_deref(), Some("second report"), "{verdict}");
+        }
     }
 
     #[test]

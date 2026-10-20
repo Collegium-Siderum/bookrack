@@ -20,7 +20,7 @@ use std::time::Instant;
 use crate::audit::projection::csl_type_token;
 use bookrack_catalog::{
     ActorKind, Catalog, IntakeStatus, NewContributor, NewIntake, NewItemPipelineAudit,
-    NewItemState, NewPublicationAttrs, NewReview, STATUS_PENDING,
+    NewItemState, NewPublicationAttrs, STATUS_PENDING,
 };
 use bookrack_config::EmbedConfig;
 use bookrack_core::{ItemKind, NodeId, NodeType, PartitionIdx};
@@ -1308,13 +1308,27 @@ async fn probe_dimension<E: Embedder>(embedder: &E) -> Result<usize> {
     Ok(first.len())
 }
 
+/// Write the paper's review row through
+/// [`Catalog::record_pipeline_review`]. A failure is logged and the
+/// pipeline continues; a verdict the row already carries is kept and
+/// logged.
+fn write_review(catalog: &Catalog, intake_id: i64, reviewer: &str, notes: &str) {
+    match catalog.record_pipeline_review(intake_id, ItemKind::Paper, reviewer, notes) {
+        Ok(status) if status != STATUS_PENDING => {
+            tracing::info!(%status, "metadata: kept the review verdict, refreshed its report");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "metadata: failed to write node_reviews row"),
+    }
+}
+
 /// Run the paper-side metadata audit after `write_biblio`. Returns
 /// `(verdict, confidence)` to populate on `GleanReport`, also
-/// writing them through `update_audit_rollup` and a `pending` row
-/// onto `node_reviews` whose `reviewed_by` carries the active
-/// profile name. Failures inside this step are logged and the
-/// surrounding pipeline continues — the audit is consultative, not
-/// gating.
+/// writing them through `update_audit_rollup` and the report onto the
+/// `node_reviews` row: a new or still-`pending` row is attributed to
+/// the active profile name, and a verdict already given is kept.
+/// Failures inside this step are logged and the surrounding pipeline
+/// continues — the audit is consultative, not gating.
 #[allow(clippy::too_many_arguments)]
 fn run_paper_audit_substep(
     catalog: &Catalog,
@@ -1333,14 +1347,15 @@ fn run_paper_audit_substep(
 ) -> Result<(Option<String>, Option<String>)> {
     let reviewer = format!("bookrack-glean:{}", profile.name);
     if !profile.audit_enabled {
-        if let Err(e) = catalog.upsert_review(
-            &NewReview::new(intake_id, ItemKind::Paper, &reviewer, STATUS_PENDING).notes(format!(
+        write_review(
+            catalog,
+            intake_id,
+            &reviewer,
+            &format!(
                 "audit skipped: {} profile disables the metadata audit",
                 profile.name,
-            )),
-        ) {
-            tracing::warn!(error = %e, "metadata: failed to write node_reviews row");
-        }
+            ),
+        );
         audit(
             catalog,
             run_id,
@@ -1389,12 +1404,7 @@ fn run_paper_audit_substep(
     if let Err(e) = catalog.update_audit_rollup(intake_id, ItemKind::Paper, &confidence, &verdict) {
         tracing::warn!(error = %e, "metadata: failed to write audit rollup");
     }
-    if let Err(e) = catalog.upsert_review(
-        &NewReview::new(intake_id, ItemKind::Paper, &reviewer, STATUS_PENDING)
-            .notes(report.to_json()),
-    ) {
-        tracing::warn!(error = %e, "metadata: failed to write node_reviews row");
-    }
+    write_review(catalog, intake_id, &reviewer, &report.to_json());
     match catalog.now_iso() {
         Ok(audited_at) => {
             let extractor_version = provenance.extractor_version.to_string();
@@ -1935,5 +1945,168 @@ mod tests {
                 "chunk {i}: offsets {start}..{end} do not reproduce the chunk text"
             );
         }
+    }
+
+    /// The token a human review write records in `reviewed_by`.
+    const HUMAN_REVIEWER: &str = "human:reviewer";
+
+    /// A note no glean run writes, standing in for an earlier run's
+    /// report.
+    const EARLIER_REPORT: &str = "an earlier report";
+
+    /// Every status a human or LLM can move a review to.
+    const REVIEWED_STATUSES: [&str; 3] = [
+        bookrack_catalog::STATUS_APPROVED,
+        bookrack_catalog::STATUS_ACKNOWLEDGED,
+        bookrack_catalog::STATUS_REJECTED,
+    ];
+
+    /// Register a paper intake on a fresh in-memory catalog.
+    fn paper_catalog() -> (Catalog, i64) {
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let intake_id = catalog
+            .register_intake(
+                ItemKind::Paper,
+                &NewIntake::new("deadbeef".to_string()).format("pdf".to_string()),
+            )
+            .expect("register")
+            .intake()
+            .intake_id;
+        (catalog, intake_id)
+    }
+
+    /// Run the paper audit substep on a fixed synthetic extraction.
+    fn run_paper_audit_once(catalog: &Catalog, intake_id: i64, profile: &audit::PaperAuditProfile) {
+        let biblio = bookrack_extract::Biblio {
+            title: Some("Synthetic Findings in Test Spaces".to_string()),
+            year: Some(2020),
+            language: Some("en".to_string()),
+            doi: Some("10.5555/example".to_string()),
+            ..Default::default()
+        };
+        let provenance = bookrack_extract::Provenance {
+            adapter: "pdf".to_string(),
+            extractor_version: 1,
+            text_layer_quality: bookrack_extract::TextLayerQuality::Usable,
+            skipped_units: Vec::new(),
+            derived_from_sha256: None,
+            partial_pages: None,
+            source_of_structure: None,
+            fallbacks: Vec::new(),
+        };
+        let blocks = [body("Body sample for the language signal.", 0)];
+        run_paper_audit_substep(
+            catalog,
+            intake_id,
+            PartitionIdx::new(intake_id).root().get(),
+            &biblio,
+            &provenance,
+            &blocks,
+            Path::new("synthetic-findings.pdf"),
+            profile,
+            &audit::PaperAuditData::default_data(),
+            "run-1",
+            "deadbeef",
+            Instant::now(),
+            None,
+        )
+        .expect("audit substep");
+    }
+
+    /// Both review writes of the paper audit substep — the audit's and
+    /// the audit-skipped one — against every reviewed status: the first
+    /// run opens a `pending` row, and a second run after a human verdict
+    /// refreshes the report without moving the verdict.
+    #[test]
+    fn a_rerun_of_the_paper_audit_substep_keeps_a_reviewed_verdict() {
+        let profiles = [
+            audit::PaperAuditProfile::default_profile(),
+            audit::PaperAuditProfile::trust_source(),
+        ];
+        for profile in &profiles {
+            for status in REVIEWED_STATUSES {
+                let case = format!("{} profile, {status}", profile.name);
+                let (catalog, intake_id) = paper_catalog();
+
+                run_paper_audit_once(&catalog, intake_id, profile);
+                let opened = catalog
+                    .review(intake_id, ItemKind::Paper)
+                    .expect("review")
+                    .expect("the first glean opens a review row");
+                assert_eq!(opened.status, STATUS_PENDING, "{case}");
+                assert_eq!(
+                    opened.reviewed_by,
+                    format!("bookrack-glean:{}", profile.name),
+                    "{case}",
+                );
+                let report = opened.notes.expect("the glean writes its report");
+
+                catalog
+                    .upsert_review(&bookrack_catalog::NewReview::new(
+                        intake_id,
+                        ItemKind::Paper,
+                        HUMAN_REVIEWER,
+                        status,
+                    ))
+                    .expect("verdict");
+                assert!(
+                    catalog
+                        .update_review_notes(intake_id, ItemKind::Paper, EARLIER_REPORT)
+                        .expect("age the report")
+                );
+
+                run_paper_audit_once(&catalog, intake_id, profile);
+                let kept = catalog
+                    .review(intake_id, ItemKind::Paper)
+                    .expect("review")
+                    .expect("present");
+                assert_eq!(
+                    kept.status, status,
+                    "{case}: a re-glean must not walk the verdict back to pending"
+                );
+                assert_eq!(
+                    kept.reviewed_by, HUMAN_REVIEWER,
+                    "{case}: the verdict must stay attributed to its reviewer"
+                );
+                assert_eq!(
+                    kept.notes.as_deref(),
+                    Some(report.as_str()),
+                    "{case}: the re-glean must refresh the report"
+                );
+            }
+        }
+    }
+
+    /// A row nobody has reviewed yet carries the latest run: its
+    /// reviewer token and report follow the profile that ran.
+    #[test]
+    fn a_rerun_of_the_paper_audit_substep_restamps_a_pending_review() {
+        let (catalog, intake_id) = paper_catalog();
+        run_paper_audit_once(
+            &catalog,
+            intake_id,
+            &audit::PaperAuditProfile::default_profile(),
+        );
+        run_paper_audit_once(
+            &catalog,
+            intake_id,
+            &audit::PaperAuditProfile::trust_source(),
+        );
+
+        let review = catalog
+            .review(intake_id, ItemKind::Paper)
+            .expect("review")
+            .expect("present");
+        assert_eq!(review.status, STATUS_PENDING);
+        assert_eq!(review.reviewed_by, "bookrack-glean:trust-source");
+        assert!(
+            review
+                .notes
+                .as_deref()
+                .unwrap_or_default()
+                .contains("audit skipped"),
+            "the report must be the latest run's: {:?}",
+            review.notes,
+        );
     }
 }

@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use bookrack_catalog::{Catalog, NewIntake, NewReview};
+use bookrack_catalog::{Catalog, NewIntake};
 use bookrack_core::{ItemKind, NodeType};
 use bookrack_corpus::Corpus;
 use bookrack_extract::{Biblio, ExtractOutcome, Extraction, extract};
@@ -496,15 +496,7 @@ fn run_pipeline(
     attrs.confidence = Some(report.confidence.as_str().to_string());
     catalog.upsert_publication_attrs(&attrs)?;
     let reviewer = format!("bookrack-ingest:{}", params.audit_profile.name);
-    let _ = catalog.upsert_review(
-        &NewReview::new(
-            intake_id,
-            ItemKind::Book,
-            &reviewer,
-            bookrack_catalog::STATUS_PENDING,
-        )
-        .notes(String::new()),
-    );
+    let _ = catalog.record_pipeline_review(intake_id, ItemKind::Book, &reviewer, "");
 
     record.biblio = Some(biblio_out(&extraction.biblio));
     record.audit_fields = Some(report_fields(&report));

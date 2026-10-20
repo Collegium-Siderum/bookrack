@@ -8,7 +8,9 @@
 use std::future::Future;
 use std::path::PathBuf;
 
-use bookrack_catalog::{Catalog, FLAG_COLUMNS, GRADE_COLUMNS, IntakeStatus};
+use bookrack_catalog::{
+    Catalog, FLAG_COLUMNS, GRADE_COLUMNS, IntakeStatus, NewReview, STATUS_APPROVED,
+};
 use bookrack_core::{ItemKind, NodeType, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, Result as EmbedResult};
@@ -306,6 +308,18 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
     assert_eq!(again.intake_id, report.intake_id);
     assert!(!again.forced);
 
+    // A human verdict on the review row outlives every re-glean below;
+    // each one refreshes the report under it.
+    catalog
+        .upsert_review(&NewReview::new(
+            report.intake_id,
+            ItemKind::Paper,
+            HUMAN_REVIEWER,
+            STATUS_APPROVED,
+        ))
+        .expect("approve");
+    age_the_review_report(&catalog, report.intake_id);
+
     // Passing `force = true` bypasses the no-op check and walks the
     // pipeline again. The same intake_id is reused; the run is not a
     // no-op even though the source is unchanged.
@@ -327,6 +341,8 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
     assert!(forced.forced);
     assert!(!forced.no_op);
     assert_eq!(forced.intake_id, report.intake_id);
+    assert_review_kept(&catalog, report.intake_id, "forced re-glean");
+    age_the_review_report(&catalog, report.intake_id);
 
     // Stamp the intake with a stale `extractor_version` to simulate a
     // version bump between glean runs. The no-op path must invalidate
@@ -405,6 +421,43 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
             .expect("stale partitions")
             .is_empty(),
         "the re-gleaned intake must no longer read as stale"
+    );
+    assert_review_kept(&catalog, report.intake_id, "re-glean after extractor bump");
+}
+
+/// The token a human review write records in `reviewed_by`.
+const HUMAN_REVIEWER: &str = "human:reviewer";
+
+/// A note no glean run writes, standing in for an earlier run's report.
+const EARLIER_REPORT: &str = "an earlier report";
+
+/// Replace the review row's report with [`EARLIER_REPORT`], so the next
+/// assertion can tell a refresh from a leftover.
+fn age_the_review_report(catalog: &Catalog, intake_id: i64) {
+    assert!(
+        catalog
+            .update_review_notes(intake_id, ItemKind::Paper, EARLIER_REPORT)
+            .expect("age the report"),
+        "the review row must exist",
+    );
+}
+
+/// The review row still carries the human verdict, under a report the
+/// latest run wrote.
+fn assert_review_kept(catalog: &Catalog, intake_id: i64, run: &str) {
+    let review = catalog
+        .review(intake_id, ItemKind::Paper)
+        .expect("read review")
+        .expect("present");
+    assert_eq!(
+        review.status, STATUS_APPROVED,
+        "{run}: a re-glean must not walk the verdict back to pending"
+    );
+    assert_eq!(review.reviewed_by, HUMAN_REVIEWER, "{run}");
+    let notes = review.notes.unwrap_or_default();
+    assert!(
+        notes != EARLIER_REPORT && notes.contains("\"verdict\""),
+        "{run}: the re-glean must refresh the report: {notes:?}"
     );
 }
 

@@ -180,12 +180,16 @@ envelope, not the source file, so the original has to still be on
 disk; a file whose bytes have changed registers as a new intake instead
 of refreshing the old one.
 
-Re-ingesting resets the item's metadata review. Every ingest writes the
-review row as `pending`, attributed to the ingest, over whatever the row
-held: a book or paper that was `approved`, `acknowledged`, or `rejected`
-is back in the review queue afterwards, and the earlier reviewer is no
-longer recorded. A `--force` re-ingest does the same. Note the verdicts
-that matter before a library-wide sweep.
+Re-ingesting keeps the item's metadata review verdict. A book or paper
+that is `approved`, `acknowledged`, or `rejected` keeps that status, its
+reviewer, and its review time; the new run replaces only the audit
+report in the review row's notes. A row still `pending` is re-stamped
+instead, its reviewer naming the latest run's audit profile. A
+`--force` re-ingest behaves the same way. The verdict is not checked against the new extraction, so it
+stands even where the new extractor changed the record that was
+reviewed — compare the refreshed report with the record to find those.
+`bookrack papers metadata reopen <id>` returns a paper to the review
+queue; the book side has no matching verb.
 
 `corpus rebuild --stale-only` and `vectors reembed --stale-only`, and
 their `papers` counterparts, do not refresh the stamp. Both re-derive

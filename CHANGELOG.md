@@ -209,6 +209,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **Re-ingesting a book or paper keeps its review verdict.** An item
+  that is `approved`, `acknowledged`, or `rejected` keeps that status,
+  its reviewer, and its review time through `ingest` and `papers
+  ingest`, with or without `--force`; the run replaces only the audit
+  report in the review row's notes. Every ingest used to write the row
+  back to `pending`, attributed to the ingest, so a re-ingest — the
+  refresh `docs/UPGRADE.md` prescribes after an extractor change — put
+  every reviewed item back in the queue. The verdict is not checked
+  against the new extraction; `papers metadata reopen` returns a paper
+  to the queue.
 - **A vector search cannot use fails the ingest instead of being
   stored.** When the embedding backend returns a vector with an
   infinite component, or one whose length is zero or overflows, the
