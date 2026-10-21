@@ -4,21 +4,15 @@
 //! SHA-256. Bumping any of the listed crates' versions in
 //! `Cargo.lock` flips this test red until both
 //! `EXTRACTOR_VERSION` and `FROZEN_DEPS_HASH` are refreshed in
-//! lockstep. The list mirrors the "behaviour-sensitive crates"
-//! discipline noted in `CLAUDE.md`.
+//! lockstep. The list is the extractor's row of the bump-to-refresh
+//! matrix in `docs/UPGRADE.md`.
 
 use std::path::PathBuf;
 
 use bookrack_extract::{EXTRACTOR_VERSION, FROZEN_DEPS_HASH};
 use sha2::{Digest, Sha256};
 
-const BEHAVIOR_SENSITIVE_CRATES: &[&str] = &[
-    "encoding_rs",
-    "pdfium-render",
-    "rbook",
-    "scraper",
-    "unicode-normalization",
-];
+const BEHAVIOR_SENSITIVE_CRATES: &[&str] = &["encoding_rs", "pdfium-render", "rbook", "scraper"];
 
 #[test]
 fn extractor_version_and_frozen_deps_hash_are_pinned_as_a_pair() {
@@ -30,7 +24,7 @@ fn extractor_version_and_frozen_deps_hash_are_pinned_as_a_pair() {
         (EXTRACTOR_VERSION, FROZEN_DEPS_HASH),
         (
             6,
-            "b4ad0eff4a4f766e81081f72e9313a2ef7ffb0dd60e8bcfb8e05e1aaf4d806ae"
+            "3df0e5610b3180e2c305469e48473395040a332e69925187f1069f95072474a4"
         ),
         "EXTRACTOR_VERSION and FROZEN_DEPS_HASH bump together; restate the pair here"
     );
@@ -38,60 +32,112 @@ fn extractor_version_and_frozen_deps_hash_are_pinned_as_a_pair() {
 
 #[test]
 fn behavior_sensitive_deps_hash_matches_frozen_value() {
-    let actual = current_deps_hash();
-    assert_eq!(
-        actual, FROZEN_DEPS_HASH,
-        "behaviour-sensitive deps changed; bump bookrack_extract::EXTRACTOR_VERSION \
-         and refresh FROZEN_DEPS_HASH to {actual}"
-    );
-}
-
-fn current_deps_hash() -> String {
     let lock_path = workspace_cargo_lock();
     let lock = std::fs::read_to_string(&lock_path)
         .unwrap_or_else(|e| panic!("read {}: {}", lock_path.display(), e));
-    let mut entries = collect_entries(&lock);
+    let entries = locked_entries(&lock, BEHAVIOR_SENSITIVE_CRATES)
+        .unwrap_or_else(|missing| panic!("Cargo.lock has no entry for {missing:?}"));
+    let actual = digest(&entries);
     assert_eq!(
-        entries.len(),
-        BEHAVIOR_SENSITIVE_CRATES.len(),
-        "expected to find every behaviour-sensitive crate in Cargo.lock; got {entries:?}"
+        actual, FROZEN_DEPS_HASH,
+        "behaviour-sensitive deps changed; Cargo.lock now holds {entries:?}. Either keep \
+         the previous versions in Cargo.lock, or bump bookrack_extract::EXTRACTOR_VERSION \
+         and refresh FROZEN_DEPS_HASH to {actual} (see docs/UPGRADE.md)"
     );
-    entries.sort();
-    let body = entries.join("\n");
-    hex(&Sha256::digest(body.as_bytes()))
 }
 
-fn collect_entries(lock: &str) -> Vec<String> {
+#[test]
+fn locked_entries_ignore_unrelated_packages_and_package_order() {
+    let forward = lock_of(&[("memchr", "2.7.4"), ("rbook", "0.7.6"), ("zip", "8.0.0")]);
+    let reversed = lock_of(&[("zip", "8.0.0"), ("rbook", "0.7.6"), ("memchr", "2.7.4")]);
+    let expected = vec!["rbook@0.7.6".to_string()];
+    assert_eq!(locked_entries(&forward, &["rbook"]), Ok(expected.clone()));
+    assert_eq!(locked_entries(&reversed, &["rbook"]), Ok(expected));
+}
+
+#[test]
+fn locked_entries_keep_every_version_of_a_guarded_crate() {
+    let lock = lock_of(&[
+        ("scraper", "0.27.0"),
+        ("rbook", "0.7.6"),
+        ("scraper", "0.26.0"),
+    ]);
+    assert_eq!(
+        locked_entries(&lock, &["rbook", "scraper"]),
+        Ok(vec![
+            "rbook@0.7.6".to_string(),
+            "scraper@0.26.0".to_string(),
+            "scraper@0.27.0".to_string(),
+        ])
+    );
+}
+
+#[test]
+fn locked_entries_name_every_guarded_crate_missing_from_the_lock() {
+    let lock = lock_of(&[("rbook", "0.7.6")]);
+    assert_eq!(
+        locked_entries(&lock, &["encoding_rs", "rbook", "scraper"]),
+        Err(vec!["encoding_rs".to_string(), "scraper".to_string()])
+    );
+}
+
+/// `name@version` for every `[[package]]` in `lock` whose name is in
+/// `crates`, sorted bytewise; a crate locked at two versions yields two
+/// entries. `Err` lists the crates in `crates` with no entry at all.
+fn locked_entries(lock: &str, crates: &[&str]) -> Result<Vec<String>, Vec<String>> {
     let mut entries = Vec::new();
-    let mut name: Option<String> = None;
-    let mut version: Option<String> = None;
-    for line in lock.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[[package]]" {
+    let mut name: Option<&str> = None;
+    for line in lock.lines().map(str::trim) {
+        if line == "[[package]]" {
             name = None;
-            version = None;
-            continue;
-        }
-        if let Some(v) = trimmed
-            .strip_prefix("name = \"")
-            .and_then(|s| s.strip_suffix('\"'))
+        } else if let Some(n) = quoted_value(line, "name") {
+            name = Some(n);
+        } else if let Some(v) = quoted_value(line, "version")
+            && let Some(n) = name.take()
+            && crates.contains(&n)
         {
-            name = Some(v.to_string());
-        } else if let Some(v) = trimmed
-            .strip_prefix("version = \"")
-            .and_then(|s| s.strip_suffix('\"'))
-        {
-            version = Some(v.to_string());
-        }
-        if let (Some(n), Some(ver)) = (name.as_ref(), version.as_ref()) {
-            if BEHAVIOR_SENSITIVE_CRATES.contains(&n.as_str()) {
-                entries.push(format!("{n}@{ver}"));
-            }
-            name = None;
-            version = None;
+            entries.push(format!("{n}@{v}"));
         }
     }
-    entries
+    let missing: Vec<String> = crates
+        .iter()
+        .filter(|c| {
+            !entries
+                .iter()
+                .any(|e| e.split_once('@').map(|(n, _)| n) == Some(**c))
+        })
+        .map(|c| c.to_string())
+        .collect();
+    if !missing.is_empty() {
+        return Err(missing);
+    }
+    entries.sort();
+    Ok(entries)
+}
+
+/// The value of a `key = "value"` line, or `None` for any other line.
+fn quoted_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    line.strip_prefix(key)?
+        .strip_prefix(" = \"")?
+        .strip_suffix('"')
+}
+
+/// SHA-256 of `entries` joined with `\n`, no trailing newline, as hex.
+fn digest(entries: &[String]) -> String {
+    hex(&Sha256::digest(entries.join("\n").as_bytes()))
+}
+
+/// A minimal `Cargo.lock` holding one registry package per pair.
+fn lock_of(packages: &[(&str, &str)]) -> String {
+    let mut lock = String::from("# This file is automatically @generated by Cargo.\nversion = 4\n");
+    for (name, version) in packages {
+        lock.push_str(&format!(
+            "\n[[package]]\nname = \"{name}\"\nversion = \"{version}\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+             dependencies = [\n \"memchr 2.7.4\",\n]\n"
+        ));
+    }
+    lock
 }
 
 fn workspace_cargo_lock() -> PathBuf {

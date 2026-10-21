@@ -58,14 +58,14 @@ earlier ones already happened.
 
 | Dependency or constant bumped | Stamp it advances | Layers that go stale | Refresh command |
 |---|---|---|---|
-| `rbook`, `scraper`, `encoding_rs`, `unicode-normalization`, `pdfium-render` | `extractor_version` | extract → structure → chunks → vectors | re-ingest the affected sources |
+| `rbook`, `scraper`, `encoding_rs`, `pdfium-render` | `extractor_version` | extract → structure → chunks → vectors | re-ingest the affected sources |
 | `bookrack_extract::EXTRACTOR_VERSION` (manual bump) | `extractor_version` | same as above | re-ingest the affected sources: `bookrack ingest` (books), `bookrack papers ingest` (papers) — see *Re-ingesting a source file* below |
 | Externalised extract-side knobs (HTML block / skip tags, PDF quality thresholds, language codes / ratios) — bumped 3 → 4 | `extractor_version` | same as above | re-ingest the affected sources |
 | `Block` carries per-paragraph `BlockStyle` geometry on the PDF path (font-size median / p90, bold-majority flag, line count, first-line left, normalized above-gap) — bumped 5 → 6 | `extractor_version` | same as above | re-ingest the affected PDF sources (book-side TXT / EPUB / OCR partitions read fine without a refresh, as their `style` is `None` on both old and new envelopes) |
 | `bookrack_extract::OCR_INTAKE_VERSION` (manual bump) | `extractor_version` on OCR rows only | OCR extract → structure → chunks → vectors | re-run `bookrack intake ocr` against each affected OCR product |
 | `text-splitter`, `bookrack_ingest::CHUNK_VERSION` | `chunk_version` | chunks → vectors | `bookrack vectors reembed` (books); `bookrack papers vectors reembed` (papers) |
 | `bookrack_glean::CHUNK_VERSION` | `chunk_version` on the papers store | papers chunks → papers vectors | `bookrack papers vectors reset` |
-| `bookrack_normalize::NORMALIZE_VERSION` | `normalize_version` | chunks → vectors | `bookrack vectors reembed` (books); `bookrack papers vectors reembed` (papers) |
+| `unicode-normalization`, `bookrack_normalize::NORMALIZE_VERSION` | `normalize_version` | chunks → vectors | `bookrack vectors reembed` (books); `bookrack papers vectors reembed` (papers) |
 | Embedding model name or vector width | `embed_model` / `vector_dim` | chunks → vectors | `bookrack libraries fork` (try it side by side) or `bookrack vectors reset` + `bookrack papers vectors reset` (in place) — see [Switching the embedding model](#switching-the-embedding-model) |
 | `catalog.db` / `papers_catalog.db` schema bump | catalog `user_version` | none — migrated forward in place (one exception: the v14 OCR-derivation edge, see below) | open the library (migration is automatic); after upgrading a library that predates v14, run `bookrack doctor --backfill-ocr-derivation` once |
 | `corpus.db` schema bump | corpus `schema_version` | corpus tree | `bookrack corpus rebuild` |
