@@ -26,7 +26,7 @@ pub mod sentences;
 mod structure;
 
 pub use bookrack_corpus::IndexStamps;
-pub use chunk::{CHUNK_VERSION, ChunkParams, ChunkPlan};
+pub use chunk::{CHUNK_VERSION, ChunkParams, ChunkPlan, FROZEN_SPLITTER_DEPS};
 pub use dryrun::{
     BiblioOut, ChunkStatsOut, DryrunBookReport, DryrunParams, DryrunSummary, FieldOut,
     StructureOut, TocStatsOut, collect_files, dryrun_book, dryrun_path, summarize,

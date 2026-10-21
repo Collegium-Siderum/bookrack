@@ -24,11 +24,31 @@ use text_splitter::{ChunkConfig, TextSplitter};
 /// Version of the chunking behaviour.
 ///
 /// Bump on any change that moves a chunk boundary: [`ChunkParams`]
-/// defaults, [`GROUP_SEPARATOR`], the `text-splitter` version, or the
-/// trim setting. The chunk text feeds `norm_chunk_sha256`, so a change is
-/// a re-embedding commitment.
+/// defaults, [`GROUP_SEPARATOR`], the version of `text-splitter` or of
+/// any `icu_*` crate it segments with, or the trim setting. The chunk
+/// text feeds `norm_chunk_sha256`, so a change is a re-embedding
+/// commitment. The companion test `tests/dep_hash.rs` fails until
+/// [`FROZEN_SPLITTER_DEPS`] is restated, forcing a deliberate bump.
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const CHUNK_VERSION: u32 = 1;
+
+/// `name@version` of `text-splitter` and every `icu_*` crate in
+/// `Cargo.lock`, sorted bytewise. Restated in lockstep with
+/// [`CHUNK_VERSION`]. See `tests/dep_hash.rs` for the selection rule.
+pub const FROZEN_SPLITTER_DEPS: &[&str] = &[
+    "icu_collections@2.2.0",
+    "icu_locale@2.2.0",
+    "icu_locale_core@2.2.0",
+    "icu_locale_data@2.2.0",
+    "icu_normalizer@2.2.0",
+    "icu_normalizer_data@2.2.0",
+    "icu_properties@2.2.0",
+    "icu_properties_data@2.2.0",
+    "icu_provider@2.2.0",
+    "icu_segmenter@2.2.0",
+    "icu_segmenter_data@2.2.0",
+    "text-splitter@0.30.1",
+];
 
 /// String joining adjacent leaves within one group before splitting. Part
 /// of chunk identity, hence covered by [`CHUNK_VERSION`].

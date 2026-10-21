@@ -47,8 +47,32 @@ pub mod stamps;
 /// store's index_meta. Independent of `bookrack_ingest::CHUNK_VERSION`:
 /// the two pipelines have separate fleets and bump on their own
 /// cadence.
+///
+/// Bump on any change that moves a chunk boundary, including the
+/// version of `text-splitter` or of any `icu_*` crate it segments with.
+/// Both pipelines share those crates, so a change there moves both
+/// stamps. The companion test `tests/dep_hash.rs` fails until
+/// [`FROZEN_SPLITTER_DEPS`] is restated, forcing a deliberate bump.
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const CHUNK_VERSION: u32 = 1;
+
+/// `name@version` of `text-splitter` and every `icu_*` crate in
+/// `Cargo.lock`, sorted bytewise. Restated in lockstep with
+/// [`CHUNK_VERSION`]. See `tests/dep_hash.rs` for the selection rule.
+pub const FROZEN_SPLITTER_DEPS: &[&str] = &[
+    "icu_collections@2.2.0",
+    "icu_locale@2.2.0",
+    "icu_locale_core@2.2.0",
+    "icu_locale_data@2.2.0",
+    "icu_normalizer@2.2.0",
+    "icu_normalizer_data@2.2.0",
+    "icu_properties@2.2.0",
+    "icu_properties_data@2.2.0",
+    "icu_provider@2.2.0",
+    "icu_segmenter@2.2.0",
+    "icu_segmenter_data@2.2.0",
+    "text-splitter@0.30.1",
+];
 
 /// Tuning parameters for chunking the abstract. The defaults are the
 /// same target / overlap pair the book pipeline uses; the abstract is
