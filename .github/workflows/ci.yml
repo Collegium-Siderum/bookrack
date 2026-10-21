@@ -167,3 +167,4 @@ jobs:
       - uses: actions/checkout@v6
       - run: ./scripts/leak-check.sh
       - run: ./scripts/error-boundary-check.sh
+      - run: ./scripts/dep-stamp-check.sh
