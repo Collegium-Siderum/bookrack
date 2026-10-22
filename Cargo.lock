@@ -854,7 +854,7 @@ name = "bookrack-embed"
 version = "0.13.0-dev"
 dependencies = [
  "bookrack-core",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1078,7 +1078,7 @@ name = "bookrack-rerank"
 version = "0.13.0-dev"
 dependencies = [
  "bookrack-core",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "serde",
  "thiserror 2.0.18",
  "tokio",
@@ -1117,7 +1117,7 @@ dependencies = [
  "eyre",
  "flate2",
  "fs2",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "rustix",
  "serde",
  "serde_json",
@@ -5696,11 +5696,11 @@ dependencies = [
 
 [[package]]
 name = "reqwest"
-version = "0.13.4"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
+checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "futures-core",
  "futures-util",
@@ -5797,7 +5797,7 @@ dependencies = [
  "pastey",
  "pin-project-lite",
  "rand 0.10.1",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "rmcp-macros",
  "schemars 1.2.1",
  "serde",
@@ -6821,9 +6821,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.52.3"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",
