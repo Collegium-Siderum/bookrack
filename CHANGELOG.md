@@ -453,6 +453,14 @@ release workflow extracts the matching section verbatim from this file.
   `reqwest`'s optional HTTP/3 path, which this workspace does not
   enable, so it never compiles into a binary; this clears a lockfile
   advisory.
+- **deps: the bundled SQLite moves from 3.53.1 to 3.53.2, through
+  `rusqlite` 0.40.2.** The patch release hardens FTS5 and FTS3 against
+  corrupt records, fixing several buffer overreads and overwrites; the
+  `refs` crate's trigram sidecar indexes are FTS5 tables. It also
+  corrects some query results involving `COLLATE`. No advisory is
+  published for these fixes. `rusqlite` 0.40.1 also escapes the name
+  passed to `Savepoint::with_name`, which bookrack does not call. The
+  database file format is unchanged and no migration runs.
 
 ## [0.12.0] - 2026-10-17
 
