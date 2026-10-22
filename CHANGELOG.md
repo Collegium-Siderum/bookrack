@@ -396,6 +396,64 @@ release workflow extracts the matching section verbatim from this file.
   caller is retired, so no new audit row carries
   `actor_detail = "gui"`; rows already recorded keep the value.
 
+### Security
+
+- **deps: `rustls` moves from 0.23.45 to 0.23.46, clearing
+  GHSA-w44r-93j7-qv28, GHSA-c8m5-c952-6cm4, GHSA-vp88-798v-h67f and
+  GHSA-h2v8-394m-p7vv (RUSTSEC-2026-0346 to -0349).** The one that
+  applies here (low) lets a network attacker answer one connection
+  attempt with an unauthenticated ServerHello and so downgrade later
+  connections to the same host to classical-only key exchange. `rustls`
+  is the TLS stack of every HTTPS client in the workspace: the PDFium
+  installer's download, and an Ollama or reranker endpoint configured
+  with an `https://` URL. The other three need a custom session store
+  that formats session values with `Debug`, Encrypted Client Hello, or
+  the `brotli` feature, none of which bookrack uses. `reqwest` accepts
+  the patch release, so the lockfile moves alone.
+- **deps: `rustls-webpki` moves from 0.103.15 to 0.103.16, clearing
+  RUSTSEC-2026-0382 (CVE-2026-111943), and `webpki-root-certs` from
+  1.0.7 to 1.0.10, clearing RUSTSEC-2026-0383.** Both concern emSign
+  intermediate certificates that are now distrusted and whose private
+  keys are known: affected versions may accept a server certificate
+  path through one of them when the trust anchors allow it, and 0.103.16
+  rejects such paths. On Linux the same HTTPS clients verify against the
+  system trust store through `rustls-webpki`, so a store that still
+  carries the emSign root was exposed; on macOS and Windows the
+  operating system verifies the path. `webpki-root-certs` resolves only
+  for WebAssembly builds of `rustls-platform-verifier` and never
+  compiles into a bookrack binary, so its move clears a lockfile
+  advisory. The lockfile moves alone.
+- **deps: `h2` moves from 0.4.14 to 0.4.20, clearing
+  GHSA-q83h-524g-xf6h (RUSTSEC-2026-0258).** The advisory (low) is
+  unbounded memory growth from empty HTTP/2 DATA frames queued on a
+  stream the application does not drain. `axum` is taken with HTTP/1
+  only, but `reqwest` 0.12, which `lancedb` pulls in, enables HTTP/2 in
+  the shared `hyper` stack, so the connection builder behind `/mcp` also
+  accepts prior-knowledge HTTP/2. The endpoint binds to loopback by
+  default and browsers do not open such connections, so the reachable
+  callers were local processes. 0.4.20 is taken over the first fixed
+  release because 0.4.17 to 0.4.19 rework the DATA-frame budget 0.4.16
+  introduced. The lockfile moves alone.
+- **deps: five crates reached through `lancedb` move to patched
+  releases.** `rkyv` 0.8.18 clears RUSTSEC-2026-0233, -0234 and -0235
+  (use-after-free and out-of-bounds reads on crafted archives),
+  `memmap2` 0.9.12 clears RUSTSEC-2026-0186 (an unchecked pointer offset
+  in the range-advise and range-flush calls), `crossbeam-epoch` 0.9.21
+  clears RUSTSEC-2026-0204 (an invalid pointer dereference in a
+  `fmt::Pointer` impl), and `event-listener` 5.4.2 and `anyhow` 1.0.104
+  clear the soundness advisories RUSTSEC-2026-0221 and
+  RUSTSEC-2026-0190. `rkyv` and `memmap2` serve the tokenizer
+  dictionaries of LanceDB full-text search, which bookrack does not
+  build, and no crate here calls the affected APIs of the others, so
+  this clears advisories from the tree rather than fixing anything
+  observed in bookrack. The lockfile moves alone.
+- **deps: `quinn-proto` moves from 0.11.16 to 0.11.19, clearing
+  RUSTSEC-2026-0338 to -0342.** These are remote panics and memory
+  exhaustion in QUIC frame handling. The crate resolves only through
+  `reqwest`'s optional HTTP/3 path, which this workspace does not
+  enable, so it never compiles into a binary; this clears a lockfile
+  advisory.
+
 ## [0.12.0] - 2026-10-17
 
 ### Added
