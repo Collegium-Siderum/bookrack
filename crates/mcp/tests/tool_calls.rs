@@ -26,7 +26,11 @@
 //!   default mark, and its default name follows the registry's pointer;
 //! * `session.queue_status` filters `recent` on a state before capping
 //!   it, counts the whole queue, refuses a state no job can be in, and
-//!   carries a failure's cause without build-machine source prefixes.
+//!   carries a failure's cause without build-machine source prefixes;
+//! * a client on protocol version 2026-07-28, served one request at a
+//!   time, receives a tool's `invalid_params` in band under HTTP 200,
+//!   and a request that neither initializes nor names a session is
+//!   answered HTTP 400.
 //!
 //! The registry carries two libraries on two roots so a card whose
 //! identity and counts came from different libraries is observable.
@@ -316,6 +320,48 @@ fn rpc_error(err: ServiceError) -> rmcp::model::ErrorData {
     }
 }
 
+/// Send one raw HTTP/1.1 `POST /mcp` carrying `headers` and `body`,
+/// and return the status code with the whole response as text. The
+/// MCP client folds a non-2xx status into a transport error, so the
+/// status line is only observable on a raw socket.
+async fn post_raw(addr: SocketAddr, headers: &[(&str, &str)], body: String) -> (u16, String) {
+    use std::fmt::Write as _;
+    use std::io::{Read, Write};
+
+    let mut request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n\
+         Content-Length: {}\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        let _ = write!(request, "{name}: {value}\r\n");
+    }
+    request.push_str("\r\n");
+    request.push_str(&body);
+
+    tokio::task::spawn_blocking(move || {
+        let mut stream = std::net::TcpStream::connect(addr).expect("connect to /mcp");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set read timeout");
+        stream.write_all(request.as_bytes()).expect("write request");
+        let mut raw = Vec::new();
+        // A timeout ends the read with what has arrived; the asserts
+        // below say whether that was enough.
+        let _ = stream.read_to_end(&mut raw);
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let status = text
+            .split(' ')
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or_else(|| panic!("an HTTP status line, got: {text:?}"));
+        (status, text)
+    })
+    .await
+    .expect("raw request task")
+}
+
 #[tokio::test]
 async fn a_tool_call_round_trips_and_is_attributed_to_the_mcp_surface() {
     let fx = Fixture::start().await;
@@ -389,6 +435,68 @@ async fn an_unknown_library_selector_is_invalid_params() {
     );
 
     let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+/// A client that negotiates protocol version 2026-07-28 sends no
+/// `initialize` and is served one request at a time. A tool's
+/// `invalid_params` for the caller's input reaches it as a JSON-RPC
+/// error under HTTP 200: a client that treats a 4xx status as a
+/// transport failure never reads the body.
+#[tokio::test]
+async fn a_per_request_clients_invalid_params_arrives_in_band() {
+    let fx = Fixture::start().await;
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "library.stats",
+            "arguments": { "library": "no-such-library" },
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }
+        }
+    });
+    let (status, text) = post_raw(
+        fx.addr,
+        &[
+            ("MCP-Protocol-Version", "2026-07-28"),
+            ("Mcp-Method", "tools/call"),
+            ("Mcp-Name", "library.stats"),
+        ],
+        body.to_string(),
+    )
+    .await;
+    assert_eq!(status, 200, "invalid params must stay in band: {text}");
+    assert!(
+        text.contains("-32602") && text.contains("no-such-library"),
+        "the body must carry the invalid-params error naming the selector: {text}"
+    );
+
+    fx.stop().await;
+}
+
+/// A request that is not `initialize` and names no session is
+/// answered HTTP 400, the status the streamable-HTTP transport asks of
+/// a server that requires a session.
+#[tokio::test]
+async fn a_session_less_request_that_is_not_initialize_is_bad_request() {
+    let fx = Fixture::start().await;
+
+    let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+    let (status, text) = post_raw(fx.addr, &[], body.to_string()).await;
+    assert_eq!(
+        status, 400,
+        "a session-less request must be refused: {text}"
+    );
+    assert!(
+        text.contains("Session ID is required"),
+        "the refusal must name the missing session: {text}"
+    );
+
     fx.stop().await;
 }
 

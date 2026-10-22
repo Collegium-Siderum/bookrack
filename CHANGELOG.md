@@ -206,6 +206,23 @@ release workflow extracts the matching section verbatim from this file.
   registry's current default pointer at enqueue time, the row carries
   that name from then on, and a name the registry does not hold is
   refused with `-32010` before any row exists.
+- **A tool's `invalid params` reaches a 2026-07-28 client as a
+  JSON-RPC error, not an HTTP 400.** A client that negotiates protocol
+  version 2026-07-28 is served one request at a time, and on that path
+  `rmcp` 3.5.0 answered every `-32602` with HTTP status 400, including
+  the ones a tool raises for the caller's input such as an unknown
+  `library` selector, so a client that treats a 4xx status as a
+  transport failure never read the error. `rmcp` 3.6.0 sends those with
+  status 200 and keeps 400 for a request whose `_meta` lacks the
+  protocol version or client capabilities. Clients that open a session
+  with `initialize` see no change.
+- **A `POST /mcp` that is not `initialize` and names no session is
+  answered HTTP 400, not 422.** The streamable-HTTP transport asks a
+  server that requires a session for 400 here, and `GET` and `DELETE`
+  without a session already answered it; through `rmcp` 3.6.0, `POST`
+  agrees. A client that initializes first, or that negotiates
+  2026-07-28 and carries its protocol metadata on each request, never
+  takes this path.
 
 ### Changed
 
