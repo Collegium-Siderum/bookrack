@@ -460,7 +460,9 @@ the exit-code bucket does not distinguish the two.
   the document on disk records; `binary_schema_version` is what the
   serving daemon reads. The first is at or below the second — a document
   above it is refused at start-up, so a daemon serving this call never
-  holds one — and they differ until the daemon next writes the document.
+  holds one — and they differ until the daemon next writes the document,
+  which relabels it at the serving binary's version; with a queue worker
+  that first write is the worker's start-up save.
 - `queue.pause` — `{ ok: true, paused: true }`. Stops the worker
   picking up new jobs; a running job finishes. The pause is persisted in
   the queue document, so it survives a restart.

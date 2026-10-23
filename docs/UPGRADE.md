@@ -101,11 +101,13 @@ they carry no runbook step:
 
 - **Queue document schema** (`QUEUE_SCHEMA_VERSION`, now `6`) — the
   persistent ingest queue is versioned on its own track. An older
-  document loads unchanged in a newer binary. The bump is one-way: a
-  binary reading a document above its own version refuses it and starts
-  nothing, naming both versions. The document is left exactly as it was
-  found, so the version that wrote it still reads every job in it. See
-  *Downgrading* below for what that means in practice.
+  document loads in a newer binary, and the first write (with a queue
+  worker, the worker's start-up save) rewrites it at the newer version.
+  The bump is one-way: a binary reading a document above its own
+  version refuses it and starts nothing, naming both versions. A refused
+  document is left exactly as it was found, so the version that wrote
+  it still reads every job in it. See *Downgrading* below for what that
+  means in practice.
 - **Corpus fingerprint** — a 16-hex digest of the five corpus stamps
   (`embed_model` / `vector_dim` / `chunk_version` / `normalize_version`
   / ANN kind) recorded per search in `retrieval_calls`. It is a

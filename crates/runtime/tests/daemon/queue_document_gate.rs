@@ -17,7 +17,8 @@
 
 use bookrack_runtime::queue::{QUEUE_SCHEMA_VERSION, QueueLoadError};
 use bookrack_test_support::{ProcessEnv, process_env};
-use eyre::Result;
+use eyre::{Result, eyre};
+use std::time::Duration;
 
 use crate::common::{build_opts, connect, join_with_deadline, recv, send};
 
@@ -116,6 +117,71 @@ async fn queue_list_reports_the_document_version_and_the_binarys() -> Result<()>
         assert_eq!(
             resp["result"]["binary_schema_version"], QUEUE_SCHEMA_VERSION,
             "the serving binary's version is reported alongside it: {resp}"
+        );
+        send(
+            &mut writer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
+/// The first write after loading an earlier document relabels it as the
+/// serving binary's version, so the two reported versions agree from
+/// then on and a binary older than this one refuses the document
+/// instead of loading it and dropping the fields it has no field for.
+/// With a queue worker the first write is the worker's start-up save.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_relabels_an_earlier_document_at_the_binarys_version() -> Result<()> {
+    let sandbox = process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+
+    let queue_path = sandbox.daemon_state_dir().join("queue.json");
+    std::fs::write(
+        &queue_path,
+        br#"{"schema_version": 5, "paused": false, "jobs": []}"#,
+    )?;
+
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut writer) = connect(&sock).await?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            send(
+                &mut writer,
+                r#"{"jsonrpc":"2.0","id":1,"method":"queue.list"}"#,
+            )
+            .await?;
+            let resp = recv(&mut reader).await?;
+            if resp["result"]["schema_version"] == serde_json::json!(QUEUE_SCHEMA_VERSION) {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(eyre!(
+                    "the worker's start-up save left the document at its loaded version: {resp}"
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&queue_path)?)?;
+        assert_eq!(
+            on_disk["schema_version"],
+            serde_json::json!(QUEUE_SCHEMA_VERSION),
+            "the document on disk is relabelled too"
         );
         send(
             &mut writer,

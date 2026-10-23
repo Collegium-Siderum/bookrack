@@ -63,7 +63,7 @@ pub async fn clear(_params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         // save flush the unintended cancellations to disk.
         let prev_jobs = guard.jobs.clone();
         let cleared = cancel_all_pending(&mut guard);
-        if let Err(e) = save_atomic(&guard, &ctx.queue_state_path) {
+        if let Err(e) = save_atomic(&mut guard, &ctx.queue_state_path) {
             guard.jobs = prev_jobs;
             return Err(RpcError::new(
                 INTERNAL_ERROR,
@@ -195,7 +195,7 @@ fn apply_pause(
         let mut guard = queue_state.lock().expect("queue state mutex poisoned");
         let prev = guard.paused;
         guard.paused = paused;
-        if let Err(e) = save_atomic(&guard, queue_state_path) {
+        if let Err(e) = save_atomic(&mut guard, queue_state_path) {
             guard.paused = prev;
             return Err(RpcError::new(
                 INTERNAL_ERROR,
@@ -233,7 +233,7 @@ pub(super) fn mutate_jobs_and_persist<T>(
             return Err(e);
         }
     };
-    if let Err(e) = save_atomic(&guard, queue_state_path) {
+    if let Err(e) = save_atomic(&mut guard, queue_state_path) {
         guard.jobs = prev_jobs;
         return Err(RpcError::new(
             INTERNAL_ERROR,

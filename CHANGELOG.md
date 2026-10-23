@@ -80,6 +80,14 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **The queue document is written at the binary's schema version.** A
+  document an earlier build wrote kept its own `schema_version` through
+  every write: the daemon loaded it, added the fields it knows, and
+  saved it still labelled as the older version, so an earlier build then
+  loaded it and dropped those fields without the refusal the version
+  gate exists for. Every write now records the writing binary's version,
+  and `queue.list` reports the two versions as equal from the first
+  write on — with a queue worker, from the worker's start-up save.
 - **A wait no longer reports a daemon that stopped answering when the
   queue merely stopped.** `bookrack ingest`, `papers ingest`,
   `intake ocr` and `queue wait` took a minute without events for a

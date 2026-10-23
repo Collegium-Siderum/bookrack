@@ -180,7 +180,24 @@ pub fn load(path: &Path) -> std::result::Result<QueueState, QueueLoadError> {
 /// and fsynced, then renamed over the destination. A crash mid-write
 /// leaves either the previous document or no document at all, never a
 /// truncated one.
-pub fn save_atomic(state: &QueueState, path: &Path) -> Result<()> {
+///
+/// The document is written at this binary's schema version. A document
+/// an earlier binary wrote keeps its own version through [`load`] and
+/// is relabelled by the first write that follows, so a binary older
+/// than this one refuses it from then on instead of loading it and
+/// dropping the fields it has no field for. A failed write undoes the
+/// relabel, so the version `state` reports stays the one on disk.
+pub fn save_atomic(state: &mut QueueState, path: &Path) -> Result<()> {
+    let loaded = state.schema_version;
+    state.schema_version = QUEUE_SCHEMA_VERSION;
+    let written = write_atomic(state, path);
+    if written.is_err() {
+        state.schema_version = loaded;
+    }
+    written
+}
+
+fn write_atomic(state: &QueueState, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -736,7 +753,7 @@ where
     {
         let mut guard = state.lock().expect("queue state mutex poisoned");
         crash_recovery_reset(&mut guard);
-        match save_atomic(&guard, &state_path) {
+        match save_atomic(&mut guard, &state_path) {
             Ok(()) => {
                 let tick = derive_tick(&guard, None);
                 events.publish(Event::QueueTick(tick));
@@ -761,7 +778,7 @@ where
             let mut guard = state.lock().expect("queue state mutex poisoned");
             let job = pull_pending(&mut guard);
             if job.is_some() {
-                match save_atomic(&guard, &state_path) {
+                match save_atomic(&mut guard, &state_path) {
                     Ok(()) => {
                         let tick = derive_tick(&guard, None);
                         events.publish(Event::QueueTick(tick));
@@ -838,7 +855,7 @@ where
                 guard.paused = true;
             }
             apply_outcome(&mut guard, &job.id, outcome);
-            let save_result = save_atomic(&guard, &state_path);
+            let save_result = save_atomic(&mut guard, &state_path);
             if let Err(err) = &save_result {
                 tracing::error!(error = %err, "queue worker: persist after outcome");
             }
@@ -987,7 +1004,7 @@ mod tests {
         let path = dir.path().join("queue.json");
         let mut state = QueueState::default();
         state.jobs.push(sample_job());
-        save_atomic(&state, &path).unwrap();
+        save_atomic(&mut state, &path).unwrap();
         let loaded = load(&path).unwrap();
         assert_eq!(loaded, state);
     }
@@ -1000,7 +1017,7 @@ mod tests {
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, b"file-not-dir").unwrap();
         let path = blocker.join("nested").join("queue.json");
-        let err = save_atomic(&QueueState::default(), &path);
+        let err = save_atomic(&mut QueueState::default(), &path);
         assert!(err.is_err());
         // The blocker file is still a regular file; the directory tree
         // never came into existence and no sibling temp was left.
@@ -1017,12 +1034,12 @@ mod tests {
     fn schema_version_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("queue.json");
-        let state = QueueState {
+        let mut state = QueueState {
             schema_version: QUEUE_SCHEMA_VERSION,
             paused: true,
             jobs: vec![sample_job()],
         };
-        save_atomic(&state, &path).unwrap();
+        save_atomic(&mut state, &path).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(
             raw.contains(&format!("\"schema_version\": {QUEUE_SCHEMA_VERSION}")),
@@ -1115,7 +1132,17 @@ mod tests {
     fn a_document_from_an_earlier_binary_still_loads() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("queue.json");
-        let v5 = r#"{"schema_version": 5, "paused": false, "jobs": [{
+        std::fs::write(&path, V5_DOCUMENT).unwrap();
+
+        let state = load(&path).expect("an earlier document must still load");
+        assert_eq!(state.schema_version, 5);
+        assert_eq!(state.jobs.len(), 1);
+        assert!(state.jobs[0].merged_into.is_none());
+    }
+
+    /// A document as a version-5 binary wrote it: one finished job,
+    /// none of the fields added since.
+    const V5_DOCUMENT: &str = r#"{"schema_version": 5, "paused": false, "jobs": [{
             "id": "0",
             "library": "default",
             "path": "/tmp/example.epub",
@@ -1131,12 +1158,51 @@ mod tests {
             "finished_at": null,
             "error": null
         }]}"#;
-        std::fs::write(&path, v5).unwrap();
 
-        let state = load(&path).expect("an earlier document must still load");
+    /// Loading leaves the document's version as found; the first write
+    /// relabels it as this binary's, on disk and in the loaded state
+    /// alike, so a binary older than this one refuses the document
+    /// instead of loading it and dropping the fields it has no field
+    /// for.
+    #[test]
+    fn a_saved_document_carries_the_binarys_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.json");
+        std::fs::write(&path, V5_DOCUMENT).unwrap();
+        let mut state = load(&path).unwrap();
+        assert_eq!(state.schema_version, 5, "loading does not relabel");
+
+        save_atomic(&mut state, &path).unwrap();
+
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            raw["schema_version"],
+            serde_json::json!(QUEUE_SCHEMA_VERSION),
+            "the written document carries the writing binary's version"
+        );
+        assert_eq!(
+            state.schema_version, QUEUE_SCHEMA_VERSION,
+            "the state reports the version it was written at"
+        );
+    }
+
+    /// A write that fails leaves the version as loaded, so the state
+    /// keeps reporting what is actually on disk.
+    #[test]
+    fn a_failed_save_leaves_the_version_as_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.json");
+        std::fs::write(&path, V5_DOCUMENT).unwrap();
+        let mut state = load(&path).unwrap();
+
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"file-not-dir").unwrap();
+        let unwritable = blocker.join("nested").join("queue.json");
+        let _blocked =
+            save_atomic(&mut state, &unwritable).expect_err("a regular file blocks the parent");
+
         assert_eq!(state.schema_version, 5);
-        assert_eq!(state.jobs.len(), 1);
-        assert!(state.jobs[0].merged_into.is_none());
     }
 
     fn job(id: &str, priority: Priority, state: JobState) -> QueueJob {
