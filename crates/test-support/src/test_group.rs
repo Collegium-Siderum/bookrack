@@ -18,6 +18,14 @@
 //! property it checks is a property of the text: which file sits in
 //! which directory, and what that file writes. [`test_group!`] puts it
 //! in a group's `main.rs` as a test.
+//!
+//! A group that installs a process environment also shares it, and the
+//! embed stub whose URL it carries, across every test in the binary.
+//! Those tests collide with each other unless each has a process of its
+//! own, so [`check_execution_mode`] refuses any other runner in one
+//! sentence that names the remedy; [`test_group!`] emits that check as
+//! a second test, in place of the batch of unrelated-looking failures
+//! the collisions would otherwise produce.
 
 use std::fs;
 use std::path::Path;
@@ -142,10 +150,42 @@ fn sibling_stems(group_dir: &Path) -> Result<Vec<String>, String> {
     Ok(stems)
 }
 
-/// Declares the layout test for the group `main.rs` it is written in.
+/// The variable `cargo nextest` sets in every test process it starts.
+pub const NEXTEST_EXECUTION_MODE_ENV: &str = "NEXTEST_EXECUTION_MODE";
+
+/// The [`NEXTEST_EXECUTION_MODE_ENV`] value under which each test runs
+/// in a process of its own.
+pub const PROCESS_PER_TEST: &str = "process-per-test";
+
+/// Verdict on the runner a grouped binary was started by.
+///
+/// `installs_process_env` is whether the group hands a spec to
+/// `process_env`; a group that installs nothing shares nothing through
+/// the environment and runs under any runner. `mode` is the value of
+/// [`NEXTEST_EXECUTION_MODE_ENV`] in the test process, `None` when the
+/// variable is absent. The `Err` is one sentence naming the remedy.
+pub fn check_execution_mode(installs_process_env: bool, mode: Option<&str>) -> Result<(), String> {
+    if !installs_process_env {
+        return Ok(());
+    }
+    let seen = match mode {
+        Some(PROCESS_PER_TEST) => return Ok(()),
+        Some(other) => format!("{NEXTEST_EXECUTION_MODE_ENV} is {other:?}"),
+        None => format!("{NEXTEST_EXECUTION_MODE_ENV} is not set"),
+    };
+    Err(format!(
+        "this binary installs one process environment for every test in it and needs one \
+         process per test; run it under cargo nextest ({seen}, not {PROCESS_PER_TEST:?})"
+    ))
+}
+
+/// Declares the guard tests for the group `main.rs` it is written in.
 ///
 /// `$group` is the directory name under `tests/`; `$spec` is the
-/// `Option<&str>` [`check_group`] takes.
+/// `Option<&str>` [`check_group`] takes. The layout test runs under
+/// any runner; the execution-mode test is a one-sentence refusal of a
+/// runner that gives a process-environment group one process for the
+/// whole binary.
 #[macro_export]
 macro_rules! test_group {
     ($group:literal, spec = $spec:expr) => {
@@ -155,6 +195,17 @@ macro_rules! test_group {
                 .join("tests")
                 .join($group);
             if let Err(why) = $crate::test_group::check_group(&dir, $spec) {
+                panic!("{why}");
+            }
+        }
+
+        #[test]
+        fn integration_test_group_runs_one_process_per_test() {
+            let spec: ::std::option::Option<&str> = $spec;
+            let mode = ::std::env::var($crate::test_group::NEXTEST_EXECUTION_MODE_ENV).ok();
+            if let Err(why) =
+                $crate::test_group::check_execution_mode(spec.is_some(), mode.as_deref())
+            {
                 panic!("{why}");
             }
         }

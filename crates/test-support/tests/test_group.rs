@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use bookrack_test_support::test_group::check_group;
+use bookrack_test_support::test_group::{PROCESS_PER_TEST, check_execution_mode, check_group};
 use tempfile::TempDir;
 
 /// A `tests/` tree with one group directory `g` and a `common/mod.rs`
@@ -104,4 +104,30 @@ fn a_missing_main_is_named() {
     let (_tree, group) = tests_tree(&[("a.rs", "")]);
     let why = failure(&group, None);
     assert!(why.contains("main.rs"), "{why}");
+}
+
+/// A group that installs a process environment refuses every runner but
+/// nextest's process-per-test mode, and the refusal names the remedy
+/// and what it saw instead, so the operator reads one sentence rather
+/// than a batch of collisions.
+#[test]
+fn a_process_env_group_outside_nextest_is_refused_with_the_remedy() {
+    check_execution_mode(true, Some(PROCESS_PER_TEST)).expect("nextest's mode passes");
+
+    let absent = check_execution_mode(true, None).expect_err("no variable is refused");
+    assert!(absent.contains("run it under cargo nextest"), "{absent}");
+    assert!(absent.contains("is not set"), "{absent}");
+
+    let other = check_execution_mode(true, Some("process-per-binary"))
+        .expect_err("another mode is refused");
+    assert!(other.contains("run it under cargo nextest"), "{other}");
+    assert!(other.contains("process-per-binary"), "{other}");
+}
+
+/// A group that installs nothing shares nothing through the
+/// environment, so it is not refused under any runner.
+#[test]
+fn a_group_installing_nothing_runs_under_any_mode() {
+    check_execution_mode(false, None).expect("no process environment, no refusal");
+    check_execution_mode(false, Some("process-per-binary")).expect("any mode passes");
 }
