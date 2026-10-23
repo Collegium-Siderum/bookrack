@@ -15,8 +15,9 @@
 //! the stamps, and the catalog are left exactly as they were, and the
 //! refusal is caller input with no resume step.
 //!
-//! Lives in its own binary because `EmbedStub::set_failure` is
-//! process-global.
+//! `EmbedStub::set_failure` is process-global, so this file relies on
+//! the per-test process `cargo nextest` runs it in; under a plain
+//! `cargo test` its flipped switch reaches every test in the binary.
 
 #![cfg(unix)]
 

@@ -10,8 +10,9 @@
 //! batches written before the bad one stay. The paper pipeline embeds
 //! a paper's chunks in one batch, so nothing of it lands.
 //!
-//! Lives in its own binary because `EmbedStub::set_failure` is
-//! process-global.
+//! `EmbedStub::set_failure` is process-global, so this file relies on
+//! the per-test process `cargo nextest` runs it in; under a plain
+//! `cargo test` its flipped switch reaches every test in the binary.
 
 #![cfg(unix)]
 
