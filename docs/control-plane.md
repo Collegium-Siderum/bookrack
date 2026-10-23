@@ -549,7 +549,9 @@ the exit-code bucket does not distinguish the two.
 - `events.subscribe` — `{ subscribed: true }` followed by an
   immediate snapshot bundle of `daemon.state`, `queue.list`,
   `queue.tick`, `library.list`, `library.changed`,
-  `mcp.availability`, `daemon.version`.
+  `mcp.availability`, `daemon.version`. The subscription is in place
+  before the reply is written, so every event published after the
+  reply reaches the connection, behind the snapshot bundle.
 - `events.snapshot` — explicit re-fetch of named channels;
   `params.channels` is the list to refresh.
 - `logs.tail` — `{ n? }` → `{ events, returned }`. Snapshot the most
