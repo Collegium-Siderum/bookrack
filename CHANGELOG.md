@@ -80,6 +80,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **An event subscription no longer drops what arrives as it starts.**
+  `events.subscribe` answered before the daemon registered the
+  connection for events, and the control client registered its
+  receiver only after that answer, so an event published in either gap
+  was lost: on the client side the snapshot bundle that follows the
+  answer, on the daemon side any `log` or `worker.progress` event, which
+  no snapshot replays. `bookrack logs --follow` could miss lines logged
+  as it attached. Both ends now register first, and every event
+  published after the answer reaches the subscriber, behind the
+  snapshot bundle.
 - **Paper hits in a long abstract point at the passage they matched.**
   An abstract longer than one chunk — about 1000 characters — is split
   into overlapping chunks, and every chunk after the first recorded a

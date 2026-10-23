@@ -314,7 +314,9 @@ impl ControlClient {
     /// Begin streaming `event` notifications. Subsequent calls reuse
     /// the same underlying subscription (the server only needs to be
     /// told once); each receiver sees the same events from this point
-    /// forward.
+    /// forward. The first caller's receiver is registered before the
+    /// `events.subscribe` request goes out, so it also sees the snapshot
+    /// bundle the server writes right behind its reply.
     ///
     /// Concurrent subscribers serialize on `inner.subscribed`: the
     /// first caller through holds the lock across the
@@ -323,15 +325,16 @@ impl ControlClient {
     /// receiver against a server that may yet refuse the subscription.
     /// A failed first attempt leaves the state at `false` so the next
     /// caller re-issues the RPC instead of inheriting a phantom
-    /// subscription.
+    /// subscription; its receiver is dropped with the error.
     pub async fn subscribe(&self) -> Result<broadcast::Receiver<Event>, ControlError> {
         let mut subscribed = self.inner.subscribed.lock().await;
+        let rx = self.inner.event_tx.subscribe();
         if !*subscribed {
             self.call_raw("events.subscribe", json!({"channels": ["*"]}))
                 .await?;
             *subscribed = true;
         }
-        Ok(self.inner.event_tx.subscribe())
+        Ok(rx)
     }
 
     /// Request a graceful daemon shutdown. The server tears down the
@@ -863,5 +866,52 @@ mod tests {
 
         drop(client);
         let _ = server.await;
+    }
+
+    /// The first receiver exists before `events.subscribe` goes out, so
+    /// it sees a notification the server writes right behind the reply —
+    /// where the snapshot bundle sits — even when the reader task decodes
+    /// the reply and the notification in one pass, before the caller
+    /// resumes.
+    #[tokio::test]
+    async fn the_first_receiver_sees_a_notification_written_with_the_subscribe_reply() {
+        let (client, remote) = paired_client();
+        client.set_default_timeout(Some(std::time::Duration::from_secs(5)));
+        let (read, mut write) = tokio::io::split(remote);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(read).lines();
+            let line = reader
+                .next_line()
+                .await
+                .expect("read request")
+                .expect("request line");
+            let frame: Value = serde_json::from_str(line.trim()).expect("request json");
+            let id = frame.get("id").and_then(Value::as_u64).expect("request id");
+            // One write, so the reader task finds both frames buffered.
+            let burst = format!(
+                "{}\n{}\n",
+                json!({"jsonrpc": "2.0", "id": id, "result": {"subscribed": true}}),
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "event",
+                    "params": {"channel": "daemon.state", "value": {"state": "idle"}},
+                }),
+            );
+            write
+                .write_all(burst.as_bytes())
+                .await
+                .expect("write burst");
+            let _ = reader.next_line().await;
+        });
+
+        let mut rx = client.subscribe().await.expect("subscribe");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the notification written with the reply reaches the first receiver")
+            .expect("event payload");
+        assert_eq!(event.channel, "daemon.state");
+        assert_eq!(event.value, json!({"state": "idle"}));
+
+        server.abort();
     }
 }

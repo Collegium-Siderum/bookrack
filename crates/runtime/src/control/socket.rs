@@ -245,23 +245,22 @@ pub async fn run_accept_loop(
     Ok(())
 }
 
-#[cfg(unix)]
-type ConnectionStream = tokio::net::UnixStream;
-#[cfg(windows)]
-type ConnectionStream = tokio::net::windows::named_pipe::NamedPipeServer;
-
-/// Serve one connection.
+/// Serve one connection: a Unix-domain stream on Unix, a named-pipe
+/// server instance on Windows.
 ///
 /// Frames are line-delimited JSON; the loop reads one request, runs
 /// the dispatcher, writes the response, and — if the client called
 /// `events.subscribe` — folds the event broadcast into the same
 /// connection task so subsequent notifications reach the same client
 /// in arrival order.
-async fn serve_connection(
-    stream: ConnectionStream,
+async fn serve_connection<S>(
+    stream: S,
     ctx: MethodContext,
     mut shutdown_rx: broadcast::Receiver<()>,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite,
+{
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half).lines();
     let mut writer = write_half;
@@ -290,20 +289,21 @@ async fn serve_connection(
                             continue;
                         }
                         let (response, side_effect) = handle_line(&line, &ctx).await;
+                        // Subscribe before the reply goes out, so every
+                        // event published once the client can read
+                        // `subscribed: true` lands in the receiver. One
+                        // published before the snapshot is written arrives
+                        // after it: the snapshot channels are
+                        // state-convergent, so the repeat is harmless, and
+                        // `log` / `worker.progress`, which the snapshot
+                        // does not cover, lose nothing.
+                        if matches!(side_effect, SideEffect::SnapshotBundle) && event_rx.is_none() {
+                            event_rx = Some(ctx.event_stream.subscribe());
+                        }
                         write_response(&mut writer, response).await?;
                         match side_effect {
                             SideEffect::None => {}
                             SideEffect::SnapshotBundle => {
-                                // Subscribe before snapshotting so an event
-                                // published in the gap between the two
-                                // operations lands in the receiver instead
-                                // of being silently dropped. Channels here
-                                // are state-convergent, so a duplicate
-                                // emission that predates the snapshot is
-                                // harmless on the client side.
-                                if event_rx.is_none() {
-                                    event_rx = Some(ctx.event_stream.subscribe());
-                                }
                                 emit_snapshot_bundle(&mut writer, &ctx).await?;
                             }
                             SideEffect::Shutdown => {
@@ -473,5 +473,110 @@ mod tests {
 
         recovered.cleanup();
         assert!(!path.exists(), "explicit cleanup unlinks the socket");
+    }
+
+    /// A connection stream that publishes one event the first time the
+    /// connection writes. The first write on a fresh connection is the
+    /// reply to its first request, so the event is published while that
+    /// reply goes out.
+    struct PublishOnFirstWrite {
+        inner: tokio::io::DuplexStream,
+        events: crate::control::events::EventStreamHandle,
+        event: Option<Event>,
+    }
+
+    impl tokio::io::AsyncRead for PublishOnFirstWrite {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::pin::Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+        }
+    }
+
+    impl tokio::io::AsyncWrite for PublishOnFirstWrite {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            if let Some(event) = this.event.take() {
+                this.events.publish(event);
+            }
+            std::pin::Pin::new(&mut this.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        }
+    }
+
+    /// The subscription is in place before the reply to
+    /// `events.subscribe` is written, so an event published while that
+    /// reply goes out still reaches the subscriber. `log` carries no
+    /// snapshot, so an event that missed the receiver never arrives.
+    #[tokio::test]
+    async fn an_event_published_as_the_subscribe_reply_goes_out_reaches_the_subscriber() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = crate::control::methods::test_method_context(dir.path(), None);
+        let shutdown_rx = ctx.shutdown_tx.subscribe();
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let stream = PublishOnFirstWrite {
+            inner: server,
+            events: ctx.event_stream.clone(),
+            event: Some(Event::Log(bookrack_obs::stream::LogEvent {
+                ts: chrono::Utc::now(),
+                level: "INFO".to_string(),
+                target: "probe".to_string(),
+                message: "published with the reply".to_string(),
+                fields: serde_json::Map::new(),
+            })),
+        };
+        let connection = tokio::spawn(serve_connection(stream, ctx, shutdown_rx));
+
+        let (read, mut write) = tokio::io::split(client);
+        let mut lines = BufReader::new(read).lines();
+        write
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"events.subscribe\",\"params\":null}\n",
+            )
+            .await
+            .expect("write request");
+
+        let mut frames = Vec::new();
+        let arrived = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Ok(Some(line)) = lines.next_line().await {
+                let frame: serde_json::Value = serde_json::from_str(&line).expect("frame json");
+                let probe = frame["params"]["channel"] == "log"
+                    && frame["params"]["value"]["target"] == "probe";
+                frames.push(frame);
+                if probe {
+                    return true;
+                }
+            }
+            false
+        })
+        .await;
+        assert_eq!(
+            arrived,
+            Ok(true),
+            "the log event published with the reply never reached the subscriber; \
+             frames received: {frames:?}"
+        );
+
+        drop(write);
+        connection.abort();
     }
 }
