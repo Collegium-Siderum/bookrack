@@ -8,8 +8,10 @@
 
 use std::path::PathBuf;
 
+use bookrack_cli::daemon_call::DEFAULT_AWAIT_STALL_TIMEOUT;
 use bookrack_cli::render::confirm::ConfirmMode;
 use bookrack_cli::render::human::truncate_to;
+use bookrack_cli::render::progress::SurfaceKind;
 use bookrack_cli::render::table::{KvTable, RowTable};
 use bookrack_cli::render::{OutputMode, ctx};
 use bookrack_cli_grammar::{
@@ -22,6 +24,7 @@ use serde_json::{Value, json};
 
 use super::helpers;
 use super::helpers::DestructivePrompt;
+use super::job_wait::{self, Daemon};
 use super::listing::{page_footer, row_id};
 
 pub async fn run(
@@ -529,8 +532,15 @@ async fn ingest(args: PapersIngestArgs, runtime_dir: Option<PathBuf>) -> Result<
         return Ok(());
     }
 
-    let report = helpers::await_jobs(rx, &job_ids).await?;
-    helpers::finalize_job_batch(&report, "ingest", "Ingested", &label_owned)
+    let end = job_wait::wait_on_ids(
+        &Daemon(&client),
+        rx,
+        &job_ids,
+        SurfaceKind::from_context().build(),
+        DEFAULT_AWAIT_STALL_TIMEOUT,
+    )
+    .await?;
+    job_wait::finalize(end, "ingest", "Ingested", &label_owned)
 }
 
 async fn list(args: PapersListArgs, runtime_dir: Option<PathBuf>) -> Result<()> {

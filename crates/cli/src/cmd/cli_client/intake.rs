@@ -9,7 +9,9 @@
 
 use std::path::PathBuf;
 
+use bookrack_cli::daemon_call::DEFAULT_AWAIT_STALL_TIMEOUT;
 use bookrack_cli::render::human::{basename_or_dash, truncate_to};
+use bookrack_cli::render::progress::SurfaceKind;
 use bookrack_cli::render::table::RowTable;
 use bookrack_cli_grammar::IntakeAction;
 use bookrack_core::ItemKind;
@@ -17,6 +19,7 @@ use eyre::Result;
 use serde_json::{Value, json};
 
 use super::helpers;
+use super::job_wait::{self, Daemon};
 use super::listing::row_id;
 
 pub async fn run(
@@ -88,8 +91,15 @@ pub async fn run(
                 return Ok(());
             }
 
-            let report = helpers::await_jobs(rx, &job_ids).await?;
-            helpers::finalize_job_batch(&report, "ingest", "OCR-ingested", &label)
+            let end = job_wait::wait_on_ids(
+                &Daemon(&client),
+                rx,
+                &job_ids,
+                SurfaceKind::from_context().build(),
+                DEFAULT_AWAIT_STALL_TIMEOUT,
+            )
+            .await?;
+            job_wait::finalize(end, "ingest", "OCR-ingested", &label)
         }
     }
 }

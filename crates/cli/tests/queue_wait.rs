@@ -191,6 +191,65 @@ async fn wait_reports_ended_and_awaited_jobs_through_the_command_entry() {
         "the worker probe carried --library into status: {stderr}"
     );
 
+    // A refused wait still reports what it saw: the ended job as a
+    // record, the pending one by id. Under `--json` stdout is one
+    // report and stderr one problem; under `--quiet` stdout is empty.
+    let (code, stdout, stderr) = client(
+        &sandbox,
+        &["--json", "queue", "wait", "--job", "0a", "--job", "0d"],
+    )
+    .await;
+    assert_eq!(code, Some(2), "{stderr}");
+    let partial: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("a refused wait printed no report ({e}): {stdout}"));
+    assert_eq!(
+        ids_and_states(&partial),
+        [(ID_FAILED.to_string(), "failed".to_string())]
+    );
+    assert_eq!(partial["unfinished"], json!([ID_PENDING_D]), "{partial}");
+    let problem: Value = serde_json::from_str(&stderr)
+        .unwrap_or_else(|e| panic!("a refused wait printed no problem ({e}): {stderr}"));
+    assert!(
+        problem["summary"]
+            .as_str()
+            .is_some_and(|s| s.contains("paused")),
+        "{problem}"
+    );
+    let (code, stdout, _) = client(
+        &sandbox,
+        &["--quiet", "queue", "wait", "--job", "0a", "--job", "0d"],
+    )
+    .await;
+    assert_eq!(code, Some(2));
+    assert!(stdout.is_empty(), "{stdout}");
+
+    // `ingest` waits by default, and on a paused queue it is refused as
+    // `queue wait` is, right after submitting: the job is queued, the
+    // report names it under `unfinished`, and nothing waits a minute
+    // for a stall.
+    let source = sandbox.path().join("nowhere.epub");
+    let started = Instant::now();
+    let (code, stdout, stderr) =
+        client(&sandbox, &["--json", "ingest", source.to_str().unwrap()]).await;
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the refusal took {:?}",
+        started.elapsed()
+    );
+    let partial: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("a refused ingest wait printed no report ({e}): {stdout}"));
+    assert_eq!(partial["jobs"], json!([]), "{partial}");
+    let ingested_id = partial["unfinished"][0]
+        .as_str()
+        .unwrap_or_else(|| panic!("no unfinished id in {partial}"))
+        .to_string();
+    assert_eq!(partial["unfinished"].as_array().map(Vec::len), Some(1));
+    assert!(stderr.contains("paused"), "{stderr}");
+    assert!(stderr.contains("bookrack queue wait"), "{stderr}");
+    let listing = client_json(&sandbox, &["queue", "list"], 0).await;
+    assert_eq!(job(&listing, &ingested_id)["state"], "pending", "{listing}");
+
     // One named job that already ended.
     let (code, stdout, stderr) = client(&sandbox, &["queue", "wait", "--job", "0b"]).await;
     assert_eq!(code, Some(0), "{stderr}");
@@ -312,6 +371,13 @@ async fn wait_reports_ended_and_awaited_jobs_through_the_command_entry() {
         report["jobs"][0]["finished_at"], rerun_finished_at,
         "{report}"
     );
+
+    // The ingested job runs once the queue is resumed and fails on its
+    // missing source; whether it ends before or after the retried job
+    // is not fixed, so it is waited on by id before the queue is read
+    // as empty.
+    let (code, _, stderr) = client(&sandbox, &["queue", "wait", "--job", &ingested_id]).await;
+    assert_eq!(code, Some(5), "{stderr}");
 
     // Nothing pending or running is nothing to wait for, in each mode.
     let (code, stdout, stderr) = client(&sandbox, &["queue", "wait"]).await;

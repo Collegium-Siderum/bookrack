@@ -248,11 +248,13 @@ pub enum BookrackCliError {
     #[error("{}", .problem.summary)]
     InitRefused { problem: Problem },
 
-    /// `queue wait` refused before waiting: a `--job` fragment matched
-    /// no job or more than one, a selected job is pending on a paused
-    /// queue, or the daemon runs without a queue worker. Judged once,
-    /// from the queue as read when the wait attaches. Operator input,
-    /// not a bug: exit 2, and the reporter draws the three parts.
+    /// A wait on queue jobs was refused: a `--job` fragment matched no
+    /// job or more than one, a selected job is pending on a paused
+    /// queue, or the daemon runs without a queue worker. Judged from
+    /// the queue as read when the wait attaches, for `queue wait` and
+    /// for the submissions that wait. The report of what the wait had
+    /// seen has already gone to stdout. Operator input, not a bug: exit
+    /// 2, and the reporter draws the three parts.
     #[error("{}", .problem.summary)]
     QueueWaitRefused { problem: Problem },
 
@@ -660,7 +662,7 @@ mod tests {
 
     #[test]
     fn queue_wait_refused_uses_exit_two_and_carries_its_hint() {
-        let hint = "Run `bookrack queue resume`, then wait again.";
+        let hint = "Run `bookrack queue resume`, then `bookrack queue wait` to pick up what is still queued.";
         let err = BookrackCliError::QueueWaitRefused {
             problem: bookrack_core::Problem {
                 summary: "cannot wait on pending jobs while the queue is paused".into(),

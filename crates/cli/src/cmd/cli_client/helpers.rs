@@ -3,16 +3,16 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use bookrack_cli::daemon_call::{DEFAULT_AWAIT_STALL_TIMEOUT, DEFAULT_CALL_TIMEOUT};
+use bookrack_cli::daemon_call::DEFAULT_CALL_TIMEOUT;
 use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::library_param;
 use bookrack_cli::path_sugar::{self, Routing};
 use bookrack_cli::render::confirm::{ConfirmMode, Confirmation};
-use bookrack_cli::render::job_report::{JobOutcomeRecord, JobOutcomeReport};
+use bookrack_cli::render::job_report::JobOutcomeReport;
 use bookrack_cli::render::{OutputMode, ctx};
-use bookrack_control_client::{ControlClient, ControlError, Event};
+use bookrack_control_client::{ControlClient, ControlError};
 use eyre::{Context, Result};
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -184,8 +184,8 @@ pub(super) async fn queue_worker_enabled(client: &ControlClient) -> Result<bool>
 ///
 /// Pure RPC: no event subscription, no rendering, no printing. The
 /// building block underneath every other call helper in this module
-/// and the unit of work subcommands compose with `await_jobs` when
-/// they want to wait for queue completion.
+/// and the unit of work subcommands compose with the wait in
+/// `job_wait` when they want to wait for queue completion.
 pub async fn dispatch(client: &ControlClient, method: &str, params: Value) -> Result<Value> {
     let params = library_param::apply(method, params)?;
     client
@@ -260,76 +260,6 @@ pub async fn call_with_progress_value(
     Ok(value)
 }
 
-/// Wait for every job in `job_ids` to reach a terminal queue state
-/// (`Done`, `Failed`, or `Cancelled`) and return the aggregated
-/// [`JobOutcomeReport`].
-///
-/// The caller passes in a `broadcast::Receiver` obtained from
-/// [`ControlClient::subscribe`] **before** the request that produced
-/// the job ids was issued. Subscribing first avoids the race where
-/// a `queue.tick` carrying `last_finished` fires between the RPC
-/// returning and the wait loop starting.
-///
-/// The batch's progress is drawn on stderr through a [`ProgressView`]
-/// while the wait is in flight, and cleared on every exit from it.
-///
-/// Bounded by a stall timeout equal to [`DEFAULT_AWAIT_STALL_TIMEOUT`]
-/// so a daemon that silently stops emitting events does not leave the
-/// CLI hanging forever; the timer resets on every event seen.
-pub async fn await_jobs(
-    rx: broadcast::Receiver<Event>,
-    job_ids: &[String],
-) -> Result<JobOutcomeReport> {
-    await_jobs_from_rx(
-        rx,
-        ProgressView::for_jobs(job_ids),
-        Instant::now(),
-        DEFAULT_AWAIT_STALL_TIMEOUT,
-    )
-    .await
-}
-
-/// Test-friendly core of [`await_jobs`]: drains the receiver until
-/// every job `view` awaits has appeared in a `queue.tick`'s
-/// `last_finished`.
-///
-/// `stall_timeout` bounds the wait between consecutive events. The
-/// timer resets every time an event lands; a stretch with no events
-/// at all surfaces as an error instead of hanging the CLI.
-pub(super) async fn await_jobs_from_rx(
-    mut rx: broadcast::Receiver<Event>,
-    mut view: ProgressView,
-    started_at: Instant,
-    stall_timeout: Duration,
-) -> Result<JobOutcomeReport> {
-    let mut jobs: Vec<JobOutcomeRecord> = Vec::with_capacity(view.pending());
-    while !view.is_complete() {
-        match tokio::time::timeout(stall_timeout, rx.recv()).await {
-            Err(_elapsed) => {
-                return Err(eyre::eyre!(
-                    "control event stream stalled for {}s with {} job(s) still pending; \
-                     daemon may be unresponsive",
-                    stall_timeout.as_secs(),
-                    view.pending()
-                ));
-            }
-            Ok(Ok(event)) => {
-                if let Some(record) = view.apply(&event) {
-                    jobs.push(record);
-                }
-            }
-            Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
-            Ok(Err(broadcast::error::RecvError::Closed)) => {
-                return Err(eyre::eyre!(
-                    "control event stream closed before {} job(s) finished",
-                    view.pending()
-                ));
-            }
-        }
-    }
-    Ok(JobOutcomeReport::new(jobs, started_at.elapsed()))
-}
-
 /// Extract `job_ids` (an array of strings) or `job_id` (a single
 /// string) from an enqueue-style RPC response, returning the empty
 /// vector when neither shape is present.
@@ -370,7 +300,7 @@ pub fn emit_job_summary(report: &JobOutcomeReport, action: &str, label: &str) {
 /// Render the per-batch summary and translate a non-success outcome
 /// into a typed [`BookrackCliError::JobBatchPartialFailure`] so the
 /// binary exits with code `5` instead of `0`. Centralised here so
-/// every `await_jobs` caller shares the same surface; per-job
+/// every waiting command shares the same surface; per-job
 /// detail in the rendered summary is the operator-facing diagnostic.
 /// `scope` names the waiting command in the error.
 pub fn finalize_job_batch(
@@ -666,10 +596,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::cli_client::progress_view::ViewState;
-    use crate::cmd::cli_client::progress_view::testing::RecordingSurface;
-    use bookrack_cli::render::job_report::JobOutcomeState;
-    use bookrack_cli::render::progress::SurfaceKind;
+    use bookrack_cli::render::job_report::{JobOutcomeRecord, JobOutcomeState};
     use bookrack_runtime::control::methods::REGISTRY;
     use serde_json::json;
 
@@ -793,140 +720,6 @@ mod tests {
         }
         assert!(!sources.is_empty(), "no client modules found at {dir:?}");
         sources
-    }
-
-    fn tick(job_id: &str, state: &str, pending: u64, running: u64) -> Event {
-        Event {
-            channel: "queue.tick".to_string(),
-            value: json!({
-                "pending": pending,
-                "running": running,
-                "last_finished": {
-                    "job_id": job_id,
-                    "kind": "book",
-                    "state": state,
-                    "finished_at": "2026-01-01T00:00:00Z",
-                },
-            }),
-            lag: false,
-        }
-    }
-
-    fn tick_without_finished() -> Event {
-        Event {
-            channel: "queue.tick".to_string(),
-            value: json!({ "pending": 1, "running": 0 }),
-            lag: false,
-        }
-    }
-
-    /// Loose default for in-test waits: long enough that the event
-    /// loop can't race the timer in CI, short enough that the stall
-    /// test still finishes promptly.
-    const TEST_STALL_TIMEOUT: Duration = Duration::from_secs(5);
-
-    /// A view over `ids` that draws nothing.
-    fn quiet_view(ids: &[&str]) -> ProgressView {
-        let ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
-        ProgressView::with_surface(ViewState::for_jobs(&ids), SurfaceKind::Hidden.build())
-    }
-
-    /// A view over `ids` whose surface calls land in the returned log.
-    fn recorded_view(ids: &[&str]) -> (ProgressView, Arc<std::sync::Mutex<Vec<String>>>) {
-        let ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
-        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let view = ProgressView::with_surface(
-            ViewState::for_jobs(&ids),
-            Box::new(RecordingSurface(Arc::clone(&log))),
-        );
-        (view, log)
-    }
-
-    #[tokio::test]
-    async fn await_jobs_returns_immediately_when_empty() {
-        let (_tx, rx) = broadcast::channel::<Event>(4);
-        let report = await_jobs_from_rx(rx, quiet_view(&[]), Instant::now(), TEST_STALL_TIMEOUT)
-            .await
-            .unwrap();
-        assert!(report.jobs.is_empty());
-        assert_eq!(report.totals.done, 0);
-    }
-
-    #[tokio::test]
-    async fn await_jobs_collects_all_three_terminal_states() {
-        let (tx, rx) = broadcast::channel::<Event>(16);
-        let view = quiet_view(&["a", "b", "c"]);
-        let handle = tokio::spawn(async move {
-            await_jobs_from_rx(rx, view, Instant::now(), TEST_STALL_TIMEOUT).await
-        });
-        tx.send(tick("a", "done", 2, 1)).unwrap();
-        tx.send(tick("b", "failed", 1, 1)).unwrap();
-        tx.send(tick("c", "cancelled", 0, 0)).unwrap();
-        let report = handle.await.unwrap().unwrap();
-        assert_eq!(report.jobs.len(), 3);
-        assert_eq!(report.totals.done, 1);
-        assert_eq!(report.totals.failed, 1);
-        assert_eq!(report.totals.cancelled, 1);
-        assert!(!report.all_succeeded());
-    }
-
-    #[tokio::test]
-    async fn await_jobs_ignores_ticks_for_other_ids_and_empty_finished() {
-        let (tx, rx) = broadcast::channel::<Event>(16);
-        let view = quiet_view(&["target"]);
-        let handle = tokio::spawn(async move {
-            await_jobs_from_rx(rx, view, Instant::now(), TEST_STALL_TIMEOUT).await
-        });
-        tx.send(tick_without_finished()).unwrap();
-        tx.send(tick("other", "done", 1, 0)).unwrap();
-        tx.send(tick("target", "done", 0, 0)).unwrap();
-        let report = handle.await.unwrap().unwrap();
-        assert_eq!(report.jobs.len(), 1);
-        assert_eq!(report.jobs[0].job_id, "target");
-        assert!(report.all_succeeded());
-    }
-
-    /// A daemon that accepts the job but then stops emitting any
-    /// events at all must not leave the CLI hanging: the stall timer
-    /// elapses and the wait returns an actionable error.
-    #[tokio::test]
-    async fn await_jobs_errors_when_stream_stalls_with_no_events() {
-        let (tx, rx) = broadcast::channel::<Event>(4);
-        let (view, log) = recorded_view(&["a"]);
-        let started = Instant::now();
-        let err = await_jobs_from_rx(rx, view, started, Duration::from_millis(50))
-            .await
-            .unwrap_err();
-        drop(tx);
-        let msg = err.to_string();
-        assert!(msg.contains("stalled"), "error text: {msg}");
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "stall fired after {:?}",
-            started.elapsed()
-        );
-        assert_eq!(
-            log.lock().unwrap().last().map(String::as_str),
-            Some("clear"),
-            "a stalled wait left its progress line drawn"
-        );
-    }
-
-    #[tokio::test]
-    async fn await_jobs_errors_when_stream_closes_with_pending() {
-        let (tx, rx) = broadcast::channel::<Event>(4);
-        let (view, log) = recorded_view(&["a"]);
-        let handle = tokio::spawn(async move {
-            await_jobs_from_rx(rx, view, Instant::now(), TEST_STALL_TIMEOUT).await
-        });
-        drop(tx);
-        let err = handle.await.unwrap().unwrap_err();
-        assert!(err.to_string().contains("1 job"));
-        assert_eq!(
-            log.lock().unwrap().last().map(String::as_str),
-            Some("clear"),
-            "a closed stream left the progress line drawn"
-        );
     }
 
     #[test]

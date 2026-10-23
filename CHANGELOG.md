@@ -248,6 +248,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **A refused wait reports what it saw, and a submission's wait is
+  judged like `queue wait`.** `bookrack ingest`, `papers ingest` and
+  `intake ocr` now read the queue once their jobs are submitted and
+  refuse to wait up front, with exit `2`, when the queue is paused
+  with their jobs pending or the daemon has no queue worker — instead
+  of waiting a minute for the event stream to stall and exiting `1`.
+  The jobs stay queued. Every refused wait, `queue wait` included,
+  still prints its report: the jobs that had ended as records, and
+  the rest by id under a new `unfinished` array in the `--json` shape,
+  which a completed wait leaves out. The human summary of a wait cut
+  short reads `Ingested 0 of 1 sample.epub in 0.2s (1 still queued)`.
+  The hint after a paused refusal now points at `bookrack queue wait`.
 - **Re-ingesting a book or paper keeps its review verdict.** An item
   that is `approved`, `acknowledged`, or `rejected` keeps that status,
   its reviewer, and its review time through `ingest` and `papers

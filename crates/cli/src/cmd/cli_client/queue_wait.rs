@@ -21,59 +21,25 @@ use std::time::{Duration, Instant};
 use bookrack_cli::daemon_call::DEFAULT_AWAIT_STALL_TIMEOUT;
 use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::render::human::basename_or_dash;
-use bookrack_cli::render::job_report::{JobOutcomeRecord, JobOutcomeReport, JobOutcomeState};
+use bookrack_cli::render::job_report::JobOutcomeReport;
 use bookrack_cli::render::progress::{Surface, SurfaceKind};
 use bookrack_cli::render::{OutputMode, ctx};
-use bookrack_control_client::{ControlClient, Event};
+use bookrack_control_client::ControlClient;
 use bookrack_core::Problem;
-use bookrack_core::queue::{FragmentMiss, JobState, QueueJob, match_id_fragment};
-use eyre::{Context, Result, eyre};
-use serde_json::Value;
-use tokio::sync::broadcast;
+use bookrack_core::queue::{FragmentMiss, QueueJob, match_id_fragment};
+use eyre::Result;
 
-use super::helpers;
-use super::progress_view::ProgressView;
+use super::job_wait::{self, Daemon, Listing, WaitEnd, WaitSource, is_live};
 
 const FULL_ID_HINT: &str = "`bookrack queue list --long` prints every job's full id.";
 
-/// The daemon calls a queue wait makes.
-pub(crate) trait WaitSource {
-    async fn subscribe(&self) -> Result<broadcast::Receiver<Event>>;
-    async fn list(&self) -> Result<Value>;
-    async fn worker_enabled(&self) -> Result<bool>;
-}
-
-/// [`WaitSource`] over a live control-plane connection.
-struct Daemon<'a>(&'a ControlClient);
-
-impl WaitSource for Daemon<'_> {
-    async fn subscribe(&self) -> Result<broadcast::Receiver<Event>> {
-        self.0
-            .subscribe()
-            .await
-            .context("subscribe to control-plane events")
-    }
-
-    async fn list(&self) -> Result<Value> {
-        helpers::dispatch(self.0, "queue.list", Value::Null).await
-    }
-
-    async fn worker_enabled(&self) -> Result<bool> {
-        helpers::queue_worker_enabled(self.0).await
-    }
-}
-
-/// How a wait ended.
+/// How a wait ended, with the noun the summary line names the jobs by.
 #[derive(Debug)]
-pub(crate) enum WaitResult {
+pub(super) enum WaitResult {
     /// No job was pending or running, and none was named.
     Nothing,
-    /// The jobs the wait covered, and the noun the summary line names
-    /// them by.
-    Report {
-        report: JobOutcomeReport,
-        label: String,
-    },
+    /// The jobs the wait covered.
+    Ended { end: WaitEnd, label: String },
 }
 
 /// `bookrack queue wait`: wait on the selected jobs and print how they
@@ -94,8 +60,8 @@ pub async fn run(client: &ControlClient, fragments: &[String]) -> Result<()> {
             }
             Ok(())
         }
-        WaitResult::Report { report, label } => {
-            helpers::finalize_job_batch(&report, "queue wait", "Completed", &label)
+        WaitResult::Ended { end, label } => {
+            job_wait::finalize(end, "queue wait", "Completed", &label)
         }
     }
 }
@@ -114,7 +80,7 @@ fn render_nothing(mode: OutputMode) -> Option<String> {
 
 /// Subscribe, read the queue, select and judge the jobs, then wait on
 /// the live ones. `stall` bounds the stretch between two events.
-pub(crate) async fn wait_on<S: WaitSource>(
+pub(super) async fn wait_on<S: WaitSource>(
     source: &S,
     fragments: &[String],
     surface: Box<dyn Surface>,
@@ -127,75 +93,13 @@ pub(crate) async fn wait_on<S: WaitSource>(
     if selected.is_empty() {
         return Ok(WaitResult::Nothing);
     }
-
-    let mut settled = Vec::new();
-    let mut live = Vec::new();
-    for &index in &selected {
-        let job = &listing.jobs[index];
-        if is_live(job.state) {
-            live.push(job);
-        } else {
-            settled.push(ended_record(job, &listing.rows[index])?);
-        }
-    }
-
-    if !live.is_empty() {
-        if !source.worker_enabled().await? {
-            return Err(no_worker(live.len()).into());
-        }
-        let pending = live
-            .iter()
-            .filter(|job| job.state == JobState::Pending)
-            .count();
-        if listing.paused && pending > 0 {
-            return Err(paused(pending).into());
-        }
-    }
-
     let label = match selected.as_slice() {
         [only] => basename_or_dash(listing.jobs[*only].path.to_str()).to_string(),
         _ => "jobs".to_string(),
     };
-    let live_ids: Vec<String> = live.iter().map(|job| job.id.clone()).collect();
-    let view = ProgressView::for_jobs_after(&settled, &live_ids, surface);
-    let awaited = helpers::await_jobs_from_rx(rx, view, started, stall).await?;
-    settled.extend(awaited.jobs);
-    Ok(WaitResult::Report {
-        report: JobOutcomeReport::new(settled, started.elapsed()),
-        label,
-    })
-}
-
-/// A `queue.list` reply: the typed rows, the same rows as sent, and the
-/// pause flag.
-struct Listing {
-    jobs: Vec<QueueJob>,
-    rows: Vec<Value>,
-    paused: bool,
-}
-
-impl Listing {
-    fn parse(reply: &Value) -> Result<Self> {
-        let rows = reply
-            .get("jobs")
-            .and_then(Value::as_array)
-            .cloned()
-            .ok_or_else(|| eyre!("queue.list reply carries no jobs array"))?;
-        let jobs = rows
-            .iter()
-            .map(|row| serde_json::from_value::<QueueJob>(row.clone()))
-            .collect::<Result<Vec<_>, _>>()
-            .context("parse queue.list rows")?;
-        let paused = reply
-            .get("paused")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        Ok(Self { jobs, rows, paused })
-    }
-}
-
-fn is_live(state: JobState) -> bool {
-    matches!(state, JobState::Pending | JobState::Running)
+    let attached = job_wait::attach(&listing, &selected)?;
+    let end = job_wait::wait(source, rx, &listing, attached, surface, started, stall).await?;
+    Ok(WaitResult::Ended { end, label })
 }
 
 /// Indices of the rows a wait covers: every pending or running row in
@@ -219,41 +123,8 @@ fn select(jobs: &[QueueJob], fragments: &[String]) -> Result<Vec<usize>, Bookrac
     Ok(picked)
 }
 
-/// The outcome record an ended row reads as. `kind` and `finished_at`
-/// are copied from the row as the daemon sent them, the same spelling
-/// its `last_finished` event carries.
-fn ended_record(job: &QueueJob, row: &Value) -> Result<JobOutcomeRecord> {
-    let wire_state = job.state.as_wire_str();
-    let state = JobOutcomeState::from_wire(wire_state)
-        .ok_or_else(|| eyre!("job {} is {wire_state}, not an ended state", job.id))?;
-    let finished_at = row
-        .get("finished_at")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            eyre!(
-                "queue.list reported job {} as {wire_state} without a finished_at",
-                job.id
-            )
-        })?;
-    let kind = row
-        .get("kind")
-        .and_then(Value::as_str)
-        .ok_or_else(|| eyre!("queue.list reported job {} without a kind", job.id))?;
-    Ok(JobOutcomeRecord {
-        job_id: job.id.clone(),
-        kind: kind.to_string(),
-        state,
-        error: job.error.clone(),
-        finished_at: finished_at.to_string(),
-    })
-}
-
-fn refused(problem: Problem) -> BookrackCliError {
-    BookrackCliError::QueueWaitRefused { problem }
-}
-
 fn fragment_refusal(fragment: &str, miss: FragmentMiss) -> BookrackCliError {
-    refused(match miss {
+    job_wait::refused(match miss {
         FragmentMiss::Empty => Problem::new("a job id fragment must not be empty"),
         FragmentMiss::NoMatch => {
             Problem::new(format!("no job matches {fragment:?}")).hint(FULL_ID_HINT)
@@ -265,171 +136,32 @@ fn fragment_refusal(fragment: &str, miss: FragmentMiss) -> BookrackCliError {
     })
 }
 
-fn no_worker(live: usize) -> BookrackCliError {
-    let detail = if live == 1 {
-        "1 selected job is pending or running, and nothing will run it.".to_string()
-    } else {
-        format!("{live} selected jobs are pending or running, and nothing will run them.")
-    };
-    refused(
-        Problem::new("cannot wait on queue jobs: the daemon has no queue worker")
-            .detail(detail)
-            .hint("Restart the daemon with a queue worker: `bookrack run`."),
-    )
-}
-
-fn paused(pending: usize) -> BookrackCliError {
-    let detail = if pending == 1 {
-        "1 selected job is pending; a paused worker pulls no job.".to_string()
-    } else {
-        format!("{pending} selected jobs are pending; a paused worker pulls no job.")
-    };
-    refused(
-        Problem::new("cannot wait on pending jobs while the queue is paused")
-            .detail(detail)
-            .hint("Run `bookrack queue resume`, then wait again."),
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
 
     use bookrack_cli::error::classify_eyre;
-    use serde_json::json;
+    use bookrack_cli::render::job_report::JobOutcomeState;
+    use serde_json::{Value, json};
 
-    use super::super::progress_view::extract_finished;
+    use super::super::job_wait::testing::*;
     use super::super::progress_view::testing::RecordingSurface;
     use super::*;
 
-    // Ids as one minute's submissions generate them: a shared timestamp
-    // head, distinct random tails.
-    const A: &str = "019a1b2c-3d4e-7f00-8a11-0000aaaaaaaa";
-    const B: &str = "019a1b2c-3d4e-7f00-8a11-0000bbbbbbbb";
-    const D: &str = "019a1b2c-3d4e-7f00-8a11-0000dddddddd";
-    const N: &str = "019a1b2c-3d4e-7f00-8a11-0000eeeeeeee";
-    const P: &str = "019a1b2c-3d4e-7f00-8a11-000011111111";
-    const R: &str = "019a1b2c-3d4e-7f00-8a11-000022222222";
-    const R1: &str = "019a1b2c-3d4e-7f00-8a11-000033333333";
-    const R2: &str = "019a1b2c-3d4e-7f00-8a11-000044444444";
-
-    const FINISHED_AT: &str = "2026-01-02T03:05:05.123456789Z";
     const STALL: Duration = Duration::from_secs(2);
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Call {
-        Subscribe,
-        List,
-        WorkerEnabled,
-    }
-
-    /// A daemon whose `queue.list` reply and worker flag are fixed. The
-    /// events in `on_list` are broadcast inside `list`, before the reply
-    /// returns, so they reach only a subscription made earlier.
-    struct FakeSource {
-        tx: broadcast::Sender<Event>,
-        calls: Mutex<Vec<Call>>,
-        reply: Value,
-        worker: bool,
-        on_list: Vec<Event>,
-    }
-
-    impl FakeSource {
-        fn new(rows: Vec<Value>, paused: bool, on_list: Vec<Event>) -> Self {
-            let (tx, _) = broadcast::channel(64);
-            Self {
-                tx,
-                calls: Mutex::new(Vec::new()),
-                reply: json!({ "paused": paused, "jobs": rows }),
-                worker: true,
-                on_list,
-            }
-        }
-
-        fn without_worker(mut self) -> Self {
-            self.worker = false;
-            self
-        }
-
-        fn calls(&self) -> Vec<Call> {
-            self.calls.lock().unwrap().clone()
-        }
-    }
-
-    impl WaitSource for FakeSource {
-        async fn subscribe(&self) -> Result<broadcast::Receiver<Event>> {
-            self.calls.lock().unwrap().push(Call::Subscribe);
-            Ok(self.tx.subscribe())
-        }
-
-        async fn list(&self) -> Result<Value> {
-            self.calls.lock().unwrap().push(Call::List);
-            for event in &self.on_list {
-                let _ = self.tx.send(event.clone());
-            }
-            Ok(self.reply.clone())
-        }
-
-        async fn worker_enabled(&self) -> Result<bool> {
-            self.calls.lock().unwrap().push(Call::WorkerEnabled);
-            Ok(self.worker)
-        }
-    }
-
-    fn row(id: &str, state: &str) -> Value {
-        row_with(id, state, "book", None)
-    }
-
-    fn row_with(id: &str, state: &str, kind: &str, error: Option<&str>) -> Value {
-        let ended = !matches!(state, "pending" | "running");
-        json!({
-            "id": id,
-            "library": "main",
-            "path": format!("/books/{id}.epub"),
-            "priority": "normal",
-            "force": false,
-            "hold_for_metadata": false,
-            "kind": kind,
-            "intake_ocr": null,
-            "audit_profile": null,
-            "state": state,
-            "queued_at": "2026-01-02T03:04:05Z",
-            "started_at": if state == "pending" { Value::Null } else { json!("2026-01-02T03:04:06Z") },
-            "finished_at": if ended { json!(FINISHED_AT) } else { Value::Null },
-            "error": error,
-            "merged_into": null,
-        })
-    }
-
-    fn finished(id: &str, state: &str, kind: &str, error: Option<&str>) -> Event {
-        let mut last = json!({
-            "job_id": id,
-            "kind": kind,
-            "state": state,
-            "finished_at": FINISHED_AT,
-        });
-        if let Some(error) = error {
-            last["error"] = json!(error);
-        }
-        Event {
-            channel: "queue.tick".to_string(),
-            value: json!({ "pending": 0, "running": 0, "last_finished": last }),
-            lag: false,
-        }
-    }
-
-    fn hidden() -> Box<dyn Surface> {
-        SurfaceKind::Hidden.build()
-    }
-
     fn named(fragments: &[&str]) -> Vec<String> {
-        fragments.iter().map(|f| f.to_string()).collect()
+        ids(fragments)
     }
 
+    /// The complete report of a wait that ended, as `(id, state)` pairs.
     fn outcomes(result: WaitResult) -> Vec<(String, JobOutcomeState)> {
-        let WaitResult::Report { report, .. } = result else {
-            panic!("expected a report, got {result:?}");
+        let WaitResult::Ended {
+            end: WaitEnd::Complete(report),
+            ..
+        } = result
+        else {
+            panic!("expected a complete report, got {result:?}");
         };
         report
             .jobs
@@ -438,7 +170,19 @@ mod tests {
             .collect()
     }
 
-    fn refusal(err: &eyre::Report) -> &Problem {
+    /// The partial report and problem of a wait refused after the read.
+    fn refusal(result: &WaitResult) -> (&JobOutcomeReport, &Problem) {
+        match result {
+            WaitResult::Ended {
+                end: WaitEnd::Refused { report, problem },
+                ..
+            } => (report, problem),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// The problem of a wait refused before the read.
+    fn early_refusal(err: &eyre::Report) -> &Problem {
         match err.downcast_ref::<BookrackCliError>() {
             Some(BookrackCliError::QueueWaitRefused { problem }) => problem,
             other => panic!("expected a queue wait refusal, got {other:?}: {err:?}"),
@@ -467,8 +211,12 @@ mod tests {
         let result = wait_on(&source, &named(&["aaaaaaaa", "bbbbbbbb"]), hidden(), STALL)
             .await
             .unwrap();
-        let WaitResult::Report { report, label } = result else {
-            panic!("expected a report");
+        let WaitResult::Ended {
+            end: WaitEnd::Complete(report),
+            label,
+        } = result
+        else {
+            panic!("expected a complete report");
         };
         assert_eq!(label, "jobs");
         assert_eq!(report.jobs.len(), 2);
@@ -538,7 +286,7 @@ mod tests {
         let err = wait_on(&source, &named(&["zz"]), hidden(), STALL)
             .await
             .unwrap_err();
-        assert_eq!(refusal(&err).summary, "no job matches \"zz\"");
+        assert_eq!(early_refusal(&err).summary, "no job matches \"zz\"");
         assert_eq!(classify_eyre(&err).unwrap().as_cli().exit_code(), 2);
         assert!(!source.calls().contains(&Call::WorkerEnabled));
 
@@ -547,17 +295,19 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(
-            refusal(&err).summary,
+            early_refusal(&err).summary,
             "\"019a1b2c\" is ambiguous, matches 2 jobs"
         );
         assert!(!source.calls().contains(&Call::WorkerEnabled));
     }
 
+    /// The refusal reports the selected rows: none had ended, both are
+    /// named under `unfinished`, in queue order.
     #[tokio::test]
     async fn a_paused_queue_refuses_selected_pending_jobs() {
         let source = FakeSource::new(vec![row(P, "pending"), row(R, "running")], true, Vec::new());
-        let err = wait_on(&source, &[], hidden(), STALL).await.unwrap_err();
-        let problem = refusal(&err);
+        let result = wait_on(&source, &[], hidden(), STALL).await.unwrap();
+        let (report, problem) = refusal(&result);
         assert_eq!(
             problem.summary,
             "cannot wait on pending jobs while the queue is paused"
@@ -570,6 +320,32 @@ mod tests {
                 .is_some_and(|hint| hint.contains("bookrack queue resume")),
             "{problem:?}"
         );
+        assert!(report.jobs.is_empty());
+        assert_eq!(report.unfinished, ids(&[P, R]));
+    }
+
+    /// A refusal keeps the ended rows it was asked about, in the order
+    /// they were named, and lists the live ones after them.
+    #[tokio::test]
+    async fn a_paused_queue_refusal_reports_the_named_ended_rows() {
+        let source = FakeSource::new(
+            vec![
+                row(P, "pending"),
+                row_with(A, "failed", "book", Some("boom")),
+                row(R, "running"),
+                row(D, "done"),
+            ],
+            true,
+            Vec::new(),
+        );
+        let result = wait_on(&source, &named(&[D, R, A, P]), hidden(), STALL)
+            .await
+            .unwrap();
+        let (report, _) = refusal(&result);
+        let seen: Vec<&str> = report.jobs.iter().map(|j| j.job_id.as_str()).collect();
+        assert_eq!(seen, [D, A]);
+        assert_eq!(report.unfinished, ids(&[R, P]));
+        assert_eq!(report.totals.failed, 1);
     }
 
     #[tokio::test]
@@ -585,15 +361,22 @@ mod tests {
         assert_eq!(outcomes(result), [(R.to_string(), JobOutcomeState::Done)]);
     }
 
+    /// The default selection covers live rows only, so the refusal
+    /// names the pending row and reports nothing ended; the ended row
+    /// is reported when it is selected by name, alone or beside the
+    /// pending one.
     #[tokio::test]
     async fn a_daemon_without_a_worker_refuses_live_jobs_but_reports_ended_ones() {
         let source = FakeSource::new(vec![row(P, "pending"), row(D, "done")], false, Vec::new())
             .without_worker();
-        let err = wait_on(&source, &[], hidden(), STALL).await.unwrap_err();
+        let result = wait_on(&source, &[], hidden(), STALL).await.unwrap();
+        let (report, problem) = refusal(&result);
         assert_eq!(
-            refusal(&err).summary,
+            problem.summary,
             "cannot wait on queue jobs: the daemon has no queue worker"
         );
+        assert!(report.jobs.is_empty());
+        assert_eq!(report.unfinished, ids(&[P]));
 
         let source = FakeSource::new(vec![row(P, "pending"), row(D, "done")], false, Vec::new())
             .without_worker();
@@ -602,6 +385,16 @@ mod tests {
             .unwrap();
         assert_eq!(outcomes(result), [(D.to_string(), JobOutcomeState::Done)]);
         assert!(!source.calls().contains(&Call::WorkerEnabled));
+
+        let source = FakeSource::new(vec![row(P, "pending"), row(D, "done")], false, Vec::new())
+            .without_worker();
+        let result = wait_on(&source, &named(&[P, D]), hidden(), STALL)
+            .await
+            .unwrap();
+        let (report, _) = refusal(&result);
+        assert_eq!(report.jobs.len(), 1);
+        assert_eq!(report.jobs[0].job_id, D);
+        assert_eq!(report.unfinished, ids(&[P]));
     }
 
     #[tokio::test]
@@ -617,6 +410,7 @@ mod tests {
         assert_eq!(render_nothing(OutputMode::Quiet), None);
         let json: Value = serde_json::from_str(&render_nothing(OutputMode::Json).unwrap()).unwrap();
         assert_eq!(json["jobs"], json!([]));
+        assert!(json.get("unfinished").is_none(), "{json}");
         assert!(
             json["totals"]
                 .as_object()
@@ -624,24 +418,6 @@ mod tests {
                 .values()
                 .all(|count| count == 0),
             "{json}"
-        );
-    }
-
-    /// A row that never reached the wait set would surface as a stall
-    /// after `STALL`; the data error names the row and returns at once.
-    #[tokio::test]
-    async fn an_ended_row_without_finished_at_is_a_data_error() {
-        let mut broken = row_with(A, "failed", "book", Some("boom"));
-        broken["finished_at"] = Value::Null;
-        let source = FakeSource::new(vec![broken], false, Vec::new());
-        let err = wait_on(&source, &named(&[A]), hidden(), STALL)
-            .await
-            .unwrap_err();
-        assert!(classify_eyre(&err).is_none(), "{err:?}");
-        let message = err.to_string();
-        assert!(
-            message.contains(A) && message.contains("finished_at"),
-            "{message}"
         );
     }
 
@@ -691,12 +467,12 @@ mod tests {
 
     #[tokio::test]
     async fn the_wait_set_is_fixed_when_the_queue_is_read() {
-        let queued_later = Event {
+        let queued_later = bookrack_control_client::Event {
             channel: "worker.progress".to_string(),
             value: json!({ "job_id": N, "kind": "book", "stage": "processing" }),
             lag: false,
         };
-        let more_pending = Event {
+        let more_pending = bookrack_control_client::Event {
             channel: "queue.tick".to_string(),
             value: json!({ "pending": 2, "running": 0 }),
             lag: false,
@@ -712,43 +488,5 @@ mod tests {
         );
         let result = wait_on(&source, &[], hidden(), STALL).await.unwrap();
         assert_eq!(outcomes(result), [(P.to_string(), JobOutcomeState::Done)]);
-    }
-
-    /// The same literal outcome, once as a listed row and once as the
-    /// `last_finished` of a tick, must read as the same record.
-    #[test]
-    fn an_ended_row_converts_to_the_record_its_finish_event_would_give() {
-        let cases = [
-            ("done", true),
-            ("skipped_duplicate", true),
-            ("needs_ocr", true),
-            ("failed", false),
-            ("cancelled", false),
-        ];
-        for (state, succeeds) in cases {
-            for kind in ["book", "paper"] {
-                let error = (state == "failed").then_some("ingest: boom: no body blocks");
-                let row = row_with(A, state, kind, error);
-                let job: QueueJob = serde_json::from_value(row.clone()).unwrap();
-                let from_row = ended_record(&job, &row).unwrap();
-
-                let pending: HashSet<String> = HashSet::from([A.to_string()]);
-                let from_event =
-                    extract_finished(&finished(A, state, kind, error).value, &pending).unwrap();
-
-                assert_eq!(
-                    serde_json::to_value(&from_row).unwrap(),
-                    serde_json::to_value(&from_event).unwrap(),
-                    "{state} / {kind}"
-                );
-                assert_eq!(from_row.finished_at, FINISHED_AT, "{state} / {kind}");
-                assert_eq!(from_row.kind, kind, "{state} / {kind}");
-                assert_eq!(
-                    JobOutcomeReport::new(vec![from_row], Duration::ZERO).all_succeeded(),
-                    succeeds,
-                    "{state} / {kind}"
-                );
-            }
-        }
     }
 }

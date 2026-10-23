@@ -1,15 +1,19 @@
 //! `bookrack ingest <path>` — submit a file (or a recursive walk's
 //! worth of files) to the daemon's ingest queue, then stay attached
-//! until every enqueued job lands in a terminal state.
+//! until every enqueued job lands in a terminal state. The wait is the
+//! one `queue wait` makes, judged the same way once the ids are known.
 
 use std::path::PathBuf;
 
+use bookrack_cli::daemon_call::DEFAULT_AWAIT_STALL_TIMEOUT;
 use bookrack_cli::render::human::basename_or_dash;
+use bookrack_cli::render::progress::SurfaceKind;
 use bookrack_cli_grammar::IngestArgs;
 use eyre::Result;
 use serde_json::json;
 
 use super::helpers;
+use super::job_wait::{self, Daemon};
 
 pub async fn run(
     args: IngestArgs,
@@ -47,7 +51,14 @@ pub async fn run(
         return Ok(());
     }
 
-    let report = helpers::await_jobs(rx, &job_ids).await?;
+    let end = job_wait::wait_on_ids(
+        &Daemon(&client),
+        rx,
+        &job_ids,
+        SurfaceKind::from_context().build(),
+        DEFAULT_AWAIT_STALL_TIMEOUT,
+    )
+    .await?;
     let label = basename_or_dash(args.path.to_str());
-    helpers::finalize_job_batch(&report, "ingest", "Ingested", label)
+    job_wait::finalize(end, "ingest", "Ingested", label)
 }

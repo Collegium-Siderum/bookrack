@@ -88,11 +88,19 @@ impl JobTotals {
 }
 
 /// Final report for one batch of awaited jobs.
+///
+/// A wait that stops before every job has ended still produces a
+/// report: `jobs` holds the records collected so far and `unfinished`
+/// names the jobs it did not see end, in the order they were selected.
+/// A complete report has an empty `unfinished`, and the field is then
+/// left out of the serialized shape.
 #[derive(Debug, Clone, Serialize)]
 pub struct JobOutcomeReport {
     pub jobs: Vec<JobOutcomeRecord>,
     pub elapsed_secs: f64,
     pub totals: JobTotals,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unfinished: Vec<String>,
 }
 
 impl JobOutcomeReport {
@@ -105,14 +113,26 @@ impl JobOutcomeReport {
             jobs,
             elapsed_secs: elapsed.as_secs_f64(),
             totals,
+            unfinished: Vec::new(),
         }
+    }
+
+    /// The same report, naming the jobs the wait did not see end.
+    pub fn with_unfinished(mut self, ids: Vec<String>) -> Self {
+        self.unfinished = ids;
+        self
+    }
+
+    /// True when the wait saw every job it covered end.
+    pub fn is_complete(&self) -> bool {
+        self.unfinished.is_empty()
     }
 
     /// True when every awaited job reached a terminal success state
     /// (`Done`, `SkippedDuplicate`, or `NeedsOcr`) — i.e. none failed or
-    /// were cancelled.
+    /// were cancelled, and none is still unfinished.
     pub fn all_succeeded(&self) -> bool {
-        self.totals.failed == 0 && self.totals.cancelled == 0
+        self.is_complete() && self.totals.failed == 0 && self.totals.cancelled == 0
     }
 
     /// One-line human summary for a single-job report.
@@ -122,9 +142,20 @@ impl JobOutcomeReport {
     /// single job's state word carries the job's error after a colon
     /// when the outcome recorded one. The report degrades gracefully
     /// when more than one job is present (falls back to the aggregate
-    /// counts).
+    /// counts). An incomplete report counts the ended jobs against the
+    /// whole batch and says how many are still queued.
     pub fn format_one_line(&self, action: &str, label: &str) -> String {
         let elapsed = format_elapsed(self.elapsed_secs);
+        if !self.is_complete() {
+            let total = self.jobs.len() + self.unfinished.len();
+            let mut parts = self.count_parts();
+            parts.push(format!("{} still queued", self.unfinished.len()));
+            return format!(
+                "{action} {done} of {total} {label} in {elapsed} ({summary})",
+                done = self.jobs.len(),
+                summary = parts.join(", "),
+            );
+        }
         match self.jobs.as_slice() {
             // A one-job batch prints no per-job outcome line, so the
             // error travels on the summary itself.
@@ -139,33 +170,37 @@ impl JobOutcomeReport {
                     id = short_id(&only.job_id),
                 )
             }
-            many => {
-                let mut parts = Vec::new();
-                if self.totals.done > 0 {
-                    parts.push(format!("{} done", self.totals.done));
-                }
-                if self.totals.skipped_duplicate > 0 {
-                    parts.push(format!(
-                        "{} already in catalog",
-                        self.totals.skipped_duplicate
-                    ));
-                }
-                if self.totals.needs_ocr > 0 {
-                    parts.push(format!("{} need OCR", self.totals.needs_ocr));
-                }
-                if self.totals.failed > 0 {
-                    parts.push(format!("{} failed", self.totals.failed));
-                }
-                if self.totals.cancelled > 0 {
-                    parts.push(format!("{} cancelled", self.totals.cancelled));
-                }
-                format!(
-                    "{action} {n} {label} in {elapsed} ({summary})",
-                    n = many.len(),
-                    summary = parts.join(", "),
-                )
-            }
+            many => format!(
+                "{action} {n} {label} in {elapsed} ({summary})",
+                n = many.len(),
+                summary = self.count_parts().join(", "),
+            ),
         }
+    }
+
+    /// The non-zero totals as `"<n> <state word>"` fragments, in the
+    /// order the states are listed.
+    fn count_parts(&self) -> Vec<String> {
+        let mut parts = Vec::new();
+        if self.totals.done > 0 {
+            parts.push(format!("{} done", self.totals.done));
+        }
+        if self.totals.skipped_duplicate > 0 {
+            parts.push(format!(
+                "{} already in catalog",
+                self.totals.skipped_duplicate
+            ));
+        }
+        if self.totals.needs_ocr > 0 {
+            parts.push(format!("{} need OCR", self.totals.needs_ocr));
+        }
+        if self.totals.failed > 0 {
+            parts.push(format!("{} failed", self.totals.failed));
+        }
+        if self.totals.cancelled > 0 {
+            parts.push(format!("{} cancelled", self.totals.cancelled));
+        }
+        parts
     }
 }
 
@@ -305,6 +340,49 @@ mod tests {
         assert!(line.contains("500ms"));
         assert!(line.contains("1 done"));
         assert!(line.contains("1 failed"));
+    }
+
+    #[test]
+    fn an_incomplete_report_counts_the_ended_against_the_batch() {
+        let r = JobOutcomeReport::new(
+            vec![
+                rec("a", JobOutcomeState::Done),
+                rec("b", JobOutcomeState::Failed),
+            ],
+            Duration::from_millis(500),
+        )
+        .with_unfinished(vec!["c".into(), "d".into()]);
+        assert!(!r.is_complete());
+        assert_eq!(
+            r.format_one_line("Ingested", "books"),
+            "Ingested 2 of 4 books in 500ms (1 done, 1 failed, 2 still queued)"
+        );
+
+        let r = JobOutcomeReport::new(Vec::new(), Duration::from_millis(500))
+            .with_unfinished(vec!["c".into()]);
+        assert_eq!(
+            r.format_one_line("Ingested", "sample.epub"),
+            "Ingested 0 of 1 sample.epub in 500ms (1 still queued)"
+        );
+    }
+
+    #[test]
+    fn an_incomplete_report_without_failures_has_not_succeeded() {
+        let r = JobOutcomeReport::new(vec![rec("a", JobOutcomeState::Done)], Duration::ZERO)
+            .with_unfinished(vec!["b".into()]);
+        assert!(!r.all_succeeded());
+        assert!(r.clone().with_unfinished(Vec::new()).all_succeeded());
+    }
+
+    #[test]
+    fn unfinished_is_serialized_only_when_present() {
+        let complete = JobOutcomeReport::new(vec![rec("a", JobOutcomeState::Done)], Duration::ZERO);
+        let json = serde_json::to_value(&complete).unwrap();
+        assert!(json.get("unfinished").is_none(), "{json}");
+
+        let partial = complete.with_unfinished(vec!["b".into()]);
+        let json = serde_json::to_value(&partial).unwrap();
+        assert_eq!(json["unfinished"], serde_json::json!(["b"]));
     }
 
     #[test]

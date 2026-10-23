@@ -65,6 +65,7 @@ pub(crate) struct ViewState {
 impl ViewState {
     /// State for a wait on the queue jobs in `job_ids`. A repeated id
     /// counts once.
+    #[cfg(test)]
     pub fn for_jobs(job_ids: &[String]) -> Self {
         Self::for_jobs_after(&[], job_ids)
     }
@@ -273,12 +274,6 @@ pub(crate) struct ProgressView {
 }
 
 impl ProgressView {
-    /// View for a wait on the queue jobs in `job_ids`, drawn on the
-    /// surface the render context selects.
-    pub fn for_jobs(job_ids: &[String]) -> Self {
-        Self::with_surface(ViewState::for_jobs(job_ids), default_surface())
-    }
-
     /// View for a wait on one RPC call to `method`, drawn on the
     /// surface the render context selects.
     pub fn for_call(method: &str) -> Self {
