@@ -248,8 +248,13 @@ async fn wait_reports_ended_and_awaited_jobs_through_the_command_entry() {
     let listing = client_json(&sandbox, &["queue", "list"], 0).await;
     assert_eq!(job(&listing, &ingested_id)["state"], "pending", "{listing}");
 
+    // From here on the queue also holds the submitted job, whose id is a
+    // UUIDv7 with a random tail; a fragment is matched anywhere in an id,
+    // so a seeded row is named by eight characters of its head, which a
+    // random tail does not reproduce.
+
     // One named job that already ended.
-    let (code, stdout, stderr) = client(&sandbox, &["queue", "wait", "--job", "0b"]).await;
+    let (code, stdout, stderr) = client(&sandbox, &["queue", "wait", "--job", "0b000000"]).await;
     assert_eq!(code, Some(0), "{stderr}");
     let first = stdout.lines().next().unwrap_or_default();
     assert!(
@@ -261,7 +266,7 @@ async fn wait_reports_ended_and_awaited_jobs_through_the_command_entry() {
     // Two named jobs that already ended, one of them failed.
     let report = client_json(
         &sandbox,
-        &["queue", "wait", "--job", "0a", "--job", "0b"],
+        &["queue", "wait", "--job", "0a000000", "--job", "0b000000"],
         5,
     )
     .await;
@@ -275,8 +280,11 @@ async fn wait_reports_ended_and_awaited_jobs_through_the_command_entry() {
     assert_eq!(report["totals"]["failed"], 1, "{report}");
     assert_eq!(report["jobs"][0]["error"], FAILURE_TEXT, "{report}");
 
-    let (code, stdout, stderr) =
-        client(&sandbox, &["queue", "wait", "--job", "0a", "--job", "0b"]).await;
+    let (code, stdout, stderr) = client(
+        &sandbox,
+        &["queue", "wait", "--job", "0a000000", "--job", "0b000000"],
+    )
+    .await;
     assert_eq!(code, Some(5), "{stderr}");
     assert!(stdout.starts_with("Completed 2 jobs in "), "{stdout}");
     assert!(stdout.contains("(1 done, 1 failed)"), "{stdout}");
@@ -286,13 +294,13 @@ async fn wait_reports_ended_and_awaited_jobs_through_the_command_entry() {
     );
 
     // A named cancelled job fails the wait.
-    let (code, _, stderr) = client(&sandbox, &["queue", "wait", "--job", "0c"]).await;
+    let (code, _, stderr) = client(&sandbox, &["queue", "wait", "--job", "0c000000"]).await;
     assert_eq!(code, Some(5), "{stderr}");
 
     // The head and the tail of one id name one job.
     let report = client_json(
         &sandbox,
-        &["queue", "wait", "--job", "0a", "--job", "00000001"],
+        &["queue", "wait", "--job", "0a000000", "--job", "00000001"],
         5,
     )
     .await;
@@ -305,6 +313,7 @@ async fn wait_reports_ended_and_awaited_jobs_through_the_command_entry() {
     let (code, _, stderr) = client(&sandbox, &["queue", "wait", "--job", "0"]).await;
     assert_eq!(code, Some(2), "{stderr}");
     assert!(stderr.contains("ambiguous"), "{stderr}");
+    assert!(stderr.contains("queue list --long"), "{stderr}");
 
     // An empty fragment is the parser's refusal, not the daemon's.
     let (code, _, stderr) = client(&sandbox, &["queue", "wait", "--job", ""]).await;
@@ -347,7 +356,7 @@ async fn wait_reports_ended_and_awaited_jobs_through_the_command_entry() {
 
     // A retried job that finished before the wait is reported with the
     // outcome of the run just made, not the seeded one.
-    let (code, _, stderr) = client(&sandbox, &["queue", "retry", "--job", "0a"]).await;
+    let (code, _, stderr) = client(&sandbox, &["queue", "retry", "--job", "0a000000"]).await;
     assert_eq!(code, Some(0), "{stderr}");
     let deadline = Instant::now() + Duration::from_secs(30);
     let rerun_finished_at = loop {
@@ -362,7 +371,7 @@ async fn wait_reports_ended_and_awaited_jobs_through_the_command_entry() {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
-    let report = client_json(&sandbox, &["queue", "wait", "--job", "0a"], 5).await;
+    let report = client_json(&sandbox, &["queue", "wait", "--job", "0a000000"], 5).await;
     assert_eq!(report["jobs"].as_array().map(Vec::len), Some(1), "{report}");
     assert_eq!(report["jobs"][0]["state"], "failed", "{report}");
     assert_eq!(
