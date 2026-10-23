@@ -478,6 +478,14 @@ release workflow extracts the matching section verbatim from this file.
   published for these fixes. `rusqlite` 0.40.1 also escapes the name
   passed to `Savepoint::with_name`, which bookrack does not call. The
   database file format is unchanged and no migration runs.
+- **deps: `ctutils` moves from 0.4.2 to 0.4.5, clearing
+  RUSTSEC-2026-0385.** Its mask generation and its `u128` comparisons
+  could compile to branches on secret values. The crate resolves only
+  through the default features of `zip`, AES encryption and LZMA among
+  them, which the `bookrack-extract` tests take to write EPUB fixtures;
+  the EPUB reader takes `zip` with deflate alone, so `ctutils` never
+  compiles into a binary and this clears a lockfile advisory. The
+  lockfile moves alone.
 
 ## [0.12.0] - 2026-10-17
 
