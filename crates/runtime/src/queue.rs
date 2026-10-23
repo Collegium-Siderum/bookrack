@@ -312,14 +312,15 @@ pub fn crash_recovery_reset(state: &mut QueueState) {
 }
 
 /// Return a terminal row to `Pending` as a fresh submission: the state
-/// flips and the four fields a run writes — `started_at`,
-/// `finished_at`, `error`, `merged_into` — are cleared. The id,
+/// flips and the five fields a run writes — `started_at`,
+/// `finished_at`, `error`, `problem`, `merged_into` — are cleared. The id,
 /// position, `queued_at`, and every submit-time flag stay.
 fn reset_for_retry(job: &mut QueueJob) {
     job.state = JobState::Pending;
     job.started_at = None;
     job.finished_at = None;
     job.error = None;
+    job.problem = None;
     job.merged_into = None;
 }
 
@@ -391,9 +392,32 @@ pub enum JobOutcome {
     /// intake id points at that anchor. A non-failure terminal: no book
     /// content was written, but the job did what it could.
     NeedsOcr { intake_id: i64 },
-    /// The ingest call returned an error; the message is folded into
-    /// `QueueJob::error`.
-    Failed(String),
+    /// The ingest call returned an error; the failure's text is folded
+    /// into `QueueJob::error` and its diagnostic, when it has one, into
+    /// `QueueJob::problem`.
+    Failed(JobFailure),
+}
+
+/// What a failed run records: the flattened text every failure has,
+/// and the classified diagnostic the failures the control plane
+/// recognises also have.
+#[derive(Debug, Clone)]
+pub struct JobFailure {
+    /// The flattened cause chain, framed by the pipeline that ran.
+    pub message: String,
+    /// The diagnostic the control plane's classifier renders for the
+    /// same error, when it knows the error's type.
+    pub problem: Option<Problem>,
+}
+
+impl JobFailure {
+    /// A failure written by hand, with no typed error behind it.
+    pub fn text(message: impl Into<String>) -> Self {
+        JobFailure {
+            message: message.into(),
+            problem: None,
+        }
+    }
 }
 
 /// Error returned by the worker's injected runner, classified by
@@ -402,18 +426,18 @@ pub enum JobOutcome {
 pub enum JobError {
     /// The book itself failed; the worker records the failure and
     /// moves on to the next pending job.
-    Book(String),
+    Book(JobFailure),
     /// The daemon process cannot currently serve any job (e.g. its
     /// file descriptors are exhausted); the worker records the
     /// failure and pauses the queue instead of burning the remaining
     /// pending jobs against a store that fails every open.
-    Process(String),
+    Process(JobFailure),
 }
 
 impl JobError {
-    fn into_message(self) -> String {
+    fn into_failure(self) -> JobFailure {
         match self {
-            JobError::Book(msg) | JobError::Process(msg) => msg,
+            JobError::Book(failure) | JobError::Process(failure) => failure,
         }
     }
 }
@@ -421,12 +445,19 @@ impl JobError {
 /// Classify a failed ingest into a [`JobError`]. File-descriptor
 /// exhaustion anywhere in the chain is process-level: every later job
 /// would fail the same way until the process gets descriptors back.
+/// The failure records the control plane's diagnostic for the error
+/// when the chain carries a type the control plane classifies
+/// ([`crate::control::error_map::job_failure_problem`]); the blast
+/// radius is judged independently of it.
 pub fn classify_ingest_error(err: &eyre::Report) -> JobError {
-    let message = format!("ingest: {err:#}");
+    let failure = JobFailure {
+        message: format!("ingest: {err:#}"),
+        problem: crate::control::error_map::job_failure_problem(err),
+    };
     if is_fd_exhaustion(err) {
-        JobError::Process(message)
+        JobError::Process(failure)
     } else {
-        JobError::Book(message)
+        JobError::Book(failure)
     }
 }
 
@@ -485,21 +516,25 @@ pub fn apply_outcome(state: &mut QueueState, id: &str, outcome: JobOutcome) {
         JobOutcome::Done => {
             job.state = JobState::Done;
             job.error = None;
+            job.problem = None;
             job.merged_into = None;
         }
         JobOutcome::SkippedDuplicate { intake_id } => {
             job.state = JobState::SkippedDuplicate;
             job.error = None;
+            job.problem = None;
             job.merged_into = Some(intake_id);
         }
         JobOutcome::NeedsOcr { intake_id } => {
             job.state = JobState::NeedsOcr;
             job.error = None;
+            job.problem = None;
             job.merged_into = Some(intake_id);
         }
-        JobOutcome::Failed(msg) => {
+        JobOutcome::Failed(failure) => {
             job.state = JobState::Failed;
-            job.error = Some(msg);
+            job.error = Some(failure.message);
+            job.problem = failure.problem;
             job.merged_into = None;
         }
     }
@@ -548,6 +583,7 @@ pub fn enqueue_files(
             started_at: None,
             finished_at: None,
             error: None,
+            problem: None,
             merged_into: None,
         });
         ids.push(id);
@@ -594,6 +630,7 @@ pub fn enqueue_ocr_intake(
         started_at: None,
         finished_at: None,
         error: None,
+        problem: None,
         merged_into: None,
     });
     id
@@ -835,15 +872,15 @@ where
             Ok(JobSuccess { no_op: false, .. }) => (JobOutcome::Done, false),
             Err(err) => {
                 let pause = matches!(err, JobError::Process(_));
-                let message = err.into_message();
+                let failure = err.into_failure();
                 if pause {
                     tracing::error!(
                         job = %job.id,
-                        error = %message,
+                        error = %failure.message,
                         "process-level failure; pausing ingest queue",
                     );
                 }
-                (JobOutcome::Failed(message), pause)
+                (JobOutcome::Failed(failure), pause)
             }
         };
 
@@ -922,6 +959,7 @@ fn summarize_outcome(job: &QueueJob) -> JobOutcomeSummary {
         kind: job.kind,
         state: job.state,
         error: job.error.clone(),
+        problem: job.problem.clone(),
         finished_at: job.finished_at.unwrap_or_else(Utc::now),
     }
 }
@@ -955,7 +993,8 @@ fn announce_outcome(job: &QueueJob, outcome: &JobOutcome) {
                 "queue: {short} {name} needs OCR (anchor intake {intake_id})"
             )
         }
-        JobOutcome::Failed(msg) => {
+        JobOutcome::Failed(failure) => {
+            let msg = &failure.message;
             tracing::info!(job = %job.id, "queue: {short} {name} failed: {msg}")
         }
     }
@@ -985,6 +1024,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             error: None,
+            problem: None,
             merged_into: None,
         }
     }
@@ -1223,6 +1263,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             error: None,
+            problem: None,
             merged_into: None,
         }
     }
@@ -1576,7 +1617,7 @@ mod tests {
         apply_outcome(
             &mut state,
             "first111",
-            JobOutcome::Failed("extract error".into()),
+            JobOutcome::Failed(JobFailure::text("extract error")),
         );
 
         let retried =
@@ -1691,9 +1732,98 @@ mod tests {
             paused: false,
             jobs: vec![job("xx", Priority::Normal, JobState::Running)],
         };
-        apply_outcome(&mut state, "xx", JobOutcome::Failed("boom".to_string()));
+        let problem = Problem::new("cannot boom").hint("Do not boom.");
+        apply_outcome(
+            &mut state,
+            "xx",
+            JobOutcome::Failed(JobFailure {
+                message: "boom".to_string(),
+                problem: Some(problem.clone()),
+            }),
+        );
         assert_eq!(state.jobs[0].state, JobState::Failed);
         assert_eq!(state.jobs[0].error.as_deref(), Some("boom"));
+        assert_eq!(state.jobs[0].problem, Some(problem));
+    }
+
+    /// Every success arm clears the diagnostic a previous run left, as
+    /// it clears `error`; a retried job that then succeeds must not keep
+    /// the failure it recovered from.
+    #[test]
+    fn apply_outcome_success_arms_clear_problem() {
+        for outcome in [
+            JobOutcome::Done,
+            JobOutcome::SkippedDuplicate { intake_id: 1 },
+            JobOutcome::NeedsOcr { intake_id: 1 },
+        ] {
+            let mut state = QueueState {
+                schema_version: QUEUE_SCHEMA_VERSION,
+                paused: false,
+                jobs: vec![job("xx", Priority::Normal, JobState::Running)],
+            };
+            state.jobs[0].problem = Some(Problem::new("stale"));
+            let label = format!("{outcome:?}");
+            apply_outcome(&mut state, "xx", outcome);
+            assert!(state.jobs[0].problem.is_none(), "{label} keeps the problem");
+        }
+    }
+
+    #[test]
+    fn reset_for_retry_clears_problem() {
+        let mut row = job("xx", Priority::Normal, JobState::Failed);
+        row.error = Some("boom".to_string());
+        row.problem = Some(Problem::new("cannot boom"));
+        reset_for_retry(&mut row);
+        assert_eq!(row.state, JobState::Pending);
+        assert!(row.error.is_none());
+        assert!(row.problem.is_none());
+    }
+
+    /// A document an earlier binary wrote, written by this one after a
+    /// failure, is relabelled at this binary's version and keeps the
+    /// diagnostic through a reload.
+    #[test]
+    fn a_v6_document_written_at_v7_keeps_its_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.json");
+        let v6 = r#"{"schema_version": 6, "paused": false, "jobs": [{
+            "id": "0",
+            "library": "default",
+            "path": "/tmp/example.epub",
+            "kind": "book",
+            "priority": "normal",
+            "force": false,
+            "hold_for_metadata": false,
+            "intake_ocr": null,
+            "audit_profile": null,
+            "state": "running",
+            "queued_at": "2026-01-02T03:04:05Z",
+            "started_at": "2026-01-02T03:04:06Z",
+            "finished_at": null,
+            "error": null,
+            "merged_into": null
+        }]}"#;
+        std::fs::write(&path, v6).unwrap();
+        let mut state = load(&path).unwrap();
+        assert!(state.jobs[0].problem.is_none());
+
+        let problem = Problem::new("cannot embed").hint("Pull it first.");
+        apply_outcome(
+            &mut state,
+            "0",
+            JobOutcome::Failed(JobFailure {
+                message: "ingest: boom".to_string(),
+                problem: Some(problem.clone()),
+            }),
+        );
+        save_atomic(&mut state, &path).unwrap();
+
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["schema_version"], serde_json::json!(7));
+        assert!(raw["jobs"][0]["problem"].is_object(), "{raw}");
+        let reloaded = load(&path).unwrap();
+        assert_eq!(reloaded.jobs[0].problem, Some(problem));
     }
 
     #[test]
@@ -2097,9 +2227,9 @@ mod tests {
                 state,
                 rx,
                 |_job| async {
-                    Err(JobError::Process(
-                        "vector store error: Too many open files".to_string(),
-                    ))
+                    Err(JobError::Process(JobFailure::text(
+                        "vector store error: Too many open files",
+                    )))
                 },
                 events,
                 paused,
@@ -2184,9 +2314,9 @@ mod tests {
                 state,
                 rx,
                 |_job| async {
-                    Err(JobError::Process(
-                        "vector store error: Too many open files".to_string(),
-                    ))
+                    Err(JobError::Process(JobFailure::text(
+                        "vector store error: Too many open files",
+                    )))
                 },
                 events,
                 paused,
@@ -2235,10 +2365,109 @@ mod tests {
         let err = eyre::eyre!("source needs OCR and cannot be ingested as text");
         let classified = classify_ingest_error(&err);
         assert!(matches!(classified, JobError::Book(_)));
-        let JobError::Book(message) = classified else {
+        let JobError::Book(failure) = classified else {
             unreachable!()
         };
-        assert!(message.starts_with("ingest: "), "got: {message}");
+        assert!(
+            failure.message.starts_with("ingest: "),
+            "got: {}",
+            failure.message
+        );
+    }
+
+    /// A dependency source location under a build-machine prefix.
+    const LOCATED: &str = "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/train.rs:10:4";
+    /// What [`LOCATED`] reads as once redacted.
+    const KEPT: &str = "dep-1.0.0/src/train.rs:10:4";
+
+    /// The wrapper the ops layer puts around a typed error before the
+    /// worker sees it.
+    fn registry_wrapped(err: impl std::error::Error + Send + Sync + 'static) -> eyre::Report {
+        eyre::Report::new(err).wrap_err("registry-mediated ingest")
+    }
+
+    /// The problem a failure built from `make()` records, checked
+    /// against the envelope the same error takes on a write RPC through
+    /// the production classifier: same summary, same data.
+    fn problem_matching_the_envelope(make: impl Fn() -> eyre::Report) -> Problem {
+        let (JobError::Book(failure) | JobError::Process(failure)) = classify_ingest_error(&make());
+        assert!(
+            failure.message.starts_with("ingest: "),
+            "{}",
+            failure.message
+        );
+        let problem = failure
+            .problem
+            .expect("a failure of a type the control plane knows records its problem");
+        let rpc = crate::control::error_map::handler_err("ingest.submit", make());
+        assert_eq!(problem.summary, rpc.message);
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(rpc.data.expect("the envelope carries data"))
+                .expect("the envelope data is a ProblemData");
+        assert_eq!(problem.data, data);
+        problem
+    }
+
+    #[test]
+    fn classify_ingest_error_records_the_control_planes_problem() {
+        let problem = problem_matching_the_envelope(|| {
+            registry_wrapped(bookrack_ingest::IngestError::Embed(
+                bookrack_embed::EmbedError::ModelNotFound {
+                    model: "m".to_string(),
+                    reason: "model \"m\" not found".to_string(),
+                },
+            ))
+        });
+        assert!(problem.data.hint.is_some(), "{problem:?}");
+        assert!(problem.data.detail.is_some(), "{problem:?}");
+        assert!(!problem.data.retryable);
+    }
+
+    #[test]
+    fn classify_ingest_error_keeps_retryable() {
+        let problem = problem_matching_the_envelope(|| {
+            registry_wrapped(bookrack_ingest::IngestError::Embed(
+                bookrack_embed::EmbedError::Unreachable("connection refused".to_string()),
+            ))
+        });
+        assert!(problem.data.retryable, "{problem:?}");
+    }
+
+    /// A type the classifier knows is recorded even when its wording
+    /// has no hint: the summary is still the typed error's own, free of
+    /// the pipeline framing the flattened text carries.
+    #[test]
+    fn classify_ingest_error_records_a_known_type_without_a_hint() {
+        let problem = problem_matching_the_envelope(|| {
+            registry_wrapped(bookrack_ingest::IngestError::EmptyExtraction)
+        });
+        assert!(problem.data.hint.is_none(), "{problem:?}");
+        assert!(!problem.summary.starts_with("ingest: "), "{problem:?}");
+    }
+
+    #[test]
+    fn classify_ingest_error_records_nothing_for_an_unknown_type() {
+        let (JobError::Book(failure) | JobError::Process(failure)) =
+            classify_ingest_error(&eyre::eyre!("boom"));
+        assert_eq!(failure.message, "ingest: boom");
+        assert!(failure.problem.is_none());
+    }
+
+    /// The recorded problem is redacted where it is recorded, so a
+    /// location a typed error's own wording carries never reaches the
+    /// row — whatever the entry layers did or did not catch.
+    #[test]
+    fn classify_ingest_error_redacts_what_it_records() {
+        let (JobError::Book(failure) | JobError::Process(failure)) =
+            classify_ingest_error(&registry_wrapped(bookrack_ingest::IngestError::Io(
+                std::io::Error::other(format!("train failed at {LOCATED}")),
+            )));
+        let problem = failure.problem.expect("IngestError is a known type");
+        assert!(problem.summary.contains(KEPT), "{problem:?}");
+        assert!(
+            !problem.summary.contains("/disk/cache/cargo/"),
+            "{problem:?}"
+        );
     }
 
     #[test]

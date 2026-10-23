@@ -847,6 +847,7 @@ fn queue_document_with_one_job(data_dir: &Path) -> String {
             started_at: None,
             finished_at: None,
             error: None,
+            problem: None,
             merged_into: None,
         }],
         ..QueueState::default()

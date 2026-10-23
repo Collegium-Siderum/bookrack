@@ -10,6 +10,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **A failed queue job records why, in parts.** The queue worker runs
+  the failure through the classifier the control plane uses for a write
+  RPC, and keeps the result on the row as `problem`: summary, detail,
+  hint, and `retryable`, the same four parts the error envelope carries.
+  `queue.list`, the `last_finished` of `queue.tick`, and the `recent`
+  rows of MCP `session.queue_status` carry it; `error` stays as it was.
+  The queue document moves to schema 7; a document from an earlier build
+  loads unchanged, and an earlier build refuses one this build has
+  written, naming both versions.
 - **MCP `session.queue_status` says why a job failed, and can list one
   state.** A `recent` row carries `finished_at` once the job has ended
   and `error` when it failed, with a dependency source location

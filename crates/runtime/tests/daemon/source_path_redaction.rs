@@ -145,6 +145,12 @@ fn seeded_queue() -> Value {
             "started_at": "2026-01-02T03:04:06Z",
             "finished_at": "2026-01-02T03:04:07Z",
             "error": format!("ingest: train failed, {LOCATED}: train failed"),
+            "problem": {
+                "summary": "cannot build the vector index",
+                "detail": format!("Training failed at {LOCATED}."),
+                "hint": "Run `bookrack vectors rebuild` once more rows are in.",
+                "retryable": false,
+            },
         }],
     })
 }
@@ -163,24 +169,55 @@ async fn a_failure_recorded_before_redaction_reads_back_redacted_after_a_restart
             .as_str()
             .with_context(|| format!("the seeded failure is listed: {listed}"))?;
         assert_eq!(error, format!("ingest: train failed, {KEPT}: train failed"));
+        let problem = &listed["result"]["jobs"][0]["problem"];
+        assert!(
+            problem.is_object(),
+            "the seeded diagnostic is listed with the row: {listed}"
+        );
+        let detail = problem["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains(KEPT) && !detail.contains(PREFIX),
+            "the diagnostic's detail is redacted as it loads: {problem}"
+        );
 
         let (mut sub_r, mut sub_w) = connect(&sock).await?;
         let resp = call(&mut sub_r, &mut sub_w, 2, "events.subscribe", Value::Null).await?;
         assert_eq!(resp["result"]["subscribed"], Value::Bool(true), "{resp}");
-        let mut snapshot = String::new();
+        let mut frames = Vec::new();
         for _ in 0..7 {
-            snapshot.push_str(&recv(&mut sub_r).await?.to_string());
+            frames.push(recv(&mut sub_r).await?);
         }
+        let snapshot = frames
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
             snapshot.contains(KEPT),
             "the snapshot lists the failure: {snapshot}"
         );
         assert!(!snapshot.contains(PREFIX), "{snapshot}");
+        let tick = frames
+            .iter()
+            .find(|frame| frame["params"]["channel"] == "queue.tick")
+            .with_context(|| format!("the snapshot carries a queue.tick: {snapshot}"))?;
+        assert_eq!(
+            tick["params"]["value"]["last_finished"]["problem"], *problem,
+            "the snapshot tick carries the same diagnostic as the listed row: {tick}"
+        );
 
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             let on_disk = std::fs::read_to_string(&queue_path)?;
             if !on_disk.contains(PREFIX) && on_disk.contains(KEPT) {
+                let saved: Value = serde_json::from_str(&on_disk)?;
+                let saved_detail = saved["jobs"][0]["problem"]["detail"]
+                    .as_str()
+                    .with_context(|| format!("the saved row keeps its diagnostic: {on_disk}"))?;
+                assert!(
+                    saved_detail.contains(KEPT) && !saved_detail.contains(PREFIX),
+                    "the saved diagnostic is the redacted one: {on_disk}"
+                );
                 break;
             }
             if std::time::Instant::now() > deadline {

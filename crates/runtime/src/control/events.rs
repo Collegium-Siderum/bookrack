@@ -21,8 +21,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use bookrack_core::ItemKind;
 use bookrack_core::queue::JobState;
+use bookrack_core::{ItemKind, Problem};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -125,6 +125,10 @@ pub struct JobOutcomeSummary {
     pub state: JobState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The classified diagnostic the row records, when it records one
+    /// (`QueueJob::problem`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<Problem>,
     pub finished_at: DateTime<Utc>,
 }
 

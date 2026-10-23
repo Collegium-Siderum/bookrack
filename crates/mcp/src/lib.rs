@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use axum::response::sse::{Event, KeepAlive, Sse};
 use bookrack_core::queue::{JobState, QueueState};
-use bookrack_core::{ItemKind, KindedNodeId, NodeId};
+use bookrack_core::{ItemKind, KindedNodeId, NodeId, Problem};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::{LogEvent, LogStreamHandle};
 use bookrack_ops::dto::{
@@ -592,6 +592,11 @@ pub struct QueueJobSummary {
     /// ([`bookrack_core::redact_source_paths`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The failure as the daemon classified it — summary, detail, hint,
+    /// `retryable` — when it did; absent otherwise. Its strings are
+    /// redacted as `error` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<Problem>,
 }
 
 /// Response shape returned by `session.queue_status`: counts by state
@@ -1716,8 +1721,10 @@ impl BookrackServer {
                        whole queue, plus the most recently enqueued jobs (newest first, \
                        capped at 10). `state` lists only jobs in that state, so \
                        `{\"state\": \"failed\"}` finds failures however early they were \
-                       enqueued; a failed job carries its `error`. Returns an empty \
-                       snapshot when run against a daemon that does not host a queue worker."
+                       enqueued; a failed job carries its `error` and, when the daemon \
+                       classified the failure, a `problem` with summary, detail, hint and \
+                       retryable. Returns an empty snapshot when run against a daemon that \
+                       does not host a queue worker."
     )]
     async fn session_queue_status(
         &self,
@@ -1765,6 +1772,7 @@ impl BookrackServer {
                     .error
                     .as_deref()
                     .map(|text| bookrack_core::redact_source_paths(text).into_owned()),
+                problem: j.problem.clone().map(Problem::redacted),
             })
             .collect();
         let result = SessionQueueStatusResult {

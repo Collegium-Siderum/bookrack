@@ -614,9 +614,11 @@ impl DaemonRuntime {
                             let intake_ocr = job.intake_ocr.clone();
                             let audit_profile = job.audit_profile.clone();
                             runtime.block_on(async move {
-                                let handle = registry
-                                    .get(library)
-                                    .map_err(|e| queue::JobError::Book(format!("registry: {e}")))?;
+                                let handle = registry.get(library).map_err(|e| {
+                                    queue::JobError::Book(queue::JobFailure::text(format!(
+                                        "registry: {e}"
+                                    )))
+                                })?;
                                 // Both book-pipeline legs below report
                                 // their embedding pass through one
                                 // throttled reporter on the job's sink.
@@ -725,18 +727,24 @@ impl DaemonRuntime {
                                         // pulling subsequent jobs instead of
                                         // panicking and surfacing the failure
                                         // as a book-side backtrace.
-                                        Err(queue::JobError::Book(format!(
-                                            "reference job {} cannot be processed: \
+                                        Err(queue::JobError::Book(queue::JobFailure::text(
+                                            format!(
+                                                "reference job {} cannot be processed: \
                                              the distill pipeline is not yet wired \
                                              through the queue worker",
-                                            path.display()
+                                                path.display()
+                                            ),
                                         )))
                                     }
                                 }
                             })
                         })
                         .await
-                        .map_err(|e| queue::JobError::Book(format!("queue worker join: {e}")))?
+                        .map_err(|e| {
+                            queue::JobError::Book(queue::JobFailure::text(format!(
+                                "queue worker join: {e}"
+                            )))
+                        })?
                     }
                 },
                 events_for_loop,

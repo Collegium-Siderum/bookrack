@@ -406,6 +406,7 @@ fn derive_tick_snapshot(state: &bookrack_core::queue::QueueState) -> QueueTick {
                         kind: job.kind,
                         state: job.state,
                         error: job.error.clone(),
+                        problem: job.problem.clone(),
                         finished_at,
                     };
                     last_finished = Some(match last_finished {

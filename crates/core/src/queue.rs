@@ -15,12 +15,12 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::ItemKind;
+use crate::{ItemKind, Problem};
 
 /// Schema version embedded in the persisted document. Bumped whenever
 /// any field shape, enum variant, or invariant changes.
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
-pub const QUEUE_SCHEMA_VERSION: u32 = 6;
+pub const QUEUE_SCHEMA_VERSION: u32 = 7;
 
 /// What a reader does with a persisted document, given the
 /// `schema_version` it carries.
@@ -199,6 +199,15 @@ pub struct QueueJob {
     /// as clean as a new one.
     #[serde(default, deserialize_with = "deserialize_redacted")]
     pub error: Option<String>,
+    /// The failure as the control plane classifies it: the same
+    /// summary / detail / hint / retryable the error envelope carries
+    /// when the same error fails a write RPC. Recorded beside `error`
+    /// when `state == Failed` and the daemon recognised the error's
+    /// type; `None` for a failure it did not, for every non-failure
+    /// state, and for a row a v6 document wrote. Redacted as it loads,
+    /// string by string, as `error` is.
+    #[serde(default, deserialize_with = "deserialize_redacted_problem")]
+    pub problem: Option<Problem>,
     /// Intake id this job resolved to: the existing catalog row when the
     /// worker skipped the source as a duplicate (`SkippedDuplicate`), or
     /// the `needs_ocr` anchor the worker registered for a scan source
@@ -220,6 +229,15 @@ where
         std::borrow::Cow::Borrowed(_) => t,
         std::borrow::Cow::Owned(redacted) => redacted,
     }))
+}
+
+/// An optional problem, each of its strings redacted of build-machine
+/// source prefixes ([`Problem::redacted`]).
+fn deserialize_redacted_problem<'de, D>(deserializer: D) -> Result<Option<Problem>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Problem>::deserialize(deserializer)?.map(Problem::redacted))
 }
 
 /// The full document persisted to disk.
@@ -451,6 +469,74 @@ mod tests {
     }
 
     #[test]
+    fn queue_job_without_problem_loads_as_none() {
+        // A v6-shaped row persisted before the classified diagnostic was
+        // recorded must still deserialize cleanly, with the diagnostic
+        // absent so the row renders from its flattened text alone.
+        let v6 = r#"{
+            "id": "0",
+            "library": "default",
+            "path": "/tmp/example.epub",
+            "kind": "book",
+            "priority": "normal",
+            "force": false,
+            "hold_for_metadata": false,
+            "intake_ocr": null,
+            "audit_profile": null,
+            "state": "failed",
+            "queued_at": "2026-01-02T03:04:05Z",
+            "started_at": null,
+            "finished_at": "2026-01-02T03:04:07Z",
+            "error": "ingest: boom",
+            "merged_into": null
+        }"#;
+        let job: QueueJob = serde_json::from_str(v6).expect("deserialize v6");
+        assert!(job.problem.is_none());
+        assert_eq!(job.error.as_deref(), Some("ingest: boom"));
+    }
+
+    /// A recorded diagnostic is redacted as it loads, every string of
+    /// it, so a row written before errors were redacted at their source
+    /// leaves the process as clean as a new one.
+    #[test]
+    fn a_recorded_problem_loads_redacted() {
+        const LOCATED: &str = "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/train.rs:10:4";
+        const KEPT: &str = "dep-1.0.0/src/train.rs:10:4";
+        let row = serde_json::json!({
+            "id": "0",
+            "library": "default",
+            "path": "/tmp/example.epub",
+            "kind": "book",
+            "priority": "normal",
+            "force": false,
+            "state": "failed",
+            "queued_at": "2026-01-02T03:04:05Z",
+            "started_at": null,
+            "finished_at": "2026-01-02T03:04:07Z",
+            "error": "ingest: boom",
+            "problem": {
+                "summary": format!("failed at {LOCATED}"),
+                "detail": format!("Detail at {LOCATED}."),
+                "hint": format!("Hint at {LOCATED}."),
+                "retryable": true
+            },
+            "merged_into": null
+        });
+        let job: QueueJob = serde_json::from_value(row).expect("deserialize");
+        let problem = job.problem.expect("the diagnostic loads");
+        assert_eq!(problem.summary, format!("failed at {KEPT}"));
+        assert_eq!(
+            problem.data.detail.as_deref(),
+            Some(format!("Detail at {KEPT}.").as_str())
+        );
+        assert_eq!(
+            problem.data.hint.as_deref(),
+            Some(format!("Hint at {KEPT}.").as_str())
+        );
+        assert!(problem.data.retryable);
+    }
+
+    #[test]
     fn job_state_skipped_duplicate_serializes_as_snake_case() {
         // The wire token is what CLI parsers and the MCP session tool
         // key off; keep it stable under `snake_case` so future readers
@@ -488,6 +574,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             error: None,
+            problem: None,
             merged_into: Some(42),
         };
         let json = serde_json::to_value(&job).expect("serialize");
@@ -520,6 +607,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             error: None,
+            problem: None,
             merged_into: None,
         };
         let json = serde_json::to_value(&job).expect("serialize");
@@ -549,6 +637,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             error: None,
+            problem: None,
             merged_into: None,
         };
         let json = serde_json::to_value(&job).expect("serialize");
@@ -596,8 +685,8 @@ mod tests {
         }
 
         assert_eq!(
-            QUEUE_SCHEMA_VERSION, 6,
-            "the key sets below describe version 6 of the document"
+            QUEUE_SCHEMA_VERSION, 7,
+            "the key sets below describe version 7 of the document"
         );
 
         let job = QueueJob {
@@ -621,6 +710,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             error: None,
+            problem: None,
             merged_into: None,
         };
         let state = serde_json::to_value(QueueState {
@@ -646,6 +736,7 @@ mod tests {
                 "merged_into",
                 "path",
                 "priority",
+                "problem",
                 "queued_at",
                 "started_at",
                 "state",
@@ -676,6 +767,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             error: None,
+            problem: None,
             merged_into: None,
         };
         let json = serde_json::to_value(&job).expect("serialize");
@@ -703,6 +795,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             error: None,
+            problem: None,
             merged_into: None,
         }
     }

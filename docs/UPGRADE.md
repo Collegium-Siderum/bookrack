@@ -99,10 +99,13 @@ it.
 Some version dimensions move without invalidating anything on disk, so
 they carry no runbook step:
 
-- **Queue document schema** (`QUEUE_SCHEMA_VERSION`, now `6`) — the
+- **Queue document schema** (`QUEUE_SCHEMA_VERSION`, now `7`) — the
   persistent ingest queue is versioned on its own track. An older
   document loads in a newer binary, and the first write (with a queue
   worker, the worker's start-up save) rewrites it at the newer version.
+  Version 7 adds `problem` to every job row, the classified diagnostic
+  of a failed job; a version 6 document loads with the field absent and
+  nothing else changes.
   The bump is one-way: a binary reading a document above its own
   version refuses it and starts nothing, naming both versions. A refused
   document is left exactly as it was found, so the version that wrote

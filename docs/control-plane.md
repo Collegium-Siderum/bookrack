@@ -196,9 +196,9 @@ ignores it sees exactly what it saw before the slot was filled.
 A source location inside a dependency appears crate-relative
 (`lance-index-7.0.0/src/vector/kmeans.rs:1365:20`), never with the
 absolute path of the machine that built the binary. That holds for the
-error envelope, for the failure text `queue.list` and `queue.tick`
-carry — including failures recorded by an older build — and for
-`logs.tail` and the `log` event. A book's text, and so a search hit,
+error envelope, for the failure text and the `problem` `queue.list` and
+`queue.tick` carry — including failures recorded by an older build —
+and for `logs.tail` and the `log` event. A book's text, and so a search hit,
 is returned as stored.
 
 #### Error mapping
@@ -455,8 +455,15 @@ the exit-code bucket does not distinguish the two.
 
   `library_key` is present exactly when the selection is `routed`.
 - `daemon.mcp_tools` — the MCP tool names the daemon's listener exposes.
-- `queue.list` — `{ schema_version, binary_schema_version, paused, jobs }`.
-  `params.limit` optionally caps the jobs slice. `schema_version` is what
+- `queue.list` — `{ schema_version, binary_schema_version, paused,
+  summary, jobs }`. `summary` counts the whole queue by state.
+  `params.limit` optionally caps the jobs slice. Each `jobs` entry is
+  the persisted row. A `failed` row carries `error`, the flattened cause
+  chain, and `problem` — `{ summary, detail?, hint?, retryable }`, the
+  diagnostic the error envelope's `message` and `data` make for the same
+  error on a write RPC — when the daemon recognised the failure's type;
+  `problem` is `null` otherwise, and on every row a document before
+  schema 7 wrote. `schema_version` is what
   the document on disk records; `binary_schema_version` is what the
   serving daemon reads. The first is at or below the second — a document
   above it is refused at start-up, so a daemon serving this call never
@@ -477,8 +484,8 @@ the exit-code bucket does not distinguish the two.
   id as `ingest.cancel` matches it, that must resolve to one row, which
   must be in one of those three states. Each selected row is flipped back
   to `pending` in place — same id, same position, same submit-time
-  flags — with `started_at`, `finished_at`, `error`, and `merged_into`
-  cleared, so the worker's next tick picks it up as a fresh
+  flags — with `started_at`, `finished_at`, `error`, `problem`, and
+  `merged_into` cleared, so the worker's next tick picks it up as a fresh
   submission. `retried` lists the full ids flipped, in queue order; a
   `state` that matches no row returns an empty list. `paused` mirrors
   the queue flag: a paused queue holds the rows until `queue.resume`.
@@ -657,7 +664,7 @@ the exit-code bucket does not distinguish the two.
   the worker's book-side audit profile for this job, with the same
   three-way resolution as `ingest.submit` — including the `-32602` on
   a name outside the built-in set. The persistent queue schema is
-  `v6`.
+  `v7`.
 - `glean.submit` — `{ paths, library?, priority?, force? }` →
   `{ job_ids: [<uuid v7>] }`. The paper-pipeline peer of
   `ingest.submit`: appends one glean job per path to the same
@@ -1127,7 +1134,10 @@ the tool description says which one it ran.
   published immediately after every persisted change to the queue
   snapshot (`queue.json` in the daemon state directory), so a
   subscriber's view always coincides with what a crash recovery
-  would replay.
+  would replay. `last_finished` is
+  `{ job_id, kind, state, error?, problem?, finished_at }` for the job
+  the tick closed out, `error` and `problem` as on the row `queue.list`
+  returns.
 - `worker.progress` — `{ job_id, kind, stage, stage_progress?, message? }`
   where `kind` is the job's pipeline (`book` / `paper` / `reference`,
   as on `queue.list`). `stage` names only a position the worker can

@@ -58,7 +58,7 @@
 
 use bookrack_catalog::CatalogError;
 use bookrack_config::ConfigError;
-use bookrack_core::{Explain, Problem};
+use bookrack_core::{Explain, Problem, ProblemData};
 use bookrack_corpus::CorpusError;
 use bookrack_embed::EmbedError;
 use bookrack_glean::GleanError;
@@ -93,41 +93,87 @@ use crate::mount::MountRefusal;
 /// `retryable` alone, since such an error has neither evidence nor a
 /// next step to name.
 pub fn handler_err(method: &str, err: Report) -> RpcError {
+    classify(&err).unwrap_or_else(|| {
+        rpc_from_problem(
+            INTERNAL_ERROR,
+            Problem::new(format!("{method} failed: {err:#}")),
+        )
+    })
+}
+
+/// The envelope `err` takes when its chain carries a type this map
+/// knows, or `None` when it does not and the caller falls back to the
+/// residual `INTERNAL_ERROR`.
+fn classify(err: &Report) -> Option<RpcError> {
     for cause in err.chain() {
         if let Some(e) = cause.downcast_ref::<OpsError>() {
-            return from_ops(e);
+            return Some(from_ops(e));
         }
         if let Some(e) = cause.downcast_ref::<IngestError>() {
-            return from_ingest(e);
+            return Some(from_ingest(e));
         }
         if let Some(e) = cause.downcast_ref::<GleanError>() {
-            return from_glean(e);
+            return Some(from_glean(e));
         }
         if let Some(e) = cause.downcast_ref::<RegistryError>() {
-            return from_registry(e);
+            return Some(from_registry(e));
         }
         if let Some(e) = cause.downcast_ref::<CmdInputError>() {
-            return from_cmd_input(e);
+            return Some(from_cmd_input(e));
         }
         if let Some(e) = cause.downcast_ref::<EmbedError>() {
-            return from_embed(e);
+            return Some(from_embed(e));
         }
         if let Some(e) = cause.downcast_ref::<QueryError>() {
-            return from_query(e);
+            return Some(from_query(e));
         }
         if let Some(e) = cause.downcast_ref::<VectorsError>() {
-            return from_vectors(e);
+            return Some(from_vectors(e));
         }
         if let Some(e) = cause.downcast_ref::<CatalogError>() {
-            return from_catalog(e);
+            return Some(from_catalog(e));
         }
         if let Some(e) = cause.downcast_ref::<CorpusError>() {
-            return from_corpus(e);
+            return Some(from_corpus(e));
         }
     }
-    rpc_from_problem(
-        INTERNAL_ERROR,
-        Problem::new(format!("{method} failed: {err:#}")),
+    None
+}
+
+/// The diagnostic a failed queue job records: the summary and data of
+/// the envelope [`handler_err`] would build for the same error, read
+/// back as one [`Problem`] and redacted as an envelope is on its way
+/// out. `None` when no type on the chain is known; the job then keeps
+/// only its flattened text.
+pub fn job_failure_problem(err: &Report) -> Option<Problem> {
+    let rpc = classify(err)?;
+    let data = match rpc.data {
+        Some(data) => match serde_json::from_value::<ProblemData>(data) {
+            Ok(data) => data,
+            Err(e) => {
+                // `rpc_from_problem` wrote this value from a `ProblemData`;
+                // failing to read it back is a contract break worth a
+                // line in the log, not a reason to drop the summary.
+                tracing::warn!(error = %e, "queue: envelope data is not a ProblemData");
+                ProblemData {
+                    detail: None,
+                    hint: None,
+                    retryable: false,
+                }
+            }
+        },
+        None => ProblemData {
+            detail: None,
+            hint: None,
+            retryable: false,
+        },
+    };
+    Some(
+        Problem {
+            summary: rpc.message,
+            data,
+        }
+        .redacted(),
     )
 }
 

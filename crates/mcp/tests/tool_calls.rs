@@ -252,6 +252,17 @@ fn handle(name: &str, cfg: Arc<Config>) -> Arc<LibraryHandle<OllamaEmbedClient>>
 /// A finished book job `job-<n>` in `state`, enqueued `n` seconds after
 /// a fixed origin so that seeding jobs in order of `n` is enqueue order.
 fn finished_job(n: u32, state: JobState, error: Option<&str>) -> QueueJob {
+    finished_job_with(n, state, error, None)
+}
+
+/// [`finished_job`] with the classified diagnostic the daemon records
+/// beside a failure it recognised.
+fn finished_job_with(
+    n: u32,
+    state: JobState,
+    error: Option<&str>,
+    problem: Option<bookrack_core::Problem>,
+) -> QueueJob {
     let at = chrono::DateTime::from_timestamp(1_700_000_000 + i64::from(n), 0).expect("timestamp");
     QueueJob {
         id: format!("job-{n:02}"),
@@ -268,6 +279,7 @@ fn finished_job(n: u32, state: JobState, error: Option<&str>) -> QueueJob {
         started_at: Some(at),
         finished_at: Some(at),
         error: error.map(str::to_string),
+        problem,
         merged_into: None,
     }
 }
@@ -830,10 +842,14 @@ async fn list_metadata_refuses_a_confidence_grade_no_audit_writes() {
 async fn queue_status_filters_on_state_before_capping_recent() {
     let fx = Fixture::start().await;
     fx.seed_queue(
-        std::iter::once(finished_job(
+        std::iter::once(finished_job_with(
             0,
             JobState::Failed,
             Some("ingest: extract error: no body blocks"),
+            Some(
+                bookrack_core::Problem::new("cannot ingest: the extraction produced no body")
+                    .hint("Check that the source is not image-only."),
+            ),
         ))
         .chain((1..=11).map(|n| finished_job(n, JobState::Done, None))),
     );
@@ -864,6 +880,11 @@ async fn queue_status_filters_on_state_before_capping_recent() {
         "a finished row must say when it finished: {body}"
     );
     assert_eq!(
+        row["problem"]["hint"], "Check that the source is not image-only.",
+        "a classified failure carries its diagnostic: {body}"
+    );
+    assert_eq!(row["problem"]["retryable"], false, "{body}");
+    assert_eq!(
         (body["failed"].as_u64(), body["done"].as_u64()),
         (Some(1), Some(11)),
         "the counts cover the whole queue, not the filtered rows: {body}"
@@ -883,6 +904,50 @@ async fn queue_status_filters_on_state_before_capping_recent() {
         body["recent"][0].get("error").is_none(),
         "a done row carries no error field: {body}"
     );
+    assert!(
+        body["recent"][0].get("problem").is_none(),
+        "a done row carries no problem field: {body}"
+    );
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+/// A dependency source location under a build-machine prefix, as a
+/// recorded diagnostic may carry it.
+const LOCATED: &str =
+    "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/train.rs:10:4";
+/// What [`LOCATED`] reads as once redacted.
+const KEPT: &str = "dep-1.0.0/src/train.rs:10:4";
+
+/// The tool reads the queue state in memory, past the redaction a load
+/// applies, so each string of a recorded diagnostic is redacted as the
+/// row is projected.
+#[tokio::test]
+async fn queue_status_redacts_every_string_of_a_problem() {
+    let fx = Fixture::start().await;
+    fx.seed_queue(std::iter::once(finished_job_with(
+        0,
+        JobState::Failed,
+        Some("ingest: train failed"),
+        Some(
+            bookrack_core::Problem::new(format!("failed at {LOCATED}"))
+                .detail(format!("Detail at {LOCATED}."))
+                .hint(format!("Hint at {LOCATED}.")),
+        ),
+    )));
+    let client = fx.connect().await;
+
+    let body = body_json(
+        &client
+            .call_tool(call("session.queue_status", serde_json::json!({})))
+            .await
+            .expect("session.queue_status"),
+    );
+    let problem = &body["recent"][0]["problem"];
+    assert_eq!(problem["summary"], format!("failed at {KEPT}"), "{body}");
+    assert_eq!(problem["detail"], format!("Detail at {KEPT}."), "{body}");
+    assert_eq!(problem["hint"], format!("Hint at {KEPT}."), "{body}");
 
     let _ = client.cancel().await;
     fx.stop().await;

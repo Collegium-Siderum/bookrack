@@ -57,6 +57,11 @@ fn row(id: &str, state: &str, error: Option<&str>, merged_into: Option<i64>) -> 
         "started_at": if terminal { Value::String(QUEUED_AT.into()) } else { Value::Null },
         "finished_at": if terminal { Value::String(FINISHED_AT.into()) } else { Value::Null },
         "error": error,
+        "problem": error.map(|_| json!({
+            "summary": "cannot read the source file",
+            "hint": "Check that the path still exists.",
+            "retryable": false,
+        })),
         "merged_into": merged_into,
     })
 }
@@ -188,7 +193,13 @@ async fn retry_flips_terminal_rows_in_place_and_the_worker_reruns_them() -> Resu
         for id in [ID_FAILED_A, ID_FAILED_B] {
             let j = job(&list, id);
             assert_eq!(j["state"], "pending", "{j}");
-            for key in ["error", "finished_at", "started_at", "merged_into"] {
+            for key in [
+                "error",
+                "problem",
+                "finished_at",
+                "started_at",
+                "merged_into",
+            ] {
                 assert_eq!(j[key], Value::Null, "{key} must be cleared: {j}");
             }
             assert_eq!(j["queued_at"], QUEUED_AT, "{j}");

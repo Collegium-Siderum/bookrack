@@ -239,6 +239,7 @@ async fn crash_recovery_resets_a_running_job_to_pending_on_restart() -> Result<(
             started_at: Some(queued_at),
             finished_at: None,
             error: None,
+            problem: None,
             merged_into: None,
         }],
     };

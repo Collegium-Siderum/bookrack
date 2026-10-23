@@ -127,6 +127,27 @@ impl Problem {
     pub fn from_error_chain(err: &(dyn Error + 'static)) -> Self {
         Self::new(error_chain(err))
     }
+
+    /// This problem with the build-machine prefix removed from every
+    /// dependency source location in its three strings
+    /// ([`crate::redact_source_paths`]). `retryable` is untouched.
+    /// Idempotent, so a boundary that redacts again changes nothing.
+    #[must_use]
+    pub fn redacted(mut self) -> Self {
+        fn redact(text: &mut String) {
+            if let std::borrow::Cow::Owned(redacted) = crate::redact_source_paths(text) {
+                *text = redacted;
+            }
+        }
+        redact(&mut self.summary);
+        if let Some(detail) = self.data.detail.as_mut() {
+            redact(detail);
+        }
+        if let Some(hint) = self.data.hint.as_mut() {
+            redact(hint);
+        }
+        self
+    }
 }
 
 /// An error type that knows how to present itself to an operator.
@@ -215,6 +236,30 @@ mod tests {
             v,
             serde_json::json!({ "summary": "could not reach Ollama", "retryable": true })
         );
+    }
+
+    /// `redacted` touches each of the three strings and nothing else.
+    #[test]
+    fn redacted_touches_the_three_strings_and_nothing_else() {
+        const LOCATED: &str = "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/train.rs:10:4";
+        const KEPT: &str = "dep-1.0.0/src/train.rs:10:4";
+        let p = Problem::new(format!("failed at {LOCATED}"))
+            .detail(format!("Detail at {LOCATED}."))
+            .hint(format!("Hint at {LOCATED}."))
+            .retryable(true)
+            .redacted();
+        assert_eq!(p.summary, format!("failed at {KEPT}"));
+        assert_eq!(
+            p.data.detail.as_deref(),
+            Some(format!("Detail at {KEPT}.").as_str())
+        );
+        assert_eq!(
+            p.data.hint.as_deref(),
+            Some(format!("Hint at {KEPT}.").as_str())
+        );
+        assert!(p.data.retryable);
+        let clean = Problem::new("cannot embed").detail("HTTP 404.");
+        assert_eq!(clean.clone().redacted(), clean);
     }
 
     /// The wire `data` object is a serialized [`ProblemData`], so a
