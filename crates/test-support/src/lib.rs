@@ -24,6 +24,9 @@
 //! - `scripts/leak-check.sh` refuses a test file that names
 //!   `CARGO_BIN_EXE_bookrack`, mutates the process environment by hand,
 //!   or sets a `BOOKRACK_*` variable on a child.
+//! - [`test_group!`] guards a grouped integration test binary: every
+//!   sibling file is declared in its `main.rs`, and every file installs
+//!   the one spec the group is built around.
 //!
 //! Both halves share one [`Sandbox`], so a test that runs a daemon in
 //! process and a client as a child points them at the same tree by
@@ -38,6 +41,7 @@ mod embed_stub;
 mod process;
 mod sandbox;
 mod spawn;
+pub mod test_group;
 
 pub use embed_stub::{EmbedFailure, EmbedStub};
 pub use process::{ProcessEnv, process_env};
