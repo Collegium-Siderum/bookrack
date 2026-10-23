@@ -144,6 +144,27 @@ if git grep -nE '/(Volumes|mnt|media)/[A-Za-z0-9._-]' -- \
   fail=1
 fi
 
+# 11. Integration test layout. In the crates named here, a file at
+#     `tests/<name>.rs` is its own binary, and every binary relinks the
+#     whole dependency tree, so the suites are grouped one binary per
+#     process-environment spec under `tests/<group>/main.rs`, each
+#     guarded by `bookrack_test_support::test_group!`. A flat file is
+#     allowed only as the sole file of its spec, and those are listed
+#     below, so a new one is a review rather than a habit.
+grouped_crates='runtime'
+flat_ok='crates/runtime/tests/wizard_registry_env.rs'
+for crate in $grouped_crates; do
+  for file in $(git ls-files "crates/$crate/tests/*.rs" | grep -vE "^crates/$crate/tests/[^/]+/"); do
+    case " $flat_ok " in
+      *" $file "*) ;;
+      *)
+        echo "$file: a flat test file in a grouped crate; move it under tests/<group>/ or list it in leak-check.sh"
+        fail=1
+        ;;
+    esac
+  done
+done
+
 # 10. The escape hatch, closed. Rules 2 and 8 let a source file carry a
 #     CJK character or a section mark as `\u{...}` / `\uXXXX`, which is
 #     also the one place a private literal sits in plain sight: the bytes
