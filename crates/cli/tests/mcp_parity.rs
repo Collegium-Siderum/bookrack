@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Phase 5 control-plane parity: `bookrack run` and `bookrack-mcp`
-//! must expose the same method set, and the headless `bookrack-mcp`
-//! profile must short-circuit queue-bound writes with a stable
-//! `-32002 queue worker disabled in headless mode` JSON-RPC error
-//! when invoked without `--with-queue-worker`.
+//! Phase 5 control-plane parity: the control-plane method set is the
+//! one `bookrack run` exposes, whether or not the runtime spawned a
+//! queue worker, and a runtime without one must short-circuit
+//! queue-bound writes with a stable
+//! `-32002 queue worker disabled in headless mode` JSON-RPC error.
 //!
 //! The embedder probe daemon bring-up performs is answered by
 //! [`bookrack_test_support::EmbedStub`], so no Ollama daemon is
@@ -86,7 +86,7 @@ async fn bookrack_run_and_bookrack_mcp_share_method_set() -> Result<()> {
     let names_b = collect_method_names(&sock_b).await?;
     assert_eq!(names_a, names_b, "method sets must match across entries");
 
-    // Headless without `--with-queue-worker` short-circuits queue-bound
+    // A runtime without a queue worker short-circuits queue-bound
     // methods to -32002. `daemon_b` is the headless analogue.
     let socket_b = bookrack_control_client::ControlSocket::from_path(sock_b.clone());
     let client_b = bookrack_control_client::connect(&socket_b).await?;

@@ -821,7 +821,7 @@ the exit-code bucket does not distinguish the two.
   concurrent ingest or glean on the same catalog, MCP is paused for the
   duration, and a successful call broadcasts `library.changed` naming
   the library it wrote. None of them enqueue work, so all of them serve
-  on a headless `bookrack-mcp` without `--with-queue-worker`.
+  on a daemon without a queue worker.
 
 - `remove` — `{ intake_id?, sha?, dry_run?, yes?, plan_id?, library? }`.
   Exactly
@@ -1221,14 +1221,14 @@ the tool description says which one it ran.
   exit 0, and `bookrack quit` has nothing to stop. The MCP
   tool set, the session-lock schema, the on-disk queue schema,
   and the REPL client are unchanged.
-- **Phase 5** — second-launch semantics and `bookrack-mcp`
-  control-plane parity. `LockInfo` and `peek_lock` move from the
+- **Phase 5** — second-launch semantics and control-plane parity
+  across entry points. `LockInfo` and `peek_lock` move from the
   `bookrack-cli` `exec` module into `bookrack-session`; the new
   `bookrack_runtime::control::probe` resolves a recorded session
   into one of `Healthy(pid, control_sock)` / `Stale` /
   `Unprobeable` inside a hard 2 s budget by attempting
   `daemon.version` against the recorded socket. A second
-  `bookrack run` (or `bookrack-mcp`) invocation against a healthy
+  `bookrack run` invocation against a healthy
   lock prints `bookrack daemon already running: pid=… control_sock=…`
   and exits zero; a lock pointing at a dead daemon exits with
   status 3 so the operator removes the lock by hand; an
@@ -1239,16 +1239,19 @@ the tool description says which one it ran.
   of competing for the lock; with no GUI attached the method is a
   no-op and still returns `{ ok: true }` so the contract stays
   stable between CLI-only and GUI builds; both were removed in 0.13
-  together with the desktop shell. `bookrack-mcp` gains a
-  `--with-queue-worker` flag: without it, queue-bound write
-  methods (`ingest.submit`, `ingest.cancel`, `glean.submit`,
+  together with the desktop shell. The headless `bookrack-mcp`
+  binary gained a `--with-queue-worker` flag: without it, queue-bound
+  write methods (`ingest.submit`, `ingest.cancel`, `glean.submit`,
   `vectors.*`, `corpus.rebuild`, `stamps.reconcile`, `remove`,
   `dryrun`, `papers.corpus_rebuild`, `papers.vectors_*`,
   `papers.stamps_reconcile`, `papers.dryrun`, `papers.remove`)
-  short-circuit at dispatch with JSON-RPC error
+  short-circuited at dispatch with JSON-RPC error
   `-32002 queue worker disabled in headless mode` rather than
-  enqueueing work no one will run; with it, the headless entry
-  exposes the same full method set as `bookrack run`. The MCP
+  enqueueing work no one would run; with it, the headless entry
+  exposed the same full method set as `bookrack run`. That binary
+  was removed in 0.13 and `bookrack run` always spawns the worker;
+  the short-circuit still applies to any host that embeds the
+  runtime without one. The MCP
   tool set, the session-lock schema (still
   `pid=… / mcp=… / control_sock=…`, with unknown keys ignored
   per Phase 1's append-only rule), and the on-disk queue schema

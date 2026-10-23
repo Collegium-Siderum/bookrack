@@ -2149,9 +2149,9 @@ impl LogConfig {
         (cfg, vec![directive, console_level])
     }
 
-    /// Resolve a [`LogConfig`] suitable for a headless daemon binary
-    /// whose stderr is the operator's primary log surface
-    /// (systemd / journalctl / docker logs).
+    /// Resolve a [`LogConfig`] with the console layer mirroring the
+    /// file directive: the log config of the runtime's `headless`
+    /// preset, for a daemon whose stderr is the primary log surface.
     ///
     /// Behaves like [`from_env`](Self::from_env) for the file directive
     /// and any explicit [`LOG_CONSOLE_ENV`] override, but when the

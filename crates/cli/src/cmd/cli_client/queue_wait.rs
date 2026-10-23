@@ -274,10 +274,7 @@ fn no_worker(live: usize) -> BookrackCliError {
     refused(
         Problem::new("cannot wait on queue jobs: the daemon has no queue worker")
             .detail(detail)
-            .hint(
-                "Restart the daemon with a queue worker: `bookrack run`, or \
-                 `bookrack-mcp --with-queue-worker`.",
-            ),
+            .hint("Restart the daemon with a queue worker: `bookrack run`."),
     )
 }
 

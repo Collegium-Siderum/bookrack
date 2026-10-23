@@ -32,8 +32,8 @@ are still being hardened for production use.
 
 2. **Grab the tarball** for your platform from the
    [Releases page](https://github.com/Collegium-Siderum/bookrack/releases).
-   Each tarball bundles the `bookrack` and `bookrack-mcp` binaries,
-   the matching PDFium dynamic library, and licenses.
+   Each tarball bundles the `bookrack` binary, the matching PDFium
+   dynamic library, and licenses.
 
    | Platform | Tarball |
    | --- | --- |
@@ -147,11 +147,8 @@ are still being hardened for production use.
    MCP server; `library.search` queries both stores at once unless a
    `kind` switch narrows it.
 
-   For a headless deployment, run `bookrack-mcp` instead: the same
-   endpoint as a plain foreground process, with `--with-queue-worker`
-   when it should also run ingest jobs. bookrack ships no service
-   definition; running it under systemd, launchd or a Windows service
-   is set up by the operator. See the
+   bookrack ships no service definition; running it under systemd,
+   launchd or a Windows service is set up by the operator. See the
    [operating guide](docs/operating.md#the-daemon).
 
 ## Connecting an MCP client
@@ -170,8 +167,8 @@ claude mcp add --transport http --scope user bookrack http://127.0.0.1:8765/mcp
 ```
 
 **Other clients** — the server speaks streamable-HTTP and nothing else:
-`bookrack run` and `bookrack-mcp` serve `http://127.0.0.1:8765/mcp`, and
-there is no stdio mode. A client that connects to HTTP MCP servers
+`bookrack run` serves `http://127.0.0.1:8765/mcp`, and there is no
+stdio mode. A client that connects to HTTP MCP servers
 takes that URL the way Claude Code does above; a client that only
 launches stdio servers needs a stdio-to-HTTP bridge in front of it.
 Pointers for specific clients are welcome via issues.
@@ -197,13 +194,13 @@ the bundle and let the pointer `init` writes find it.
   protocolbuffers/protobuf on `PATH`.
 - a C compiler, for the vendored SQLite and TLS libraries.
 
-Clone the repo and build the two binaries:
+Clone the repo and build the binary:
 
 ```
-cargo build --release -p bookrack-cli -p bookrack-mcp
+cargo build --release -p bookrack-cli
 ```
 
-The binaries land in `target/release/`.
+The binary lands in `target/release/`.
 
 Two limits of a source build. It is not portable across CPU
 generations: the vector library compiles with `-march=native`, so run

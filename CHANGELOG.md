@@ -422,6 +422,18 @@ release workflow extracts the matching section verbatim from this file.
   launch_mode` and `LaunchMode` leave the runtime API, and the `gui`
   caller is retired, so no new audit row carries
   `actor_detail = "gui"`; rows already recorded keep the value.
+- **The `bookrack-mcp` binary.** It served the same MCP endpoint as
+  `bookrack run` from a second entry point with no tests of its own,
+  and it had drifted from the first: it did not exit after
+  `bookrack quit` or the `session.shutdown` tool, reported three of
+  the four bring-up refusals as a one-line `Error:` at exit 1, and
+  exited 1 with the raw lock error when started beside a running
+  session, although the 0.4.0 notes said it shared `bookrack run`'s
+  re-entry behaviour. `bookrack run` is the one daemon entry point;
+  it always runs the queue worker, so `--with-queue-worker` has no
+  counterpart. Release tarballs bundle `bookrack` alone. A host that
+  embeds the runtime without a queue worker still receives `-32002`
+  on queue-bound writes.
 
 ### Security
 

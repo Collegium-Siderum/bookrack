@@ -822,9 +822,8 @@ impl BookrackServer {
     /// `session.info` can report uptime. `log_stream` is the shared
     /// in-process log fan-out the `session.logs_tail` tool reads its
     /// ring-buffer snapshot from. `queue_state` is the shared snapshot
-    /// of the ingest queue the daemon-REPL drives; the headless mcp
-    /// binary passes an inert default since it does not run a queue
-    /// worker. `shutdown_tx` carries the session-wide graceful-shutdown
+    /// of the ingest queue the daemon-REPL drives; a host that spawns
+    /// no queue worker passes an inert default. `shutdown_tx` carries the session-wide graceful-shutdown
     /// signal so the `session.shutdown` tool can ask the daemon to
     /// stop. Tools route each call through the registry, scoped to
     /// either an explicit `library` selector or the current default
@@ -1709,8 +1708,8 @@ impl BookrackServer {
     /// state. The filter applies before the cap, so an early failure in
     /// a long batch stays reachable.
     ///
-    /// The headless `bookrack-mcp` binary does not drive a queue
-    /// worker; against it this tool reports an inert empty state.
+    /// Against a host that spawns no queue worker this tool reports
+    /// an inert empty state.
     #[tool(
         name = "session.queue_status",
         description = "Snapshot of the ingest queue: counts by lifecycle state across the \
@@ -2186,8 +2185,8 @@ impl ServerHandler for BookrackServer {
 /// to its broadcast channel.
 ///
 /// `queue_state` is the shared snapshot of the ingest queue the
-/// daemon-REPL drives; the headless `bookrack-mcp` binary passes an
-/// inert default since it does not run a queue worker.
+/// daemon-REPL drives; a host that spawns no queue worker passes an
+/// inert default.
 ///
 /// `shutdown_tx` is the session-wide graceful-shutdown broadcaster
 /// that the signal listener, REPL, queue worker, and this listener

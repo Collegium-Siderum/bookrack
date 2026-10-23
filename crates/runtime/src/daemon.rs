@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Daemon-side process runtime shared by `bookrack run` and the
-//! headless `bookrack-mcp` binary.
+//! Daemon-side process runtime behind `bookrack run`, and the
+//! in-process hosts the tests build.
 //!
 //! [`DaemonRuntime::start`] performs the fixed eleven-step bring-up:
 //! resolve the runtime directory, acquire the session [`TtyLock`],
@@ -82,9 +82,11 @@ pub struct RuntimeOpts {
     /// Skip binding the MCP listener. The daemon still acquires the
     /// tty lock and opens the registry.
     pub no_mcp: bool,
-    /// Spawn the persistent ingest queue worker. `false` for the
-    /// headless `bookrack-mcp` profile, which exposes the queue state
-    /// as inert zero counts.
+    /// Spawn the persistent ingest queue worker. `false` leaves the
+    /// queue state inert, exposed as zero counts; the [`headless`]
+    /// preset and in-process hosts use it.
+    ///
+    /// [`headless`]: RuntimeOpts::headless
     pub spawn_queue_worker: bool,
     /// Observability layer configuration. The daemon-REPL profile uses
     /// [`LogConfig::from_env`]; the headless profile uses
@@ -106,8 +108,9 @@ pub struct RuntimeOpts {
 }
 
 impl RuntimeOpts {
-    /// Headless `bookrack-mcp` profile: env-derived MCP address, no
-    /// queue worker, file-mirrored stderr console layer.
+    /// Preset with no REPL and no queue worker: env-derived MCP
+    /// address, console layer mirroring the file directive. For
+    /// in-process hosts and tests.
     pub fn headless(data_dir: Option<PathBuf>, library: Option<String>) -> Self {
         Self {
             selection: LibrarySelection { data_dir, library },
@@ -122,8 +125,8 @@ impl RuntimeOpts {
     }
 }
 
-/// Shared daemon state. `bookrack run` and `bookrack-mcp` both build
-/// one and hand it to the MCP listener, the REPL, and the queue worker
+/// Shared daemon state. `bookrack run` builds one and hands it to the
+/// MCP listener, the REPL, and the queue worker
 /// as a single source of truth for the open library registry, the
 /// broadcast shutdown channel, and the on-disk queue state.
 pub struct DaemonRuntime {

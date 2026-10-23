@@ -8,8 +8,8 @@
 //! - [`TtyLock`] at `<runtime_dir>/bookrack.tty.lock` — one daemon per
 //!   runtime directory, plus the discovery lines (`pid=`, `mcp=`,
 //!   `control_sock=`) other tools read to reach the live session.
-//!   `bookrack run` and the headless `bookrack-mcp` compete for it, so
-//!   the operator cannot accidentally point two writers at the same
+//!   Two `bookrack run` processes compete for it, so the operator
+//!   cannot accidentally point two writers at the same
 //!   on-disk catalog or corpus. Readers that go through the MCP HTTP
 //!   surface (`bookrack rpc`) never take it.
 //! - [`RootLock`] at `<data_root>/.bookrack.lock` — one writer per data
@@ -41,8 +41,8 @@ const TTY_LOCK_NAME_STR: &str = "bookrack.tty.lock";
 const ROOT_LOCK_NAME_STR: &str = ".bookrack.lock";
 
 /// File name of the session-scoped lock under the runtime directory.
-/// Exposed so siblings (the `cli` REPL, the headless `mcp` binary,
-/// `bookrack rpc`) discover the active session through the same path.
+/// Exposed so siblings (the `cli` REPL, `bookrack rpc`) discover the
+/// active session through the same path.
 pub fn tty_lock_name() -> &'static str {
     TTY_LOCK_NAME_STR
 }

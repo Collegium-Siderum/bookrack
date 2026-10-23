@@ -150,8 +150,8 @@ pub struct MethodContext {
     /// `bookrack_mcp::list_tools()`. Empty in entry points that do
     /// not bring up the MCP listener.
     pub mcp_tools: Arc<Vec<meta::McpToolInfo>>,
-    /// `true` when the runtime spawned a queue worker. Headless
-    /// `bookrack-mcp` entries leave it `false`, in which case the
+    /// `true` when the runtime spawned a queue worker. A host that
+    /// spawns none leaves it `false`, in which case the
     /// dispatch routes queue-bound write methods to a
     /// `-32002 not_ready` response without invoking the handler.
     pub queue_worker_enabled: bool,
@@ -240,9 +240,8 @@ use verify::VerifyParams;
 /// 1. `kind` — `read`, `write`, or `stream`; reflected in
 ///    `daemon.methods` so clients can pick the right call surface.
 /// 2. `queue` — `queue` if the runtime routes the call through the
-///    persistent queue worker (and so a headless `bookrack-mcp`
-///    without `--with-queue-worker` must short-circuit it); otherwise
-///    `no_queue`.
+///    persistent queue worker (and so a host that spawns no queue
+///    worker must short-circuit it); otherwise `no_queue`.
 /// 3. `shape` — handler signature: `sync` for `fn(_, _) -> Result`,
 ///    `async` for `async fn(_, _) -> Result`, `sidebar` for methods
 ///    intercepted before `dispatch_normal` (the handler is left to a
@@ -564,9 +563,8 @@ fn unknown_method_message(method: &str, mcp_tools: &[meta::McpToolInfo]) -> Stri
 
 /// JSON-RPC application code returned when the daemon cannot honour a
 /// queue-bound write because the queue worker was not spawned.
-/// Stable: callers (`bookrack-mcp` clients, the CLI) match on it to
-/// distinguish a misconfigured headless entry from a transient busy
-/// state.
+/// Stable: callers (MCP clients, the CLI) match on it to distinguish
+/// a host that spawned no queue worker from a transient busy state.
 // setting: internal -- a JSON-RPC application code callers match on, not a value to tune
 pub const QUEUE_WORKER_DISABLED: i32 = -32002;
 

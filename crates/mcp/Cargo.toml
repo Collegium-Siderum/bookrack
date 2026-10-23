@@ -14,7 +14,6 @@ bookrack-obs = { path = "../obs" }
 bookrack-ops = { path = "../ops" }
 bookrack-catalog = { path = "../catalog" }
 bookrack-runtime = { path = "../runtime" }
-bookrack-session = { path = "../session" }
 # The reference-book read store opened on every `reference.lookup`
 # / `reference.overlay_set` call; phase 9 of the v2 distill rollout.
 bookrack-refs.workspace = true
@@ -34,7 +33,6 @@ axum.workspace = true
 # Re-exports the `Stream` trait so no separate `futures` dep is needed
 # at the listener layer.
 tokio-stream.workspace = true
-clap.workspace = true
 tokio.workspace = true
 eyre.workspace = true
 serde.workspace = true

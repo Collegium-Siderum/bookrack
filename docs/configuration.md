@@ -281,8 +281,8 @@ collision matters more than a stable URL.
 
 ### When `.env` is read
 
-`.env` is loaded by the binaries — `bookrack` and `bookrack-mcp` — as
-the first thing each of them does, before anything reads a variable. The search runs upward from the working directory,
+`.env` is loaded by the `bookrack` binary as the first thing it does,
+before anything reads a variable. The search runs upward from the working directory,
 so which file is found depends on where the command was started.
 
 Two consequences follow. A process that reads a variable does so after

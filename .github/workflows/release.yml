@@ -128,7 +128,7 @@ jobs:
           tar -xzf pdfium.tgz -C pdfium-extracted
 
       - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }} -p bookrack-cli -p bookrack-mcp
+        run: cargo build --release --target ${{ matrix.target }} -p bookrack-cli
 
       - name: Assemble release archive
         shell: bash
@@ -153,11 +153,10 @@ jobs:
           bin_suffix=""
           if [ "${{ runner.os }}" = "Windows" ]; then bin_suffix=".exe"; fi
           cp "target/${{ matrix.target }}/release/bookrack${bin_suffix}" "${payload_dir}/"
-          cp "target/${{ matrix.target }}/release/bookrack-mcp${bin_suffix}" "${payload_dir}/"
 
           # PDFium loaded by the adapter from the binary's own directory
           # when BOOKRACK_PDFIUM_LIB is unset, so place it beside the
-          # binaries inside the tarball.
+          # binary inside the tarball.
           cp "pdfium-extracted/${{ matrix.pdfium_path_in_archive }}" \
              "${payload_dir}/${{ matrix.pdfium_lib_name }}"
 
@@ -183,8 +182,7 @@ jobs:
               cp packaging/macos/bookrack-run.command "${payload_dir}/"
               chmod 755 "${macos_dir}/bookrack-launcher" \
                 "${payload_dir}/bookrack-run.command" \
-                "${payload_dir}/bookrack" \
-                "${payload_dir}/bookrack-mcp"
+                "${payload_dir}/bookrack"
               # Ad-hoc sign so Gatekeeper sees a signature on the
               # bundle. No paid Developer ID and no notarization; a
               # quarantined copy still needs one-time approval in

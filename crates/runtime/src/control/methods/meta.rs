@@ -15,8 +15,8 @@ pub struct MethodSignature {
     pub name: &'static str,
     pub kind: &'static str,
     /// `true` iff the runtime routes the method through the persistent
-    /// queue worker. Headless `bookrack-mcp` profiles without
-    /// `--with-queue-worker` short-circuit these to `-32002 not_ready`.
+    /// queue worker. A host that spawns no queue worker short-circuits
+    /// these to `-32002 not_ready`.
     pub queue_bound: bool,
     /// How an explicit library selection reaches the method:
     /// `"routed"` — it takes one, under [`Self::library_key`];
@@ -184,7 +184,7 @@ mod tests {
         ] {
             assert!(
                 super::super::is_queue_bound_method(name),
-                "{name} must be queue-bound so headless bookrack-mcp short-circuits it"
+                "{name} must be queue-bound so a host without a queue worker short-circuits it"
             );
         }
     }

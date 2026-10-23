@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #![recursion_limit = "256"]
 
-//! Daemon-side runtime primitives shared by `bookrack run` and the
-//! headless `bookrack-mcp` binary.
+//! Daemon-side runtime primitives behind `bookrack run`, and the
+//! in-process hosts the tests build.
 //!
 //! Holds the business commands the CLI invokes (`cmd::*`), the
 //! persistent ingest queue and worker (`queue`), the operator health
