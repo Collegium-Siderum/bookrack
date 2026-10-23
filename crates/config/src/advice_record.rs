@@ -198,11 +198,11 @@ mod tests {
         let (_dir, path) = record();
         let writers: Vec<_> = ["a", "b", "c", "d"]
             .into_iter()
-            .map(|uuid| {
+            .map(|library| {
                 let path = path.clone();
                 std::thread::spawn(move || {
                     for round in 0..20 {
-                        record_seen(&path, uuid, &keys(&[&format!("{uuid}-{round}")]))
+                        record_seen(&path, library, &keys(&[&format!("{library}-{round}")]))
                             .expect("record");
                     }
                 })
@@ -211,11 +211,11 @@ mod tests {
         for writer in writers {
             writer.join().expect("writer thread");
         }
-        for uuid in ["a", "b", "c", "d"] {
+        for library in ["a", "b", "c", "d"] {
             assert_eq!(
-                seen_keys(&path, uuid),
-                keys(&[&format!("{uuid}-19")]),
-                "{uuid}"
+                seen_keys(&path, library),
+                keys(&[&format!("{library}-19")]),
+                "{library}"
             );
         }
     }

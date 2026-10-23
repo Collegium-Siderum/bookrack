@@ -82,10 +82,10 @@ const PAPERS: Side = Side {
 };
 
 /// A synthetic text long enough for either pipeline to extract prose,
-/// plan chunks, and embed them against the stub. `salt` makes each
+/// plan chunks, and embed them against the stub. `tag` makes each
 /// copy a distinct source.
-fn write_source(dir: &Path, salt: &str) -> Result<PathBuf> {
-    let path = dir.join(format!("synthetic-ledger-{salt}.txt"));
+fn write_source(dir: &Path, tag: &str) -> Result<PathBuf> {
+    let path = dir.join(format!("synthetic-ledger-{tag}.txt"));
     std::fs::write(
         &path,
         format!(
@@ -97,7 +97,7 @@ fn write_source(dir: &Path, salt: &str) -> Result<PathBuf> {
              By noon the ledger was balanced. The narrator celebrated with a \
              fictional meal and recorded the celebration as a footnote.\n\n\
              Chapter Two\n\n\
-             On the second day the ledger grew a second column, numbered {salt}. \
+             On the second day the ledger grew a second column, numbered {tag}. \
              The new column held colours instead of weights, and the narrator \
              sorted them from dull to bright.\n"
         ),
