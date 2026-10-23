@@ -13,8 +13,6 @@
 
 #![cfg(unix)]
 
-mod common;
-
 use std::time::{Duration, Instant};
 
 use bookrack_config::DEFAULT_EMBED_MODEL;

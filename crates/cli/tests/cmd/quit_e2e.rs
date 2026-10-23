@@ -9,8 +9,6 @@
 //! The embedder probe on the daemon's startup path is answered by
 //! [`EmbedStub`], so no Ollama daemon is required.
 
-mod common;
-
 use std::time::Duration;
 
 use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};

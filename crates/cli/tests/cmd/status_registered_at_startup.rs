@@ -12,8 +12,6 @@
 
 #![cfg(unix)]
 
-mod common;
-
 use std::time::Duration;
 
 use bookrack_config::{LibraryKind, new_manifest, write_manifest};

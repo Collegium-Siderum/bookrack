@@ -12,8 +12,6 @@
 
 #![cfg(unix)]
 
-mod common;
-
 use std::time::Duration;
 
 use bookrack_test_support::{EmbedFailure, EmbedStub, Sandbox, bookrack_cmd};

@@ -16,8 +16,6 @@
 
 #![cfg(unix)]
 
-mod common;
-
 use std::time::{Duration, Instant};
 
 use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};

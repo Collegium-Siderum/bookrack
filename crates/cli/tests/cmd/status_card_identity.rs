@@ -19,8 +19,6 @@
 
 #![cfg(unix)]
 
-mod common;
-
 use std::time::Duration;
 
 use bookrack_catalog::{Catalog, NewItemState};

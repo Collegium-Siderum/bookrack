@@ -15,8 +15,6 @@
 
 #![cfg(unix)]
 
-mod common;
-
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

@@ -16,8 +16,6 @@
 
 #![cfg(unix)]
 
-mod common;
-
 use std::time::{Duration, Instant};
 
 use bookrack_core::queue::QUEUE_SCHEMA_VERSION;
