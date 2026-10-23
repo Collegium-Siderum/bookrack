@@ -144,15 +144,22 @@ bookrack queue wait --job <id>          # or on named jobs, finished ones includ
 
 `queue wait` reads the queue once, when it attaches, and refuses up
 front when a selected job is pending on a paused queue or the daemon has
-no queue worker. After that it learns only what the event stream tells
-it: a pause, a `queue cancel` or `queue clear`, or a completion dropped
-because the client or the daemon fell behind on the stream goes
-unnoticed, and the wait then stops with an error after a minute without
-events — or keeps waiting while the daemon is still logging. A job that
-another client retries while the wait is attaching may be reported with
-the outcome of its previous run. Once a job has finished, running
-`queue wait --job <id>` again reads its outcome straight from the queue;
-a job still pending on a paused queue is refused again until
+no queue worker; `ingest`, `papers ingest` and `intake ocr` make the same
+read, and the same refusal, once they have submitted. A refused wait
+still prints what the read showed: the jobs that had ended, and the rest
+by id. After that the wait follows the event stream, and whatever the
+stream does not tell it — a pause, a `queue cancel` or `queue clear`, a
+completion dropped because the client or the daemon fell behind — it
+learns by reading the queue again: about a minute after the last event
+about one of its jobs, at once when the stream reports it dropped
+events, and at once when the daemon reports itself degraded, as it does
+when the worker pauses the queue after a process-level failure. A job
+that ended meanwhile is counted as it ended; a queue found paused with
+jobs still pending ends the wait with exit `2` and the report so far.
+A job that another client retries while the wait is attaching may be
+reported with the outcome of its previous run. Once a job has finished,
+running `queue wait --job <id>` again reads its outcome straight from the
+queue; a job still pending on a paused queue is refused again until
 `queue resume`.
 
 ### The OCR worklist

@@ -80,6 +80,23 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A wait no longer reports a daemon that stopped answering when the
+  queue merely stopped.** `bookrack ingest`, `papers ingest`,
+  `intake ocr` and `queue wait` took a minute without events for a
+  daemon that had gone unresponsive and exited `1` with an internal
+  error — after `queue pause`, after the worker paused the queue on a
+  process-level failure, after `queue cancel` or `queue clear` ended
+  one of their jobs without an outcome event, or after a completion was
+  dropped because one side fell behind on the stream; and while the
+  daemon kept logging they waited forever. A wait now reads the queue
+  again about a minute after the last event about one of its own jobs
+  (other jobs' events no longer postpone it), at once when either side
+  reports dropped events, and at once when the daemon reports itself
+  degraded: jobs that ended meanwhile are counted as they ended, and a
+  queue found paused with jobs still pending ends the wait with exit
+  `2`, the report so far on stdout and the hint to resume on stderr.
+  Only a `queue.list` that fails ends a wait as an error now, classified
+  as that failure is.
 - **The stale-session-lock message no longer tells you to delete the
   lock.** `bookrack run`, `bookrack status` and the offline `doctor`
   repairs ended their advice with `rm <lock>` once the recorded pid

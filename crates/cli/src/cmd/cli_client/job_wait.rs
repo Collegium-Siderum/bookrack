@@ -189,13 +189,16 @@ pub(super) async fn wait<S: WaitSource>(
         return Ok(WaitEnd::Refused { report, problem });
     }
     let view = ProgressView::for_jobs_after(&attached.settled, &attached.live, surface);
-    let awaited = await_jobs_from_rx(rx, view, started, stall).await?;
-    let mut jobs = attached.settled;
-    jobs.extend(awaited.jobs);
-    Ok(WaitEnd::Complete(JobOutcomeReport::new(
-        jobs,
-        started.elapsed(),
-    )))
+    await_jobs_reconciling(
+        source,
+        rx,
+        view,
+        attached.settled,
+        attached.live,
+        started,
+        stall,
+    )
+    .await
 }
 
 /// Read the queue, attach to `ids`, judge, wait: the path a submission
@@ -286,56 +289,118 @@ fn paused(pending: usize) -> Problem {
         .hint(RESUME_HINT)
 }
 
-/// Drains the receiver until every job `view` awaits has appeared in a
-/// `queue.tick`'s `last_finished`.
+/// Waits on the jobs `view` awaits, reconciling against the queue
+/// whenever the stream goes quiet or drops events.
 ///
-/// `stall_timeout` bounds the wait between consecutive events. The
-/// timer resets every time an event lands; a stretch with no events
-/// at all surfaces as an error instead of hanging the CLI.
-pub(super) async fn await_jobs_from_rx(
+/// A job ends when a `queue.tick` carries its outcome. Only an event
+/// about an awaited job — its progress, or its outcome — extends the
+/// deadline; a stretch of `stall` without one, a lag marker from either
+/// side of the stream, or the daemon reporting itself degraded all make
+/// the wait read the queue: awaited rows that have ended there are
+/// settled from the listing, and pending rows on a paused queue end the
+/// wait with the same refusal the attach makes. Only a `queue.list` that
+/// fails ends the wait as an error. The deadline is compared before
+/// every turn on the receiver, so a receiver that is never empty cannot
+/// starve a deadline that has passed; the timer runs with the
+/// runtime's millisecond granularity, which is why the comparison is
+/// not left to the timer alone.
+pub(super) async fn await_jobs_reconciling<S: WaitSource>(
+    source: &S,
     mut rx: broadcast::Receiver<Event>,
     mut view: ProgressView,
-    started_at: Instant,
-    stall_timeout: Duration,
-) -> Result<JobOutcomeReport> {
-    let mut jobs: Vec<JobOutcomeRecord> = Vec::with_capacity(view.pending());
+    settled: Vec<JobOutcomeRecord>,
+    live: Vec<String>,
+    started: Instant,
+    stall: Duration,
+) -> Result<WaitEnd> {
+    let mut jobs = settled;
+    let mut deadline = tokio::time::Instant::now() + stall;
     while !view.is_complete() {
-        match tokio::time::timeout(stall_timeout, rx.recv()).await {
-            Err(_elapsed) => {
-                return Err(eyre::eyre!(
-                    "control event stream stalled for {}s with {} job(s) still pending; \
-                     daemon may be unresponsive",
-                    stall_timeout.as_secs(),
-                    view.pending()
-                ));
+        let reconcile = tokio::time::Instant::now() >= deadline
+            || tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(deadline) => true,
+                received = rx.recv() => match received {
+                    Ok(event) => {
+                        let applied = view.apply(&event);
+                        if let Some(record) = applied.finished {
+                            jobs.push(record);
+                        }
+                        if applied.relevant {
+                            deadline = tokio::time::Instant::now() + stall;
+                        }
+                        event.lag || is_degraded(&event)
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => true,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(eyre!(
+                            "control event stream closed before {} job(s) finished",
+                            view.pending()
+                        ));
+                    }
+                },
+            };
+        if !reconcile {
+            continue;
+        }
+        let awaited = view.pending();
+        let reply = source.list().await.wrap_err_with(|| {
+            format!("queue.list did not answer with {awaited} job(s) still awaited")
+        })?;
+        let listing = Listing::parse(&reply)?;
+        for id in &live {
+            if !view.awaits(id) {
+                continue;
             }
-            Ok(Ok(event)) => {
-                if let Some(record) = view.apply(&event) {
-                    jobs.push(record);
-                }
+            let index = listing
+                .jobs
+                .iter()
+                .position(|job| &job.id == id)
+                .ok_or_else(|| eyre!("queue.list carries no row for job {id}"))?;
+            let job = &listing.jobs[index];
+            if is_live(job.state) {
+                continue;
             }
-            Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
-            Ok(Err(broadcast::error::RecvError::Closed)) => {
-                return Err(eyre::eyre!(
-                    "control event stream closed before {} job(s) finished",
-                    view.pending()
-                ));
+            if let Some(record) = view.settle(ended_record(job, &listing.rows[index])?) {
+                jobs.push(record);
             }
         }
+        if view.is_complete() {
+            break;
+        }
+        let unfinished: Vec<String> = live.iter().filter(|id| view.awaits(id)).cloned().collect();
+        let pending = pending_among(&listing, &unfinished);
+        if listing.paused && pending > 0 {
+            return Ok(WaitEnd::Refused {
+                report: JobOutcomeReport::new(jobs, started.elapsed()).with_unfinished(unfinished),
+                problem: paused(pending),
+            });
+        }
+        deadline = tokio::time::Instant::now() + stall;
     }
-    Ok(JobOutcomeReport::new(jobs, started_at.elapsed()))
+    Ok(WaitEnd::Complete(JobOutcomeReport::new(
+        jobs,
+        started.elapsed(),
+    )))
+}
+
+/// A `daemon.state` event reporting the daemon degraded: the state a
+/// queue worker folds in when it pauses the queue after a process-level
+/// failure.
+fn is_degraded(event: &Event) -> bool {
+    event.channel == "daemon.state" && event.value.as_str() == Some("degraded")
 }
 
 /// A fake daemon and the rows and events the wait tests feed it.
 #[cfg(test)]
 pub(super) mod testing {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use bookrack_cli::render::progress::{Surface, SurfaceKind};
-    use bookrack_control_client::Event;
-    use eyre::Result;
+    use bookrack_control_client::{ControlError, Event};
+    use eyre::{Context, Result};
     use serde_json::{Value, json};
-    use tokio::sync::broadcast;
+    use tokio::sync::{Notify, broadcast};
 
     use super::WaitSource;
 
@@ -360,14 +425,20 @@ pub(super) mod testing {
     }
 
     /// A daemon whose `queue.list` reply and worker flag are fixed. The
-    /// events in `on_list` are broadcast inside `list`, before the reply
-    /// returns, so they reach only a subscription made earlier.
+    /// events in `on_list` are broadcast
+    /// inside `list`, before the reply returns, so they reach only a
+    /// subscription made earlier. Every `list` is recorded in `calls`,
+    /// in `log` when one is shared with a surface, and signalled on
+    /// `listed` so a test can wait for the first reconciliation.
     pub struct FakeSource {
         pub tx: broadcast::Sender<Event>,
+        pub listed: Notify,
         calls: Mutex<Vec<Call>>,
         reply: Value,
+        fail_list: Mutex<Option<ControlError>>,
         worker: bool,
         on_list: Vec<Event>,
+        log: Option<Arc<Mutex<Vec<String>>>>,
     }
 
     impl FakeSource {
@@ -375,10 +446,13 @@ pub(super) mod testing {
             let (tx, _) = broadcast::channel(64);
             Self {
                 tx,
+                listed: Notify::new(),
                 calls: Mutex::new(Vec::new()),
                 reply: json!({ "paused": paused, "jobs": rows }),
+                fail_list: Mutex::new(None),
                 worker: true,
                 on_list,
+                log: None,
             }
         }
 
@@ -387,8 +461,25 @@ pub(super) mod testing {
             self
         }
 
+        /// Records each `list` as the line `list` in `log`, beside what
+        /// a surface sharing it draws.
+        pub fn logging_to(mut self, log: Arc<Mutex<Vec<String>>>) -> Self {
+            self.log = Some(log);
+            self
+        }
+
+        /// The next `list` fails with `error` instead of answering.
+        pub fn failing_list(self, error: ControlError) -> Self {
+            *self.fail_list.lock().unwrap() = Some(error);
+            self
+        }
+
         pub fn calls(&self) -> Vec<Call> {
             self.calls.lock().unwrap().clone()
+        }
+
+        pub fn lists(&self) -> usize {
+            self.calls().iter().filter(|c| **c == Call::List).count()
         }
     }
 
@@ -400,6 +491,13 @@ pub(super) mod testing {
 
         async fn list(&self) -> Result<Value> {
             self.calls.lock().unwrap().push(Call::List);
+            if let Some(log) = &self.log {
+                log.lock().unwrap().push("list".to_string());
+            }
+            self.listed.notify_one();
+            if let Some(error) = self.fail_list.lock().unwrap().take() {
+                return Err(eyre::Report::from(error)).context("queue.list rpc");
+            }
             for event in &self.on_list {
                 let _ = self.tx.send(event.clone());
             }
@@ -464,6 +562,33 @@ pub(super) mod testing {
         }
     }
 
+    /// A `worker.progress` for `id` in `stage`.
+    pub fn progress(id: &str, stage: &str) -> Event {
+        Event {
+            channel: "worker.progress".to_string(),
+            value: json!({ "job_id": id, "kind": "book", "stage": stage }),
+            lag: false,
+        }
+    }
+
+    /// A `daemon.state` event with the given state word.
+    pub fn daemon_state(state: &str) -> Event {
+        Event {
+            channel: "daemon.state".to_string(),
+            value: json!(state),
+            lag: false,
+        }
+    }
+
+    /// The lag marker the daemon sends for one snapshot channel.
+    pub fn lag_marker() -> Event {
+        Event {
+            channel: "queue.tick".to_string(),
+            value: Value::Null,
+            lag: true,
+        }
+    }
+
     pub fn hidden() -> Box<dyn Surface> {
         SurfaceKind::Hidden.build()
     }
@@ -480,49 +605,57 @@ mod tests {
 
     use bookrack_cli::error::classify_eyre;
     use bookrack_cli::render::progress::SurfaceKind;
-    use serde_json::json;
+    use bookrack_control_client::ControlError;
 
+    use super::super::progress_view::extract_finished;
     use super::super::progress_view::testing::RecordingSurface;
-    use super::super::progress_view::{ViewState, extract_finished};
     use super::testing::*;
     use super::*;
 
-    const STALL: Duration = Duration::from_secs(2);
+    const STALL: Duration = Duration::from_millis(300);
 
-    /// Loose default for in-test waits: long enough that the event
-    /// loop can't race the timer in CI, short enough that the stall
-    /// test still finishes promptly.
-    const TEST_STALL_TIMEOUT: Duration = Duration::from_secs(5);
+    /// Bound on a test's own wait: a loop that never reconciles, or
+    /// never completes, is red here instead of hanging.
+    const LIMIT: Duration = Duration::from_millis(1200);
 
-    /// A view over `ids` that draws nothing.
-    fn quiet_view(list: &[&str]) -> ProgressView {
-        ProgressView::with_surface(ViewState::for_jobs(&ids(list)), SurfaceKind::Hidden.build())
+    /// A view over `live` that draws nothing.
+    fn quiet_view(live: &[&str]) -> ProgressView {
+        ProgressView::for_jobs_after(&[], &ids(live), SurfaceKind::Hidden.build())
     }
 
-    /// A view over `ids` whose surface calls land in the returned log.
-    fn recorded_view(list: &[&str]) -> (ProgressView, Arc<Mutex<Vec<String>>>) {
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let view = ProgressView::with_surface(
-            ViewState::for_jobs(&ids(list)),
-            Box::new(RecordingSurface(Arc::clone(&log))),
-        );
-        (view, log)
+    /// A view over `live` whose surface calls land in `log`.
+    fn logged_view(live: &[&str], log: &Arc<Mutex<Vec<String>>>) -> ProgressView {
+        ProgressView::for_jobs_after(&[], &ids(live), Box::new(RecordingSurface(Arc::clone(log))))
     }
 
-    fn tick(job_id: &str, state: &str, pending: u64, running: u64) -> Event {
-        Event {
-            channel: "queue.tick".to_string(),
-            value: json!({
-                "pending": pending,
-                "running": running,
-                "last_finished": {
-                    "job_id": job_id,
-                    "kind": "book",
-                    "state": state,
-                    "finished_at": "2026-01-01T00:00:00Z",
-                },
-            }),
-            lag: false,
+    /// Runs the wait core on `source`'s own stream over `live`, bounded
+    /// by [`LIMIT`].
+    async fn reconciling(
+        source: &FakeSource,
+        rx: broadcast::Receiver<Event>,
+        view: ProgressView,
+        live: &[&str],
+    ) -> Result<WaitEnd> {
+        tokio::time::timeout(
+            LIMIT,
+            await_jobs_reconciling(
+                source,
+                rx,
+                view,
+                Vec::new(),
+                ids(live),
+                Instant::now(),
+                STALL,
+            ),
+        )
+        .await
+        .expect("the wait neither completed nor reconciled within the limit")
+    }
+
+    fn complete(end: WaitEnd) -> JobOutcomeReport {
+        match end {
+            WaitEnd::Complete(report) => report,
+            other => panic!("expected a complete report, got {other:?}"),
         }
     }
 
@@ -533,90 +666,477 @@ mod tests {
         }
     }
 
+    fn states(report: &JobOutcomeReport) -> Vec<(String, JobOutcomeState)> {
+        report
+            .jobs
+            .iter()
+            .map(|job| (job.job_id.clone(), job.state))
+            .collect()
+    }
+
     #[tokio::test]
-    async fn await_jobs_returns_immediately_when_empty() {
-        let (_tx, rx) = broadcast::channel::<Event>(4);
-        let report = await_jobs_from_rx(rx, quiet_view(&[]), Instant::now(), TEST_STALL_TIMEOUT)
-            .await
-            .unwrap();
+    async fn an_empty_wait_set_completes_at_once() {
+        let source = FakeSource::new(Vec::new(), false, Vec::new());
+        let rx = source.tx.subscribe();
+        let report = complete(
+            reconciling(&source, rx, quiet_view(&[]), &[])
+                .await
+                .unwrap(),
+        );
         assert!(report.jobs.is_empty());
-        assert_eq!(report.totals.done, 0);
+        assert_eq!(source.lists(), 0);
     }
 
     #[tokio::test]
-    async fn await_jobs_collects_all_three_terminal_states() {
-        let (tx, rx) = broadcast::channel::<Event>(16);
-        let view = quiet_view(&["a", "b", "c"]);
-        let handle = tokio::spawn(async move {
-            await_jobs_from_rx(rx, view, Instant::now(), TEST_STALL_TIMEOUT).await
-        });
-        tx.send(tick("a", "done", 2, 1)).unwrap();
-        tx.send(tick("b", "failed", 1, 1)).unwrap();
-        tx.send(tick("c", "cancelled", 0, 0)).unwrap();
-        let report = handle.await.unwrap().unwrap();
-        assert_eq!(report.jobs.len(), 3);
-        assert_eq!(report.totals.done, 1);
-        assert_eq!(report.totals.failed, 1);
-        assert_eq!(report.totals.cancelled, 1);
-        assert!(!report.all_succeeded());
-    }
-
-    #[tokio::test]
-    async fn await_jobs_ignores_ticks_for_other_ids_and_empty_finished() {
-        let (tx, rx) = broadcast::channel::<Event>(16);
-        let view = quiet_view(&["target"]);
-        let handle = tokio::spawn(async move {
-            await_jobs_from_rx(rx, view, Instant::now(), TEST_STALL_TIMEOUT).await
-        });
-        tx.send(tick_without_finished()).unwrap();
-        tx.send(tick("other", "done", 1, 0)).unwrap();
-        tx.send(tick("target", "done", 0, 0)).unwrap();
-        let report = handle.await.unwrap().unwrap();
-        assert_eq!(report.jobs.len(), 1);
-        assert_eq!(report.jobs[0].job_id, "target");
-        assert!(report.all_succeeded());
-    }
-
-    /// A daemon that accepts the job but then stops emitting any
-    /// events at all must not leave the CLI hanging: the stall timer
-    /// elapses and the wait returns an actionable error.
-    #[tokio::test]
-    async fn await_jobs_errors_when_stream_stalls_with_no_events() {
-        let (tx, rx) = broadcast::channel::<Event>(4);
-        let (view, log) = recorded_view(&["a"]);
-        let started = Instant::now();
-        let err = await_jobs_from_rx(rx, view, started, Duration::from_millis(50))
-            .await
-            .unwrap_err();
-        drop(tx);
-        let msg = err.to_string();
-        assert!(msg.contains("stalled"), "error text: {msg}");
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "stall fired after {:?}",
-            started.elapsed()
+    async fn outcomes_on_the_stream_are_collected_in_arrival_order() {
+        let source = FakeSource::new(Vec::new(), false, Vec::new());
+        let rx = source.tx.subscribe();
+        source.tx.send(finished(A, "done", "book", None)).unwrap();
+        source.tx.send(tick_without_finished()).unwrap();
+        source.tx.send(finished(N, "done", "book", None)).unwrap();
+        source
+            .tx
+            .send(finished(B, "failed", "book", Some("boom")))
+            .unwrap();
+        source
+            .tx
+            .send(finished(D, "cancelled", "book", None))
+            .unwrap();
+        let report = complete(
+            reconciling(&source, rx, quiet_view(&[A, B, D]), &[A, B, D])
+                .await
+                .unwrap(),
         );
         assert_eq!(
-            log.lock().unwrap().last().map(String::as_str),
-            Some("clear"),
-            "a stalled wait left its progress line drawn"
+            states(&report),
+            [
+                (A.to_string(), JobOutcomeState::Done),
+                (B.to_string(), JobOutcomeState::Failed),
+                (D.to_string(), JobOutcomeState::Cancelled),
+            ]
         );
+        assert!(!report.all_succeeded());
+        assert_eq!(source.lists(), 0, "a stream that delivers needs no listing");
     }
 
     #[tokio::test]
-    async fn await_jobs_errors_when_stream_closes_with_pending() {
+    async fn a_closed_stream_ends_the_wait_as_an_error() {
+        let source = FakeSource::new(Vec::new(), false, Vec::new());
         let (tx, rx) = broadcast::channel::<Event>(4);
-        let (view, log) = recorded_view(&["a"]);
-        let handle = tokio::spawn(async move {
-            await_jobs_from_rx(rx, view, Instant::now(), TEST_STALL_TIMEOUT).await
-        });
         drop(tx);
-        let err = handle.await.unwrap().unwrap_err();
-        assert!(err.to_string().contains("1 job"));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let err = reconciling(&source, rx, logged_view(&[A], &log), &[A])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("1 job"), "{err}");
         assert_eq!(
             log.lock().unwrap().last().map(String::as_str),
             Some("clear"),
             "a closed stream left the progress line drawn"
+        );
+    }
+
+    /// B.5 #1: a queue paused after the wait attached sends nothing; the
+    /// quiet stretch ends in a listing, and the pause is a refusal.
+    #[tokio::test]
+    async fn a_paused_queue_found_on_a_quiet_stream_refuses_with_the_pending_ids() {
+        let source = FakeSource::new(vec![row(P, "pending")], true, Vec::new());
+        let rx = source.tx.subscribe();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let started = Instant::now();
+        let end = reconciling(&source, rx, logged_view(&[P], &log), &[P])
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() >= STALL,
+            "reconciled early: {:?}",
+            started.elapsed()
+        );
+        let (report, problem) = refusal(&end);
+        assert!(report.jobs.is_empty());
+        assert_eq!(report.unfinished, ids(&[P]));
+        assert_eq!(
+            problem.summary,
+            "cannot wait on pending jobs while the queue is paused"
+        );
+        assert_eq!(
+            log.lock().unwrap().last().map(String::as_str),
+            Some("clear"),
+            "a refused wait left its progress line drawn"
+        );
+    }
+
+    /// B.5 #2: the target was cancelled without an outcome event while
+    /// other jobs keep the stream busy; their events do not postpone the
+    /// listing.
+    #[tokio::test]
+    async fn a_cancelled_target_is_reconciled_while_other_jobs_keep_ticking() {
+        let source = Arc::new(FakeSource::new(
+            vec![row(A, "cancelled")],
+            false,
+            Vec::new(),
+        ));
+        let rx = source.tx.subscribe();
+        source.tx.send(tick_without_finished()).unwrap();
+        let noise = {
+            let source = Arc::clone(&source);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(STALL / 4).await;
+                    let _ = source.tx.send(progress(N, "processing"));
+                    let _ = source.tx.send(finished(N, "done", "book", None));
+                }
+            })
+        };
+        let started = Instant::now();
+        let report = complete(
+            reconciling(&source, rx, quiet_view(&[A]), &[A])
+                .await
+                .unwrap(),
+        );
+        noise.abort();
+        assert_eq!(
+            states(&report),
+            [(A.to_string(), JobOutcomeState::Cancelled)]
+        );
+        assert!(
+            started.elapsed() < STALL + STALL / 2,
+            "unrelated events postponed the listing: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(source.lists(), 1);
+    }
+
+    /// B.5 #3: a lag marker from the daemon reconciles at once.
+    #[tokio::test]
+    async fn a_lag_marker_reconciles_at_once() {
+        let source = FakeSource::new(vec![row(D, "done")], false, Vec::new());
+        let rx = source.tx.subscribe();
+        source.tx.send(lag_marker()).unwrap();
+        let started = Instant::now();
+        let report = complete(
+            reconciling(&source, rx, quiet_view(&[D]), &[D])
+                .await
+                .unwrap(),
+        );
+        assert!(
+            started.elapsed() < STALL / 2,
+            "the lag marker waited for the deadline: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(states(&report), [(D.to_string(), JobOutcomeState::Done)]);
+    }
+
+    /// B.5 #4: the daemon reporting itself degraded reconciles at once;
+    /// the listing shows the failure that paused the queue and the rows
+    /// left pending behind it.
+    #[tokio::test]
+    async fn a_degraded_daemon_reconciles_at_once() {
+        let source = FakeSource::new(
+            vec![
+                row_with(A, "failed", "book", Some("out of file descriptors")),
+                row(P, "pending"),
+            ],
+            true,
+            Vec::new(),
+        );
+        let rx = source.tx.subscribe();
+        source.tx.send(daemon_state("degraded")).unwrap();
+        let started = Instant::now();
+        let end = reconciling(&source, rx, quiet_view(&[A, P]), &[A, P])
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() < STALL / 2,
+            "degraded waited for the deadline: {:?}",
+            started.elapsed()
+        );
+        let (report, _) = refusal(&end);
+        assert_eq!(states(report), [(A.to_string(), JobOutcomeState::Failed)]);
+        assert_eq!(
+            report.jobs[0].error.as_deref(),
+            Some("out of file descriptors")
+        );
+        assert_eq!(report.unfinished, ids(&[P]));
+    }
+
+    /// B.5 #5: progress of an awaited job is what keeps the wait from
+    /// listing; a job that keeps reporting is never reconciled.
+    #[tokio::test]
+    async fn progress_of_an_awaited_job_keeps_the_wait_from_listing() {
+        let source = Arc::new(FakeSource::new(vec![row(A, "running")], false, Vec::new()));
+        let rx = source.tx.subscribe();
+        let reporter = {
+            let source = Arc::clone(&source);
+            tokio::spawn(async move {
+                for _ in 0..6 {
+                    tokio::time::sleep(STALL / 2).await;
+                    let _ = source.tx.send(progress(A, "embed"));
+                }
+                let _ = source.tx.send(finished(A, "done", "book", None));
+            })
+        };
+        let limit = Duration::from_secs(5);
+        let end = tokio::time::timeout(
+            limit,
+            await_jobs_reconciling(
+                &*source,
+                rx,
+                quiet_view(&[A]),
+                Vec::new(),
+                ids(&[A]),
+                Instant::now(),
+                STALL,
+            ),
+        )
+        .await
+        .expect("the wait did not complete")
+        .unwrap();
+        reporter.await.unwrap();
+        assert_eq!(
+            states(&complete(end)),
+            [(A.to_string(), JobOutcomeState::Done)]
+        );
+        assert_eq!(source.lists(), 0, "a reporting job was listed");
+    }
+
+    /// B.5 #6: a paused queue with only a running job awaited is not a
+    /// refusal; the wait lists once and keeps waiting for the outcome.
+    #[tokio::test]
+    async fn a_paused_queue_keeps_waiting_on_a_running_job() {
+        let source = Arc::new(FakeSource::new(vec![row(R, "running")], true, Vec::new()));
+        let rx = source.tx.subscribe();
+        let finisher = {
+            let source = Arc::clone(&source);
+            tokio::spawn(async move {
+                source.listed.notified().await;
+                let _ = source.tx.send(finished(R, "done", "book", None));
+            })
+        };
+        let report = complete(
+            reconciling(&source, rx, quiet_view(&[R]), &[R])
+                .await
+                .unwrap(),
+        );
+        finisher.await.unwrap();
+        assert_eq!(states(&report), [(R.to_string(), JobOutcomeState::Done)]);
+        assert_eq!(source.lists(), 1);
+    }
+
+    /// B.5 #7: a listing that fails ends the wait as that failure,
+    /// classified as the failure itself is.
+    #[tokio::test]
+    async fn a_listing_that_fails_ends_the_wait_as_that_failure() {
+        let failures = [
+            (
+                ControlError::Transport(std::io::Error::other("connection reset")),
+                None,
+            ),
+            (
+                ControlError::Timeout {
+                    method: "queue.list".to_string(),
+                    after: Duration::from_secs(10),
+                },
+                None,
+            ),
+            (
+                ControlError::Rpc {
+                    code: bookrack_runtime::control::jsonrpc::BUSY,
+                    message: "busy".to_string(),
+                    data: None,
+                },
+                Some(4),
+            ),
+        ];
+        for (failure, exit_code) in failures {
+            let label = failure.to_string();
+            let source =
+                FakeSource::new(vec![row(P, "pending")], false, Vec::new()).failing_list(failure);
+            let rx = source.tx.subscribe();
+            let err = reconciling(&source, rx, quiet_view(&[P]), &[P])
+                .await
+                .unwrap_err();
+            let message = format!("{err:#}");
+            assert!(
+                message.contains("queue.list") && message.contains("1 job"),
+                "{label}: {message}"
+            );
+            assert_eq!(
+                classify_eyre(&err).map(|cause| cause.as_cli().exit_code()),
+                exit_code,
+                "{label}: {err:?}"
+            );
+        }
+    }
+
+    /// B.5 #8: the local receiver falling behind reconciles at once.
+    #[tokio::test]
+    async fn a_lagged_local_receiver_reconciles_at_once() {
+        let source = FakeSource::new(vec![row(D, "done")], false, Vec::new());
+        let rx = source.tx.subscribe();
+        for _ in 0..70 {
+            source.tx.send(tick_without_finished()).unwrap();
+        }
+        let started = Instant::now();
+        let report = complete(
+            reconciling(&source, rx, quiet_view(&[D]), &[D])
+                .await
+                .unwrap(),
+        );
+        assert!(
+            started.elapsed() < STALL / 2,
+            "the lagged receiver waited for the deadline: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(states(&report), [(D.to_string(), JobOutcomeState::Done)]);
+    }
+
+    /// B.5 #9: an awaited id the listing does not carry is a data
+    /// error, not a refusal.
+    #[tokio::test]
+    async fn an_awaited_id_missing_from_the_listing_is_a_data_error() {
+        let source = FakeSource::new(Vec::new(), false, Vec::new());
+        let rx = source.tx.subscribe();
+        let err = reconciling(&source, rx, quiet_view(&[A]), &[A])
+            .await
+            .unwrap_err();
+        assert!(classify_eyre(&err).is_none(), "{err:?}");
+        assert!(err.to_string().contains(A), "{err}");
+    }
+
+    /// B.5 #10: a deadline that has passed is seen before the events
+    /// backlogged on the receiver, so a stream that is never empty
+    /// cannot starve the listing.
+    #[tokio::test]
+    async fn an_expired_deadline_is_seen_before_backlogged_events() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let source =
+            FakeSource::new(vec![row(P, "pending")], true, Vec::new()).logging_to(Arc::clone(&log));
+        let rx = source.tx.subscribe();
+        for _ in 0..16 {
+            source.tx.send(progress(P, "processing")).unwrap();
+        }
+        let view = logged_view(&[P], &log);
+        let end = tokio::time::timeout(
+            LIMIT,
+            await_jobs_reconciling(
+                &source,
+                rx,
+                view,
+                Vec::new(),
+                ids(&[P]),
+                Instant::now(),
+                Duration::ZERO,
+            ),
+        )
+        .await
+        .expect("the wait did not reconcile")
+        .unwrap();
+        refusal(&end);
+        let log = log.lock().unwrap();
+        let listed_at = log
+            .iter()
+            .position(|line| line == "list")
+            .expect("no listing");
+        let first_progress = log.iter().position(|line| line.contains("processing"));
+        assert!(
+            first_progress.is_none_or(|at| listed_at < at),
+            "backlogged events were drained before the expired deadline: {log:?}"
+        );
+    }
+
+    /// B.5 #11: a reconciliation settles every ended row, with the
+    /// record its outcome event would have given.
+    #[tokio::test]
+    async fn a_reconciliation_settles_every_ended_row() {
+        let source = FakeSource::new(
+            vec![
+                row(A, "done"),
+                row_with(B, "failed", "book", Some("boom")),
+                row(D, "running"),
+            ],
+            false,
+            Vec::new(),
+        );
+        let rx = source.tx.subscribe();
+        source.tx.send(finished(D, "done", "book", None)).unwrap();
+        let report = complete(
+            reconciling(&source, rx, quiet_view(&[A, B, D]), &[A, B, D])
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            states(&report),
+            [
+                (D.to_string(), JobOutcomeState::Done),
+                (A.to_string(), JobOutcomeState::Done),
+                (B.to_string(), JobOutcomeState::Failed),
+            ]
+        );
+        let pending: HashSet<String> = HashSet::from([B.to_string()]);
+        let from_event =
+            extract_finished(&finished(B, "failed", "book", Some("boom")).value, &pending).unwrap();
+        assert_eq!(
+            serde_json::to_value(&report.jobs[2]).unwrap(),
+            serde_json::to_value(&from_event).unwrap()
+        );
+        assert_eq!(source.lists(), 1);
+    }
+
+    /// B.5 #12: a row the reconciliation settled is counted once when
+    /// its outcome event arrives late, and the stage slot it held is
+    /// freed as soon as it is settled.
+    #[tokio::test]
+    async fn a_row_settled_by_reconciliation_is_counted_once_and_frees_the_stage_slot() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let source = Arc::new(
+            FakeSource::new(vec![row(A, "done"), row(B, "running")], false, Vec::new())
+                .logging_to(Arc::clone(&log)),
+        );
+        let rx = source.tx.subscribe();
+        source.tx.send(progress(A, "embed")).unwrap();
+        let late = {
+            let source = Arc::clone(&source);
+            let log = Arc::clone(&log);
+            tokio::spawn(async move {
+                source.listed.notified().await;
+                // Settling A redraws the status line without A's stage.
+                let deadline = Instant::now() + LIMIT;
+                while !log
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|line| line == "status: 1/2 waiting")
+                {
+                    assert!(
+                        Instant::now() < deadline,
+                        "A kept the stage slot: {:?}",
+                        log.lock().unwrap()
+                    );
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                let _ = source.tx.send(finished(A, "done", "book", None));
+                let _ = source.tx.send(finished(B, "done", "book", None));
+            })
+        };
+        let report = complete(
+            reconciling(&source, rx, logged_view(&[A, B], &log), &[A, B])
+                .await
+                .unwrap(),
+        );
+        late.await.unwrap();
+        assert_eq!(
+            states(&report),
+            [
+                (A.to_string(), JobOutcomeState::Done),
+                (B.to_string(), JobOutcomeState::Done),
+            ]
+        );
+        let log = log.lock().unwrap();
+        let listed_at = log.iter().position(|line| line == "list").unwrap();
+        assert!(
+            !log[listed_at..].iter().any(|line| line.contains("[embed")),
+            "A's stage was drawn after it was settled: {log:?}"
         );
     }
 

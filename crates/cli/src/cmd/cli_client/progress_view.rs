@@ -53,6 +53,9 @@ pub(crate) struct Applied {
     pub notice: Option<String>,
     /// The stage slot now names a different job or stage.
     pub stage_changed: bool,
+    /// The event concerned a batch job still awaited: its progress,
+    /// or its terminal outcome.
+    pub relevant: bool,
 }
 
 /// Drawing-free state of a [`ProgressView`].
@@ -118,6 +121,25 @@ impl ViewState {
         matches!(&self.scope, Scope::Jobs { pending, .. } if pending.is_empty())
     }
 
+    /// True while the batch still awaits the job `id`.
+    pub fn awaits(&self, id: &str) -> bool {
+        matches!(&self.scope, Scope::Jobs { pending, .. } if pending.contains(id))
+    }
+
+    /// Records a terminal outcome learned outside the event stream, from
+    /// the queue as listed. Ignored when the job is not awaited: an
+    /// outcome the stream already delivered counts once.
+    pub fn settle(&mut self, record: JobOutcomeRecord) -> Applied {
+        let Self { scope, slot } = self;
+        let Scope::Jobs { total, pending } = scope else {
+            return Applied::default();
+        };
+        if !pending.contains(&record.job_id) {
+            return Applied::default();
+        }
+        finish(*total, pending, slot, record)
+    }
+
     /// Folds one broadcast event into the state.
     ///
     /// A batch takes `worker.progress` and terminal `queue.tick`
@@ -160,6 +182,7 @@ impl ViewState {
                 });
                 Applied {
                     stage_changed,
+                    relevant: true,
                     ..Applied::default()
                 }
             }
@@ -167,17 +190,7 @@ impl ViewState {
                 let Some(record) = extract_finished(&event.value, pending) else {
                     return Applied::default();
                 };
-                pending.remove(&record.job_id);
-                if slot.as_ref().is_some_and(|s| s.job_id == record.job_id) {
-                    *slot = None;
-                }
-                let done = *total - pending.len();
-                let notice = (*total > 1).then(|| outcome_line(done, *total, &record));
-                Applied {
-                    finished: Some(record),
-                    notice,
-                    stage_changed: false,
-                }
+                finish(*total, pending, slot, record)
             }
             _ => Applied::default(),
         }
@@ -212,6 +225,29 @@ impl ViewState {
             short_id(&s.job_id),
             s.stage
         ))
+    }
+}
+
+/// Takes `record` out of the awaited set, frees the stage slot it
+/// held, and words the outcome line a batch of more than one job
+/// prints for it.
+fn finish(
+    total: usize,
+    pending: &mut HashSet<String>,
+    slot: &mut Option<StageSlot>,
+    record: JobOutcomeRecord,
+) -> Applied {
+    pending.remove(&record.job_id);
+    if slot.as_ref().is_some_and(|s| s.job_id == record.job_id) {
+        *slot = None;
+    }
+    let done = total - pending.len();
+    let notice = (total > 1).then(|| outcome_line(done, total, &record));
+    Applied {
+        finished: Some(record),
+        notice,
+        stage_changed: false,
+        relevant: true,
     }
 }
 
@@ -313,10 +349,25 @@ impl ProgressView {
         self.state.pending()
     }
 
-    /// Folds one event into the view and redraws it. Returns the
-    /// terminal record of a batch job the event finished.
-    pub fn apply(&mut self, event: &Event) -> Option<JobOutcomeRecord> {
+    /// True while the batch still awaits the job `id`.
+    pub fn awaits(&self, id: &str) -> bool {
+        self.state.awaits(id)
+    }
+
+    /// Folds one event into the view and redraws it.
+    pub fn apply(&mut self, event: &Event) -> Applied {
         let applied = self.state.apply(event);
+        self.draw(applied)
+    }
+
+    /// Records an outcome learned from the queue as listed and redraws
+    /// the view. Returns the record when the job was still awaited.
+    pub fn settle(&mut self, record: JobOutcomeRecord) -> Option<JobOutcomeRecord> {
+        let applied = self.state.settle(record);
+        self.draw(applied).finished
+    }
+
+    fn draw(&mut self, applied: Applied) -> Applied {
         if let Some(notice) = &applied.notice {
             self.surface.notice(notice);
         }
@@ -326,7 +377,7 @@ impl ProgressView {
             self.surface.transition(&line);
         }
         self.surface.status(&self.state.status_line());
-        applied.finished
+        applied
     }
 }
 
