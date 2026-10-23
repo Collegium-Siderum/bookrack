@@ -28,6 +28,7 @@
 
 # Agent instructions — local working file, deliberately not committed
 /CLAUDE.md
+/AGENTS.md
 
 # Leak-check denylist — holds private literals, must stay local
 /scripts/leak-denylist.txt
