@@ -80,6 +80,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **The stale-session-lock message no longer tells you to delete the
+  lock.** `bookrack run`, `bookrack status` and the offline `doctor`
+  repairs ended their advice with `rm <lock>` once the recorded pid
+  was gone — but the recorded pid is only the last writer's word, a
+  lock still held stays held whoever holds it, and deleting the file
+  releases nothing: the next daemon locks a new file and runs beside
+  the holder. The message now says the daemon may still be starting,
+  points at `lsof <lock>` to list the processes that have the lock
+  open, and prints in three parts with a shell-quoted path; `--json`
+  carries the detail, the hint and `retryable: true`. The "within 2s"
+  it quoted is gone too: the probe allows up to twice that. Exit code
+  3 is unchanged.
 - **An event subscription no longer drops what arrives as it starts.**
   `events.subscribe` answered before the daemon registered the
   connection for events, and the control client registered its

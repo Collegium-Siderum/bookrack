@@ -316,9 +316,19 @@ async fn status_with_a_stale_lock_exits_three() -> Result<()> {
         "a held lock with a dead control plane is stale (exit 3); stderr={stderr:?}",
     );
     assert!(
-        stderr.contains("stale"),
-        "the error should name the stale lock: {stderr}",
+        stderr.contains("is held, and the daemon it records does not answer"),
+        "the summary states what the probe established: {stderr}",
     );
+    assert!(
+        stderr.contains("The lock records pid 999999"),
+        "the detail names the recorded pid: {stderr}",
+    );
+    let hint = stderr
+        .lines()
+        .find(|line| line.trim_start().starts_with("hint:"))
+        .unwrap_or_else(|| panic!("no hint line in: {stderr}"));
+    assert!(hint.contains("lsof"), "{hint}");
+    assert!(!stderr.contains("rm "), "no removal step: {stderr}");
     drop(holder);
     Ok(())
 }

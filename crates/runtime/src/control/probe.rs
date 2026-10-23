@@ -9,9 +9,10 @@
 //! - [`HealthProbe::Healthy`] — the daemon answered `daemon.version`
 //!   inside the timeout; the caller can hand its work over or surface
 //!   the recorded address and exit cleanly.
-//! - [`HealthProbe::Stale`] — the lock named a control-plane socket
-//!   but no live daemon answered; the caller should ask the operator
-//!   to remove the lock by hand.
+//! - [`HealthProbe::Stale`] — the lock is held and names a
+//!   control-plane socket, but nothing answered there; the caller
+//!   reports those two facts and points the operator at the process
+//!   holding the lock.
 //! - [`HealthProbe::Unprobeable`] — the lock did not name a
 //!   control-plane socket; the caller falls back to the underlying
 //!   acquire error.

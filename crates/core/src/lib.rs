@@ -21,6 +21,7 @@ mod problem;
 pub mod queue;
 mod redact;
 mod scope;
+pub mod shell;
 mod typed_id;
 mod vector;
 

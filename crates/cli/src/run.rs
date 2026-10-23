@@ -143,7 +143,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
 /// Resolve a session-lock conflict by probing the running daemon. A
 /// healthy daemon prints the recorded pid and control socket and
 /// returns `Ok` so a second `bookrack run` invocation is a no-op. A
-/// lock pointing at a dead daemon returns
+/// held lock whose recorded daemon does not answer returns
 /// [`BookrackCliError::StaleSessionLock`] (exit 3); an unprobeable
 /// lock returns [`BookrackCliError::SessionLockUnreadable`] (exit 1).
 async fn handle_lock_conflict(err: eyre::Report, lock_path: &Path) -> Result<()> {

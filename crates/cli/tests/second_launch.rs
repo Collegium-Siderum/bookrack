@@ -2,8 +2,8 @@
 
 //! Phase 5 second-launch contract: a second `bookrack run` against a
 //! runtime directory whose lock is held prints the recorded address
-//! and exits zero; a lock pointing at a dead daemon exits with status
-//! three so the operator removes it by hand.
+//! and exits zero; a held lock whose recorded daemon does not answer
+//! exits with status three.
 //!
 //! The daemon comes up in this process and again as a spawned
 //! `bookrack` subprocess, so both halves are isolated: `process_env`
@@ -175,12 +175,23 @@ async fn stale_lock_exits_three() -> Result<()> {
     .args(["run", "--no-mcp"])
     .output()
     .await?;
-    assert_eq!(
-        out.status.code(),
-        Some(3),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "stderr: {stderr}");
+    assert!(
+        stderr.contains("is held, and the daemon it records does not answer"),
+        "the summary states what the probe established: {stderr}"
     );
+    assert!(
+        stderr.contains("The lock records pid 999999"),
+        "the detail names the recorded pid: {stderr}"
+    );
+    let hint = stderr
+        .lines()
+        .find(|line| line.trim_start().starts_with("hint:"))
+        .unwrap_or_else(|| panic!("no hint line in: {stderr}"));
+    assert!(hint.contains("lsof"), "{hint}");
+    assert!(hint.contains("ps -p"), "{hint}");
+    assert!(!stderr.contains("rm "), "no removal step: {stderr}");
     drop(holder);
     Ok(())
 }

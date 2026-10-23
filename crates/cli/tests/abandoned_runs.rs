@@ -233,7 +233,7 @@ async fn an_unreadable_session_lock_refuses_the_offline_repair() {
 }
 
 /// A held lock whose control socket does not answer is the stale-lock
-/// state the exit-code table assigns `3`: the operator clears the lock
+/// state the exit-code table assigns `3`: the operator finds the holder
 /// first, and the repair does not run beside a daemon that may still be
 /// holding the write handle.
 #[tokio::test]
@@ -246,9 +246,15 @@ async fn a_stale_lock_refuses_the_offline_repair() {
     let (code, text) = close_abandoned_runs(&sandbox, &root, &["--dry-run"]).await;
     assert_eq!(code, 3, "a stale lock is exit 3: {text}");
     assert!(
-        text.contains("stale"),
-        "the refusal names the stale lock: {text}"
+        text.contains("is held, and the daemon it records does not answer"),
+        "the summary states what the probe established: {text}"
     );
+    let hint = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("hint:"))
+        .unwrap_or_else(|| panic!("no hint line in: {text}"));
+    assert!(hint.contains("lsof"), "{hint}");
+    assert!(!text.contains("rm "), "no removal step: {text}");
     assert!(!text.contains("would close"), "no plan is computed: {text}");
 }
 

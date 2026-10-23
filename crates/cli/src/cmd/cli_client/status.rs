@@ -11,7 +11,7 @@
 //! probe reports a healthy daemon:
 //!
 //! - no lock, or a leftover lock nobody holds → short card, exit 0;
-//! - flock held but the control plane does not answer within 2s
+//! - flock held but the control plane does not answer the probe
 //!   (stale) → [`BookrackCliError::StaleSessionLock`], exit 3;
 //! - flock held but the lock names no control socket (unprobeable) →
 //!   short card with the recorded pid, exit 0 — the probe made no

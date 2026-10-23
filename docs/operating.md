@@ -323,20 +323,25 @@ The card distinguishes four verdicts:
 
 | Verdict | How it is decided | Output | Exit |
 | --- | --- | --- | --- |
-| running | session lock held, control plane answers within 2s | full card | 0 |
+| running | session lock held, control plane answers the probe | full card | 0 |
 | not running | no lock, or a leftover lock nobody holds | short card pointing at `bookrack run`, with the library a restart would serve | 0 |
-| stale | lock held, control plane silent for 2s | error, with the steps to check the process before removing the lock | 3 |
+| stale | lock held, the daemon it records does not answer the probe | error naming the recorded pid, with the steps to find the holder | 3 |
 | unprobeable | lock held but records no control socket | short card with the recorded pid | 0 |
 
 "Not running" is an answer, not an error, so it exits 0; a daemon
 killed outright releases its flock and lands here, no cleanup needed.
-"Stale" means a process still holds the flock but its control plane
-has stopped answering — the same exit-3 contract as `bookrack run`
-against a stale lock. A suspended process looks exactly like this from
-outside, so the message walks the pid it recorded: check the process is
-there (`kill -0`), resume or end it if it is, and remove the lock only
-once it is gone. Deleting the lock under a live daemon leaves two
-processes believing they own the same session. "Unprobeable" means the lock names no control
+"Stale" means a process still holds the flock but the control plane
+the lock records has not answered — the same exit-3 contract as
+`bookrack run` against a stale lock. That daemon may still be starting,
+so the first step is to retry in a moment. Otherwise `lsof <lock>`
+lists the processes that have the lock file open, and the holder is
+among them: check a candidate with `ps`, then resume or end it if it
+is a bookrack daemon, or stop it if it is something else. Nothing
+listed means the holder has already exited and the lock is released;
+retry. The lock is released when its holder exits, never by deleting
+the file: a held lock stays held when its file is unlinked, and the
+next daemon then locks a new file and runs beside the holder.
+"Unprobeable" means the lock names no control
 address (a daemon started without a control listener, or a hand-edited
 lock): the probe made no verdict that the daemon is dead, so status
 does not either — but note that under `--quiet`, where the exit code

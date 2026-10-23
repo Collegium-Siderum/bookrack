@@ -40,24 +40,22 @@ pub enum BookrackCliError {
         source: ControlError,
     },
 
-    /// `bookrack run` found a lock pointing at a daemon that did not
-    /// answer the health probe within the grace window.
+    /// A session lock that is held, whose recorded daemon did not
+    /// answer the control-plane probe. `bookrack run`, `bookrack
+    /// status`, and the offline `doctor` repairs all return it; exit 3.
     ///
-    /// A daemon that stopped answering has not necessarily stopped
-    /// existing: a suspended process holds its `flock` and answers
-    /// nothing, which is exactly what this state looks like. The remedy
-    /// therefore starts by asking whether the process is there, and
-    /// reaches removing the lock only after that has been answered —
-    /// deleting it under a live daemon leaves two processes believing
-    /// they own the same session. The recorded pid is what makes the
-    /// first step something the operator can run.
+    /// The summary states the two facts the probe established: the
+    /// lock is held, and nothing answered on the socket it records.
+    /// Who holds the lock, and whether the recorded daemon still
+    /// exists, are not among them: the pid in the lock is the last
+    /// writer's word, and a `flock` follows the holder's file handle,
+    /// not a pid. The hint therefore lists the processes that have the
+    /// lock file open and asks for the holder to be resumed or ended,
+    /// which releases the lock. It never says to delete the file: a
+    /// held lock stays held when its file is unlinked, and the next
+    /// daemon then locks a new file and runs beside the holder.
     #[error(
-        "bookrack session lock at {path} is stale (no live daemon answered within 2s).\n\
-         The daemon recorded there may still exist; check before removing the lock:\n\
-         \x20 1. is it alive?      kill -0 {pid}\n\
-         \x20 2. if it is, it may be suspended: kill -CONT {pid} to resume it, \
-         or 'bookrack quit' / kill {pid} to end it\n\
-         \x20 3. only once it is gone:  rm {path}",
+        "the session lock at \"{path}\" is held, and the daemon it records does not answer",
         path = .path.display()
     )]
     StaleSessionLock { path: PathBuf, pid: u32 },
@@ -384,6 +382,26 @@ impl BookrackCliError {
                     retryable: false,
                 });
             }
+            Self::StaleSessionLock { path, pid } => {
+                let path = path.to_string_lossy();
+                let quoted = bookrack_core::shell::quote_arg(&path);
+                return Some(ProblemData {
+                    detail: Some(format!(
+                        "The lock records pid {pid}; nothing answered `daemon.version` on the \
+                         control socket it records."
+                    )),
+                    hint: Some(format!(
+                        "The daemon may still be starting: retry in a moment. Otherwise \
+                         `lsof {quoted}` lists the processes that have the lock open, and the \
+                         holder is among them; check a candidate with \
+                         `ps -p <pid> -o command=`. A bookrack daemon can be resumed with \
+                         `kill -CONT <pid>`, or ended with `bookrack quit` or `kill <pid>`; \
+                         stop any other process holding it. If nothing is listed, the lock \
+                         has been released: retry. Deleting the lock file never releases it."
+                    )),
+                    retryable: true,
+                });
+            }
             Self::RpcMethodNotNamespaced { .. } => {
                 return Some(ProblemData {
                     detail: Some(
@@ -462,30 +480,45 @@ pub fn classify_eyre(err: &eyre::Report) -> Option<CliReportCause<'_>> {
 mod tests {
     use super::*;
 
-    /// The stale-lock remedy asks whether the process exists before it
-    /// says to delete anything. A suspended daemon holds its `flock`
-    /// and answers no probe, which is indistinguishable from a dead one
-    /// from here — so a message whose first instruction is `rm` tells
-    /// the operator to strand a live daemon's session.
+    /// The stale-lock message is three parts: a one-line summary that
+    /// states only what the probe established, a detail naming the
+    /// recorded pid, and a hint that lists the lock's openers with a
+    /// shell-quoted path and never says to delete the file. The path
+    /// carries a space and a single quote so the quoting is exercised.
     #[test]
-    fn the_stale_lock_remedy_checks_for_the_process_before_removing_the_lock() {
-        let rendered = BookrackCliError::StaleSessionLock {
-            path: PathBuf::from("/run/bookrack.tty.lock"),
+    fn the_stale_lock_remedy_finds_the_holder_and_never_removes_the_lock() {
+        let err = BookrackCliError::StaleSessionLock {
+            path: PathBuf::from("/run/book rack's/bookrack.tty.lock"),
             pid: 4242,
+        };
+        let summary = err.to_string();
+        assert_eq!(summary.lines().count(), 1, "one line: {summary}");
+        assert!(
+            summary.contains("/run/book rack's/bookrack.tty.lock"),
+            "the summary shows the path as it is: {summary}"
+        );
+        assert!(!summary.contains("rm "), "{summary}");
+        assert!(!summary.contains("2s"), "{summary}");
+
+        let data = err.problem_data().expect("a stale lock is explained");
+        let detail = data.detail.expect("the detail names the recorded pid");
+        assert!(detail.contains("4242"), "{detail}");
+        let hint = data.hint.expect("the hint says how to find the holder");
+        let lsof = hint
+            .find("lsof '/run/book rack'\\''s/bookrack.tty.lock'")
+            .unwrap_or_else(|| panic!("no shell-quoted `lsof` step in: {hint}"));
+        for step in ["ps -p", "kill -CONT", "bookrack quit"] {
+            let at = hint
+                .find(step)
+                .unwrap_or_else(|| panic!("no `{step}` step in: {hint}"));
+            assert!(lsof < at, "`lsof` comes before `{step}`: {hint}");
         }
-        .to_string();
-        let removal = rendered
-            .find("rm /run/bookrack.tty.lock")
-            .expect("the message still says how to remove the lock");
-        for probe in ["kill -0 4242", "kill -CONT 4242", "bookrack quit"] {
-            let at = rendered
-                .find(probe)
-                .unwrap_or_else(|| panic!("no `{probe}` step in: {rendered}"));
-            assert!(
-                at < removal,
-                "`{probe}` must come before the removal step: {rendered}"
-            );
-        }
+        assert!(!hint.contains("rm "), "no removal step: {hint}");
+        assert!(!hint.contains("2s"), "{hint}");
+        assert!(
+            data.retryable,
+            "a daemon still starting answers the next probe"
+        );
     }
 
     #[test]
