@@ -211,6 +211,9 @@ impl Listing {
             Some(JobState::Failed) => {
                 for group in failure_groups(jobs) {
                     let _ = writeln!(out, "{}  ({})", group.cause, group.rows.len());
+                    for hint in &group.hints {
+                        let _ = writeln!(out, "  hint: {hint}");
+                    }
                     let mut table = RowTable::new(["id", "kind", "queued", "priority", "path"]);
                     for job in group.rows {
                         table.push_row(row_cells(job, long, false));
@@ -285,24 +288,39 @@ fn row_cells(job: &Value, long: bool, with_state: bool) -> Vec<String> {
     cells
 }
 
-/// Failed rows that share a cause, in queue order.
+/// Failed rows that share a cause, in queue order, with the distinct
+/// hints their recorded diagnostics carry, in first-seen order.
 struct FailureGroup<'a> {
     cause: String,
+    hints: Vec<&'a str>,
     rows: Vec<&'a Value>,
 }
 
 /// Groups failed rows by [`failure_cause`], largest group first; groups
-/// of one size keep the order their first row has in the queue.
+/// of one size keep the order their first row has in the queue. The
+/// key stays the flattened `error` text, which every failed row has;
+/// the recorded diagnostic only adds the hints printed under the header.
 fn failure_groups(jobs: &[Value]) -> Vec<FailureGroup<'_>> {
     let mut groups: Vec<FailureGroup<'_>> = Vec::new();
     for job in jobs {
         let cause = failure_cause(job.get("error").and_then(Value::as_str));
-        match groups.iter_mut().find(|group| group.cause == cause) {
-            Some(group) => group.rows.push(job),
-            None => groups.push(FailureGroup {
-                cause,
-                rows: vec![job],
-            }),
+        let hint = job.pointer("/problem/hint").and_then(Value::as_str);
+        let group = match groups.iter_mut().position(|group| group.cause == cause) {
+            Some(index) => &mut groups[index],
+            None => {
+                groups.push(FailureGroup {
+                    cause,
+                    hints: Vec::new(),
+                    rows: Vec::new(),
+                });
+                groups.last_mut().expect("just pushed")
+            }
+        };
+        group.rows.push(job);
+        if let Some(hint) = hint
+            && !group.hints.contains(&hint)
+        {
+            group.hints.push(hint);
         }
     }
     groups.sort_by_key(|group| std::cmp::Reverse(group.rows.len()));
@@ -568,6 +586,59 @@ mod tests {
         assert!(!out.contains("showing "), "{out}");
         assert!(out.contains("failed 2  cancelled 1  total 5"), "{out}");
         assert!(out.ends_with("queue is paused\n"), "{out}");
+    }
+
+    /// Hints sit under the cause header: each distinct hint of the group
+    /// once, in first-seen order; a group whose rows record no
+    /// diagnostic has no hint line.
+    #[test]
+    fn the_failed_listing_prints_each_distinct_hint_under_the_header() {
+        let mut with_hint = job("failed-3", "failed", Some(NO_BODY));
+        with_hint["problem"] = json!({
+            "summary": "cannot ingest: the extraction produced no body",
+            "hint": "Check that the source is not image-only.",
+            "retryable": false,
+        });
+        let mut other_hint = job("failed-4", "failed", Some(NO_BODY));
+        other_hint["problem"] = json!({
+            "summary": "cannot ingest: the extraction produced no body",
+            "hint": "Run `bookrack intake ocr` on it.",
+            "retryable": false,
+        });
+        let mut same_hint = job("failed-5", "failed", Some(NO_BODY));
+        same_hint["problem"] = with_hint["problem"].clone();
+        let mut reply = reply();
+        for row in [with_hint, other_hint, same_hint] {
+            reply["jobs"].as_array_mut().unwrap().push(row);
+        }
+        let out = Listing::select(reply, Some(JobState::Failed), None).render(false);
+        let lines: Vec<&str> = out.lines().collect();
+        let header = lines
+            .iter()
+            .position(|line| {
+                line.starts_with("extract error: extraction produced no body blocks  (4)")
+            })
+            .unwrap_or_else(|| panic!("{out}"));
+        assert_eq!(
+            &lines[header + 1..header + 3],
+            [
+                "  hint: Check that the source is not image-only.",
+                "  hint: Run `bookrack intake ocr` on it.",
+            ],
+            "{out}"
+        );
+        assert!(
+            lines[header + 3].starts_with('\u{250c}'),
+            "the row table follows the hints: {out}"
+        );
+        let missing = lines
+            .iter()
+            .position(|line| line.starts_with("reading the source file failed"))
+            .unwrap_or_else(|| panic!("{out}"));
+        assert!(
+            lines[missing + 1].starts_with('\u{250c}'),
+            "a group without diagnostics has no hint line: {out}"
+        );
     }
 
     #[test]

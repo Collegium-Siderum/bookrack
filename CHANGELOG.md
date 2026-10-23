@@ -18,7 +18,12 @@ release workflow extracts the matching section verbatim from this file.
   rows of MCP `session.queue_status` carry it; `error` stays as it was.
   The queue document moves to schema 7; a document from an earlier build
   loads unchanged, and an earlier build refuses one this build has
-  written, naming both versions.
+  written, naming both versions. On the command line, `ingest --wait`,
+  `papers ingest --wait`, `intake ocr --wait` and `queue wait` name a
+  failed job by the recorded summary instead of the whole chain and
+  print each distinct hint under the summary line; `queue list --state
+  failed` prints the hints under each cause header. Under `--json`, a
+  record whose failure was classified carries `problem`.
 - **MCP `session.queue_status` says why a job failed, and can list one
   state.** A `recent` row carries `finished_at` once the job has ended
   and `error` when it failed, with a dependency source location
@@ -227,7 +232,8 @@ release workflow extracts the matching section verbatim from this file.
   and nothing else: the per-job outcome line that carries the error
   is printed only for a batch of several, and the one-job summary
   named the state alone, so the reason was reachable only through
-  `--json` or `queue list`. The summary now reads `(failed: <error>)`.
+  `--json` or `queue list`. The summary now names the reason:
+  `(failed: <reason>)`.
 - **`--audit-profile` is refused on `doctor`, `init`, `run`, and
   `rpc`.** The gate that rejects the global flag on a subcommand that
   does not consume it ran after those four had already dispatched, so

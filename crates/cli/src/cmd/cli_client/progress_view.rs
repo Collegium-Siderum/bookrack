@@ -267,12 +267,18 @@ pub(crate) fn extract_finished(
     let kind = lf.get("kind")?.as_str()?.to_string();
     let state = JobOutcomeState::from_wire(lf.get("state")?.as_str()?)?;
     let error = lf.get("error").and_then(Value::as_str).map(String::from);
+    // A diagnostic that does not read as one is dropped, not the frame:
+    // the record still carries its state and flattened text.
+    let problem = lf
+        .get("problem")
+        .and_then(|value| serde_json::from_value(value.clone()).ok());
     let finished_at = lf.get("finished_at")?.as_str()?.to_string();
     Some(JobOutcomeRecord {
         job_id,
         kind,
         state,
         error,
+        problem,
         finished_at,
     })
 }
@@ -295,9 +301,9 @@ fn outcome_line(done: usize, total: usize, record: &JobOutcomeRecord) -> String 
         short_id(&record.job_id),
         state_word(record.state)
     );
-    if let Some(error) = &record.error {
+    if let Some(reason) = record.reason() {
         line.push_str(": ");
-        line.push_str(error);
+        line.push_str(reason);
     }
     line
 }
@@ -459,6 +465,12 @@ mod tests {
     }
 
     fn finished(job_id: &str, state: &str, error: Option<&str>) -> Event {
+        finished_with(job_id, state, error, Value::Null)
+    }
+
+    /// [`finished`] with a `problem` value on `last_finished`; `Null`
+    /// leaves the key out.
+    fn finished_with(job_id: &str, state: &str, error: Option<&str>, problem: Value) -> Event {
         let mut lf = json!({
             "job_id": job_id,
             "kind": "book",
@@ -468,10 +480,42 @@ mod tests {
         if let Some(e) = error {
             lf["error"] = json!(e);
         }
+        if !problem.is_null() {
+            lf["problem"] = problem;
+        }
         event(
             "queue.tick",
             json!({ "pending": 0, "running": 0, "last_finished": lf }),
         )
+    }
+
+    #[test]
+    fn extract_finished_reads_the_problem() {
+        let mut pending = HashSet::new();
+        pending.insert("a".to_string());
+        let ev = finished_with(
+            "a",
+            "failed",
+            Some("ingest: embed error: no model"),
+            json!({ "summary": "cannot embed", "hint": "Pull it first.", "retryable": false }),
+        );
+        let record = extract_finished(&ev.value, &pending).expect("a failed terminal");
+        assert_eq!(record.reason(), Some("cannot embed"));
+        let problem = record.problem.expect("the diagnostic is read");
+        assert_eq!(problem.summary, "cannot embed");
+        assert_eq!(problem.data.hint.as_deref(), Some("Pull it first."));
+    }
+
+    /// A `problem` that is not a diagnostic object does not void the
+    /// frame: the record keeps its state and flattened text.
+    #[test]
+    fn an_unshaped_problem_reads_as_none() {
+        let mut pending = HashSet::new();
+        pending.insert("a".to_string());
+        let ev = finished_with("a", "failed", Some("boom"), json!("not an object"));
+        let record = extract_finished(&ev.value, &pending).expect("the frame still reads");
+        assert!(record.problem.is_none());
+        assert_eq!(record.reason(), Some("boom"));
     }
 
     fn slot_of(state: &ViewState) -> Option<(String, String, Option<u8>)> {
@@ -605,6 +649,20 @@ mod tests {
             applied.notice.as_deref(),
             Some("1/2 bbbbbbbb failed: source unreadable")
         );
+
+        // With a recorded diagnostic the line names its summary, not
+        // the flattened chain.
+        let mut batch = ViewState::for_jobs(&ids(&[A, B]));
+        let applied = batch.apply(&finished_with(
+            B,
+            "failed",
+            Some("ingest: registry-mediated ingest: embed error: no model"),
+            json!({ "summary": "cannot embed", "retryable": false }),
+        ));
+        assert_eq!(
+            applied.notice.as_deref(),
+            Some("1/2 bbbbbbbb failed: cannot embed")
+        );
     }
 
     #[test]
@@ -681,6 +739,7 @@ mod tests {
             kind: "book".to_string(),
             state,
             error: error.map(String::from),
+            problem: None,
             finished_at: "2026-01-01T00:00:00Z".to_string(),
         }
     }

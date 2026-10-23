@@ -260,6 +260,7 @@ fn ended_record(job: &QueueJob, row: &Value) -> Result<JobOutcomeRecord> {
         kind: kind.to_string(),
         state,
         error: job.error.clone(),
+        problem: job.problem.clone(),
         finished_at: finished_at.to_string(),
     })
 }
@@ -1286,5 +1287,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A listed row's recorded diagnostic reaches the record, and the
+    /// record it makes is the one the closing tick would have made.
+    #[test]
+    fn ended_record_carries_the_problem() {
+        let problem = serde_json::json!({
+            "summary": "cannot embed: the model is not available",
+            "hint": "Pull it first.",
+            "retryable": false,
+        });
+        let mut row = row_with(A, "failed", "book", Some("ingest: embed error: no model"));
+        row["problem"] = problem.clone();
+        let job: QueueJob = serde_json::from_value(row.clone()).unwrap();
+        let from_row = ended_record(&job, &row).unwrap();
+        assert_eq!(
+            serde_json::to_value(from_row.problem.as_ref()).unwrap(),
+            problem
+        );
+        assert_eq!(
+            from_row.reason(),
+            Some("cannot embed: the model is not available")
+        );
+
+        let mut event = finished(A, "failed", "book", Some("ingest: embed error: no model"));
+        event.value["last_finished"]["problem"] = problem;
+        let pending: HashSet<String> = HashSet::from([A.to_string()]);
+        let from_event = extract_finished(&event.value, &pending).unwrap();
+        assert_eq!(
+            serde_json::to_value(&from_row).unwrap(),
+            serde_json::to_value(&from_event).unwrap()
+        );
     }
 }

@@ -37,6 +37,9 @@ const QUEUED_AT: &str = "2026-01-02T03:04:05Z";
 const FINISHED_AT: &str = "2026-01-02T03:05:05Z";
 const FAILURE_TEXT: &str =
     "ingest: registry-mediated ingest: reading the source file failed: no such file";
+/// The classified diagnostic seeded beside [`FAILURE_TEXT`].
+const FAILURE_SUMMARY: &str = "cannot read the source file";
+const FAILURE_HINT: &str = "Check that the path still exists.";
 
 fn row(id: &str, state: &str, error: Option<&str>) -> Value {
     let ended = state != "pending";
@@ -55,6 +58,11 @@ fn row(id: &str, state: &str, error: Option<&str>) -> Value {
         "started_at": if ended { Value::String(QUEUED_AT.into()) } else { Value::Null },
         "finished_at": if ended { Value::String(FINISHED_AT.into()) } else { Value::Null },
         "error": error,
+        "problem": error.map(|_| json!({
+            "summary": FAILURE_SUMMARY,
+            "hint": FAILURE_HINT,
+            "retryable": false,
+        })),
         "merged_into": null,
     })
 }
@@ -279,6 +287,14 @@ async fn wait_reports_ended_and_awaited_jobs_through_the_command_entry() {
     );
     assert_eq!(report["totals"]["failed"], 1, "{report}");
     assert_eq!(report["jobs"][0]["error"], FAILURE_TEXT, "{report}");
+    assert_eq!(
+        report["jobs"][0]["problem"]["hint"], FAILURE_HINT,
+        "the record carries the recorded diagnostic: {report}"
+    );
+    assert!(
+        report["jobs"][1].get("problem").is_none(),
+        "a done record carries no problem: {report}"
+    );
 
     let (code, stdout, stderr) = client(
         &sandbox,
@@ -286,11 +302,49 @@ async fn wait_reports_ended_and_awaited_jobs_through_the_command_entry() {
     )
     .await;
     assert_eq!(code, Some(5), "{stderr}");
-    assert!(stdout.starts_with("Completed 2 jobs in "), "{stdout}");
-    assert!(stdout.contains("(1 done, 1 failed)"), "{stdout}");
+    let mut lines = stdout.lines();
+    let summary = lines.next().unwrap_or_default();
+    assert!(summary.starts_with("Completed 2 jobs in "), "{stdout}");
+    assert!(summary.contains("(1 done, 1 failed)"), "{stdout}");
+    assert_eq!(
+        lines.next(),
+        Some(format!("  hint: {FAILURE_HINT}").as_str()),
+        "the hint follows the summary line: {stdout}"
+    );
     assert!(
-        stderr.contains(&format!("1/2 00000001 failed: {FAILURE_TEXT}")),
-        "{stderr}"
+        stderr.contains(&format!("1/2 00000001 failed: {FAILURE_SUMMARY}")),
+        "the outcome line names the recorded summary, not the chain: {stderr}"
+    );
+
+    // One named job that failed: the summary line names the recorded
+    // summary and the hint follows it.
+    let (code, stdout, stderr) = client(&sandbox, &["queue", "wait", "--job", "0a000000"]).await;
+    assert_eq!(code, Some(5), "{stderr}");
+    let mut lines = stdout.lines();
+    let first = lines.next().unwrap_or_default();
+    assert!(
+        first.ends_with(&format!("(failed: {FAILURE_SUMMARY})")),
+        "{stdout}"
+    );
+    assert_eq!(
+        lines.next(),
+        Some(format!("  hint: {FAILURE_HINT}").as_str()),
+        "{stdout}"
+    );
+
+    // The failed listing prints the hint under the cause header.
+    let (code, stdout, stderr) = client(&sandbox, &["queue", "list", "--state", "failed"]).await;
+    assert_eq!(code, Some(0), "{stderr}");
+    let mut lines = stdout.lines();
+    let header = lines.next().unwrap_or_default();
+    assert!(
+        header.starts_with("reading the source file failed: no such file  ("),
+        "{stdout}"
+    );
+    assert_eq!(
+        lines.next(),
+        Some(format!("  hint: {FAILURE_HINT}").as_str()),
+        "the hint sits under the cause header: {stdout}"
     );
 
     // A named cancelled job fails the wait.

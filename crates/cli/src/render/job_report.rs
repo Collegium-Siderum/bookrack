@@ -10,6 +10,7 @@
 
 use std::time::Duration;
 
+use bookrack_core::Problem;
 use serde::Serialize;
 
 use super::human::short_id;
@@ -62,7 +63,23 @@ pub struct JobOutcomeRecord {
     pub state: JobOutcomeState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The classified diagnostic the daemon recorded beside the failure,
+    /// when it recorded one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<Problem>,
     pub finished_at: String,
+}
+
+impl JobOutcomeRecord {
+    /// The one-line reason for the outcome: the recorded diagnostic's
+    /// summary when the daemon classified the failure, else the
+    /// flattened error text.
+    pub fn reason(&self) -> Option<&str> {
+        self.problem
+            .as_ref()
+            .map(|p| p.summary.as_str())
+            .or(self.error.as_deref())
+    }
 }
 
 /// Aggregate count of terminal states across the report.
@@ -135,12 +152,31 @@ impl JobOutcomeReport {
         self.is_complete() && self.totals.failed == 0 && self.totals.cancelled == 0
     }
 
+    /// One `hint: <hint>` line per distinct hint among the records'
+    /// diagnostics, in record order; a hint several jobs share is
+    /// printed once.
+    pub fn hint_lines(&self) -> Vec<String> {
+        let mut seen: Vec<&str> = Vec::new();
+        for hint in self
+            .jobs
+            .iter()
+            .filter_map(|job| job.problem.as_ref()?.data.hint.as_deref())
+        {
+            if !seen.contains(&hint) {
+                seen.push(hint);
+            }
+        }
+        seen.into_iter()
+            .map(|hint| format!("hint: {hint}"))
+            .collect()
+    }
+
     /// One-line human summary for a single-job report.
     ///
     /// `action` is the verb stem (e.g. `"Ingested"`). `label` is the
     /// noun the operator can recognise (typically a basename). A
-    /// single job's state word carries the job's error after a colon
-    /// when the outcome recorded one. The report degrades gracefully
+    /// single job's state word carries the job's reason after a colon
+    /// when the outcome recorded one ([`JobOutcomeRecord::reason`]). The report degrades gracefully
     /// when more than one job is present (falls back to the aggregate
     /// counts). An incomplete report counts the ended jobs against the
     /// whole batch and says how many are still queued.
@@ -161,9 +197,9 @@ impl JobOutcomeReport {
             // error travels on the summary itself.
             [only] => {
                 let mut verb = state_word(only.state).to_string();
-                if let Some(error) = &only.error {
+                if let Some(reason) = only.reason() {
                     verb.push_str(": ");
-                    verb.push_str(error);
+                    verb.push_str(reason);
                 }
                 format!(
                     "{action} {label} as {id} in {elapsed} ({verb})",
@@ -237,8 +273,75 @@ mod tests {
             kind: "book".to_string(),
             state,
             error: None,
+            problem: None,
             finished_at: "2026-01-01T00:00:00Z".to_string(),
         }
+    }
+
+    /// A failed record carrying both the flattened text and the
+    /// classified diagnostic.
+    fn failed_with_problem(
+        id: &str,
+        error: &str,
+        summary: &str,
+        hint: Option<&str>,
+    ) -> JobOutcomeRecord {
+        let mut record = rec(id, JobOutcomeState::Failed);
+        record.error = Some(error.to_string());
+        let mut problem = Problem::new(summary);
+        if let Some(hint) = hint {
+            problem = problem.hint(hint);
+        }
+        record.problem = Some(problem);
+        record
+    }
+
+    /// The one-job summary names the recorded summary when there is
+    /// one, and falls back to the flattened text when there is not.
+    #[test]
+    fn a_one_job_summary_prefers_the_recorded_summary() {
+        let r = JobOutcomeReport::new(
+            vec![failed_with_problem(
+                "0190f6c0-ac42-7e05-7000-deadbeef",
+                "ingest: registry-mediated ingest: embed error: no model",
+                "cannot embed: the model is not available",
+                Some("Pull it first."),
+            )],
+            Duration::from_millis(3_200),
+        );
+        assert_eq!(
+            r.format_one_line("Ingested", "sample.epub"),
+            "Ingested sample.epub as deadbeef in 3.2s (failed: cannot embed: the model is not available)"
+        );
+        assert_eq!(r.hint_lines(), ["hint: Pull it first."]);
+
+        let mut plain = rec("0190f6c0-ac42-7e05-7000-deadbeef", JobOutcomeState::Failed);
+        plain.error = Some("source unreadable".to_string());
+        let r = JobOutcomeReport::new(vec![plain], Duration::from_millis(3_200));
+        assert!(
+            r.format_one_line("Ingested", "sample.epub")
+                .ends_with("(failed: source unreadable)")
+        );
+        assert!(r.hint_lines().is_empty());
+    }
+
+    /// Three failures, two distinct hints, one record without any:
+    /// each hint once, in record order.
+    #[test]
+    fn hint_lines_prints_each_distinct_hint_once() {
+        let r = JobOutcomeReport::new(
+            vec![
+                failed_with_problem("a", "e", "cannot embed", Some("Pull it first.")),
+                failed_with_problem("b", "e", "cannot read", None),
+                failed_with_problem("c", "e", "could not reach Ollama", Some("Start Ollama.")),
+                failed_with_problem("d", "e", "cannot embed", Some("Pull it first.")),
+            ],
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            r.hint_lines(),
+            ["hint: Pull it first.", "hint: Start Ollama."]
+        );
     }
 
     #[test]

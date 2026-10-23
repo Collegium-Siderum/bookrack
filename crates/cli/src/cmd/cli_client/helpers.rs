@@ -295,6 +295,9 @@ pub fn emit_job_summary(report: &JobOutcomeReport, action: &str, label: &str) {
         return;
     }
     println!("{}", report.format_one_line(action, label));
+    for line in report.hint_lines() {
+        println!("  {line}");
+    }
 }
 
 /// Render the per-batch summary and translate a non-success outcome
@@ -737,6 +740,7 @@ mod tests {
             kind: "book".into(),
             state,
             error: None,
+            problem: None,
             finished_at: "2026-01-01T00:00:00Z".into(),
         }
     }
