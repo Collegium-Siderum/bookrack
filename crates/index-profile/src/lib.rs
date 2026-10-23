@@ -25,7 +25,7 @@ pub use load::{ProfileLoadError, parse_str};
 pub use models::{
     EMBED_MODELS, EmbedModelInfo, RERANKER_MODELS, RerankerModelInfo, embed_model, reranker_model,
 };
-pub use validate::{Finding, Severity, has_errors, validate};
+pub use validate::{Advice, Finding, Severity, advise, has_errors, validate};
 
 /// Schema version every profile file must declare. Bumped only when a
 /// renamed or removed field changes an existing file's on-disk meaning.
@@ -130,7 +130,8 @@ pub struct EmbedSpec {
     pub backend: String,
     /// Embedding model tag.
     pub model: String,
-    /// Vector dimension the model emits.
+    /// The dimension the index is built at. A reset checks it against
+    /// what the backend returns for `model` before it changes anything.
     pub dim: u32,
 }
 
@@ -343,7 +344,7 @@ mod tests {
         // are allowed.
         for name in ALL_BUILT_IN_NAMES {
             let profile = IndexProfile::from_named(name).expect("built-in resolves");
-            let findings = validate(&profile, false);
+            let findings = validate(&profile);
             let errors: Vec<_> = findings
                 .iter()
                 .filter(|f| f.severity == Severity::Error)

@@ -23,6 +23,7 @@ mod cascade;
 mod catalog_meta;
 mod csl;
 mod db;
+mod diagnostic_text;
 mod effective;
 mod expressions;
 mod intake;

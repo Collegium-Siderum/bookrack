@@ -481,10 +481,29 @@ running system can still move are `nprobes` and `refine_factor`, through
 the two per-query variables above.
 
 `validate` enforces the product-quantization constraints, checks the
-cross-encoder reranker contract, and consults an offline model registry
-that `--allow-unknown-model` bypasses. `bookrack doctor` additionally
+cross-encoder reranker contract and the embed section's structure, and
+consults an offline model registry. The registry records what is known
+about the qualified models rather than which models may be used: a
+listed model must be declared at the dimension it emits, while a model
+it does not list validates on structure alone, and `index-profile
+apply` and `libraries config` accept it. `--allow-unknown-model` is
+deprecated and has no effect.
+
+What the registry does not know — an unlisted embed or cross-encoder
+model, a pairing across model families — those two write entrances say
+in a `note:` line, once per library: a note already shown for a library
+is not shown again until what it says changes. The record of what each
+library was shown is `advice-seen.toml` beside the registry file;
+deleting it shows every note again. A write under `--json` or `--quiet`
+prints no note and records none.
+
+`bookrack doctor` additionally
 compares each library's referenced profile against its built index
-stamps and warns on a mismatch that would keep the daemon from starting.
+stamps whenever the profile resolves, whether or not it validates, and
+warns on any mismatch. A different model or algorithm version keeps the
+daemon from serving a non-empty index; a different declared dimension
+does not — opening a library compares the width the backend produces
+with the stamp — and is checked against the backend before a reset.
 
 The sixth verb changes things rather than reporting them:
 

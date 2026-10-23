@@ -21,7 +21,7 @@ use bookrack_config::{
     Config, EmbedConfig, LibraryEntry, LibraryKind, LibrarySelection, list_libraries, load_manifest,
 };
 use bookrack_index_profile::{
-    Finding, IndexProfile, ProfileOrigin, RerankerKind, Severity, builtin_toml, has_errors,
+    Advice, Finding, IndexProfile, ProfileOrigin, RerankerKind, Severity, builtin_toml, has_errors,
     list_profiles, resolve, validate,
 };
 use bookrack_vectors::ChunkStore;
@@ -61,14 +61,13 @@ pub enum IndexProfileAction {
     /// an error.
     #[command(after_long_help = bookrack_cli_grammar::examples![
         "index-profile validate qwen3-0.6b-default",
-        "index-profile validate qwen3-0.6b-default --allow-unknown-model",
+        "index-profile validate my-profile",
     ])]
     Validate {
         /// Profile name.
         name: String,
-        /// Skip the "model is known" and "declared dimension matches"
-        /// registry checks so an out-of-tree model can still be checked
-        /// structurally.
+        /// Deprecated; has no effect. A model outside the registry is
+        /// not a validation error.
         #[arg(long)]
         allow_unknown_model: bool,
     },
@@ -265,7 +264,7 @@ fn show(name: &str) -> Result<()> {
     let (profile, _) = resolve(dir.as_deref(), name)?
         .ok_or_else(|| eyre::eyre!("unknown index profile '{name}'"))?;
     println!();
-    render_findings(&validate(&profile, false));
+    render_findings(&validate(&profile));
     Ok(())
 }
 
@@ -273,7 +272,13 @@ fn validate_cmd(name: &str, allow_unknown_model: bool) -> Result<()> {
     let dir = user_profile_dir();
     let (profile, _source) = resolve(dir.as_deref(), name)?
         .ok_or_else(|| eyre::eyre!("unknown index profile '{name}'"))?;
-    let findings = validate(&profile, allow_unknown_model);
+    if allow_unknown_model {
+        eprintln!(
+            "warning: --allow-unknown-model is deprecated and has no effect; models outside \
+             the registry are accepted"
+        );
+    }
+    let findings = validate(&profile);
     render_findings(&findings);
     if has_errors(&findings) {
         let errors = findings
@@ -770,6 +775,10 @@ pub struct ApplyPlan {
     pub profile: IndexProfile,
     /// Per-pipeline sections, in [`Pipeline::ALL`] order.
     pub sections: Vec<PipelineSection>,
+    /// The registry's remarks on the profile the library has not been
+    /// shown yet; rendered under the profile line. A caller that renders
+    /// for a machine or for silence clears it.
+    pub advice: Vec<Advice>,
 }
 
 impl ApplyPlan {
@@ -852,11 +861,36 @@ pub async fn plan_apply(
         });
     }
 
+    let advice = crate::profile::pending_advice(target.data_dir(), Some(&profile));
     Ok(ApplyPlan {
         target,
         profile,
         sections,
+        advice,
     })
+}
+
+/// One registry remark as the terminal note both write entrances print
+/// when they point a library at a profile.
+pub fn advice_line(advice: &Advice) -> String {
+    match advice {
+        Advice::UnlistedEmbedModel { model, dim } => format!(
+            "note: embed model '{model}' is not in the model registry; its dimension ({dim}) \
+             is taken as declared, and a reset checks it against the backend first"
+        ),
+        Advice::UnlistedReranker { model } => format!(
+            "note: reranker model '{model}' is not in the model registry and has no pinned \
+             download; serve it through reranker.url, or set {} to its GGUF file",
+            bookrack_config::RERANKER_MODEL_ENV
+        ),
+        Advice::CrossFamilyPair {
+            embed_family,
+            reranker_family,
+        } => format!(
+            "note: reranker family '{reranker_family}' differs from embed family \
+             '{embed_family}'; cross-family pairs are unverified"
+        ),
+    }
 }
 
 /// Best-effort chunk-row count for the plan's scale hint. Read-only:
@@ -888,6 +922,9 @@ pub fn render_apply_plan(plan: &ApplyPlan, queue_busy: Option<u32>) {
         p.ann.kind.as_str(),
         ann_params(p)
     );
+    for advice in &plan.advice {
+        println!("{}", advice_line(advice));
+    }
     for section in &plan.sections {
         println!("[{}]", section.pipeline.as_str());
         match &section.plan {

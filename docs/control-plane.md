@@ -107,8 +107,9 @@ systems. bookrack is a local-first system and does not probe for it.
   `library.info` against its own `name` key — so a client branches on
   the code alone, without knowing which class it called. The message
   names the library it could not resolve and the names it could.
-- `-32011` job not found (bookrack-specific; `ingest.cancel` named a
-  job id no longer in the queue document)
+- `-32011` job not found (bookrack-specific; `ingest.cancel` or
+  `queue.retry` named a job id, or a part of one, that matches no row,
+  or more than one)
 - `-32012` confirmation required (bookrack-specific; a destructive
   method that exposes a `yes` parameter was called without
   `yes = true`. The control plane never prompts on the caller's
@@ -192,6 +193,14 @@ wording falls back to a flattened cause chain as the summary and sends
 `data` with `retryable` alone. `data` is additive — a client that
 ignores it sees exactly what it saw before the slot was filled.
 
+A source location inside a dependency appears crate-relative
+(`lance-index-7.0.0/src/vector/kmeans.rs:1365:20`), never with the
+absolute path of the machine that built the binary. That holds for the
+error envelope, for the failure text `queue.list` and `queue.tick`
+carry — including failures recorded by an older build — and for
+`logs.tail` and the `log` event. A book's text, and so a search hit,
+is returned as stored.
+
 #### Error mapping
 
 Write-class RPCs — `metadata.*`, `corpus.rebuild`, `vectors.*`,
@@ -268,12 +277,23 @@ onto.
   plan pinned. It is the one `CmdInputError` variant with its own
   code, because a client recovers from it differently: by minting a
   fresh plan rather than by correcting a parameter.
-- **A store refusing what the caller passed** (`-32602`): three
+- **A store refusing what the caller passed** (`-32602`): five
   vector-store refusals — an ANN build asked of the brute-force kind,
   an IvfPq build missing a required parameter, an IvfPq quantization
-  too coarse for the embedding dimension — plus a non-positive intake
-  id (`CorpusError::InvalidIntakeId`) and an attempt to re-point a
-  derived text at a different source (`CatalogError::DerivedFromConflict`).
+  too coarse for the embedding dimension, an ANN configuration no
+  build accepts (`VectorsError::InvalidAnnConfig`: zero partitions,
+  probes, or refine factor; a PQ code width other than 4 or 8; a
+  sub-vector count that does not divide the dimension, or an odd one
+  with 4-bit codes), and a store holding too few vectors to train the
+  requested index (`VectorsError::TooFewVectors`: fewer rows than
+  partitions, or fewer than `2^num_bits` for a PQ codebook) — plus a
+  non-positive intake id (`CorpusError::InvalidIntakeId`) and an
+  attempt to re-point a derived text at a different source
+  (`CatalogError::DerivedFromConflict`). A rebuild refused by one of
+  the vector-store checks leaves the existing index and its
+  `vectors_meta.json` as they were; clearing them does not guarantee
+  training succeeds, and a rebuild that fails after that point may
+  already have dropped the old index.
   Each carries the next step in `error.data.hint`. The mapping is
   recursive, so the code is the same whether the command raised the
   store error bare or a pipeline wrapper carried it
@@ -345,10 +365,10 @@ the kind of failure without parsing stderr.
 | --- | --- | --- |
 | `0` | success | — |
 | `1` | internal / unexpected error | color-eyre fallback for unclassified errors; `-32700 parse error`, `-32600 invalid request`, `-32603 internal error`, and unknown JSON-RPC codes; `SessionLockUnreadable` (`bookrack run` on a lock it cannot interpret; an offline `doctor` repair on a lock it cannot read, or a held one naming no control socket, since neither shows the library unserved); `doctor` reported a FAIL row; `verify` judged a finding as damage (see `verify.run` below for the table); `libraries detect` returned a not-a-library or unreadable-manifest verdict |
-| `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32016` plan-id mismatches and plan-target drift, `-32018 state unusable` (a store from another build or with drifted stamps; the hint names the rebuild or the build to run); an offline `doctor` repair (`--backfill-ocr-derivation`, `--close-abandoned-runs`) asked for while a daemon answers on the session lock's control socket; a locally-resolved command rejected operator input (a global `--audit-profile` on a subcommand that does not consume it, judged before any dispatch so the four subcommands that run ahead of the shared resolver — `doctor`, `init`, `run`, `rpc` — refuse it too; `libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate, `config effective` given a data root that does not resolve — the report is still printed, with the failure at its head, because a configuration report that fails when the configuration is broken is useless exactly when it is needed); a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0`; `bookrack run` refused to start because an external backend it needs is unusable (the embed model is not pulled, or the Ollama endpoint does not answer), or because the selected data root carries the identity of a library the registry records at another path — either check runs before any library is opened, so nothing was half-started. The same judgement on a live write RPC splits: an unpulled model stays `-32602` and exit `2`, while an unreachable or overloaded backend is `-32017` and exit `4`, because a call that failed mid-session may succeed on the next attempt; `bookrack rpc call` was handed params that are not valid JSON (`RpcParamsInvalid`) or a method name carrying no namespace (`RpcMethodNotNamespaced`), both judged locally before the call is sent; `bookrack init` refused on its input or the host (`--non-interactive` without `--data-dir`, a data root inside the application bundle, a path that is not a directory, a root that already holds a library without `--force`, Ollama unreachable or the embed model not pulled) — each decided before anything is written |
+| `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32016` plan-id mismatches and plan-target drift, `-32018 state unusable` (a store from another build or with drifted stamps; the hint names the rebuild or the build to run); an offline `doctor` repair (`--backfill-ocr-derivation`, `--close-abandoned-runs`) asked for while a daemon answers on the session lock's control socket; a locally-resolved command rejected operator input (a global `--audit-profile` on a subcommand that does not consume it, judged before any dispatch so the four subcommands that run ahead of the shared resolver — `doctor`, `init`, `run`, `rpc` — refuse it too; `libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate, `config effective` given a data root that does not resolve — the report is still printed, with the failure at its head, because a configuration report that fails when the configuration is broken is useless exactly when it is needed); `bookrack queue wait` refused before waiting — a `--job` fragment that matches no job or more than one, a selected job pending on a paused queue, or a daemon without a queue worker; the queue is read and judged once, when the wait attaches; a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0`; `bookrack run` refused to start because an external backend it needs is unusable (the embed model is not pulled, or the Ollama endpoint does not answer), or because the selected data root carries the identity of a library the registry records at another path — either check runs before any library is opened, so nothing was half-started. The same judgement on a live write RPC splits: an unpulled model stays `-32602` and exit `2`, while an unreachable or overloaded backend is `-32017` and exit `4`, because a call that failed mid-session may succeed on the next attempt; `bookrack rpc call` was handed params that are not valid JSON (`RpcParamsInvalid`) or a method name carrying no namespace (`RpcMethodNotNamespaced`), both judged locally before the call is sent; `bookrack init` refused on its input or the host (`--non-interactive` without `--data-dir`, a data root inside the application bundle, a path that is not a directory, a root that already holds a library without `--force`, Ollama unreachable or the embed model not pulled) — each decided before anything is written |
 | `3` | needs operator cleanup | a stale session lock points at a daemon that no longer answers (`bookrack run`, `bookrack status`, and the offline `doctor` repairs all judge it the same way); the operator must remove the lock file before retrying |
 | `4` | busy / not ready (retryable) | `-32001 busy`, `-32002 not ready` and `queue worker disabled`; `-32017 backend unavailable` (the Ollama daemon did not answer, or reported itself overloaded); a scripted caller can sleep and retry |
-| `5` | async job batch had failures | `bookrack ingest`, `bookrack papers ingest`, and `bookrack intake ocr` return this when at least one queued job ended in `Failed` or `Cancelled`. `Done`, `SkippedDuplicate`, and `NeedsOcr` are terminal successes and do not trigger it — a batch of scan sources that all end in `needs_ocr` returns `0` and points at `bookrack intake list-ocr-pending`. The per-job summary on stdout names the offenders; `--no-wait` returns `0` because the batch is not awaited |
+| `5` | async job batch had failures | `bookrack ingest`, `bookrack papers ingest`, `bookrack intake ocr`, and `bookrack queue wait` return this when at least one awaited job ended in `Failed` or `Cancelled` — for `queue wait`, a job named with `--job` that had already ended counts too. `Done`, `SkippedDuplicate`, and `NeedsOcr` are terminal successes and do not trigger it — a batch of scan sources that all end in `needs_ocr` returns `0` and points at `bookrack intake list-ocr-pending`. The per-job summary on stdout names the offenders; `--no-wait` returns `0` because the batch is not awaited |
 
 `-32601 method not found` is grouped with the user-input bucket so
 the common case — `bookrack rpc call <typo>` — exits with the same code
@@ -445,8 +465,26 @@ the exit-code bucket does not distinguish the two.
   picking up new jobs; a running job finishes. The pause is persisted in
   the queue document, so it survives a restart.
 - `queue.resume` — `{ ok: true, paused: false }`.
-- `queue.clear` — `{ ok: true, cleared }`. Drops every not-yet-running
-  job; a running job is untouched.
+- `queue.clear` — `{ ok: true, paused, cleared }`. Drops every
+  not-yet-running job; a running job is untouched. `paused` reports the
+  pause flag as it stands after the trim.
+- `queue.retry` — `{ state?, job_id? }` → `{ ok: true, retried,
+  paused }`. Exactly one of the two selects the rows: `state` is one of
+  `failed`, `needs_ocr`, `cancelled` and selects every row in that
+  state; `job_id` is an id or a part of one, matched anywhere in the
+  id as `ingest.cancel` matches it, that must resolve to one row, which
+  must be in one of those three states. Each selected row is flipped back
+  to `pending` in place — same id, same position, same submit-time
+  flags — with `started_at`, `finished_at`, `error`, and `merged_into`
+  cleared, so the worker's next tick picks it up as a fresh
+  submission. `retried` lists the full ids flipped, in queue order; a
+  `state` that matches no row returns an empty list. `paused` mirrors
+  the queue flag: a paused queue holds the rows until `queue.resume`.
+  The queue spans libraries, so the reply carries no `library`.
+  Refusals: `-32602` for a selection that is not exactly one of the
+  two, a `state` outside the three, or a `job_id` that resolves to a
+  row in another state (the message names that state); `-32011` for a
+  `job_id` that matches no row or more than one. Emits one `queue.tick`.
 - `library.list` — array of `{ name, default, dimension }` entries,
   one per mounted library: the daemon's served set.
 - `library.info` — full status card for one library;
@@ -594,9 +632,13 @@ the exit-code bucket does not distinguish the two.
   is refused with `-32602 invalid params` before a job is queued, and
   the error's `detail` lists the accepted names.
 - `ingest.cancel` — `{ job_id }` → `{ ok: true, job_id }`. Marks the
-  one pending or running job whose id starts with `job_id` as
-  cancelled; the reply's `job_id` is the full id the prefix resolved
-  to. The queue spans libraries, so the reply carries no `library`;
+  one pending or running job whose id contains `job_id` as cancelled:
+  the full id or any part of it, matched anywhere. A UUIDv7 leads with
+  its millisecond timestamp, so jobs queued within the same minute
+  share their leading characters and a part of the random tail is what
+  tells them apart. A `job_id` that matches no pending or running job,
+  or more than one, is `-32011`. The reply's `job_id` is the full id
+  the fragment resolved to. The queue spans libraries, so the reply carries no `library`;
   `queue.list` reports it per row.
 - `intake.ocr` — `{ ocr_md, from_pdf, expected_pages?, allow_partial?,
   library?, priority?, force?, hold_for_metadata?, audit_profile? }`
@@ -675,7 +717,14 @@ the exit-code bucket does not distinguish the two.
     a resume with nothing waiting at `Extracted` reports zeros. A
     failure inside the reset pass appends to the error's hint the
     step to rerun with `resume = true`; a failure while the reset is
-    being set up — before anything changed — does not.
+    being set up — before anything changed — does not. When the
+    library's index profile declares `embed.dim`, the reset checks it
+    against the backend's output dimension before it changes anything,
+    confirming a mismatch with a request the dimension cache cannot
+    answer, and refuses a mismatch with `-32602` and no resume step.
+    The code alone does not say whether a reset changed anything — a
+    model that goes missing mid-pass is `-32602` too — only the resume
+    step in the hint does.
 - `corpus.rebuild` — `{ include_vectors?, book?, stale_only?, dry_run?,
   yes?, library? }`.
 - `stamps.reconcile` — `{ library? }` → `{ ok: true, embed_model,
@@ -1150,10 +1199,18 @@ the tool description says which one it ran.
   snapshot (`queue.json` in the daemon state directory), so a
   subscriber's view always coincides with what a crash recovery
   would replay.
-- `worker.progress` — `{ job_id, stage, stage_progress?, message? }`
-  with `stage` in `extract` / `ingest` / `embed`. Phase 2 emits at
-  the runner's two visible boundaries (`extract` on pull,
-  `embed` on success); finer-grained progress is deferred.
+- `worker.progress` — `{ job_id, kind, stage, stage_progress?, message? }`
+  where `kind` is the job's pipeline (`book` / `paper` / `reference`,
+  as on `queue.list`). `stage` names only a position the worker can
+  observe: `processing`, published once when the worker pulls the
+  job, and — for a book job, an `intake.ocr` job included — `embed`,
+  whose `stage_progress` is the fraction of the book's chunks written
+  to the vector store, published always for the first and the last
+  batch and throttled in between. Paper jobs report `processing` only.
+  The event does
+  not name pipeline stages the worker cannot see, and it does not
+  report the job's terminal state — that arrives on the `queue.tick`
+  whose `last_finished` carries the job.
 - `library.changed` — `{ library }` published after every successful
   write command finishes, which includes a `library.mount` or
   `library.unmount` naming the library that joined or left the served

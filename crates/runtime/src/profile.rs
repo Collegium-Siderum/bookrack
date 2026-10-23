@@ -18,6 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
+use bookrack_config::advice_record::{advice_record_path, record_seen, seen_keys};
 use bookrack_config::{
     Config, EmbedConfig, effective_profile_reference, list_libraries, load_manifest,
     profile_reference_drift, registry_profile_ref_in, registry_target_path,
@@ -30,8 +31,8 @@ use bookrack_corpus::{
     CHUNK_VERSION_KEY, Corpus, EMBED_MODEL_KEY, IndexStamps, NORMALIZE_VERSION_KEY, VECTOR_DIM_KEY,
 };
 use bookrack_index_profile::{
-    AnnKind, AnnSpec, IndexProfile, ProfileOrigin, USER_PROFILE_DIR_NAME, has_errors,
-    list_profiles, resolve, validate,
+    Advice, AnnKind, AnnSpec, IndexProfile, ProfileOrigin, USER_PROFILE_DIR_NAME, advise,
+    has_errors, list_profiles, resolve, validate,
 };
 use bookrack_vectors::AnnConfig;
 use eyre::{Result, eyre};
@@ -149,10 +150,112 @@ fn effective_index_profile_in(
 /// when the profile does not resolve, so a handler cannot embed under a
 /// configuration the daemon would refuse to start with.
 pub fn effective_embed_config(cfg: &Config) -> Result<EmbedConfig> {
+    effective_embed_declaration(cfg).map(|(embed, _)| embed)
+}
+
+/// The embed dimension the effective index profile declares. Carries the
+/// whole profile: a refusal quotes its name, and its hint re-validates
+/// the profile at the dimension the backend produces.
+#[derive(Debug, Clone)]
+pub struct EmbedDeclaration {
+    /// The effective profile.
+    pub profile: IndexProfile,
+}
+
+impl EmbedDeclaration {
+    /// The declaring profile's name.
+    pub fn name(&self) -> &str {
+        &self.profile.name
+    }
+
+    /// The declared `embed.dim`.
+    pub fn dim(&self) -> u32 {
+        self.profile.embed.dim
+    }
+}
+
+/// [`effective_embed_config`] together with the profile that declared
+/// it, `None` when no profile is in effect and the model is the
+/// built-in default. Reads the manifest once for both.
+pub fn effective_embed_declaration(
+    cfg: &Config,
+) -> Result<(EmbedConfig, Option<EmbedDeclaration>)> {
     let manifest_ref = fresh_manifest_profile_ref(cfg);
     let effective = effective_index_profile_in(cfg, manifest_ref.as_deref())?;
     let model = effective.as_ref().map(|e| e.profile.embed.model.as_str());
-    Ok(EmbedConfig::resolve(model))
+    let embed = EmbedConfig::resolve(model);
+    let declaration = effective.map(|e| EmbedDeclaration { profile: e.profile });
+    Ok((embed, declaration))
+}
+
+/// The profile `name` resolves to — a user file over a built-in — or
+/// `None` when it does not resolve or fails to load.
+pub fn resolve_named_profile(name: &str) -> Option<IndexProfile> {
+    let dir = user_profile_dir();
+    resolve(dir.as_deref(), name)
+        .ok()
+        .flatten()
+        .map(|(profile, _)| profile)
+}
+
+/// The registry's remarks on `profile` that the library at `data_dir`
+/// has not been shown. A write that points the library at `profile`
+/// prints these; `None` — dropping the reference — has none. A library
+/// with no manifest has no identity to record against, so everything is
+/// pending.
+pub fn pending_advice(data_dir: &Path, profile: Option<&IndexProfile>) -> Vec<Advice> {
+    pending_advice_in(advice_record_path().as_deref(), data_dir, profile)
+}
+
+/// [`pending_advice`] against an explicit record location.
+fn pending_advice_in(
+    record: Option<&Path>,
+    data_dir: &Path,
+    profile: Option<&IndexProfile>,
+) -> Vec<Advice> {
+    let Some(profile) = profile else {
+        return Vec::new();
+    };
+    let all = advise(profile);
+    let Some((record, uuid)) = advice_record_target(record, data_dir) else {
+        return all;
+    };
+    let seen = seen_keys(&record, &uuid);
+    all.into_iter()
+        .filter(|a| !seen.contains(&a.key()))
+        .collect()
+}
+
+/// Record that the library at `data_dir` has been shown the remarks on
+/// `profile`, replacing what it was shown before; `None` clears the
+/// record. Called once a write has printed its remarks and committed.
+/// A failure only warns: the write itself stands, and the cost is one
+/// remark printed again.
+pub fn acknowledge_advice(data_dir: &Path, profile: Option<&IndexProfile>) {
+    acknowledge_advice_in(advice_record_path().as_deref(), data_dir, profile);
+}
+
+/// [`acknowledge_advice`] against an explicit record location.
+fn acknowledge_advice_in(record: Option<&Path>, data_dir: &Path, profile: Option<&IndexProfile>) {
+    let Some((record, uuid)) = advice_record_target(record, data_dir) else {
+        return;
+    };
+    let keys = profile
+        .map(|p| advise(p).iter().map(Advice::key).collect())
+        .unwrap_or_default();
+    if let Err(e) = record_seen(&record, &uuid, &keys) {
+        eprintln!(
+            "warning: could not record the notes shown for this library in {}: {e}",
+            record.display()
+        );
+    }
+}
+
+/// The record file and the library's manifest uuid, when both exist.
+fn advice_record_target(record: Option<&Path>, data_dir: &Path) -> Option<(PathBuf, String)> {
+    let record = record?.to_path_buf();
+    let manifest = load_manifest(data_dir).ok().flatten()?;
+    Some((record, manifest.uuid))
 }
 
 /// Write gate for an `index_profile` reference: the name must resolve
@@ -168,7 +271,7 @@ pub fn refuse_bad_profile_reference(name: &str) -> Option<String> {
             "index profile '{name}' is not defined; \
              `bookrack index-profile list` shows the available names"
         )),
-        Ok(Some((profile, _))) => has_errors(&validate(&profile, false)).then(|| {
+        Ok(Some((profile, _))) => has_errors(&validate(&profile)).then(|| {
             format!(
                 "index profile '{name}' has validation errors; \
                  run `bookrack index-profile validate {name}`"
@@ -458,9 +561,13 @@ pub enum PipelinePlan {
 /// 1. A stamped embed model or vector dimension that differs from the
 ///    profile derives a [`PlannedAction::Reset`]. The reset re-chunks
 ///    and re-embeds everything — absorbing any re-embed or reconcile —
-///    but it also removes `vectors_meta.json` with the chunks table, so
-///    a profile that declares an index gets the follow-up
-///    [`PlannedAction::Rebuild`] that realizes it.
+///    but it also removes `vectors_meta.json` with the chunks table, and
+///    a book re-embed that finds no meta builds the cold-start index.
+///    The ANN state after a reset is therefore never the declared one,
+///    and a follow-up action realizes it: a [`PlannedAction::Rebuild`]
+///    for a profile that declares an index, a
+///    [`PlannedAction::DropIndex`] for a `brute-force` profile (a no-op
+///    over a store with no index, which still records the scan state).
 /// 2. A stamped chunk or normalize version that differs from this
 ///    binary derives a [`PlannedAction::Reembed`].
 /// 3. The declared ANN state is realized: an index-declaring profile
@@ -489,11 +596,12 @@ pub fn derive_pipeline_plan(
         .is_some_and(|m| m != target.embed_model);
     let dim_diverges = built.vector_dim.is_some_and(|d| d != target.vector_dim);
     if model_diverges || dim_diverges {
-        let mut actions = vec![PlannedAction::Reset];
-        if profile.ann.kind != AnnKind::BruteForce {
-            actions.push(PlannedAction::Rebuild);
-        }
-        return PipelinePlan::Run(actions);
+        let realize_ann = if profile.ann.kind == AnnKind::BruteForce {
+            PlannedAction::DropIndex
+        } else {
+            PlannedAction::Rebuild
+        };
+        return PipelinePlan::Run(vec![PlannedAction::Reset, realize_ann]);
     }
 
     let mut actions = Vec::new();
@@ -584,6 +692,95 @@ mod tests {
         assert!(
             detail.contains(PROFILE_QWEN3_06B_DEFAULT),
             "the built-ins are always defined: {detail}"
+        );
+    }
+
+    /// A profile naming an embed model and a cross-encoder model the
+    /// registry does not list.
+    fn unlisted_profile(reranker: &str) -> IndexProfile {
+        let mut profile =
+            IndexProfile::from_named(bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT)
+                .expect("the built-in resolves");
+        profile.embed.model = "synthetic-embed:unlisted".to_string();
+        profile.embed.dim = 8;
+        profile.reranker = bookrack_index_profile::RerankerSpec {
+            kind: bookrack_index_profile::RerankerKind::CrossEncoder,
+            backend: Some("llama-server".to_string()),
+            model: Some(reranker.to_string()),
+            top_k_in: Some(50),
+            top_k_out: Some(10),
+        };
+        profile
+    }
+
+    fn declared_root() -> tempfile::TempDir {
+        let root = tempfile::tempdir().expect("tempdir");
+        bookrack_config::set_manifest_index_profile(
+            root.path(),
+            Some("p"),
+            bookrack_config::ManifestIdentitySeed {
+                name: "lib",
+                kind: bookrack_config::LibraryKind::Test,
+                description: None,
+            },
+        )
+        .expect("write a manifest");
+        root
+    }
+
+    fn record_in(dir: &tempfile::TempDir) -> PathBuf {
+        dir.path()
+            .join(bookrack_config::advice_record::ADVICE_RECORD_FILENAME)
+    }
+
+    #[test]
+    fn advice_is_pending_until_acknowledged_and_again_when_it_changes() {
+        let records = tempfile::tempdir().expect("tempdir");
+        let record = record_in(&records);
+        let root = declared_root();
+        let first = unlisted_profile("synthetic-reranker:a");
+
+        let pending = pending_advice_in(Some(&record), root.path(), Some(&first));
+        assert_eq!(pending.len(), 2, "{pending:?}");
+        acknowledge_advice_in(Some(&record), root.path(), Some(&first));
+        assert!(pending_advice_in(Some(&record), root.path(), Some(&first)).is_empty());
+
+        // The same profile with another reranker: only that remark.
+        let second = unlisted_profile("synthetic-reranker:b");
+        assert_eq!(
+            pending_advice_in(Some(&record), root.path(), Some(&second)),
+            vec![Advice::UnlistedReranker {
+                model: "synthetic-reranker:b".to_string()
+            }]
+        );
+
+        // Dropping the reference clears what was shown.
+        acknowledge_advice_in(Some(&record), root.path(), None);
+        assert_eq!(
+            pending_advice_in(Some(&record), root.path(), Some(&first)).len(),
+            2
+        );
+        assert!(pending_advice_in(Some(&record), root.path(), None).is_empty());
+    }
+
+    #[test]
+    fn a_root_without_a_manifest_has_been_shown_nothing_and_records_nothing() {
+        let records = tempfile::tempdir().expect("tempdir");
+        let record = record_in(&records);
+        let root = tempfile::tempdir().expect("tempdir");
+        let profile = unlisted_profile("synthetic-reranker:a");
+        acknowledge_advice_in(Some(&record), root.path(), Some(&profile));
+        assert!(!record.exists(), "no identity to record against");
+        assert_eq!(
+            pending_advice_in(Some(&record), root.path(), Some(&profile)).len(),
+            2
+        );
+        // No record location at all: everything stays pending.
+        let declared = declared_root();
+        acknowledge_advice_in(None, declared.path(), Some(&profile));
+        assert_eq!(
+            pending_advice_in(None, declared.path(), Some(&profile)).len(),
+            2
         );
     }
 
@@ -739,13 +936,13 @@ mod tests {
         );
 
         // A model change under a brute-force profile: the reset's
-        // post-state (no index, exhaustive scan) is the declared state,
-        // so nothing follows it.
+        // re-embed finds no ANN meta and builds the cold-start index,
+        // so the drop that realizes the declared scan follows it.
         let mut scan_profile = profile.clone();
         scan_profile.ann.kind = AnnKind::BruteForce;
         assert_eq!(
             derive_pipeline_plan(&scan_profile, &target, &other_model),
-            PipelinePlan::Run(vec![PlannedAction::Reset])
+            PipelinePlan::Run(vec![PlannedAction::Reset, PlannedAction::DropIndex])
         );
 
         // A brute-force profile over a built index: drop it; over a
@@ -821,5 +1018,171 @@ mod tests {
             derive_pipeline_plan(&profile, &target, &drift_and_stale),
             PipelinePlan::Run(vec![PlannedAction::Reembed])
         );
+    }
+
+    /// The field a vector-store refusal names, under the profile's
+    /// field names.
+    fn refused_field(err: &bookrack_vectors::VectorsError) -> &'static str {
+        use bookrack_vectors::VectorsError;
+        match err {
+            VectorsError::InvalidAnnConfig { field, .. } => field,
+            VectorsError::MissingPqParam(param) => param,
+            VectorsError::IvfPqQuantizationTooCoarse { .. } => "num_sub_vectors",
+            other => panic!("not a static ANN refusal: {other:?}"),
+        }
+    }
+
+    /// One row of the ANN parity table: a profile's dimension and ANN
+    /// knob, set by chained overrides so each row reads on one line.
+    #[derive(Clone, Copy)]
+    struct AnnRow {
+        kind: bookrack_index_profile::AnnKind,
+        dim: u32,
+        partitions: u32,
+        nsv: Option<u32>,
+        bits: Option<u32>,
+        probes: u32,
+        refine: Option<u32>,
+    }
+
+    impl AnnRow {
+        fn new(kind: bookrack_index_profile::AnnKind, dim: u32) -> AnnRow {
+            AnnRow {
+                kind,
+                dim,
+                partitions: 1,
+                nsv: None,
+                bits: None,
+                probes: 1,
+                refine: None,
+            }
+        }
+        fn partitions(self, partitions: u32) -> AnnRow {
+            AnnRow { partitions, ..self }
+        }
+        fn nsv(self, nsv: u32) -> AnnRow {
+            AnnRow {
+                nsv: Some(nsv),
+                ..self
+            }
+        }
+        fn bits(self, bits: u32) -> AnnRow {
+            AnnRow {
+                bits: Some(bits),
+                ..self
+            }
+        }
+        fn probes(self, probes: u32) -> AnnRow {
+            AnnRow { probes, ..self }
+        }
+        fn refine(self, refine: u32) -> AnnRow {
+            AnnRow {
+                refine: Some(refine),
+                ..self
+            }
+        }
+        fn profile(self) -> IndexProfile {
+            let mut p = profile();
+            p.embed.model = "synthetic-embed:parity".to_string();
+            p.embed.dim = self.dim;
+            p.ann = bookrack_index_profile::AnnSpec {
+                kind: self.kind,
+                num_partitions: self.partitions,
+                num_sub_vectors: self.nsv,
+                num_bits: self.bits,
+                nprobes: self.probes,
+                refine_factor: self.refine,
+            };
+            p
+        }
+    }
+
+    /// Profile validation and the vector store hold the same static ANN
+    /// rules, written once in each crate. Every row states its own
+    /// expectation, so a rule both sides forget fails here instead of
+    /// agreeing quietly.
+    #[test]
+    fn profile_validation_and_the_store_refuse_the_same_ann_settings() {
+        use bookrack_index_profile::AnnKind::{BruteForce, IvfFlat, IvfHnswPq, IvfHnswSq, IvfPq};
+
+        let flat = AnnRow::new(IvfFlat, 4);
+        // 24 divides by the odd 3 within the coarseness bound.
+        let pq = AnnRow::new(IvfPq, 24).nsv(3);
+        let rows: [(&str, AnnRow, Option<&'static str>); 19] = [
+            ("flat", flat, None),
+            (
+                "flat, zero partitions",
+                flat.partitions(0),
+                Some("num_partitions"),
+            ),
+            ("flat, zero probes", flat.probes(0), Some("nprobes")),
+            ("flat, zero refine", flat.refine(0), Some("refine_factor")),
+            ("flat, refine 1", flat.refine(1), None),
+            ("flat ignores PQ fields", flat.nsv(3).bits(16), None),
+            (
+                "pq, no sub-vectors",
+                AnnRow::new(IvfPq, 24),
+                Some("num_sub_vectors"),
+            ),
+            ("pq, zero sub-vectors", pq.nsv(0), Some("num_sub_vectors")),
+            ("pq, indivisible", pq.nsv(5), Some("num_sub_vectors")),
+            ("pq, too coarse", pq.nsv(1), Some("num_sub_vectors")),
+            ("pq, width omitted", pq, None),
+            ("pq, 8 bits", pq.bits(8), None),
+            ("pq, 2 bits", pq.bits(2), Some("num_bits")),
+            ("pq, 16 bits", pq.bits(16), Some("num_bits")),
+            ("pq, 4 bits, odd", pq.bits(4), Some("num_sub_vectors")),
+            ("pq, 4 bits, even", pq.nsv(4).bits(4), None),
+            (
+                "hnsw-pq, 16 bits",
+                AnnRow {
+                    kind: IvfHnswPq,
+                    ..pq
+                }
+                .bits(16),
+                Some("num_bits"),
+            ),
+            ("hnsw-sq", AnnRow::new(IvfHnswSq, 24).refine(5), None),
+            (
+                "scan with zeros",
+                AnnRow::new(BruteForce, 4)
+                    .partitions(0)
+                    .probes(0)
+                    .refine(0)
+                    .bits(16),
+                None,
+            ),
+        ];
+
+        let mut cases: Vec<(String, IndexProfile, Option<&'static str>)> = rows
+            .into_iter()
+            .map(|(case, row, refused)| (case.to_string(), row.profile(), refused))
+            .collect();
+        for name in bookrack_index_profile::ALL_BUILT_IN_NAMES {
+            let p = IndexProfile::from_named(name).expect("built-in");
+            cases.push((format!("built-in {name}"), p, None));
+        }
+
+        for (case, p, refused) in cases {
+            let profile_fields: Vec<String> = validate(&p)
+                .into_iter()
+                .filter(|f| {
+                    f.severity == bookrack_index_profile::Severity::Error
+                        && f.field_path.starts_with("ann.")
+                })
+                .map(|f| f.field_path)
+                .collect();
+            let expected: Vec<String> = refused.map(|f| format!("ann.{f}")).into_iter().collect();
+            assert_eq!(profile_fields, expected, "{case}: profile validation");
+
+            let store = matching_ann(&p).validate(p.embed.dim as usize);
+            match refused {
+                None => assert!(store.is_ok(), "{case}: the store refused {store:?}"),
+                Some(field) => {
+                    let err = store.expect_err(&case);
+                    assert_eq!(refused_field(&err), field, "{case}: {err:?}");
+                }
+            }
+        }
     }
 }

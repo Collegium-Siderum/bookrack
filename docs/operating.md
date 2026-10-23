@@ -140,11 +140,30 @@ fixed tick. `bookrack queue` inspects and steers it:
 
 ```
 bookrack queue list          # jobs plus a per-state count footer
+bookrack queue list --state failed      # one state, failures grouped by cause
+bookrack queue list --state pending --limit 20
 bookrack queue pause         # stop draining without losing the queue
 bookrack queue resume
-bookrack queue cancel <id>   # cancel by job-id prefix
+bookrack queue cancel <id>   # cancel by job id, or any unique part of it
 bookrack queue clear         # drop every not-yet-running job
+bookrack queue retry                    # re-run every failed job
+bookrack queue retry --state needs-ocr  # or one state, or --job <id>
+bookrack queue wait                     # wait on every pending or running job
+bookrack queue wait --job <id>          # or on named jobs, finished ones included
 ```
+
+`queue wait` reads the queue once, when it attaches, and refuses up
+front when a selected job is pending on a paused queue or the daemon has
+no queue worker. After that it learns only what the event stream tells
+it: a pause, a `queue cancel` or `queue clear`, or a completion dropped
+because the client or the daemon fell behind on the stream goes
+unnoticed, and the wait then stops with an error after a minute without
+events — or keeps waiting while the daemon is still logging. A job that
+another client retries while the wait is attaching may be reported with
+the outcome of its previous run. Once a job has finished, running
+`queue wait --job <id>` again reads its outcome straight from the queue;
+a job still pending on a paused queue is refused again until
+`queue resume`.
 
 ### The OCR worklist
 

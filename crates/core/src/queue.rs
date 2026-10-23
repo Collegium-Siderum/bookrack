@@ -86,6 +86,18 @@ pub enum JobState {
 }
 
 impl JobState {
+    /// Every lifecycle state, in declaration order. Lets a caller walk
+    /// the vocabulary instead of transcribing it.
+    pub const ALL: [JobState; 7] = [
+        JobState::Pending,
+        JobState::Running,
+        JobState::Done,
+        JobState::SkippedDuplicate,
+        JobState::NeedsOcr,
+        JobState::Failed,
+        JobState::Cancelled,
+    ];
+
     /// The stable wire token for this state — the same `snake_case`
     /// string serde emits. Kept as an explicit map so string consumers
     /// (queue rendering, the MCP session tool) share one source of
@@ -127,7 +139,9 @@ pub struct IntakeOcrInfo {
 /// One row in the persistent queue.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct QueueJob {
-    /// UUIDv7 string. Prefix matching is a plain `str::starts_with`.
+    /// UUIDv7 string. A job is located by any fragment of it
+    /// (`str::contains`); the leading characters are the millisecond
+    /// timestamp, shared by every job queued within the same minute.
     pub id: String,
     /// Library name the job runs against, as registered in the
     /// `LibraryRegistry`.
@@ -179,7 +193,11 @@ pub struct QueueJob {
     /// When the worker transitioned this job to `Done`,
     /// `SkippedDuplicate`, `NeedsOcr`, `Failed`, or `Cancelled`.
     pub finished_at: Option<DateTime<Utc>>,
-    /// Failure message recorded when `state == Failed`.
+    /// Failure message recorded when `state == Failed`. Redacted as
+    /// it loads ([`crate::redact_source_paths`]), so a message recorded
+    /// before errors were redacted at their source leaves the process
+    /// as clean as a new one.
+    #[serde(default, deserialize_with = "deserialize_redacted")]
     pub error: Option<String>,
     /// Intake id this job resolved to: the existing catalog row when the
     /// worker skipped the source as a duplicate (`SkippedDuplicate`), or
@@ -190,6 +208,18 @@ pub struct QueueJob {
     /// matching the previous single-`done` terminal.
     #[serde(default)]
     pub merged_into: Option<i64>,
+}
+
+/// An optional string, redacted of build-machine source prefixes.
+fn deserialize_redacted<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let text = Option::<String>::deserialize(deserializer)?;
+    Ok(text.map(|t| match crate::redact_source_paths(&t) {
+        std::borrow::Cow::Borrowed(_) => t,
+        std::borrow::Cow::Owned(redacted) => redacted,
+    }))
 }
 
 /// The full document persisted to disk.
@@ -213,9 +243,95 @@ impl Default for QueueState {
     }
 }
 
+/// Why an id fragment did not locate exactly one row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FragmentMiss {
+    /// The fragment is empty; every id contains it.
+    Empty,
+    /// No eligible row's id contains the fragment.
+    NoMatch,
+    /// More than one eligible row's id contains the fragment.
+    Ambiguous { count: usize },
+}
+
+/// Index of the one row in `jobs` that `eligible` admits and whose id
+/// contains `fragment`, matched anywhere in the id. Rows `eligible`
+/// rejects are not candidates: they neither match nor make a match
+/// ambiguous.
+///
+/// A UUIDv7 leads with its millisecond timestamp, so jobs queued within
+/// the same minute share their leading characters; any part of the id,
+/// including its random tail, is accepted.
+pub fn match_id_fragment(
+    jobs: &[QueueJob],
+    fragment: &str,
+    eligible: impl Fn(&QueueJob) -> bool,
+) -> Result<usize, FragmentMiss> {
+    if fragment.is_empty() {
+        return Err(FragmentMiss::Empty);
+    }
+    let mut candidates = jobs
+        .iter()
+        .enumerate()
+        .filter(|(_, job)| eligible(job) && job.id.contains(fragment))
+        .map(|(index, _)| index);
+    let Some(first) = candidates.next() else {
+        return Err(FragmentMiss::NoMatch);
+    };
+    match candidates.count() {
+        0 => Ok(first),
+        rest => Err(FragmentMiss::Ambiguous { count: rest + 1 }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failure recorded before errors were redacted at their source
+    /// is redacted as it loads: the failure text reaches `queue.list`,
+    /// the queue snapshot, and the next save only through this field.
+    #[test]
+    fn a_recorded_failure_loads_without_build_prefixes() {
+        let failed = r#"{
+            "id": "0",
+            "library": "default",
+            "path": "/srv/books/example.epub",
+            "kind": "book",
+            "priority": "normal",
+            "force": false,
+            "state": "failed",
+            "queued_at": "2026-01-02T03:04:05Z",
+            "started_at": "2026-01-02T03:04:06Z",
+            "finished_at": "2026-01-02T03:04:07Z",
+            "error": "ingest: train failed, /disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/train.rs:10:4: train failed"
+        }"#;
+        let job: QueueJob = serde_json::from_str(failed).expect("deserialize");
+        assert_eq!(
+            job.error.as_deref(),
+            Some("ingest: train failed, dep-1.0.0/src/train.rs:10:4: train failed")
+        );
+        assert_eq!(
+            job.path,
+            std::path::PathBuf::from("/srv/books/example.epub")
+        );
+
+        let missing = failed.replace(
+            r#""error": "ingest: train failed, /disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/train.rs:10:4: train failed""#,
+            r#""error": null"#,
+        );
+        let job: QueueJob = serde_json::from_str(&missing).expect("deserialize null");
+        assert_eq!(job.error, None);
+    }
+
+    #[test]
+    fn every_listed_state_round_trips_through_its_wire_token() {
+        for state in JobState::ALL {
+            let token = serde_json::Value::String(state.as_wire_str().to_string());
+            let read: JobState = serde_json::from_value(token).expect("serde reads the wire token");
+            assert_eq!(read, state);
+        }
+    }
 
     #[test]
     fn queue_job_without_kind_loads_as_book() {
@@ -567,5 +683,83 @@ mod tests {
         let back: QueueJob = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back.audit_profile.as_deref(), Some("strict"));
         assert_eq!(back, job);
+    }
+
+    fn job_with(id: &str, state: JobState) -> QueueJob {
+        QueueJob {
+            id: id.to_string(),
+            library: "default".to_string(),
+            path: "/tmp/example.epub".into(),
+            kind: ItemKind::Book,
+            priority: Priority::Normal,
+            force: false,
+            hold_for_metadata: false,
+            intake_ocr: None,
+            audit_profile: None,
+            state,
+            queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            started_at: None,
+            finished_at: None,
+            error: None,
+            merged_into: None,
+        }
+    }
+
+    #[test]
+    fn match_id_fragment_finds_a_fragment_anywhere_in_the_id() {
+        let jobs = [
+            job_with("019a1b2c-3d4e-7f00-8a11-0000aaaa1111", JobState::Pending),
+            job_with("029a1b2c-3d4e-7f00-8b22-0000bbbb2222", JobState::Failed),
+            job_with("039a1b2c-3d4e-7f00-8c33-0000cccc3333", JobState::Done),
+        ];
+        let any = |_: &QueueJob| true;
+        assert_eq!(match_id_fragment(&jobs, "019a", any), Ok(0));
+        assert_eq!(match_id_fragment(&jobs, "8b22", any), Ok(1));
+        assert_eq!(match_id_fragment(&jobs, "cccc3333", any), Ok(2));
+    }
+
+    #[test]
+    fn match_id_fragment_reports_no_match_and_the_ambiguous_count() {
+        let jobs = [
+            job_with("019a1b2c-3d4e-7f00-8a11-0000aaaa1111", JobState::Pending),
+            job_with("019a1b2c-3d4e-7f00-8b22-0000bbbb2222", JobState::Failed),
+            job_with("019a1b2c-3d4e-7f00-8c33-0000cccc3333", JobState::Done),
+        ];
+        let any = |_: &QueueJob| true;
+        assert_eq!(
+            match_id_fragment(&jobs, "zz", any),
+            Err(FragmentMiss::NoMatch)
+        );
+        assert_eq!(
+            match_id_fragment(&jobs, "019a1b2c", any),
+            Err(FragmentMiss::Ambiguous { count: 3 })
+        );
+    }
+
+    /// On a one-row queue an empty fragment would be a unique match,
+    /// since every id contains it; the refusal must come first.
+    #[test]
+    fn match_id_fragment_refuses_an_empty_fragment() {
+        let jobs = [job_with("aaaa1111", JobState::Pending)];
+        assert_eq!(
+            match_id_fragment(&jobs, "", |_| true),
+            Err(FragmentMiss::Empty)
+        );
+    }
+
+    #[test]
+    fn match_id_fragment_counts_only_eligible_rows() {
+        let jobs = [
+            job_with("aaaa1111", JobState::Done),
+            job_with("aaaa2222", JobState::Pending),
+        ];
+        let live = |job: &QueueJob| matches!(job.state, JobState::Pending | JobState::Running);
+        assert_eq!(match_id_fragment(&jobs, "aaaa", live), Ok(1));
+        assert_eq!(
+            match_id_fragment(&jobs, "1111", live),
+            Err(FragmentMiss::NoMatch)
+        );
     }
 }

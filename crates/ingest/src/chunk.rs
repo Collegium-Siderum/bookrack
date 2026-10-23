@@ -24,11 +24,31 @@ use text_splitter::{ChunkConfig, TextSplitter};
 /// Version of the chunking behaviour.
 ///
 /// Bump on any change that moves a chunk boundary: [`ChunkParams`]
-/// defaults, [`GROUP_SEPARATOR`], the `text-splitter` version, or the
-/// trim setting. The chunk text feeds `norm_chunk_sha256`, so a change is
-/// a re-embedding commitment.
+/// defaults, [`GROUP_SEPARATOR`], the version of `text-splitter` or of
+/// any `icu_*` crate it segments with, or the trim setting. The chunk
+/// text feeds `norm_chunk_sha256`, so a change is a re-embedding
+/// commitment. The companion test `tests/dep_hash.rs` fails until
+/// [`FROZEN_SPLITTER_DEPS`] is restated, forcing a deliberate bump.
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const CHUNK_VERSION: u32 = 1;
+
+/// `name@version` of `text-splitter` and every `icu_*` crate in
+/// `Cargo.lock`, sorted bytewise. Restated in lockstep with
+/// [`CHUNK_VERSION`]. See `tests/dep_hash.rs` for the selection rule.
+pub const FROZEN_SPLITTER_DEPS: &[&str] = &[
+    "icu_collections@2.2.0",
+    "icu_locale@2.2.0",
+    "icu_locale_core@2.2.0",
+    "icu_locale_data@2.2.0",
+    "icu_normalizer@2.2.0",
+    "icu_normalizer_data@2.2.0",
+    "icu_properties@2.2.0",
+    "icu_properties_data@2.2.0",
+    "icu_provider@2.2.0",
+    "icu_segmenter@2.2.0",
+    "icu_segmenter_data@2.2.0",
+    "text-splitter@0.30.1",
+];
 
 /// String joining adjacent leaves within one group before splitting. Part
 /// of chunk identity, hence covered by [`CHUNK_VERSION`].
@@ -319,5 +339,170 @@ mod tests {
                 .collect();
             assert_eq!(slice, p.text);
         }
+    }
+
+    /// Configurations the golden fixture runs under: the production pair,
+    /// then two small targets that cut every case many times, so a change
+    /// in sentence, word, or grapheme segmentation moves a boundary.
+    const GOLDEN_CONFIGS: &[(usize, usize)] = &[(1000, 100), (200, 50), (40, 10)];
+
+    /// Digest of each case's planned chunks per configuration, recorded
+    /// with the crates in `FROZEN_SPLITTER_DEPS`. A match says only that
+    /// these inputs chunk as before; it does not show that a dependency
+    /// move leaves every input's boundaries in place.
+    const GOLDEN: &[(&str, &str)] = &[
+        ("1000/100/lines-en", "efd6476d1f5aa099"),       // 3 chunks
+        ("1000/100/para-zh", "79d7498ad336a93e"),        // 2 chunks
+        ("1000/100/para-en", "2eb6ddc0f2b785d6"),        // 3 chunks
+        ("1000/100/runon-zh", "aad7fc50cfcb8c5d"),       // 2 chunks
+        ("1000/100/runon-en-colon", "db739837ec84eb18"), // 4 chunks
+        ("1000/100/colon-chain", "795900d69f2f3a65"),    // 2 chunks
+        ("1000/100/runon-th", "549d2459ed6e166a"),       // 7 chunks
+        ("1000/100/mixed", "e130db0e96415c49"),          // 4 chunks
+        ("1000/100/grapheme", "8931b6c73d9d43ff"),       // 2 chunks
+        ("1000/100/parents", "cc9a206f70378dec"),        // 6 chunks
+        ("1000/100/empty-leaves", "e6c59fba80fcb122"),   // 2 chunks
+        ("1000/100/compat-forms", "0f071c5f2edeca5b"),   // 2 chunks
+        ("200/50/lines-en", "845827ddba3e4c72"),         // 15 chunks
+        ("200/50/para-zh", "a1a0c2ec4dbcf449"),          // 12 chunks
+        ("200/50/para-en", "9ffb8e618527749b"),          // 14 chunks
+        ("200/50/runon-zh", "147766dfb78abecf"),         // 12 chunks
+        ("200/50/runon-en-colon", "4939fd5fc4ae2508"),   // 22 chunks
+        ("200/50/colon-chain", "eda245331c9b0d8e"),      // 11 chunks
+        ("200/50/runon-th", "77e1bec17a92211e"),         // 41 chunks
+        ("200/50/mixed", "e047f1880cd5f844"),            // 19 chunks
+        ("200/50/grapheme", "f21d17ceb9fbb8a5"),         // 10 chunks
+        ("200/50/parents", "1f789de76edcb5f0"),          // 27 chunks
+        ("200/50/empty-leaves", "523d275938095e1d"),     // 11 chunks
+        ("200/50/compat-forms", "099506444d3f3c3e"),     // 11 chunks
+        ("40/10/lines-en", "212292d10764545e"),          // 90 chunks
+        ("40/10/para-zh", "8420f41085396366"),           // 60 chunks
+        ("40/10/para-en", "e5d0c9e75ec57723"),           // 61 chunks
+        ("40/10/runon-zh", "edcf48322162a505"),          // 60 chunks
+        ("40/10/runon-en-colon", "15758cefee941a9e"),    // 105 chunks
+        ("40/10/colon-chain", "3e318ba79acbf9c2"),       // 53 chunks
+        ("40/10/runon-th", "a09d566d705fed06"),          // 207 chunks
+        ("40/10/mixed", "e40ebb013ca89348"),             // 101 chunks
+        ("40/10/grapheme", "f38a602d7476212a"),          // 47 chunks
+        ("40/10/parents", "eb1388222a51c558"),           // 127 chunks
+        ("40/10/empty-leaves", "dfc20cc96ea91bb5"),      // 47 chunks
+        ("40/10/compat-forms", "9a93e443317316b7"),      // 51 chunks
+    ];
+
+    /// The fixture's cases as `(label, leaves)`. Leaf ids count up from 1
+    /// across the file; each case and each `---` starts a new parent.
+    fn golden_cases(fixture: &str) -> Vec<(&str, Vec<ChunkLeaf<'_>>)> {
+        let mut cases: Vec<(&str, Vec<ChunkLeaf<'_>>)> = Vec::new();
+        let (mut next_id, mut parent) = (1, 0);
+        for line in fixture.lines() {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(label) = line.strip_prefix("=== ") {
+                cases.push((label, Vec::new()));
+                parent += 1;
+            } else if line == "---" {
+                parent += 1;
+            } else {
+                let text = if line == "<empty>" { "" } else { line };
+                let case = cases.last_mut().expect("a leaf before the first case");
+                case.1.push(leaf(next_id, parent, text));
+                next_id += 1;
+            }
+        }
+        cases
+    }
+
+    /// The text a plan's coordinates select: the covered part of every
+    /// non-empty leaf from its start node to its end node, joined the way
+    /// the group was.
+    fn text_at(leaves: &[ChunkLeaf<'_>], plan: &ChunkPlan) -> String {
+        let position = |id| leaves.iter().position(|l| l.node_id == id).unwrap();
+        let (first, last) = (position(plan.start_node_id), position(plan.end_node_id));
+        leaves[first..=last]
+            .iter()
+            .filter(|l| !l.text.is_empty())
+            .map(|l| {
+                let from = if l.node_id == plan.start_node_id {
+                    plan.start_char_offset as usize
+                } else {
+                    0
+                };
+                let to = if l.node_id == plan.end_node_id {
+                    plan.end_char_offset as usize
+                } else {
+                    l.text.chars().count()
+                };
+                l.text
+                    .chars()
+                    .skip(from)
+                    .take(to - from)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join(GROUP_SEPARATOR)
+    }
+
+    /// First 8 bytes, as hex, of a SHA-256 over every plan's coordinates,
+    /// raw text, and normalized-text hash, in order.
+    fn golden_digest(plans: &[ChunkPlan]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        for p in plans {
+            h.update(
+                format!(
+                    "{}:{}-{}:{}\n",
+                    p.start_node_id, p.start_char_offset, p.end_node_id, p.end_char_offset
+                )
+                .as_bytes(),
+            );
+            h.update(p.text.as_bytes());
+            h.update(b"\0");
+            h.update(p.norm_chunk_sha256.as_bytes());
+            h.update(b"\n");
+        }
+        h.finalize()[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    #[test]
+    fn chunk_boundaries_match_the_golden_digests() {
+        let cases = golden_cases(include_str!("../tests/fixtures/chunk/golden.txt"));
+        let mut actual = Vec::new();
+        for &(target_chars, overlap_chars) in GOLDEN_CONFIGS {
+            let params = ChunkParams {
+                target_chars,
+                overlap_chars,
+            };
+            for (label, leaves) in &cases {
+                let key = format!("{target_chars}/{overlap_chars}/{label}");
+                let plans = plan_chunks(leaves, &params);
+                for (i, p) in plans.iter().enumerate() {
+                    assert_eq!(
+                        text_at(leaves, p),
+                        p.text,
+                        "{key}: chunk {i}'s coordinates do not select its text"
+                    );
+                }
+                actual.push((key, golden_digest(&plans), plans.len()));
+            }
+        }
+        let moved: Vec<&str> = actual
+            .iter()
+            .filter(|(k, d, _)| !GOLDEN.contains(&(k.as_str(), d.as_str())))
+            .map(|(k, _, _)| k.as_str())
+            .collect();
+        let restated: String = actual
+            .iter()
+            .map(|(k, d, n)| format!("        (\"{k}\", \"{d}\"), // {n} chunks\n"))
+            .collect();
+        assert!(
+            moved.is_empty() && actual.len() == GOLDEN.len(),
+            "chunk boundaries moved for {moved:?}. A chunking dependency or setting changed \
+             what plan_chunks produces: keep the previous dependency versions in Cargo.lock, or \
+             bump CHUNK_VERSION and restate GOLDEN as\n{restated}"
+        );
     }
 }

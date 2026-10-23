@@ -22,6 +22,7 @@ use bookrack_core::knob::{
 };
 use fs2::FileExt;
 
+pub mod advice_record;
 mod detect;
 mod knobs;
 pub mod llama_server_pin;

@@ -47,7 +47,9 @@ use lancedb::DistanceType;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::table::OptimizeAction;
 
-use bookrack_core::{NODE_CAPACITY, NODE_PARTITION_FACTOR, NodeId, PartitionIdx};
+use bookrack_core::{
+    NODE_CAPACITY, NODE_PARTITION_FACTOR, NodeId, PartitionIdx, VectorDefect, vector_defect,
+};
 
 /// Name of the single table this crate manages.
 const TABLE: &str = "chunks";
@@ -75,9 +77,10 @@ pub(crate) fn ensure_lance_env() {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum VectorsError {
-    /// The underlying LanceDB layer reported an error.
-    #[error("LanceDB error")]
-    Lance(#[from] lancedb::Error),
+    /// The underlying LanceDB layer reported an error. The text is the
+    /// whole LanceDB chain, already redacted: see [`LanceError`].
+    #[error("LanceDB error: {0}")]
+    Lance(LanceError),
 
     /// An Arrow record batch could not be built or decoded.
     #[error("Arrow error")]
@@ -92,6 +95,18 @@ pub enum VectorsError {
         got: usize,
         /// The dimension the store was opened with.
         expected: usize,
+    },
+
+    /// A row's vector cannot be indexed: a component is NaN or
+    /// infinite, or its length is zero or overflows. An embedder is
+    /// expected to refuse such a vector first; this is the store's own
+    /// invariant, and the whole batch is rejected before any write.
+    #[error("chunk row {row} carries an unusable vector: {}", .defect.describe())]
+    UnusableVector {
+        /// The row's position in the batch.
+        row: usize,
+        /// What makes it unusable.
+        defect: VectorDefect,
     },
 
     /// A query result was missing an expected column, or it held an
@@ -146,6 +161,33 @@ pub enum VectorsError {
         num_sub_vectors: usize,
     },
 
+    /// An ANN configuration no build accepts, whatever the data: a
+    /// zero partition count, probe count, or refine factor, a PQ code
+    /// width other than 4 or 8, a sub-vector count that does not
+    /// divide the dimension, or an odd one with 4-bit codes.
+    #[error("invalid ANN configuration: {field} {reason}")]
+    InvalidAnnConfig {
+        /// The [`AnnConfig`] field at fault.
+        field: &'static str,
+        /// What the field must satisfy, and the value it holds.
+        reason: String,
+    },
+
+    /// The table holds fewer vectors than the requested index can
+    /// train on. This is the hard floor below which the build fails;
+    /// clearing it does not guarantee that training succeeds.
+    #[error("cannot train {} on {rows} vectors: it needs at least {required}", .kind.as_str())]
+    TooFewVectors {
+        /// The requested index kind.
+        kind: AnnKind,
+        /// The rows the table holds.
+        rows: u64,
+        /// The rows the binding limit needs.
+        required: u64,
+        /// The limit that binds.
+        limit: TrainingLimit,
+    },
+
     /// `vectors_meta.json` carried a `min_reader_version` stamp this
     /// binary cannot meet. The writer required a reader at version
     /// `required` or higher; this build is at `current`.
@@ -173,6 +215,82 @@ pub const MIN_READER_VERSION: u32 = 1;
 
 /// A fallible `vectors` operation.
 pub type Result<T> = std::result::Result<T, VectorsError>;
+
+/// A LanceDB error with its message flattened and the build-machine
+/// prefix of any dependency source location removed
+/// ([`bookrack_core::redact_source_paths`]).
+///
+/// Every LanceDB error enters bookrack through [`VectorsError::Lance`],
+/// so this is where its text is made fit to leave the process. `Display`
+/// and `Debug` both print the redacted chain — `Debug` is what
+/// `tracing`'s `?e` writes — and `source()` is `None`, so walking the
+/// chain cannot reach the original text. [`LanceError::inner`] keeps
+/// the original error for code that has to match on it.
+pub struct LanceError {
+    inner: lancedb::Error,
+    text: String,
+}
+
+impl LanceError {
+    /// The LanceDB error as raised, unredacted.
+    pub fn inner(&self) -> &lancedb::Error {
+        &self.inner
+    }
+}
+
+impl From<lancedb::Error> for LanceError {
+    fn from(inner: lancedb::Error) -> LanceError {
+        let text =
+            bookrack_core::redact_source_paths(&bookrack_core::error_chain(&inner)).into_owned();
+        LanceError { inner, text }
+    }
+}
+
+impl std::fmt::Display for LanceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl std::fmt::Debug for LanceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl std::error::Error for LanceError {}
+
+impl From<lancedb::Error> for VectorsError {
+    fn from(e: lancedb::Error) -> VectorsError {
+        VectorsError::Lance(LanceError::from(e))
+    }
+}
+
+/// The training requirement behind a [`VectorsError::TooFewVectors`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrainingLimit {
+    /// IVF k-means needs at least one vector per partition.
+    Partitions {
+        /// The requested partition count.
+        num_partitions: u32,
+    },
+    /// A PQ codebook needs at least `2^num_bits` vectors.
+    PqCodebook {
+        /// The code width in bits, after the 8-bit default applies.
+        num_bits: u32,
+        /// The configured sub-vector count, which decides whether
+        /// 4-bit codes are an option.
+        num_sub_vectors: Option<u32>,
+    },
+}
+
+/// The PQ code widths LanceDB builds.
+// setting: internal -- what the pinned LanceDB accepts, not a bookrack choice
+const PQ_NUM_BITS: [u32; 2] = [4, 8];
+
+/// The PQ code width LanceDB applies when the configuration omits one.
+// setting: internal -- the pinned LanceDB's default, not a bookrack choice
+const PQ_DEFAULT_NUM_BITS: u32 = 8;
 
 /// The ANN index family attached to the chunks table. `BruteForce` is
 /// the explicit "no index" state — distinct from "no meta file yet,"
@@ -350,6 +468,137 @@ impl AnnConfig {
             lance_index_name,
         }
     }
+
+    /// Check this configuration against what an index build accepts on
+    /// a `dim`-wide table, before any data is consulted.
+    ///
+    /// Read-only: an omitted PQ code width is checked as LanceDB's 8-bit
+    /// default without being written back, and the PQ fields of a
+    /// non-PQ kind are ignored. A [`AnnKind::BruteForce`] configuration
+    /// has no build parameters and always passes.
+    pub fn validate(&self, dim: usize) -> Result<()> {
+        if self.kind == AnnKind::BruteForce {
+            return Ok(());
+        }
+        if self.num_partitions == 0 {
+            return Err(invalid("num_partitions", "must be greater than 0, got 0"));
+        }
+        if self.is_pq() {
+            let nsv = self
+                .num_sub_vectors
+                .ok_or(VectorsError::MissingPqParam("num_sub_vectors"))?;
+            if nsv == 0 {
+                return Err(invalid("num_sub_vectors", "must be greater than 0, got 0"));
+            }
+            let nsv_width = nsv as usize;
+            if !dim.is_multiple_of(nsv_width) {
+                return Err(invalid(
+                    "num_sub_vectors",
+                    format!("must divide the dimension {dim}, got {nsv}"),
+                ));
+            }
+            if dim / nsv_width > 8 {
+                return Err(VectorsError::IvfPqQuantizationTooCoarse {
+                    dim,
+                    num_sub_vectors: nsv_width,
+                });
+            }
+            let num_bits = self.pq_num_bits();
+            if !PQ_NUM_BITS.contains(&num_bits) {
+                return Err(invalid_num_bits(num_bits));
+            }
+            if num_bits == 4 && !nsv.is_multiple_of(2) {
+                return Err(invalid(
+                    "num_sub_vectors",
+                    format!("must be even with 4-bit codes, got {nsv}"),
+                ));
+            }
+        }
+        if self.nprobes == 0 {
+            return Err(invalid("nprobes", "must be greater than 0, got 0"));
+        }
+        if self.refine_factor == Some(0) {
+            return Err(invalid(
+                "refine_factor",
+                "must be greater than 0 when set, got 0",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Check that a table of `rows` vectors clears the floor below
+    /// which building this index fails: one vector per IVF partition
+    /// and, for the PQ families, `2^num_bits` vectors for the codebook.
+    ///
+    /// Clearing the floor does not guarantee that training succeeds.
+    /// When both floors bind, the higher one is reported, the codebook
+    /// on a tie. Safe to call without [`Self::validate`]: a code width
+    /// outside 4 and 8 is refused here too, before any power of two is
+    /// taken.
+    pub fn check_trainable(&self, rows: u64) -> Result<()> {
+        if self.kind == AnnKind::BruteForce {
+            return Ok(());
+        }
+        let mut binding = None;
+        if self.is_pq() {
+            let num_bits = self.pq_num_bits();
+            if !PQ_NUM_BITS.contains(&num_bits) {
+                return Err(invalid_num_bits(num_bits));
+            }
+            let required = 1u64 << num_bits;
+            if rows < required {
+                binding = Some((
+                    required,
+                    TrainingLimit::PqCodebook {
+                        num_bits,
+                        num_sub_vectors: self.num_sub_vectors,
+                    },
+                ));
+            }
+        }
+        let partitions = u64::from(self.num_partitions);
+        if rows < partitions && binding.is_none_or(|(required, _)| partitions > required) {
+            binding = Some((
+                partitions,
+                TrainingLimit::Partitions {
+                    num_partitions: self.num_partitions,
+                },
+            ));
+        }
+        match binding {
+            None => Ok(()),
+            Some((required, limit)) => Err(VectorsError::TooFewVectors {
+                kind: self.kind,
+                rows,
+                required,
+                limit,
+            }),
+        }
+    }
+
+    /// Whether this kind quantizes with PQ.
+    fn is_pq(&self) -> bool {
+        matches!(self.kind, AnnKind::IvfPq | AnnKind::IvfHnswPq)
+    }
+
+    /// The PQ code width a build uses: the configured one, or LanceDB's
+    /// default when it is omitted.
+    fn pq_num_bits(&self) -> u32 {
+        self.num_bits.unwrap_or(PQ_DEFAULT_NUM_BITS)
+    }
+}
+
+/// A [`VectorsError::InvalidAnnConfig`] for `field`.
+fn invalid(field: &'static str, reason: impl Into<String>) -> VectorsError {
+    VectorsError::InvalidAnnConfig {
+        field,
+        reason: reason.into(),
+    }
+}
+
+/// The refusal for a PQ code width LanceDB does not build.
+fn invalid_num_bits(num_bits: u32) -> VectorsError {
+    invalid("num_bits", format!("must be 4 or 8, got {num_bits}"))
 }
 
 /// One chunk row about to be written to the store.
@@ -615,17 +864,22 @@ impl ChunkStore {
 
     /// Append chunk rows to the table in one batch. Returns the number
     /// written; an empty input is a no-op. Every vector must match the
-    /// store dimension, or the whole batch is rejected before any write.
+    /// store dimension and be usable for cosine search
+    /// ([`bookrack_core::vector_defect`]), or the whole batch is
+    /// rejected before any write.
     pub async fn append(&self, rows: &[ChunkRow]) -> Result<usize> {
         if rows.is_empty() {
             return Ok(0);
         }
-        for row in rows {
+        for (index, row) in rows.iter().enumerate() {
             if row.vector.len() != self.dim {
                 return Err(VectorsError::DimensionMismatch {
                     got: row.vector.len(),
                     expected: self.dim,
                 });
+            }
+            if let Some(defect) = vector_defect(&row.vector) {
+                return Err(VectorsError::UnusableVector { row: index, defect });
             }
         }
         let batch = build_batch(rows, self.dim)?;
@@ -680,28 +934,26 @@ impl ChunkStore {
         Ok(rows)
     }
 
-    /// Run table-level maintenance: compact small fragments, prune
-    /// versions older than the LanceDB default retention, and absorb any
-    /// freshly-appended rows into existing indices.
-    ///
-    /// Safe to call on an empty table or one with no vector index — the
-    /// corresponding step is a no-op in those cases. A book write is
-    /// `delete_partition` followed by `append`, which leaves tombstones
-    /// and unindexed rows behind; running this at the end of each book
-    /// keeps that churn from accumulating.
     /// Build an ANN index over the chunks table according to `cfg`,
     /// dropping any existing index of the canonical name first. The new
     /// configuration is stamped to `<lancedb_dir>/vectors_meta.json` on
-    /// success — `built_at` is owned by the caller (RFC 3339 expected)
-    /// so this module stays clock-deterministic.
+    /// success, as given — an omitted PQ code width stays omitted —
+    /// and `built_at` is owned by the caller (RFC 3339 expected) so this
+    /// module stays clock-deterministic.
     ///
-    /// Guardrails:
+    /// Guardrails, all checked before the existing index is touched:
     ///
     /// * `AnnKind::BruteForce` is rejected — there is no index to
     ///   build; call [`drop_ann_index`] instead.
-    /// * For `AnnKind::IvfPq` and `AnnKind::IvfHnswPq`,
-    ///   `num_sub_vectors` is required, and `dim / num_sub_vectors > 8`
-    ///   is rejected as too-coarse quantization.
+    /// * [`AnnConfig::validate`] refuses a configuration no build
+    ///   accepts: zero partitions, probes, or refine factor; for the PQ
+    ///   kinds a missing, zero, or non-dividing `num_sub_vectors`,
+    ///   `dim / num_sub_vectors > 8`, a code width other than 4 or 8,
+    ///   and an odd sub-vector count with 4-bit codes.
+    /// * [`AnnConfig::check_trainable`] refuses a table with fewer rows
+    ///   than partitions, or fewer than `2^num_bits` rows for a PQ
+    ///   codebook. Clearing that floor does not guarantee training
+    ///   succeeds: a build can still fail after the old index is gone.
     /// * `IvfHnsw*` builds are accepted but logged at `warn` — they
     ///   carry an upstream recall regression on lancedb 0.30 and should
     ///   not be relied on as a default.
@@ -720,17 +972,8 @@ impl ChunkStore {
         if matches!(cfg.kind, AnnKind::BruteForce) {
             return Err(VectorsError::BuildOnBruteForceKind);
         }
-        if matches!(cfg.kind, AnnKind::IvfPq | AnnKind::IvfHnswPq) {
-            let nsv = cfg
-                .num_sub_vectors
-                .ok_or(VectorsError::MissingPqParam("num_sub_vectors"))?;
-            if nsv == 0 || self.dim as u32 / nsv > 8 {
-                return Err(VectorsError::IvfPqQuantizationTooCoarse {
-                    dim: self.dim,
-                    num_sub_vectors: nsv as usize,
-                });
-            }
-        }
+        cfg.validate(self.dim)?;
+        cfg.check_trainable(self.count_rows().await? as u64)?;
         if matches!(
             cfg.kind,
             AnnKind::IvfHnswFlat | AnnKind::IvfHnswSq | AnnKind::IvfHnswPq
@@ -876,6 +1119,15 @@ impl ChunkStore {
         }
     }
 
+    /// Run table-level maintenance: compact small fragments, prune
+    /// versions older than the LanceDB default retention, and absorb any
+    /// freshly-appended rows into existing indices.
+    ///
+    /// Safe to call on an empty table or one with no vector index — the
+    /// corresponding step is a no-op in those cases. A book write is
+    /// `delete_partition` followed by `append`, which leaves tombstones
+    /// and unindexed rows behind; running this at the end of each book
+    /// keeps that churn from accumulating.
     pub async fn optimize(&self) -> Result<()> {
         let started = std::time::Instant::now();
         let stats = self.table.optimize(OptimizeAction::All).await?;
@@ -1562,6 +1814,370 @@ mod tests {
         ));
     }
 
+    /// `n` chunk rows in book 1 whose vectors vary in every component,
+    /// so each PQ sub-vector has distinct points to train on.
+    fn varied_rows(n: i64) -> Vec<ChunkRow> {
+        (0..n)
+            .map(|i| {
+                let v = (i as f32 + 1.0) / (n as f32 + 1.0);
+                let a = ((i * 7) % 13) as f32 / 13.0 + 0.05;
+                let b = ((i * 3) % 11) as f32 / 11.0 + 0.05;
+                row(1, i + 1, [v, 1.0 - v, a, b])
+            })
+            .collect()
+    }
+
+    /// A configuration of `kind` with every parameter set explicitly.
+    fn ann(
+        kind: AnnKind,
+        num_partitions: u32,
+        num_sub_vectors: Option<u32>,
+        num_bits: Option<u32>,
+    ) -> AnnConfig {
+        AnnConfig {
+            kind,
+            num_partitions,
+            num_sub_vectors,
+            num_bits,
+            nprobes: 1,
+            refine_factor: None,
+        }
+    }
+
+    /// A store of `rows` varied rows carrying a one-partition IvfFlat
+    /// index, and the index list and sidecar bytes it starts from.
+    async fn store_with_index(rows: i64) -> (TempDir, ChunkStore, Vec<String>, Vec<u8>) {
+        let (dir, store) = fresh_store().await;
+        store.append(&varied_rows(rows)).await.expect("append");
+        store
+            .build_ann_index(
+                &ann(AnnKind::IvfFlat, 1, None, None),
+                dir.path(),
+                fixed_ts(),
+            )
+            .await
+            .expect("seed index");
+        let indices = store.list_indices().await.expect("list_indices");
+        assert!(
+            indices.contains(&DEFAULT_INDEX_NAME.to_string()),
+            "{indices:?}"
+        );
+        let meta = std::fs::read(dir.path().join(META_FILENAME)).expect("read meta");
+        (dir, store, indices, meta)
+    }
+
+    /// The index and the sidecar are exactly what they were.
+    async fn assert_untouched(dir: &TempDir, store: &ChunkStore, indices: &[String], meta: &[u8]) {
+        assert_eq!(
+            store.list_indices().await.expect("list_indices"),
+            indices,
+            "a refused build must leave the index in place"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(META_FILENAME)).expect("read meta"),
+            meta,
+            "a refused build must leave the sidecar byte for byte"
+        );
+    }
+
+    #[tokio::test]
+    async fn too_few_rows_for_the_partitions_is_refused_before_the_old_index_goes() {
+        let (dir, store, indices, meta) = store_with_index(4).await;
+        let err = store
+            .build_ann_index(
+                &ann(AnnKind::IvfFlat, 256, None, None),
+                dir.path(),
+                fixed_ts(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                VectorsError::TooFewVectors {
+                    kind: AnnKind::IvfFlat,
+                    rows: 4,
+                    required: 256,
+                    limit: TrainingLimit::Partitions {
+                        num_partitions: 256
+                    },
+                }
+            ),
+            "{err:?}"
+        );
+        assert_untouched(&dir, &store, &indices, &meta).await;
+    }
+
+    #[tokio::test]
+    async fn the_partition_floor_is_one_row_per_partition() {
+        let (dir, store, indices, meta) = store_with_index(3).await;
+        let cfg = ann(AnnKind::IvfFlat, 4, None, None);
+        let err = store
+            .build_ann_index(&cfg, dir.path(), fixed_ts())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                VectorsError::TooFewVectors {
+                    rows: 3,
+                    required: 4,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert_untouched(&dir, &store, &indices, &meta).await;
+
+        let (dir, store) = fresh_store().await;
+        store.append(&varied_rows(4)).await.expect("append");
+        store
+            .build_ann_index(&cfg, dir.path(), fixed_ts())
+            .await
+            .expect("one row per partition builds");
+    }
+
+    #[tokio::test]
+    async fn the_pq_floor_is_one_row_per_codebook_entry() {
+        for (num_bits, enough) in [(8u32, 256i64), (4, 16)] {
+            let cfg = ann(AnnKind::IvfPq, 1, Some(2), Some(num_bits));
+            let (dir, store, indices, meta) = store_with_index(enough - 1).await;
+            let err = store
+                .build_ann_index(&cfg, dir.path(), fixed_ts())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    VectorsError::TooFewVectors {
+                        limit: TrainingLimit::PqCodebook { num_bits: b, .. },
+                        required,
+                        ..
+                    } if b == num_bits && required == enough as u64
+                ),
+                "{num_bits} bits: {err:?}"
+            );
+            assert_untouched(&dir, &store, &indices, &meta).await;
+
+            let (dir, store) = fresh_store().await;
+            store.append(&varied_rows(enough)).await.expect("append");
+            store
+                .build_ann_index(&cfg, dir.path(), fixed_ts())
+                .await
+                .unwrap_or_else(|e| panic!("{num_bits} bits on {enough} rows builds: {e:?}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_table_is_refused_without_writing_a_sidecar() {
+        let (dir, store) = fresh_store().await;
+        let err = store
+            .build_ann_index(
+                &ann(AnnKind::IvfFlat, 1, None, None),
+                dir.path(),
+                fixed_ts(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                VectorsError::TooFewVectors {
+                    rows: 0,
+                    required: 1,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(!dir.path().join(META_FILENAME).exists());
+    }
+
+    #[test]
+    fn the_higher_floor_binds_and_the_codebook_wins_a_tie() {
+        let limit = |num_partitions: u32, rows: u64| match ann(
+            AnnKind::IvfPq,
+            num_partitions,
+            Some(2),
+            Some(8),
+        )
+        .check_trainable(rows)
+        .unwrap_err()
+        {
+            VectorsError::TooFewVectors {
+                required, limit, ..
+            } => (required, limit),
+            other => panic!("{other:?}"),
+        };
+        assert!(matches!(
+            limit(300, 200),
+            (
+                300,
+                TrainingLimit::Partitions {
+                    num_partitions: 300
+                }
+            )
+        ));
+        assert!(matches!(
+            limit(100, 50),
+            (256, TrainingLimit::PqCodebook { num_bits: 8, .. })
+        ));
+        assert!(matches!(
+            limit(256, 100),
+            (256, TrainingLimit::PqCodebook { num_bits: 8, .. })
+        ));
+    }
+
+    #[test]
+    fn check_trainable_refuses_a_wide_code_without_overflowing() {
+        for num_bits in [16, 64] {
+            let err = ann(AnnKind::IvfPq, 1, Some(2), Some(num_bits))
+                .check_trainable(1_000_000)
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    VectorsError::InvalidAnnConfig {
+                        field: "num_bits",
+                        ..
+                    }
+                ),
+                "{num_bits} bits: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn static_mistakes_are_refused_before_the_old_index_goes() {
+        let pq = |nsv: u32, bits: u32| ann(AnnKind::IvfPq, 1, Some(nsv), Some(bits));
+        let cases: Vec<(&str, AnnConfig, &str)> = vec![
+            (
+                "zero partitions",
+                ann(AnnKind::IvfFlat, 0, None, None),
+                "num_partitions",
+            ),
+            (
+                "zero probes",
+                AnnConfig {
+                    nprobes: 0,
+                    ..ann(AnnKind::IvfFlat, 1, None, None)
+                },
+                "nprobes",
+            ),
+            (
+                "zero refine factor",
+                AnnConfig {
+                    refine_factor: Some(0),
+                    ..ann(AnnKind::IvfFlat, 1, None, None)
+                },
+                "refine_factor",
+            ),
+            ("2-bit codes", pq(2, 2), "num_bits"),
+            ("16-bit codes", pq(2, 16), "num_bits"),
+            (
+                "odd sub-vectors with 4-bit codes",
+                pq(1, 4),
+                "num_sub_vectors",
+            ),
+            (
+                "sub-vectors not dividing the dimension",
+                pq(3, 8),
+                "num_sub_vectors",
+            ),
+            ("zero sub-vectors", pq(0, 8), "num_sub_vectors"),
+        ];
+        let (dir, store, indices, meta) = store_with_index(300).await;
+        for (case, cfg, field) in cases {
+            let err = store
+                .build_ann_index(&cfg, dir.path(), fixed_ts())
+                .await
+                .expect_err(case);
+            assert!(
+                matches!(&err, VectorsError::InvalidAnnConfig { field: f, .. } if *f == field),
+                "{case}: {err:?}"
+            );
+            assert_untouched(&dir, &store, &indices, &meta).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_pq_builds_search_and_keep_an_omitted_width_omitted() {
+        let cases = [
+            (AnnKind::IvfPq, None, 300),
+            (AnnKind::IvfHnswPq, None, 300),
+            (AnnKind::IvfPq, Some(4), 16),
+        ];
+        for (kind, num_bits, rows) in cases {
+            let (dir, store) = fresh_store().await;
+            store.append(&varied_rows(rows)).await.expect("append");
+            let cfg = ann(kind, 1, Some(2), num_bits);
+            store
+                .build_ann_index(&cfg, dir.path(), fixed_ts())
+                .await
+                .unwrap_or_else(|e| panic!("{kind:?} {num_bits:?}: {e:?}"));
+            let hits = store
+                .search(&[0.5, 0.5, 0.3, 0.3], 3)
+                .await
+                .expect("search");
+            assert!(!hits.is_empty(), "{kind:?} {num_bits:?}: no hits");
+            let stored = meta::load(dir.path()).expect("load").expect("meta");
+            assert_eq!(
+                stored.num_bits, num_bits,
+                "{kind:?}: the meta records the given width"
+            );
+        }
+    }
+
+    /// The text up to `registry/src/` from the last space or quote
+    /// before it: the build machine's cargo home, as an error prints it.
+    fn registry_prefix(text: &str) -> Option<&str> {
+        let marker = text.find("registry/src/")?;
+        let start = text[..marker].rfind([' ', '"']).map_or(0, |p| p + 1);
+        Some(&text[start..marker])
+    }
+
+    /// A LanceDB error raised by a real table carries the absolute
+    /// source location of the dependency that raised it. Once it is a
+    /// `VectorsError`, every way bookrack formats it keeps the
+    /// crate-relative location and drops the build-machine prefix.
+    #[tokio::test]
+    async fn a_lance_error_formats_without_the_build_machine_prefix() {
+        use lancedb::index::Index;
+        use lancedb::index::vector::IvfFlatIndexBuilder;
+
+        let (_dir, store) = fresh_store().await;
+        store.append(&varied_rows(4)).await.expect("append");
+        // Straight to LanceDB, past `build_ann_index`'s own floor, so
+        // the error is LanceDB's.
+        let raw = store
+            .table
+            .create_index(
+                &["vector"],
+                Index::IvfFlat(IvfFlatIndexBuilder::default().num_partitions(256)),
+            )
+            .execute()
+            .await
+            .expect_err("k-means cannot train 256 centroids on 4 rows");
+        let unredacted = format!("{raw:?}");
+        let prefix = registry_prefix(&unredacted)
+            .filter(|p| p.starts_with('/') || p.contains(":\\"))
+            .unwrap_or_else(|| panic!("the raw error carries no absolute location: {unredacted}"))
+            .to_string();
+
+        let err = VectorsError::from(raw);
+        for (form, text) in [
+            ("error_chain", bookrack_core::error_chain(&err)),
+            ("Debug", format!("{err:?}")),
+            ("Display", err.to_string()),
+        ] {
+            assert!(!text.contains(&prefix), "{form} keeps {prefix:?}: {text}");
+            assert!(
+                text.contains("/src/vector/kmeans.rs:"),
+                "{form} keeps the crate-relative location: {text}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn drop_on_empty_table_writes_brute_force_meta() {
         let (dir, store) = fresh_store().await;
@@ -1866,6 +2482,61 @@ mod tests {
             ),
             "got {err:?}"
         );
+    }
+
+    /// An unusable vector anywhere in a batch rejects the whole batch
+    /// before it is written: the rows ahead of it do not land, and the
+    /// rows written earlier stay.
+    #[tokio::test]
+    async fn an_unusable_vector_rejects_its_whole_batch() {
+        let cases = [
+            (f32::NAN, VectorDefect::NonFinite),
+            (f32::INFINITY, VectorDefect::NonFinite),
+            (f32::NEG_INFINITY, VectorDefect::NonFinite),
+        ];
+        for (bad, defect) in cases {
+            let (_dir, store) = fresh_store().await;
+            store
+                .append(&[row(1, 1, [1.0, 0.0, 0.0, 0.0])])
+                .await
+                .expect("first batch");
+            let batch = [
+                row(2, 1, [0.0, 1.0, 0.0, 0.0]),
+                row(2, 2, [0.0, 0.0, 1.0, 0.0]),
+                row(2, 3, [0.5, bad, 0.5, 0.5]),
+            ];
+            let err = store.append(&batch).await.unwrap_err();
+            assert!(
+                matches!(err, VectorsError::UnusableVector { row: 2, defect: d } if d == defect),
+                "{bad}: got {err:?}"
+            );
+            assert_eq!(store.count_rows().await.expect("count"), 1, "{bad}");
+            assert!(
+                store
+                    .scan_partition(PartitionIdx::new(2))
+                    .await
+                    .expect("scan")
+                    .is_empty(),
+                "{bad}: no row of the rejected batch lands"
+            );
+        }
+
+        let (_dir, store) = fresh_store().await;
+        let err = store
+            .append(&[row(1, 1, [0.0, 0.0, 0.0, 0.0])])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                VectorsError::UnusableVector {
+                    row: 0,
+                    defect: VectorDefect::DegenerateNorm
+                }
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(store.count_rows().await.expect("count"), 0);
     }
 
     #[tokio::test]

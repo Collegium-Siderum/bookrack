@@ -59,7 +59,9 @@ use crate::control::events::{
     EventStreamHandle, Stage,
 };
 use crate::control::methods::MethodContext;
-use crate::control::progress::{EventProgressSink, ProgressSink};
+use crate::control::progress::{
+    EMBED_PROGRESS_INTERVAL, EventProgressSink, ProgressSink, embed_batch_reporter,
+};
 use crate::control::socket::{
     ControlSocketGuard, ControlSocketPath, bind as bind_control_socket, run_accept_loop,
 };
@@ -446,9 +448,8 @@ impl DaemonRuntime {
         }
 
         // 5. Effective embed configuration for the served library. The
-        //    model resolves by the full chain (env > config.toml >
-        //    index profile > default), so a profile-reference or
-        //    embed-model conflict and an undefined profile each refuse
+        //    model resolves from the index profile, else the built-in
+        //    default, so an undefined or unloadable profile refuses
         //    startup here with the repair spelled out, rather than
         //    embedding under a combination the operator never
         //    declared. `build_library_handle` below re-runs the same
@@ -587,10 +588,11 @@ impl DaemonRuntime {
                 shutdown_rx,
                 move |job| {
                     let registry = Arc::clone(&registry);
-                    let sink = EventProgressSink::new(job.id.clone(), events_for_runner.clone());
+                    let sink =
+                        EventProgressSink::new(job.id.clone(), job.kind, events_for_runner.clone());
                     async move {
-                        sink.report(Stage::Extract, None, None);
-                        let outcome = tokio::task::spawn_blocking(move || {
+                        sink.report(Stage::Processing, None, None);
+                        tokio::task::spawn_blocking(move || {
                             let runtime = tokio::runtime::Handle::current();
                             // A submit pins the job to a registry name
                             // at enqueue time. An empty name is a row
@@ -612,6 +614,11 @@ impl DaemonRuntime {
                                 let handle = registry
                                     .get(library)
                                     .map_err(|e| queue::JobError::Book(format!("registry: {e}")))?;
+                                // Both book-pipeline legs below report
+                                // their embedding pass through one
+                                // throttled reporter on the job's sink.
+                                let on_embed_batch =
+                                    embed_batch_reporter(&sink, EMBED_PROGRESS_INTERVAL);
                                 if let Some(ocr) = intake_ocr {
                                     let params = prepare_book_params(
                                         &handle.templates().ingest,
@@ -625,7 +632,13 @@ impl DaemonRuntime {
                                         allow_partial: ocr.allow_partial,
                                     };
                                     let report = handle
-                                        .ingest_ocr(&path, &ocr.from_pdf, &ocr_params, &params)
+                                        .ingest_ocr(
+                                            &path,
+                                            &ocr.from_pdf,
+                                            &ocr_params,
+                                            &params,
+                                            &on_embed_batch,
+                                        )
                                         .await
                                         .map_err(|e| queue::classify_ingest_error(&e))?;
                                     return Ok::<queue::JobSuccess, queue::JobError>(
@@ -652,7 +665,9 @@ impl DaemonRuntime {
                                         // terminal carrying that anchor id.
                                         // Recognize it before `classify_ingest_error`
                                         // erases the typed error into a message.
-                                        let report = match handle.ingest_book(&path, &params).await
+                                        let report = match handle
+                                            .ingest_book(&path, &params, &on_embed_batch)
+                                            .await
                                         {
                                             Ok(report) => report,
                                             Err(e) => {
@@ -718,11 +733,7 @@ impl DaemonRuntime {
                             })
                         })
                         .await
-                        .map_err(|e| queue::JobError::Book(format!("queue worker join: {e}")))?;
-                        if outcome.is_ok() {
-                            sink.report(Stage::Embed, None, None);
-                        }
-                        outcome
+                        .map_err(|e| queue::JobError::Book(format!("queue worker join: {e}")))?
                     }
                 },
                 events_for_loop,
@@ -1035,11 +1046,10 @@ pub(crate) async fn build_library_handle(
     mount_guard: Option<MountGuard>,
 ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>> {
     let cfg = cfg_arc.as_ref();
-    // The embed model resolves per library by the full chain
-    // (env > config.toml > index profile > default); a conflict or an
-    // undefined profile refuses the handle with the repair spelled
-    // out, rather than embedding under a combination the operator
-    // never declared.
+    // The embed model resolves per library from the index profile,
+    // else the built-in default; an undefined or unloadable profile
+    // refuses the handle with the repair spelled out, rather than
+    // embedding under a combination the operator never declared.
     let embed_cfg = crate::profile::effective_embed_config(cfg)
         .context("resolve effective embed configuration")?;
     let embedder = OllamaEmbedClient::new(

@@ -97,14 +97,19 @@ impl Default for DaemonStateFlag {
     }
 }
 
-/// Ingest pipeline stage tag carried on [`Event::WorkerProgress`].
-/// Aligned with the three top-level phases the ingest pipeline drives a
-/// book through.
-#[derive(Debug, Clone, Copy, Serialize)]
+/// Stage tag carried on [`Event::WorkerProgress`].
+///
+/// A variant names only a position the worker can observe. A pipeline
+/// stage gets a variant once the worker can see that stage begin;
+/// until then a running job reports [`Stage::Processing`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
-    Extract,
-    Ingest,
+    /// The worker has pulled the job and handed it to its pipeline;
+    /// which stage the pipeline is in is not reported.
+    Processing,
+    /// A book's embedding pass, reported as batches land in the vector
+    /// store; `stage_progress` is the fraction of chunks written.
     Embed,
 }
 
@@ -138,12 +143,16 @@ pub struct QueueTick {
     pub last_finished: Option<JobOutcomeSummary>,
 }
 
-/// Intra-stage progress emitted by the queue worker around each phase
-/// boundary. `stage_progress` is a 0.0..=1.0 fraction when measurable,
-/// otherwise omitted.
+/// Progress of one running queue job, as far as the worker can observe
+/// it. `stage_progress` is a 0.0..=1.0 fraction when measurable,
+/// otherwise omitted. A job's terminal state is not reported here; it
+/// arrives on [`QueueTick::last_finished`].
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkerProgress {
     pub job_id: String,
+    /// Which pipeline runs the job. Mirrored from the matching
+    /// `QueueJob.kind`.
+    pub kind: ItemKind,
     pub stage: Stage,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stage_progress: Option<f32>,
@@ -444,7 +453,8 @@ mod tests {
             }),
             Event::WorkerProgress(WorkerProgress {
                 job_id: "job".to_string(),
-                stage: Stage::Extract,
+                kind: ItemKind::Book,
+                stage: Stage::Processing,
                 stage_progress: None,
                 message: None,
             }),

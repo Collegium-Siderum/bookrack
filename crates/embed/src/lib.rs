@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use bookrack_core::{Explain, Problem};
+use bookrack_core::{Explain, Problem, VectorDefect, vector_defect};
 use serde::{Deserialize, Serialize};
 
 mod probe;
@@ -81,6 +81,18 @@ pub enum EmbedError {
     /// or its vector count did not match the input count.
     #[error("Ollama returned a malformed response: {0}")]
     MalformedResponse(String),
+
+    /// A returned vector cannot be stored or indexed: a component is
+    /// NaN or infinite, or its length is zero or overflows. The same
+    /// model gives the same vector for the same text, so this never
+    /// retries and never shrinks the batch.
+    #[error("Ollama returned an unusable vector at position {index}: {}", .defect.describe())]
+    UnusableVector {
+        /// The vector's position in the batch.
+        index: usize,
+        /// What makes it unusable.
+        defect: VectorDefect,
+    },
 }
 
 impl EmbedError {
@@ -125,6 +137,21 @@ impl Explain for EmbedError {
                     .detail(format!("Ollama answered HTTP {status}: {body}."))
                     .hint("Wait for the current load to clear, then retry with a smaller batch.")
                     .retryable(true)
+            }
+
+            // Present tense: the same model returns the same vector for
+            // the same text.
+            EmbedError::UnusableVector { index, defect } => {
+                Problem::new("cannot embed: Ollama returned an unusable vector")
+                    .detail(format!(
+                        "The vector at position {index} of the batch cannot be indexed: {}.",
+                        defect.describe()
+                    ))
+                    .hint(
+                        "This is a fault in the embedding backend, not in the library's data. \
+                         Upgrade Ollama or the model, or point the index profile at another \
+                         embed model.",
+                    )
             }
 
             // No wording written for these yet, so the flattening
@@ -351,6 +378,14 @@ impl OllamaEmbedClient {
                     parsed.embeddings.len(),
                     texts.len()
                 )));
+            }
+            if let Some((index, defect)) = parsed
+                .embeddings
+                .iter()
+                .enumerate()
+                .find_map(|(index, v)| vector_defect(v).map(|defect| (index, defect)))
+            {
+                return Err(EmbedError::UnusableVector { index, defect });
             }
             Ok(parsed.embeddings)
         } else {
@@ -786,6 +821,87 @@ mod tests {
         );
     }
 
+    /// A well-formed response carrying a vector the store cannot index
+    /// is refused with that vector's position, after exactly one
+    /// request: the same model answers the same text the same way, so
+    /// neither a retry nor a smaller batch can help. `1e39` is outside
+    /// `f32` and decodes to infinity.
+    #[tokio::test]
+    async fn an_unusable_vector_is_refused_at_its_position_without_a_retry() {
+        use std::sync::atomic::Ordering;
+        let cases: [(&'static str, usize, usize, VectorDefect); 2] = [
+            (
+                r#"{"embeddings":[[1e39,0.0]]}"#,
+                1,
+                0,
+                VectorDefect::NonFinite,
+            ),
+            (
+                r#"{"embeddings":[[1.0,0.0],[0.0,0.0],[0.0,1.0]]}"#,
+                3,
+                1,
+                VectorDefect::DegenerateNorm,
+            ),
+        ];
+        for (body, inputs, index, defect) in cases {
+            let (url, hits) = counting_mock(0, "200 OK", body).await;
+            let client = OllamaEmbedClient::new(
+                &url,
+                "test-model",
+                Duration::from_secs(5),
+                3,
+                Duration::from_millis(1),
+            )
+            .expect("client builds");
+            let texts: Vec<String> = (0..inputs).map(|i| format!("text {i}")).collect();
+            let err = client.embed_batch(&texts).await.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    EmbedError::UnusableVector { index: i, defect: d } if i == index && d == defect
+                ),
+                "{body}: got {err:?}"
+            );
+            assert!(!err.is_transient() && !err.is_overload(), "{err:?}");
+            assert_eq!(hits.load(Ordering::SeqCst), 1, "{body}: one request");
+        }
+    }
+
+    #[test]
+    fn an_unusable_vector_explains_itself_as_a_backend_fault() {
+        let e = EmbedError::UnusableVector {
+            index: 2,
+            defect: VectorDefect::DegenerateNorm,
+        };
+        assert_eq!(
+            e.to_string(),
+            "Ollama returned an unusable vector at position 2: its length is zero or too large \
+             to normalize"
+        );
+        let p = e.explain();
+        assert_eq!(
+            p.summary,
+            "cannot embed: Ollama returned an unusable vector"
+        );
+        assert!(
+            p.data
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("position 2") && d.contains("length is zero")),
+            "{:?}",
+            p.data.detail
+        );
+        assert!(
+            p.data
+                .hint
+                .as_deref()
+                .is_some_and(|h| h.contains("embedding backend")),
+            "{:?}",
+            p.data.hint
+        );
+        assert!(!p.data.retryable);
+    }
+
     #[tokio::test]
     async fn a_vector_count_mismatch_is_a_malformed_response() {
         // One input, but the server returns zero vectors.
@@ -978,7 +1094,8 @@ mod tests {
                 | EmbedError::Unreachable(_)
                 | EmbedError::Overloaded { .. }
                 | EmbedError::BadRequest { .. }
-                | EmbedError::MalformedResponse(_) => {}
+                | EmbedError::MalformedResponse(_)
+                | EmbedError::UnusableVector { .. } => {}
             }
         }
         assert_classified(&EmbedError::Unreachable("probe".into()));

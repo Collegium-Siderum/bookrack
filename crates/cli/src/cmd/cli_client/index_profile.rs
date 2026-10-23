@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::render::confirm::{ConfirmMode, Confirmation, confirm_destructive};
+use bookrack_cli::render::ctx;
 use bookrack_config::{
     LibraryEntryFields, LibrarySelection, ManifestIdentitySeed, load_manifest,
     registry_target_path, set_manifest_index_profile, upsert_library_entry,
@@ -27,7 +28,7 @@ use bookrack_control_client::ControlClient;
 use bookrack_runtime::cmd::index_profile::{
     ApplyPlan, ApplyRefusal, PipelineFilter, plan_apply, render_apply_plan,
 };
-use bookrack_runtime::profile::{Pipeline, PlannedAction};
+use bookrack_runtime::profile::{Pipeline, PlannedAction, acknowledge_advice};
 use eyre::{Context, Result};
 use serde_json::{Value, json};
 
@@ -43,9 +44,16 @@ pub async fn run(
 ) -> Result<()> {
     // Plan derivation is offline and read-only; refusals that are the
     // operator's to fix map to the user-error exit code.
-    let plan = plan_apply(name, selection, pipeline)
+    let mut plan = plan_apply(name, selection, pipeline)
         .await
         .map_err(as_user_error)?;
+    // The registry's remarks are for a person reading the plan: a
+    // machine-readable or quiet run neither prints them nor records them
+    // as shown, so the next human-facing write still does.
+    let show_advice = !ctx().is_json() && !ctx().is_quiet();
+    if !show_advice {
+        plan.advice.clear();
+    }
 
     if dry_run {
         render_apply_plan(&plan, None);
@@ -66,6 +74,9 @@ pub async fn run(
     if plan.is_noop() {
         render_apply_plan(&plan, None);
         declare_target(&plan, name)?;
+        if show_advice {
+            acknowledge_advice(plan.target.data_dir(), Some(&plan.profile));
+        }
         println!("nothing else to do: the built index already matches '{name}'");
         // The reranker is query-time behaviour: no index action, but a
         // running daemon supervises its backend per the profile it
@@ -87,12 +98,8 @@ pub async fn run(
     );
 
     let client = helpers::connect(runtime_dir).await?;
-    let status = helpers::dispatch(&client, "status", Value::Null).await?;
-    if !status
-        .get("queue_worker_enabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
-    {
+    let status = helpers::daemon_status(&client).await?;
+    if !helpers::reports_queue_worker(&status) {
         return Err(BookrackCliError::LocalUserError {
             message: "queue worker unavailable: the daemon runs headless without one, so \
                       apply cannot execute any action; restart the daemon with a queue \
@@ -116,6 +123,9 @@ pub async fn run(
     }
 
     declare_target(&plan, name)?;
+    if show_advice {
+        acknowledge_advice(plan.target.data_dir(), Some(&plan.profile));
+    }
     execute_plan(&client, &plan, name).await?;
 
     // Self-check: re-derive against the on-disk state the actions left
@@ -124,8 +134,9 @@ pub async fn run(
     let verify = plan_apply(name, selection, pipeline).await?;
     if !verify.is_noop() {
         eyre::bail!(
-            "every action completed but the library still diverges from '{name}'; \
+            "every action completed but the library still diverges from '{name}'{}; \
              `bookrack index-profile current` on {} shows the remaining findings",
+            dimension_divergence(&verify),
             plan.target.data_dir().display()
         );
     }
@@ -140,6 +151,36 @@ pub async fn run(
         println!("restart the daemon so it brings up the reranker backend.");
     }
     Ok(())
+}
+
+/// The stamped dimension of every selected pipeline whose index
+/// disagrees with the profile's `embed.dim`, as a clause for the
+/// self-check's refusal; empty when the dimensions agree. The actions
+/// stamp what the backend produced, so a declared dimension the backend
+/// does not produce is the one divergence a re-run cannot clear.
+fn dimension_divergence(plan: &ApplyPlan) -> String {
+    let declared = plan.profile.embed.dim;
+    let mut clauses = Vec::new();
+    for section in &plan.sections {
+        let pipeline = section.pipeline;
+        let stamped =
+            bookrack_runtime::profile::built_stamps(&pipeline.corpus_db(plan.target.data_dir()))
+                .ok()
+                .flatten()
+                .and_then(|built| built.vector_dim);
+        if let Some(stamped) = stamped.filter(|&d| d != declared) {
+            clauses.push(format!(
+                "the {} index is stamped {stamped} dimensions, but '{}' declares {declared}",
+                pipeline.as_str(),
+                plan.profile.name
+            ));
+        }
+    }
+    if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", clauses.join("; "))
+    }
 }
 
 /// Map a planning refusal to the CLI's user-error exit path; every
@@ -365,8 +406,9 @@ fn print_interruption(actions: &[(Pipeline, PlannedAction)], failed: usize, name
     );
     println!(
         "rerun `bookrack index-profile apply {name}` to re-derive the remaining actions; \
-         an interrupted reset can also be finished with `bookrack vectors reset --resume` \
-         (books) or `bookrack papers vectors reset --resume` (papers)"
+         when the error offers --resume, an interrupted reset can also be finished with \
+         `bookrack vectors reset --resume` (books) or `bookrack papers vectors reset --resume` \
+         (papers)"
     );
 }
 

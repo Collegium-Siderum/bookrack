@@ -830,7 +830,7 @@ impl Catalog {
             |row| {
                 Ok(OcrPending {
                     intake: Intake::from_row(row)?,
-                    reason: row.get("ocr_reason")?,
+                    reason: crate::diagnostic_text::redacted(row.get("ocr_reason")?),
                 })
             },
         )?;
@@ -2813,6 +2813,29 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].intake.intake_id, anchor);
         assert_eq!(pending[0].reason.as_deref(), Some("garbled text layer"));
+    }
+
+    /// The OCR-pending listing projects the rejection reason straight
+    /// out of the audit table, past the audit row mapping, and still
+    /// reads it back redacted.
+    #[test]
+    fn list_ocr_pending_reads_the_reason_back_redacted() {
+        use crate::diagnostic_text::fixture::{READ, STORED};
+        let mut cat = catalog();
+        register_book(&mut cat, "pdf-located", "pdf", IntakeStatus::NeedsOcr);
+        let mut skip = crate::NewItemPipelineAudit::new(
+            "extract",
+            "quality_gate",
+            "skipped",
+            "run-ocr",
+            crate::ActorKind::Pipeline,
+        );
+        skip.source_sha256 = Some("pdf-located".to_string());
+        skip.error_message = Some(STORED.to_string());
+        cat.record_pipeline_audit(&skip).expect("skip row");
+
+        let pending = cat.list_ocr_pending(50, 0).expect("list");
+        assert_eq!(pending[0].reason.as_deref(), Some(READ));
     }
 
     #[test]

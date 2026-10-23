@@ -36,8 +36,8 @@ use bookrack_embed::Embedder;
 use bookrack_extract::Extraction;
 
 use crate::{
-    IngestError, IngestParams, Result, ingest_structure, new_run_id, resume_from_chunk,
-    run_metadata_substep, set_state, sha256_hex,
+    IngestError, IngestParams, OnEmbedBatch, Result, ingest_structure, new_run_id,
+    resume_from_chunk, run_metadata_substep, set_state, sha256_hex,
 };
 use bookrack_extract::envelope;
 
@@ -138,6 +138,41 @@ pub async fn ingest_ocr_intake<E: Embedder>(
     embedder: &E,
     params: &IngestParams,
     ocr_params: &OcrIngestParams,
+) -> Result<OcrIngestReport> {
+    ingest_ocr_intake_with_progress(
+        corpus,
+        catalog,
+        lancedb_dir,
+        books_dir,
+        ocr_md_path,
+        source_pdf_path,
+        embedder,
+        params,
+        ocr_params,
+        &|_, _| {},
+    )
+    .await
+}
+
+/// [`ingest_ocr_intake`], reporting each EMBED batch to
+/// `on_embed_batch` once it is written, as
+/// [`ingest_book_with_progress`](crate::ingest_book_with_progress)
+/// does for a born-digital source. Only the EMBED stage reports; the
+/// stages before it run without callbacks.
+// `ingest_ocr_intake`'s nine parameters plus the callback, for the
+// same reason `ingest_book_with_progress` carries its own.
+#[allow(clippy::too_many_arguments)]
+pub async fn ingest_ocr_intake_with_progress<E: Embedder>(
+    corpus: &mut Corpus,
+    catalog: &mut Catalog,
+    lancedb_dir: &Path,
+    books_dir: &Path,
+    ocr_md_path: &Path,
+    source_pdf_path: &Path,
+    embedder: &E,
+    params: &IngestParams,
+    ocr_params: &OcrIngestParams,
+    on_embed_batch: &OnEmbedBatch<'_>,
 ) -> Result<OcrIngestReport> {
     // 1. Read and hash both files. The OCR product can be a single
     //    markdown file or a polyocr `dir/` output; `read_source`
@@ -371,6 +406,7 @@ pub async fn ingest_ocr_intake<E: Embedder>(
         &run_id,
         &source_sha_ocr,
         &parsed_at,
+        on_embed_batch,
     )
     .await?;
 

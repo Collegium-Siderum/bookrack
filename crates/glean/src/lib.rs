@@ -20,7 +20,7 @@ use std::time::Instant;
 use crate::audit::projection::csl_type_token;
 use bookrack_catalog::{
     ActorKind, Catalog, IntakeStatus, NewContributor, NewIntake, NewItemPipelineAudit,
-    NewItemState, NewPublicationAttrs, NewReview, STATUS_PENDING,
+    NewItemState, NewPublicationAttrs, STATUS_PENDING,
 };
 use bookrack_config::EmbedConfig;
 use bookrack_core::{ItemKind, NodeId, NodeType, PartitionIdx};
@@ -47,8 +47,32 @@ pub mod stamps;
 /// store's index_meta. Independent of `bookrack_ingest::CHUNK_VERSION`:
 /// the two pipelines have separate fleets and bump on their own
 /// cadence.
+///
+/// Bump on any change that moves a chunk boundary, including the
+/// version of `text-splitter` or of any `icu_*` crate it segments with.
+/// Both pipelines share those crates, so a change there moves both
+/// stamps. The companion test `tests/dep_hash.rs` fails until
+/// [`FROZEN_SPLITTER_DEPS`] is restated, forcing a deliberate bump.
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const CHUNK_VERSION: u32 = 1;
+
+/// `name@version` of `text-splitter` and every `icu_*` crate in
+/// `Cargo.lock`, sorted bytewise. Restated in lockstep with
+/// [`CHUNK_VERSION`]. See `tests/dep_hash.rs` for the selection rule.
+pub const FROZEN_SPLITTER_DEPS: &[&str] = &[
+    "icu_collections@2.2.0",
+    "icu_locale@2.2.0",
+    "icu_locale_core@2.2.0",
+    "icu_locale_data@2.2.0",
+    "icu_normalizer@2.2.0",
+    "icu_normalizer_data@2.2.0",
+    "icu_properties@2.2.0",
+    "icu_properties_data@2.2.0",
+    "icu_provider@2.2.0",
+    "icu_segmenter@2.2.0",
+    "icu_segmenter_data@2.2.0",
+    "text-splitter@0.30.1",
+];
 
 /// Tuning parameters for chunking the abstract. The defaults are the
 /// same target / overlap pair the book pipeline uses; the abstract is
@@ -1210,6 +1234,12 @@ fn role_str(role: ContributorRole) -> &'static str {
 
 /// Plan the chunks for an abstract leaf. The abstract is almost always
 /// one chunk under the default 1000-character target.
+///
+/// Each chunk's char offsets locate it within `text`: the splitter
+/// reports the byte position of the trimmed chunk, so overlap with the
+/// previous chunk and whitespace trimmed between chunks are both
+/// accounted for, and slicing `text` by the offsets reproduces the
+/// chunk text.
 pub(crate) fn plan_chunks(leaf_id: NodeId, text: &str, params: &ChunkParams) -> Vec<PlannedChunk> {
     let splitter = text_splitter::TextSplitter::new(
         text_splitter::ChunkConfig::new(params.target_chars)
@@ -1217,23 +1247,19 @@ pub(crate) fn plan_chunks(leaf_id: NodeId, text: &str, params: &ChunkParams) -> 
             .expect("valid chunk config"),
     );
     let mut out = Vec::new();
-    let mut cursor = 0i32;
-    for piece in splitter.chunks(text) {
-        let trimmed = piece.trim();
-        if trimmed.is_empty() {
+    for (byte_start, chunk) in splitter.chunk_indices(text) {
+        if chunk.is_empty() {
             continue;
         }
-        let len = trimmed.chars().count() as i32;
-        let start = cursor;
-        let end = cursor + len;
-        cursor = end;
+        let start = text[..byte_start].chars().count() as i32;
+        let end = start + chunk.chars().count() as i32;
         out.push(PlannedChunk {
             start_node_id: leaf_id,
             start_char_offset: start,
             end_node_id: leaf_id,
             end_char_offset: end,
-            text: trimmed.to_string(),
-            norm_chunk_sha256: norm_text_sha256(trimmed),
+            text: chunk.to_string(),
+            norm_chunk_sha256: norm_text_sha256(chunk),
         });
     }
     out
@@ -1306,13 +1332,27 @@ async fn probe_dimension<E: Embedder>(embedder: &E) -> Result<usize> {
     Ok(first.len())
 }
 
+/// Write the paper's review row through
+/// [`Catalog::record_pipeline_review`]. A failure is logged and the
+/// pipeline continues; a verdict the row already carries is kept and
+/// logged.
+fn write_review(catalog: &Catalog, intake_id: i64, reviewer: &str, notes: &str) {
+    match catalog.record_pipeline_review(intake_id, ItemKind::Paper, reviewer, notes) {
+        Ok(status) if status != STATUS_PENDING => {
+            tracing::info!(%status, "metadata: kept the review verdict, refreshed its report");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "metadata: failed to write node_reviews row"),
+    }
+}
+
 /// Run the paper-side metadata audit after `write_biblio`. Returns
 /// `(verdict, confidence)` to populate on `GleanReport`, also
-/// writing them through `update_audit_rollup` and a `pending` row
-/// onto `node_reviews` whose `reviewed_by` carries the active
-/// profile name. Failures inside this step are logged and the
-/// surrounding pipeline continues — the audit is consultative, not
-/// gating.
+/// writing them through `update_audit_rollup` and the report onto the
+/// `node_reviews` row: a new or still-`pending` row is attributed to
+/// the active profile name, and a verdict already given is kept.
+/// Failures inside this step are logged and the surrounding pipeline
+/// continues — the audit is consultative, not gating.
 #[allow(clippy::too_many_arguments)]
 fn run_paper_audit_substep(
     catalog: &Catalog,
@@ -1331,14 +1371,15 @@ fn run_paper_audit_substep(
 ) -> Result<(Option<String>, Option<String>)> {
     let reviewer = format!("bookrack-glean:{}", profile.name);
     if !profile.audit_enabled {
-        if let Err(e) = catalog.upsert_review(
-            &NewReview::new(intake_id, ItemKind::Paper, &reviewer, STATUS_PENDING).notes(format!(
+        write_review(
+            catalog,
+            intake_id,
+            &reviewer,
+            &format!(
                 "audit skipped: {} profile disables the metadata audit",
                 profile.name,
-            )),
-        ) {
-            tracing::warn!(error = %e, "metadata: failed to write node_reviews row");
-        }
+            ),
+        );
         audit(
             catalog,
             run_id,
@@ -1387,12 +1428,7 @@ fn run_paper_audit_substep(
     if let Err(e) = catalog.update_audit_rollup(intake_id, ItemKind::Paper, &confidence, &verdict) {
         tracing::warn!(error = %e, "metadata: failed to write audit rollup");
     }
-    if let Err(e) = catalog.upsert_review(
-        &NewReview::new(intake_id, ItemKind::Paper, &reviewer, STATUS_PENDING)
-            .notes(report.to_json()),
-    ) {
-        tracing::warn!(error = %e, "metadata: failed to write node_reviews row");
-    }
+    write_review(catalog, intake_id, &reviewer, &report.to_json());
     match catalog.now_iso() {
         Ok(audited_at) => {
             let extractor_version = provenance.extractor_version.to_string();
@@ -1897,5 +1933,333 @@ mod tests {
         // Auto-opened Section carries only the Subsection — no leading
         // Heading leaf, since no Heading{1} text existed.
         assert_eq!(kinds, vec![NodeType::Subsection]);
+    }
+
+    #[test]
+    fn plan_chunks_offsets_reconstruct_every_chunk_of_a_long_abstract() {
+        // An abstract past the default target splits into overlapping
+        // chunks whose boundaries fall on trimmed whitespace; slicing the
+        // leaf text by each chunk's recorded char offsets must reproduce
+        // that chunk's text. Multi-byte characters keep byte and char
+        // positions apart.
+        let text: String = (0..60)
+            .map(|i| format!("Sentence {i} of the r\u{e9}sum\u{e9} keeps going.  "))
+            .collect();
+        let text = text.trim_end();
+        let leaf = NodeId::new(7);
+        let plans = plan_chunks(leaf, text, &ChunkParams::default());
+        assert!(
+            plans.len() > 2,
+            "the abstract must split into several chunks, got {}",
+            plans.len()
+        );
+        let chars: Vec<char> = text.chars().collect();
+        for (i, p) in plans.iter().enumerate() {
+            assert_eq!(p.start_node_id, leaf);
+            assert_eq!(p.end_node_id, leaf);
+            let (start, end) = (p.start_char_offset as usize, p.end_char_offset as usize);
+            assert!(
+                start <= end && end <= chars.len(),
+                "chunk {i}: span {start}..{end} lies outside the {}-char leaf",
+                chars.len()
+            );
+            let slice: String = chars[start..end].iter().collect();
+            assert_eq!(
+                slice, p.text,
+                "chunk {i}: offsets {start}..{end} do not reproduce the chunk text"
+            );
+        }
+    }
+
+    /// The token a human review write records in `reviewed_by`.
+    const HUMAN_REVIEWER: &str = "human:reviewer";
+
+    /// A note no glean run writes, standing in for an earlier run's
+    /// report.
+    const EARLIER_REPORT: &str = "an earlier report";
+
+    /// Every status a human or LLM can move a review to.
+    const REVIEWED_STATUSES: [&str; 3] = [
+        bookrack_catalog::STATUS_APPROVED,
+        bookrack_catalog::STATUS_ACKNOWLEDGED,
+        bookrack_catalog::STATUS_REJECTED,
+    ];
+
+    /// Register a paper intake on a fresh in-memory catalog.
+    fn paper_catalog() -> (Catalog, i64) {
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let intake_id = catalog
+            .register_intake(
+                ItemKind::Paper,
+                &NewIntake::new("deadbeef".to_string()).format("pdf".to_string()),
+            )
+            .expect("register")
+            .intake()
+            .intake_id;
+        (catalog, intake_id)
+    }
+
+    /// Run the paper audit substep on a fixed synthetic extraction.
+    fn run_paper_audit_once(catalog: &Catalog, intake_id: i64, profile: &audit::PaperAuditProfile) {
+        let biblio = bookrack_extract::Biblio {
+            title: Some("Synthetic Findings in Test Spaces".to_string()),
+            year: Some(2020),
+            language: Some("en".to_string()),
+            doi: Some("10.5555/example".to_string()),
+            ..Default::default()
+        };
+        let provenance = bookrack_extract::Provenance {
+            adapter: "pdf".to_string(),
+            extractor_version: 1,
+            text_layer_quality: bookrack_extract::TextLayerQuality::Usable,
+            skipped_units: Vec::new(),
+            derived_from_sha256: None,
+            partial_pages: None,
+            source_of_structure: None,
+            fallbacks: Vec::new(),
+        };
+        let blocks = [body("Body sample for the language signal.", 0)];
+        run_paper_audit_substep(
+            catalog,
+            intake_id,
+            PartitionIdx::new(intake_id).root().get(),
+            &biblio,
+            &provenance,
+            &blocks,
+            Path::new("synthetic-findings.pdf"),
+            profile,
+            &audit::PaperAuditData::default_data(),
+            "run-1",
+            "deadbeef",
+            Instant::now(),
+            None,
+        )
+        .expect("audit substep");
+    }
+
+    /// Both review writes of the paper audit substep — the audit's and
+    /// the audit-skipped one — against every reviewed status: the first
+    /// run opens a `pending` row, and a second run after a human verdict
+    /// refreshes the report without moving the verdict.
+    #[test]
+    fn a_rerun_of_the_paper_audit_substep_keeps_a_reviewed_verdict() {
+        let profiles = [
+            audit::PaperAuditProfile::default_profile(),
+            audit::PaperAuditProfile::trust_source(),
+        ];
+        for profile in &profiles {
+            for status in REVIEWED_STATUSES {
+                let case = format!("{} profile, {status}", profile.name);
+                let (catalog, intake_id) = paper_catalog();
+
+                run_paper_audit_once(&catalog, intake_id, profile);
+                let opened = catalog
+                    .review(intake_id, ItemKind::Paper)
+                    .expect("review")
+                    .expect("the first glean opens a review row");
+                assert_eq!(opened.status, STATUS_PENDING, "{case}");
+                assert_eq!(
+                    opened.reviewed_by,
+                    format!("bookrack-glean:{}", profile.name),
+                    "{case}",
+                );
+                let report = opened.notes.expect("the glean writes its report");
+
+                catalog
+                    .upsert_review(&bookrack_catalog::NewReview::new(
+                        intake_id,
+                        ItemKind::Paper,
+                        HUMAN_REVIEWER,
+                        status,
+                    ))
+                    .expect("verdict");
+                assert!(
+                    catalog
+                        .update_review_notes(intake_id, ItemKind::Paper, EARLIER_REPORT)
+                        .expect("age the report")
+                );
+
+                run_paper_audit_once(&catalog, intake_id, profile);
+                let kept = catalog
+                    .review(intake_id, ItemKind::Paper)
+                    .expect("review")
+                    .expect("present");
+                assert_eq!(
+                    kept.status, status,
+                    "{case}: a re-glean must not walk the verdict back to pending"
+                );
+                assert_eq!(
+                    kept.reviewed_by, HUMAN_REVIEWER,
+                    "{case}: the verdict must stay attributed to its reviewer"
+                );
+                assert_eq!(
+                    kept.notes.as_deref(),
+                    Some(report.as_str()),
+                    "{case}: the re-glean must refresh the report"
+                );
+            }
+        }
+    }
+
+    /// A row nobody has reviewed yet carries the latest run: its
+    /// reviewer token and report follow the profile that ran.
+    #[test]
+    fn a_rerun_of_the_paper_audit_substep_restamps_a_pending_review() {
+        let (catalog, intake_id) = paper_catalog();
+        run_paper_audit_once(
+            &catalog,
+            intake_id,
+            &audit::PaperAuditProfile::default_profile(),
+        );
+        run_paper_audit_once(
+            &catalog,
+            intake_id,
+            &audit::PaperAuditProfile::trust_source(),
+        );
+
+        let review = catalog
+            .review(intake_id, ItemKind::Paper)
+            .expect("review")
+            .expect("present");
+        assert_eq!(review.status, STATUS_PENDING);
+        assert_eq!(review.reviewed_by, "bookrack-glean:trust-source");
+        assert!(
+            review
+                .notes
+                .as_deref()
+                .unwrap_or_default()
+                .contains("audit skipped"),
+            "the report must be the latest run's: {:?}",
+            review.notes,
+        );
+    }
+
+    /// Configurations the golden fixture runs under: the production pair,
+    /// then two small targets that cut every case many times, so a change
+    /// in sentence, word, or grapheme segmentation moves a boundary.
+    const GOLDEN_CONFIGS: &[(usize, usize)] = &[(1000, 100), (200, 50), (40, 10)];
+
+    /// Digest of each case's planned chunks per configuration, recorded
+    /// with the crates in `FROZEN_SPLITTER_DEPS`. A match says only that
+    /// these inputs chunk as before; it does not show that a dependency
+    /// move leaves every input's boundaries in place.
+    const GOLDEN: &[(&str, &str)] = &[
+        ("1000/100/lines-en", "2d9288a95bd51a8e"),       // 3 chunks
+        ("1000/100/para-zh", "963a0b80c5f34061"),        // 2 chunks
+        ("1000/100/para-en", "5ee262ac117496c0"),        // 3 chunks
+        ("1000/100/runon-zh", "0878d9cc38e53f59"),       // 2 chunks
+        ("1000/100/runon-en-colon", "ebc2123fc657ed37"), // 4 chunks
+        ("1000/100/colon-chain", "4ba33433ce574507"),    // 2 chunks
+        ("1000/100/runon-th", "823f558873348b9f"),       // 7 chunks
+        ("1000/100/mixed", "437f40034bdfb377"),          // 4 chunks
+        ("1000/100/grapheme", "dc739d05a00d26a8"),       // 2 chunks
+        ("1000/100/parents", "a21f468ac4166eef"),        // 4 chunks
+        ("1000/100/empty-leaves", "335bf8a126043c2f"),   // 2 chunks
+        ("1000/100/compat-forms", "86eb55102799b15b"),   // 2 chunks
+        ("200/50/lines-en", "bad6c58fb2e4bc92"),         // 15 chunks
+        ("200/50/para-zh", "9da66acfa7f197c4"),          // 12 chunks
+        ("200/50/para-en", "9b077a0340a56e5b"),          // 14 chunks
+        ("200/50/runon-zh", "61c8f22df91748cc"),         // 12 chunks
+        ("200/50/runon-en-colon", "5fc94aeaff419e13"),   // 22 chunks
+        ("200/50/colon-chain", "d1d969cc0f54f6db"),      // 11 chunks
+        ("200/50/runon-th", "2e70fa7bd138af7b"),         // 41 chunks
+        ("200/50/mixed", "5a4b570e29e27148"),            // 19 chunks
+        ("200/50/grapheme", "c1a9ddfa704ceb22"),         // 10 chunks
+        ("200/50/parents", "985173d29929e553"),          // 27 chunks
+        ("200/50/empty-leaves", "3fef15b36e2c772a"),     // 11 chunks
+        ("200/50/compat-forms", "8853a80fc206f832"),     // 11 chunks
+        ("40/10/lines-en", "07268d181c219bbb"),          // 90 chunks
+        ("40/10/para-zh", "5d4a2a732c9b328c"),           // 60 chunks
+        ("40/10/para-en", "34b41b0b948943fc"),           // 61 chunks
+        ("40/10/runon-zh", "50f63be7196b6a8c"),          // 60 chunks
+        ("40/10/runon-en-colon", "6e63047e319c83f5"),    // 105 chunks
+        ("40/10/colon-chain", "aec52421e47d7924"),       // 53 chunks
+        ("40/10/runon-th", "7ac359d7ad0c76d2"),          // 207 chunks
+        ("40/10/mixed", "141be3b89aaeb1e4"),             // 101 chunks
+        ("40/10/grapheme", "80622037f1f0f354"),          // 47 chunks
+        ("40/10/parents", "502e3686f3d9c5fc"),           // 127 chunks
+        ("40/10/empty-leaves", "941ba151fb7b8815"),      // 47 chunks
+        ("40/10/compat-forms", "20a1f14d9dc5b476"),      // 51 chunks
+    ];
+
+    /// The book pipeline's chunk fixture as `(label, text)`: each case's
+    /// non-empty leaves joined into one abstract-sized text.
+    fn golden_cases(fixture: &str) -> Vec<(&str, String)> {
+        let mut cases: Vec<(&str, Vec<&str>)> = Vec::new();
+        for line in fixture.lines() {
+            if line.is_empty() || line.starts_with('#') || line == "---" || line == "<empty>" {
+                continue;
+            }
+            if let Some(label) = line.strip_prefix("=== ") {
+                cases.push((label, Vec::new()));
+            } else {
+                let case = cases.last_mut().expect("a leaf before the first case");
+                case.1.push(line);
+            }
+        }
+        cases
+            .into_iter()
+            .map(|(label, leaves)| (label, leaves.join("\n\n")))
+            .collect()
+    }
+
+    /// First 8 bytes, as hex, of a SHA-256 over every plan's offsets, raw
+    /// text, and normalized-text hash, in order.
+    fn golden_digest(plans: &[PlannedChunk]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        for p in plans {
+            h.update(format!("{}-{}\n", p.start_char_offset, p.end_char_offset).as_bytes());
+            h.update(p.text.as_bytes());
+            h.update(b"\0");
+            h.update(p.norm_chunk_sha256.as_bytes());
+            h.update(b"\n");
+        }
+        h.finalize()[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    #[test]
+    fn chunk_boundaries_match_the_golden_digests() {
+        let cases = golden_cases(include_str!("../../ingest/tests/fixtures/chunk/golden.txt"));
+        let leaf = NodeId::new(7);
+        let mut actual = Vec::new();
+        for &(target_chars, overlap_chars) in GOLDEN_CONFIGS {
+            let params = ChunkParams {
+                target_chars,
+                overlap_chars,
+            };
+            for (label, text) in &cases {
+                let key = format!("{target_chars}/{overlap_chars}/{label}");
+                let chars: Vec<char> = text.chars().collect();
+                let plans = plan_chunks(leaf, text, &params);
+                for (i, p) in plans.iter().enumerate() {
+                    let span = p.start_char_offset as usize..p.end_char_offset as usize;
+                    assert_eq!(
+                        chars[span].iter().collect::<String>(),
+                        p.text,
+                        "{key}: chunk {i}'s offsets do not select its text"
+                    );
+                }
+                actual.push((key, golden_digest(&plans), plans.len()));
+            }
+        }
+        let moved: Vec<&str> = actual
+            .iter()
+            .filter(|(k, d, _)| !GOLDEN.contains(&(k.as_str(), d.as_str())))
+            .map(|(k, _, _)| k.as_str())
+            .collect();
+        let restated: String = actual
+            .iter()
+            .map(|(k, d, n)| format!("        (\"{k}\", \"{d}\"), // {n} chunks\n"))
+            .collect();
+        assert!(
+            moved.is_empty() && actual.len() == GOLDEN.len(),
+            "chunk boundaries moved for {moved:?}. A chunking dependency or setting changed \
+             what plan_chunks produces: keep the previous dependency versions in Cargo.lock, or \
+             bump CHUNK_VERSION and restate GOLDEN as\n{restated}"
+        );
     }
 }

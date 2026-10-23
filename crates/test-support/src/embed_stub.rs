@@ -27,6 +27,12 @@ pub enum EmbedFailure {
     ModelNotFound,
     /// HTTP 503 with a body, the shape a loaded runner returns.
     Overloaded,
+    /// A well-formed 200 in which every input containing
+    /// [`EmbedStub::UNUSABLE_MARKER`] gets an all-zero vector, which no
+    /// cosine index can use. Inputs without the marker — bring-up's
+    /// dimension probe among them — are answered normally, so a fixture
+    /// decides which batch fails by where it puts the marker.
+    UnusableVector,
 }
 
 impl EmbedFailure {
@@ -37,6 +43,7 @@ impl EmbedFailure {
             EmbedFailure::None => 0,
             EmbedFailure::ModelNotFound => 1,
             EmbedFailure::Overloaded => 2,
+            EmbedFailure::UnusableVector => 3,
         }
     }
 
@@ -46,6 +53,7 @@ impl EmbedFailure {
         match byte {
             1 => EmbedFailure::ModelNotFound,
             2 => EmbedFailure::Overloaded,
+            3 => EmbedFailure::UnusableVector,
             _ => EmbedFailure::None,
         }
     }
@@ -82,6 +90,10 @@ impl EmbedStub {
     /// so a one-model stub cannot express that case at all.
     // setting: internal -- the stub embedder's second model tag, fixed by the fixtures naming it
     pub const ALTERNATE_MODEL: &'static str = "stub-embedding:alternate";
+
+    /// The text that marks an input for an all-zero vector under
+    /// [`EmbedFailure::UnusableVector`].
+    pub const UNUSABLE_MARKER: &'static str = "zero-vector-marker";
 
     /// Make the embed arm answer `failure` from the next request on.
     /// Takes effect for requests already in flight only after they are
@@ -168,18 +180,37 @@ fn status_line(status: u16) -> &'static str {
 /// unit test can drive every mode without the whole binary seeing it.
 fn respond(request_line: &str, body: &[u8], failure: EmbedFailure) -> (u16, serde_json::Value) {
     if request_line.starts_with("POST /api/embed") {
+        let inputs: Vec<String> = serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| {
+                v["input"].as_array().map(|inputs| {
+                    inputs
+                        .iter()
+                        .map(|i| i.as_str().unwrap_or_default().to_string())
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
         match failure {
-            EmbedFailure::None => {
-                let inputs = serde_json::from_slice::<serde_json::Value>(body)
-                    .ok()
-                    .and_then(|v| v["input"].as_array().map(Vec::len))
-                    .unwrap_or(0);
-                (
-                    200,
-                    serde_json::json!({
-                        "embeddings": vec![vec![0.5f32; EmbedStub::DIMENSION]; inputs],
-                    }),
-                )
+            EmbedFailure::None => (
+                200,
+                serde_json::json!({
+                    "embeddings": vec![vec![0.5f32; EmbedStub::DIMENSION]; inputs.len()],
+                }),
+            ),
+            EmbedFailure::UnusableVector => {
+                let embeddings: Vec<Vec<f32>> = inputs
+                    .iter()
+                    .map(|input| {
+                        let fill = if input.contains(EmbedStub::UNUSABLE_MARKER) {
+                            0.0
+                        } else {
+                            0.5
+                        };
+                        vec![fill; EmbedStub::DIMENSION]
+                    })
+                    .collect();
+                (200, serde_json::json!({ "embeddings": embeddings }))
             }
             EmbedFailure::ModelNotFound => (
                 404,
@@ -276,6 +307,36 @@ mod tests {
         }
     }
 
+    /// Under the unusable-vector mode only the marked inputs come back
+    /// as zero vectors; the rest, and the tags arm, are answered as in
+    /// the healthy mode.
+    #[test]
+    fn the_unusable_vector_mode_zeroes_only_marked_inputs() {
+        let body = format!(
+            r#"{{"input":["plain","a {} b","plain again"]}}"#,
+            EmbedStub::UNUSABLE_MARKER
+        );
+        let (status, embed) = respond(
+            "POST /api/embed HTTP/1.1",
+            body.as_bytes(),
+            EmbedFailure::UnusableVector,
+        );
+        assert_eq!(status, 200);
+        let firsts: Vec<f64> = embed["embeddings"]
+            .as_array()
+            .expect("embeddings array")
+            .iter()
+            .map(|v| {
+                assert_eq!(v.as_array().expect("vector").len(), EmbedStub::DIMENSION);
+                v[0].as_f64().expect("component")
+            })
+            .collect();
+        assert_eq!(firsts, [0.5, 0.0, 0.5]);
+
+        let (status, _) = respond("GET /api/tags HTTP/1.1", b"", EmbedFailure::UnusableVector);
+        assert_eq!(status, 200);
+    }
+
     /// The global switch round-trips through its atomic representation:
     /// a mode stored is the mode `serve` reads back.
     #[test]
@@ -283,6 +344,7 @@ mod tests {
         for failure in [
             EmbedFailure::ModelNotFound,
             EmbedFailure::Overloaded,
+            EmbedFailure::UnusableVector,
             EmbedFailure::None,
         ] {
             EmbedStub::set_failure(failure);

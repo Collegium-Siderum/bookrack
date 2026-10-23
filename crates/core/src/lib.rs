@@ -19,8 +19,10 @@ mod node_type;
 mod partition;
 mod problem;
 pub mod queue;
+mod redact;
 mod scope;
 mod typed_id;
+mod vector;
 
 pub use bytes::bytes_human;
 pub use error_chain::error_chain;
@@ -29,5 +31,7 @@ pub use kinded_node_id::KindedNodeId;
 pub use node_type::NodeType;
 pub use partition::{NODE_CAPACITY, NODE_PARTITION_FACTOR, NodeId, PartitionIdx};
 pub use problem::{Explain, Problem, ProblemData};
+pub use redact::redact_source_paths;
 pub use scope::{Scope, ScopeParseError};
 pub use typed_id::{TypedIdParseError, TypedItemId};
+pub use vector::{VectorDefect, vector_defect};

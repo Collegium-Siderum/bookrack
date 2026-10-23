@@ -64,6 +64,9 @@ pub struct RerankerModelLocation {
     pub path: Option<PathBuf>,
     /// Every candidate that was checked, in search order.
     pub probed: Vec<PathBuf>,
+    /// Whether [`crate::RERANKER_MODEL_ENV`] named the one candidate. A
+    /// miss then lies with that path, which no install can repair.
+    pub explicit: bool,
 }
 
 /// Locate the GGUF file for a registry model tag.
@@ -95,10 +98,11 @@ fn locate_reranker_model_from(
     tag: &str,
     is_file: &dyn Fn(&std::path::Path) -> bool,
 ) -> RerankerModelLocation {
-    let candidates: Vec<PathBuf> = match override_path
+    let override_path = override_path
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
+        .filter(|s| !s.is_empty());
+    let explicit = override_path.is_some();
+    let candidates: Vec<PathBuf> = match override_path {
         Some(path) => vec![PathBuf::from(path)],
         None => managed_dir
             .zip(reranker_model_pin(tag))
@@ -110,6 +114,7 @@ fn locate_reranker_model_from(
     RerankerModelLocation {
         path,
         probed: candidates,
+        explicit,
     }
 }
 
@@ -171,6 +176,19 @@ mod tests {
         );
         assert!(missing.path.is_none());
         assert_eq!(missing.probed.len(), 1, "no fallback behind the override");
+        assert!(missing.explicit, "the miss lies with the override");
+    }
+
+    #[test]
+    fn a_blank_override_is_not_explicit() {
+        let found = locate_reranker_model_from(
+            Some("  ".into()),
+            Some(PathBuf::from("managed")),
+            "Qwen3-Reranker-0.6B",
+            &|_| false,
+        );
+        assert!(!found.explicit);
+        assert_eq!(found.probed.len(), 1, "the managed candidate is checked");
     }
 
     #[test]

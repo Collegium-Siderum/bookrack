@@ -89,7 +89,7 @@ pub const OCR_INTAKE_VERSION: u32 = 1;
 /// with [`EXTRACTOR_VERSION`]. See `tests/dep_hash.rs` for the input
 /// list and computation.
 pub const FROZEN_DEPS_HASH: &str =
-    "b4ad0eff4a4f766e81081f72e9313a2ef7ffb0dd60e8bcfb8e05e1aaf4d806ae";
+    "3df0e5610b3180e2c305469e48473395040a332e69925187f1069f95072474a4";
 
 /// Extract one source file into an [`ExtractOutcome`].
 ///

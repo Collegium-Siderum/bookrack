@@ -27,6 +27,7 @@ use bookrack_runtime::backend_probe::PreflightRefusal;
 use bookrack_runtime::control::HealthProbe;
 use bookrack_runtime::mcp_endpoint::McpBindRefusal;
 use bookrack_runtime::queue::QueueLoadError;
+use bookrack_runtime::rerank_supervisor::RerankerModelRefusal;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use eyre::{Context, Result};
 
@@ -87,6 +88,15 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
             if let Some(refusal) = err.downcast_ref::<McpBindRefusal>() {
                 return Err(BookrackCliError::PreflightRefused {
                     problem: refusal.problem.clone(),
+                }
+                .into());
+            }
+            // A reranker model the profile promises and nothing provides
+            // is operator input of the same kind: the refusal names the
+            // route that does provide it.
+            if let Some(refusal) = err.downcast_ref::<RerankerModelRefusal>() {
+                return Err(BookrackCliError::PreflightRefused {
+                    problem: refusal.explain(),
                 }
                 .into());
             }

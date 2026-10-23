@@ -34,6 +34,11 @@ pub trait Stage: Send + Sync {
     fn run(&self, data: StageData, ctx: &mut Ctx) -> Result<StageData, ParseError>;
 }
 
+/// Callback [`Pipeline::run_with_progress`] invokes before each stage
+/// with `(i, n, name)`: the stage's 1-based position, the number of
+/// stages, and the stage's name.
+pub type OnStage<'a> = dyn Fn(usize, usize, &str) + 'a;
+
 /// A named pipeline: zero or more stages run in order, starting from
 /// `StageData::Source` and required to end at `StageData::Drafts`.
 pub struct Pipeline {
@@ -100,10 +105,25 @@ impl Pipeline {
         source: String,
         extras: serde_json::Map<String, serde_json::Value>,
     ) -> Result<(Vec<EntryDraft>, Coverage), ParseError> {
+        self.run_with_progress(source, extras, &|_, _, _| {})
+    }
+
+    /// [`Pipeline::run_with_extras`], announcing each stage to
+    /// `on_stage` before the stage runs. While stage `i` runs, the last
+    /// announcement names it; a failing stage is the last one
+    /// announced.
+    pub fn run_with_progress(
+        &self,
+        source: String,
+        extras: serde_json::Map<String, serde_json::Value>,
+        on_stage: &OnStage<'_>,
+    ) -> Result<(Vec<EntryDraft>, Coverage), ParseError> {
         let mut data = StageData::Source(source);
         let mut ctx = Ctx::new();
         ctx.extras = extras;
-        for stage in &self.stages {
+        let total = self.stages.len();
+        for (index, stage) in self.stages.iter().enumerate() {
+            on_stage(index + 1, total, stage.name());
             let in_kind = data.kind();
             let in_len = cardinality(&data);
             let in_items = if in_len <= MAX_SAMPLE_SCAN {
@@ -212,6 +232,9 @@ fn collect_dropped_sample(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
     use crate::core::{EntryDraft, Page};
     use serde_json::{Map, json};
 
@@ -255,6 +278,107 @@ mod tests {
                 .collect();
             Ok(StageData::Drafts(drafts))
         }
+    }
+
+    /// Wraps a stage and records, when it runs, how many stage
+    /// announcements the pipeline had made by then.
+    struct Witness {
+        inner: Box<dyn Stage>,
+        announced: Arc<AtomicUsize>,
+        seen: Arc<Mutex<Vec<usize>>>,
+    }
+    impl Stage for Witness {
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+        fn run(&self, data: StageData, ctx: &mut Ctx) -> Result<StageData, ParseError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(self.announced.load(Ordering::SeqCst));
+            self.inner.run(data, ctx)
+        }
+    }
+
+    #[test]
+    fn each_stage_is_announced_by_position_before_it_runs() {
+        let announced = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let witness = |inner: Box<dyn Stage>| -> Box<dyn Stage> {
+            Box::new(Witness {
+                inner,
+                announced: Arc::clone(&announced),
+                seen: Arc::clone(&seen),
+            })
+        };
+        let mut pipeline = Pipeline::new("witnessed");
+        pipeline.push(witness(Box::new(IdentityStage)));
+        pipeline.push(witness(Box::new(IdentityStage)));
+        pipeline.push(witness(Box::new(MockSourceToDrafts {
+            n: 1,
+            book_slug: "fake_book".to_string(),
+        })));
+
+        let calls = Mutex::new(Vec::new());
+        let (_, coverage) = pipeline
+            .run_with_progress(String::new(), Map::new(), &|i, n, name| {
+                announced.fetch_add(1, Ordering::SeqCst);
+                calls.lock().unwrap().push((i, n, name.to_string()));
+            })
+            .expect("pipeline run");
+
+        let calls = calls.into_inner().unwrap();
+        assert_eq!(
+            calls,
+            vec![
+                (1, 3, "identity".to_string()),
+                (2, 3, "identity".to_string()),
+                (3, 3, "mock_source_to_drafts".to_string()),
+            ]
+        );
+        let reported: Vec<&str> = coverage
+            .stage_reports
+            .iter()
+            .map(|r| r.stage_name.as_str())
+            .collect();
+        let announced_names: Vec<&str> = calls.iter().map(|(_, _, name)| name.as_str()).collect();
+        assert_eq!(announced_names, reported);
+        // Stage k runs after exactly k announcements: its own label is
+        // already up, not the previous stage's.
+        assert_eq!(*seen.lock().unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn a_failing_stage_is_the_last_one_announced() {
+        // The second stage expects `Source` and receives `Drafts`, so it
+        // fails and the third never runs.
+        let mock = || {
+            Box::new(MockSourceToDrafts {
+                n: 1,
+                book_slug: "fake_book".to_string(),
+            })
+        };
+        let mut pipeline = Pipeline::new("fails_midway");
+        pipeline.push(mock());
+        pipeline.push(mock());
+        pipeline.push(Box::new(IdentityStage));
+        let calls = Mutex::new(Vec::new());
+        let err = pipeline
+            .run_with_progress(String::new(), Map::new(), &|i, n, name| {
+                calls.lock().unwrap().push((i, n, name.to_string()));
+            })
+            .unwrap_err();
+        assert!(
+            matches!(&err, ParseError::StageMismatch { stage, .. } if stage == "mock_source_to_drafts"),
+            "unexpected error: {err:?}"
+        );
+        assert_eq!(
+            calls.into_inner().unwrap(),
+            vec![
+                (1, 3, "mock_source_to_drafts".to_string()),
+                (2, 3, "mock_source_to_drafts".to_string()),
+            ]
+        );
     }
 
     #[test]

@@ -153,6 +153,58 @@ release workflow extracts the matching section verbatim from this file.
   the translation store's canonical location beside the other
   per-library databases; no new environment knob.
 
+- **MCP `session.queue_status` says why a job failed, and can list one
+  state.** A `recent` row carries `finished_at` once the job has ended
+  and `error` when it failed, with a dependency source location
+  crate-relative as on the error envelope. The new optional `state`
+  argument lists only jobs in that state, under the same cap of ten,
+  newest enqueued first; the counts still cover the whole queue, so
+  `{"state": "failed"}` reaches a failure that has scrolled out of the
+  unfiltered window. A state no row can be in is refused as invalid
+  params, with the accepted names in the hint.
+- **`bookrack queue wait` re-attaches to queued work.** It waits on
+  every job that is pending or running when the queue is read — jobs
+  submitted later are not waited on — and ends with the summary and
+  exit code `ingest --wait` uses: `5` when any job failed or was
+  cancelled. `--job <id>` names jobs instead, by any part of their id,
+  and may repeat; a named job that has already finished is reported as
+  it ended, so `queue retry` followed by `queue wait --job` reports a
+  failure even when the retried job finished first. A paused queue
+  with selected pending jobs, or a daemon without a queue worker, is
+  refused up front with exit `2` instead of waiting on work nothing
+  will run. Both are checked once, when the wait attaches;
+  `docs/operating.md` lists what a wait does not see after that.
+- **Terminal queue jobs can be retried.** The new control-plane method
+  `queue.retry` flips `failed`, `needs_ocr`, or `cancelled` rows back
+  to `pending` in place — one row by its id or any part of it, or
+  every row in one state — clearing the previous run's error and timestamps, so the
+  worker re-runs them as fresh submissions. Nothing else in the queue
+  document moves, and a paused queue holds the rows until `resume`.
+  `bookrack queue retry` is the verb: with no flag it retries every
+  `failed` row, `--state needs-ocr` or `--state cancelled` picks another
+  state, `--job <id>` picks one row, and the human output lists the
+  ids it flipped.
+- **`queue list` can show one state, capped, with failures grouped by
+  cause.** `--state <s>` keeps the rows in that state and `--limit N`
+  shows at most N of them, oldest first; the per-state footer still
+  counts the whole queue, and a capped listing says `showing N of M`.
+  `--state failed` groups its rows under one header per cause with the
+  group's size, so a long failed set reads as a handful of reasons
+  instead of a wall of rows. Under `--json` the `jobs` array carries the
+  selected rows and the rest of the reply is the daemon's.
+- **`distill build` shows which stage of which book is running.** The
+  build ran each book's pipeline without a word until the book's stage
+  table printed. It now draws `2/5 <slug> [3/7] <stage>` on stderr,
+  naming a stage as it starts; with stderr not a terminal it appends
+  one such line per stage, and under `--json` or `--quiet` it draws
+  nothing. `distill lint` and `distill verify` are unchanged.
+- **A book's embedding pass reports how far it has got.** While the
+  queue worker embeds a book, `worker.progress` carries `stage: embed`
+  with `stage_progress` set to the fraction of the book's chunks
+  written to the vector store — always for the first and the last
+  batch, throttled in between — so `ingest` and `intake ocr` show a
+  percentage during the longest stage instead of a bare spinner. Paper
+  jobs report `processing` only.
 - **A write's reply names the library it acted on.** Every control-plane
   method that takes the write mutex — the `vectors`, `stamps`,
   `corpus`, `metadata`, `remove`, and `dryrun` writes on both sides,
@@ -171,6 +223,98 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **Paper hits in a long abstract point at the passage they matched.**
+  An abstract longer than one chunk — about 1000 characters — is split
+  into overlapping chunks, and every chunk after the first recorded a
+  `start_char_offset` / `end_char_offset` that counted neither the
+  overlap nor the whitespace between chunks, so the span drifted further
+  into the abstract with each chunk and could run past its end. Papers
+  ingested from now on record the right span. Rows already in a papers
+  store keep the old offsets, and `papers vectors reembed` copies them as
+  they are: run `bookrack papers vectors reset` once to re-chunk every
+  paper from the corpus.
+- **Errors, job failures, and logs no longer carry the build machine's
+  paths.** A LanceDB error printed the absolute path of the dependency
+  source it was raised in, which named the machine that built the
+  binary; it reached control-plane and MCP error replies, the failure
+  text of queue jobs, `logs.tail`, and the `log` event. Such locations
+  now appear crate-relative, and failure text recorded by an older
+  build — in the queue document and in the catalog's error columns —
+  is shown the same way when it is read. A book's text is left as it
+  is.
+- **A rebuild on a store too small for the index keeps the index it
+  had.** `vectors rebuild`, `papers vectors rebuild`, and the rebuilds
+  `index-profile apply` runs now check the table against the index's
+  training floor — at least one vector per partition, and `2^num_bits`
+  vectors for a PQ codebook — before touching the existing index, and
+  refuse with exit `2` and a hint that names what can work on that
+  many vectors. Previously the old index was dropped first and the
+  build then failed as an internal error carrying LanceDB's own
+  message.
+- **`index-profile apply` converges in one run when a `brute-force`
+  profile changes the model or dimension.** The reset's re-embed builds
+  an ANN index on a library that records none, while the plan took the
+  reset to leave an exhaustive scan, so apply ran the reset, reported
+  that the library "still diverges", and exited `1`; a second apply
+  then dropped the index. The plan now follows the reset with `vectors
+  drop`, and the self-check passes.
+- **A reset refuses a dimension the backend does not produce.** When
+  the library's index profile declares `embed.dim`, `vectors reset`,
+  `papers vectors reset`, and the resets `index-profile apply` runs
+  check the backend's output dimension against it before clearing
+  anything — confirming a mismatch with a fresh request — and refuse
+  with exit `2` when they differ. The hint names a dimension only when
+  the profile would validate at it. Previously the reset re-embedded
+  the whole library at the backend's dimension and `apply` then
+  reported that the library "still diverges", on every run; that
+  report now names both dimensions, and an interrupted `apply` no
+  longer offers `--resume` unless the error does.
+- **A missing reranker model is no longer always sent to
+  `--install-reranker`.** The installer downloads only the pinned
+  model into the managed directory, so for a model with no pinned
+  download, or a `BOOKRACK_RERANKER_MODEL` naming a file that is not
+  there, `bookrack run` and `doctor` used to point at a command that
+  could not help. Bring-up now refuses with exit `2` and the route that
+  does: fix or unset the explicit path, or point it at the model's GGUF
+  file, or serve the model and set `reranker.url`. The model is checked
+  before the `llama-server` binary, so this refusal is not hidden behind
+  the binary's.
+- **`doctor` compares a library's stamps even when its profile fails
+  validation, and words the consequence by stamp.** A profile with a
+  validation error used to get only that row, with the index never
+  compared; both rows now appear, as `index-profile current` shows them.
+  The row no longer says the daemon will refuse to start for every
+  difference: a different model, algorithm version, or missing stamp
+  keeps the daemon from serving a non-empty index, while a different
+  declared dimension does not, and the row says a reset checks it
+  against the backend first.
+- **Profile validation catches three structural mistakes on its own.**
+  `index-profile validate`, `index-profile apply`, and `libraries config
+  <name> index_profile=<p>` refuse `embed.dim = 0`, an empty embed or
+  cross-encoder model name, and an embed backend other than `ollama`.
+  The first two were caught only by the model-registry check, so
+  `--allow-unknown-model` let them through; the backend was never
+  checked, and the daemon embedded through Ollama whatever it said.
+- **`index-profile apply` executes on a library named by `--library`,
+  `--data-dir`, or `BOOKRACK_DATA_DIR`.** Before running a plan that
+  has actions, apply reads the daemon's `status` for the worker flag
+  and the queue depth, and that read carried the selection; `status`
+  refuses one, so every selected apply with work to do exited `2`
+  with `cannot run this command against library` before rendering the
+  plan, and only the registry default could be reconciled. The read
+  now carries no selection; each action still names the plan's own
+  library.
+- **`queue.pause`, `queue.resume`, and `queue.clear` answer with
+  `ok: true`.** The three replies carried only `paused` (and `cleared`),
+  so a client branching on the `ok` field every other write reply
+  carries read `null`; `queue.clear` also reports `paused`, which the
+  reply always included and the control-plane document now lists.
+- **A one-job wait says why the job failed.** `ingest`, `papers
+  ingest`, and `intake ocr` on a single source ended with `(failed)`
+  and nothing else: the per-job outcome line that carries the error
+  is printed only for a batch of several, and the one-job summary
+  named the state alone, so the reason was reachable only through
+  `--json` or `queue list`. The summary now reads `(failed: <error>)`.
 - **`--audit-profile` is refused on `doctor`, `init`, `run`, and
   `rpc`.** The gate that rejects the global flag on a subcommand that
   does not consume it ran after those four had already dispatched, so
@@ -205,9 +349,106 @@ release workflow extracts the matching section verbatim from this file.
   registry's current default pointer at enqueue time, the row carries
   that name from then on, and a name the registry does not hold is
   refused with `-32010` before any row exists.
+- **A tool's `invalid params` reaches a 2026-07-28 client as a
+  JSON-RPC error, not an HTTP 400.** A client that negotiates protocol
+  version 2026-07-28 is served one request at a time, and on that path
+  `rmcp` 3.5.0 answered every `-32602` with HTTP status 400, including
+  the ones a tool raises for the caller's input such as an unknown
+  `library` selector, so a client that treats a 4xx status as a
+  transport failure never read the error. `rmcp` 3.6.0 sends those with
+  status 200 and keeps 400 for a request whose `_meta` lacks the
+  protocol version or client capabilities. Clients that open a session
+  with `initialize` see no change.
+- **A `POST /mcp` that is not `initialize` and names no session is
+  answered HTTP 400, not 422.** The streamable-HTTP transport asks a
+  server that requires a session for 400 here, and `GET` and `DELETE`
+  without a session already answered it; through `rmcp` 3.6.0, `POST`
+  agrees. A client that initializes first, or that negotiates
+  2026-07-28 and carries its protocol metadata on each request, never
+  takes this path.
 
 ### Changed
 
+- **Re-ingesting a book or paper keeps its review verdict.** An item
+  that is `approved`, `acknowledged`, or `rejected` keeps that status,
+  its reviewer, and its review time through `ingest` and `papers
+  ingest`, with or without `--force`; the run replaces only the audit
+  report in the review row's notes. Every ingest used to write the row
+  back to `pending`, attributed to the ingest, so a re-ingest — the
+  refresh `docs/UPGRADE.md` prescribes after an extractor change — put
+  every reviewed item back in the queue. The verdict is not checked
+  against the new extraction; `papers metadata reopen` returns a paper
+  to the queue.
+- **A vector search cannot use fails the ingest instead of being
+  stored.** When the embedding backend returns a vector with an
+  infinite component, or one whose length is zero or overflows, the
+  ingest, re-embed, or reset fails with an error naming the vector's
+  position and the backend as the fault, and the batch carrying it is
+  not written; batches written before it stay. Such vectors used to be
+  stored silently and could not be retrieved by cosine search. A NaN
+  component, which the store already refused with an internal error,
+  now gets the same reason.
+- **Index profiles and `vectors rebuild` refuse more ANN settings no
+  build accepts.** `index-profile validate` now rejects zero
+  `num_partitions`, zero `nprobes`, a `refine_factor` of zero, a PQ
+  `num_bits` other than 4 or 8, and an odd `num_sub_vectors` with
+  4-bit codes; a profile carrying one is refused by `index-profile
+  apply` and `libraries config <name> index_profile=<p>` as well. `vectors
+  rebuild` and `papers vectors rebuild` refuse the same settings, plus
+  a `num_sub_vectors` that does not divide the embedding dimension,
+  with exit `2` and the field to correct. Previously a zero probe count
+  built an index whose searches returned no results, a zero refine
+  factor one whose searches failed, and zero partitions crashed the
+  build.
+- **Models outside the built-in registry can be applied.** The offline
+  model registry records what is known about the qualified models, not
+  which models may be used. A profile naming an embed model or a
+  cross-encoder model it does not list validates on its structure
+  alone, and `index-profile apply` and `libraries config <name>
+  index_profile=<p>` accept it instead of refusing with `has validation
+  errors` and a pointer to a flag neither command takes. The declared
+  dimension of such a model is checked against the backend before a
+  reset. A listed model must still be declared at the dimension it
+  emits, and validation findings no longer name a command-line flag.
+  Each write notes what the registry does not know in a `note:` line,
+  once per library: a note already shown is not repeated until what it
+  says changes, and a `--json` or `--quiet` write neither prints nor
+  records it. The record is `advice-seen.toml` beside the registry.
+
+- **Human output prints a job id's last eight characters, and
+  `queue cancel` takes any part of an id.** The short id in
+  `queue list`, the `ingest --wait` progress lines, and the one-job
+  summary was the id's first eight characters, which in a UUIDv7 are
+  the high bits of the millisecond timestamp: every job queued within
+  the same minute or so printed the same short id, a batch's progress
+  lines could not tell its jobs apart, and pasting a listed id into
+  `queue cancel` was refused as ambiguous whenever a neighbour was
+  still queued. The short form is now the id's random tail, and
+  `queue cancel` and `queue retry --job` — `ingest.cancel` and
+  `queue.retry` on the control plane — match a fragment anywhere in the
+  id, so the full id, its head, and the printed tail all locate a job.
+- **A waiting command draws one progress line, about what it waits
+  on.** `ingest`, `papers ingest`, and `intake ocr` drew progress by
+  rewriting stderr with carriage returns: the queue counts and the job
+  stage overwrote each other on one row, any job's progress was shown —
+  another terminal's batch included — and a wait that ended in an error
+  left the row behind. The line now counts this batch's finished jobs
+  against its size, shows the stage of this batch's running job, prints
+  a line for each job that finishes when the batch has more than one,
+  and is cleared on every exit. Long writes such as `vectors rebuild`,
+  `stamps reconcile`, and `dryrun` show their method beside a spinner
+  instead of unrelated queue jobs. With stderr not a terminal, the line
+  becomes appended lines — one per stage and per finished job — with no
+  carriage returns. Nothing is drawn for a wait shorter than half a
+  second, or under `--json` or `--quiet`.
+- **`worker.progress` no longer names stages the worker cannot see.**
+  The event announced `extract` when the worker pulled a job and
+  `embed` once the job had succeeded — neither a real stage boundary,
+  and a paper job was shown under the same two book-pipeline names.
+  It now carries the job's `kind` and announces `processing` once, on
+  pull; the job's outcome is read from the `queue.tick` that closes
+  it. `extract` is gone, `embed` now arrives only while a book is
+  being embedded (see Added), and `ingest` was never emitted.
 - **Book-side `metadata` writes return what they recorded.** Each
   answered `{ ok: true }` and printed its sentence on the daemon's own
   stdout, while the same ops call handed an MCP agent the audit row it
@@ -293,6 +534,14 @@ release workflow extracts the matching section verbatim from this file.
   `reference.db` was reported as uninitialised, and its stores went
   unchecked.
 
+### Deprecated
+
+- **`index-profile validate --allow-unknown-model` has no effect.** A
+  model outside the registry is no longer a validation error, so the
+  flag only prints a deprecation warning; it is removed in the next
+  minor release. It used to skip the dimension check for listed models
+  as well, and that check now applies with or without it.
+
 ### Removed
 
 - **The desktop shell.** The `crates/app` Tauri shell, which never
@@ -306,6 +555,72 @@ release workflow extracts the matching section verbatim from this file.
   launch_mode` and `LaunchMode` leave the runtime API, and the `gui`
   caller is retired, so no new audit row carries
   `actor_detail = "gui"`; rows already recorded keep the value.
+
+### Security
+
+- **deps: `rustls` moves from 0.23.45 to 0.23.46, clearing
+  GHSA-w44r-93j7-qv28, GHSA-c8m5-c952-6cm4, GHSA-vp88-798v-h67f and
+  GHSA-h2v8-394m-p7vv (RUSTSEC-2026-0346 to -0349).** The one that
+  applies here (low) lets a network attacker answer one connection
+  attempt with an unauthenticated ServerHello and so downgrade later
+  connections to the same host to classical-only key exchange. `rustls`
+  is the TLS stack of every HTTPS client in the workspace: the PDFium
+  installer's download, and an Ollama or reranker endpoint configured
+  with an `https://` URL. The other three need a custom session store
+  that formats session values with `Debug`, Encrypted Client Hello, or
+  the `brotli` feature, none of which bookrack uses. `reqwest` accepts
+  the patch release, so the lockfile moves alone.
+- **deps: `rustls-webpki` moves from 0.103.15 to 0.103.16, clearing
+  RUSTSEC-2026-0382 (CVE-2026-111943), and `webpki-root-certs` from
+  1.0.7 to 1.0.10, clearing RUSTSEC-2026-0383.** Both concern emSign
+  intermediate certificates that are now distrusted and whose private
+  keys are known: affected versions may accept a server certificate
+  path through one of them when the trust anchors allow it, and 0.103.16
+  rejects such paths. On Linux the same HTTPS clients verify against the
+  system trust store through `rustls-webpki`, so a store that still
+  carries the emSign root was exposed; on macOS and Windows the
+  operating system verifies the path. `webpki-root-certs` resolves only
+  for WebAssembly builds of `rustls-platform-verifier` and never
+  compiles into a bookrack binary, so its move clears a lockfile
+  advisory. The lockfile moves alone.
+- **deps: `h2` moves from 0.4.14 to 0.4.20, clearing
+  GHSA-q83h-524g-xf6h (RUSTSEC-2026-0258).** The advisory (low) is
+  unbounded memory growth from empty HTTP/2 DATA frames queued on a
+  stream the application does not drain. `axum` is taken with HTTP/1
+  only, but `reqwest` 0.12, which `lancedb` pulls in, enables HTTP/2 in
+  the shared `hyper` stack, so the connection builder behind `/mcp` also
+  accepts prior-knowledge HTTP/2. The endpoint binds to loopback by
+  default and browsers do not open such connections, so the reachable
+  callers were local processes. 0.4.20 is taken over the first fixed
+  release because 0.4.17 to 0.4.19 rework the DATA-frame budget 0.4.16
+  introduced. The lockfile moves alone.
+- **deps: five crates reached through `lancedb` move to patched
+  releases.** `rkyv` 0.8.18 clears RUSTSEC-2026-0233, -0234 and -0235
+  (use-after-free and out-of-bounds reads on crafted archives),
+  `memmap2` 0.9.12 clears RUSTSEC-2026-0186 (an unchecked pointer offset
+  in the range-advise and range-flush calls), `crossbeam-epoch` 0.9.21
+  clears RUSTSEC-2026-0204 (an invalid pointer dereference in a
+  `fmt::Pointer` impl), and `event-listener` 5.4.2 and `anyhow` 1.0.104
+  clear the soundness advisories RUSTSEC-2026-0221 and
+  RUSTSEC-2026-0190. `rkyv` and `memmap2` serve the tokenizer
+  dictionaries of LanceDB full-text search, which bookrack does not
+  build, and no crate here calls the affected APIs of the others, so
+  this clears advisories from the tree rather than fixing anything
+  observed in bookrack. The lockfile moves alone.
+- **deps: `quinn-proto` moves from 0.11.16 to 0.11.19, clearing
+  RUSTSEC-2026-0338 to -0342.** These are remote panics and memory
+  exhaustion in QUIC frame handling. The crate resolves only through
+  `reqwest`'s optional HTTP/3 path, which this workspace does not
+  enable, so it never compiles into a binary; this clears a lockfile
+  advisory.
+- **deps: the bundled SQLite moves from 3.53.1 to 3.53.2, through
+  `rusqlite` 0.40.2.** The patch release hardens FTS5 and FTS3 against
+  corrupt records, fixing several buffer overreads and overwrites; the
+  `refs` crate's trigram sidecar indexes are FTS5 tables. It also
+  corrects some query results involving `COLLATE`. No advisory is
+  published for these fixes. `rusqlite` 0.40.1 also escapes the name
+  passed to `Savepoint::with_name`, which bookrack does not call. The
+  database file format is unchanged and no migration runs.
 
 ## [0.12.0] - 2026-10-17
 

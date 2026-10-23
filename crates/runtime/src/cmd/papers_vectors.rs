@@ -15,7 +15,7 @@ use eyre::{Context, Result};
 use crate::cmd::ResetInterrupted;
 use crate::cmd::input_error::CmdInputError;
 use crate::cmd::vectors::{AnnDropReport, AnnRebuildReport, VectorsResetReport, parse_ann_kind};
-use crate::embed_helpers::embedder;
+use crate::embed_helpers::{embedder, refuse_dimension_mismatch};
 use crate::pipeline_run_helpers::{close_run, open_run};
 
 /// Run `bookrack papers vectors rebuild` — build or rebuild the ANN
@@ -105,9 +105,13 @@ pub async fn drop(cfg: &Config) -> Result<AnnDropReport> {
 
 /// Run `bookrack papers vectors reset` — drop the papers chunks
 /// table, clear the papers_corpus stamps, and re-embed every paper's
-/// abstract leaf with the env-configured embedding model. The old
+/// abstract leaf with the index profile's embedding model. The old
 /// vectors are unrecoverable. The caller confirms; this function does
 /// not ask.
+///
+/// When an index profile is in effect, its `embed.dim` is checked
+/// against the backend before anything changes, and a dimension the
+/// backend does not produce is refused as caller input.
 ///
 /// With `resume`, continue a reset that stopped partway: the
 /// destructive steps are skipped and the paper intakes still at
@@ -121,7 +125,7 @@ pub async fn reset(cfg: &Config, resume: bool) -> Result<VectorsResetReport> {
     let catalog = Catalog::open_with_backup(&cfg.papers_catalog_db(), &cfg.backup_dir())
         .context("open papers catalog")?;
     let mut corpus = Corpus::open(&cfg.papers_corpus_db()).context("open papers corpus")?;
-    let embed_cfg = crate::profile::effective_embed_config(cfg)?;
+    let (embed_cfg, declaration) = crate::profile::effective_embed_declaration(cfg)?;
     let embedder_client = embedder(cfg, &embed_cfg)?;
 
     if resume
@@ -135,6 +139,8 @@ pub async fn reset(cfg: &Config, resume: bool) -> Result<VectorsResetReport> {
             ..VectorsResetReport::default()
         });
     }
+
+    refuse_dimension_mismatch(&embedder_client, &embed_cfg.model, declaration.as_ref()).await?;
 
     let run = open_run(
         &catalog,

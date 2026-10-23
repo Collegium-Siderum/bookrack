@@ -484,6 +484,7 @@ async fn advance(cfg: &Config, book: i64, profile_name: Option<&str>) -> Result<
         &run_id,
         &intake.source_sha256,
         &parsed_at,
+        &|_, _| {},
     )
     .await
     .context("resume CHUNK→EMBED")?;

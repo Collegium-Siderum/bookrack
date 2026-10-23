@@ -2596,7 +2596,7 @@ mod tests {
         ("bookrack papers metadata", 10),
         ("bookrack papers stamps", 1),
         ("bookrack papers vectors", 4),
-        ("bookrack queue", 5),
+        ("bookrack queue", 7),
         ("bookrack retrieval", 2),
         ("bookrack rpc", 2),
         ("bookrack runs", 2),

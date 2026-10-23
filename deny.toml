@@ -1,0 +1,32 @@
+# cargo-deny configuration. The `audit` workflow runs the advisories
+# check only:
+#
+#     cargo deny --locked check advisories
+#
+# The licenses, bans and sources checks are not configured.
+
+[graph]
+# The release targets. A dependency reached only on another target is
+# in no shipped binary and stays out of the graph.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+all-features = true
+
+[advisories]
+# A yanked release in the lockfile fails the check like an advisory.
+yanked = "deny"
+# Each exception states the path that brings the crate in and why the
+# advisory stands; an entry goes once a release that clears it is in
+# the lockfile.
+ignore = [
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.39 through rbook's EPUB parser, which iterates start-tag attributes, so a crafted EPUB slows its own ingest. quick-xml 0.41 needs rbook 0.7.10 or later, and an rbook move bumps EXTRACTOR_VERSION." },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.39 through rbook, which parses with Reader and never constructs the affected NsReader. quick-xml 0.41 needs rbook 0.7.10 or later, and an rbook move bumps EXTRACTOR_VERSION." },
+    { id = "RUSTSEC-2026-0367", reason = "zip 8 through rbook, which reads archive entries in memory and never calls the extract APIs. zip 9 needs rbook 0.7.12, and an rbook move bumps EXTRACTOR_VERSION." },
+    { id = "RUSTSEC-2026-0368", reason = "zip 8 through rbook, which reads archive entries in memory and never calls the extract APIs. zip 9 needs rbook 0.7.12, and an rbook move bumps EXTRACTOR_VERSION." },
+    { id = "RUSTSEC-2026-0369", reason = "zip 8 through rbook, which reads archive entries in memory and never calls the extract APIs. zip 9 needs rbook 0.7.12, and an rbook move bumps EXTRACTOR_VERSION." },
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained; a proc-macro reached through datafusion under lancedb, with no direct use in the workspace." },
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained; it reads tokenizer configuration in lindera under lancedb's full-text search, which bookrack does not build." },
+]

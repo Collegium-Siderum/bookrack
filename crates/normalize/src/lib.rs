@@ -39,12 +39,21 @@ use unicode_normalization::UnicodeNormalization;
 
 /// Version of the normalization algorithm.
 ///
-/// Bump on any change to [`normalize`]'s behaviour. The value is
-/// recorded in the index so a daemon can refuse to serve an index that
-/// was built with a different algorithm version. Bumping it is a
-/// commitment to rebuild the whole corpus.
+/// Bump on any change to [`normalize`]'s behaviour, including an
+/// upgrade of `unicode-normalization`. The value is recorded in the
+/// index so a daemon can refuse to serve an index that was built with
+/// a different algorithm version. Bumping it is a commitment to rebuild
+/// the whole corpus. The companion test `tests/dep_hash.rs` fails until
+/// [`FROZEN_DEPS_HASH`] is refreshed, forcing a deliberate bump.
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const NORMALIZE_VERSION: u32 = 1;
+
+/// SHA-256 of the sorted `name@version` lines of the behaviour-
+/// sensitive crates [`normalize`] depends on. Refreshed in lockstep
+/// with [`NORMALIZE_VERSION`]. See `tests/dep_hash.rs` for the input
+/// list and computation.
+pub const FROZEN_DEPS_HASH: &str =
+    "f6f8b19c40dbdbab017aba7eb0f1c4056649cac1ea1645f3cf44c66a9abdfd7d";
 
 /// Normalize prose text to its frozen canonical form.
 ///

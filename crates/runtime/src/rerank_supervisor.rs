@@ -30,9 +30,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use bookrack_config::llama_server_pin::locate_llama_server;
-use bookrack_config::reranker_model_pin::locate_reranker_model;
-use bookrack_config::{Config, DEFAULT_RERANKER_CTX, RERANKER_SERVER_BATCH_SIZE, RerankerConfig};
-use bookrack_core::Problem;
+use bookrack_config::reranker_model_pin::{
+    RerankerModelLocation, locate_reranker_model, reranker_model_pin,
+};
+use bookrack_config::{
+    Config, DEFAULT_RERANKER_CTX, RERANKER_MODEL_ENV, RERANKER_SERVER_BATCH_SIZE, RerankerConfig,
+};
+use bookrack_core::{Explain, Problem};
 use bookrack_index_profile::{RerankerKind, RerankerSpec};
 
 use crate::backend_probe::PreflightRefusal;
@@ -418,6 +422,114 @@ pub async fn bring_up_reranker(
     .map(Some)
 }
 
+/// Whether the GGUF file a reranker tag needs was found, and when not,
+/// which of the three ways it is missing: each has a different way out,
+/// and only one of them is the managed installer.
+///
+/// One judgement, two consumers: bring-up refuses on it through
+/// [`Explain`], and `doctor` lays it out as its own row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RerankerModelState {
+    /// The file to load.
+    Found(PathBuf),
+    /// [`RERANKER_MODEL_ENV`] names a file that is not there. It
+    /// overrides the managed install, so no install repairs it.
+    ExplicitPathMissing(PathBuf),
+    /// The tag has a pinned download and the managed file is absent.
+    NotInstalled {
+        /// The reranker model tag.
+        tag: String,
+    },
+    /// The tag has no pinned download, so nothing can install it.
+    Unpinned {
+        /// The reranker model tag.
+        tag: String,
+    },
+}
+
+/// Classify a reranker model search for `tag`.
+pub fn reranker_model_state(tag: &str, location: RerankerModelLocation) -> RerankerModelState {
+    if let Some(path) = location.path {
+        return RerankerModelState::Found(path);
+    }
+    if location.explicit {
+        return RerankerModelState::ExplicitPathMissing(
+            location.probed.into_iter().next().unwrap_or_default(),
+        );
+    }
+    if reranker_model_pin(tag).is_some() {
+        RerankerModelState::NotInstalled {
+            tag: tag.to_string(),
+        }
+    } else {
+        RerankerModelState::Unpinned {
+            tag: tag.to_string(),
+        }
+    }
+}
+
+impl Explain for RerankerModelState {
+    fn explain(&self) -> Problem {
+        match self {
+            RerankerModelState::Found(path) => Problem::new(format!(
+                "reranker model file \"{}\" is present",
+                path.display()
+            )),
+            RerankerModelState::ExplicitPathMissing(path) => Problem::new(format!(
+                "reranker model file \"{}\" does not exist",
+                path.display()
+            ))
+            .hint(format!(
+                "Fix or unset {RERANKER_MODEL_ENV}; it overrides the managed install."
+            )),
+            RerankerModelState::NotInstalled { tag } => {
+                Problem::new(format!("reranker model '{tag}' is not installed"))
+                    .hint("Run `bookrack doctor --install-reranker`.")
+            }
+            RerankerModelState::Unpinned { tag } => Problem::new(format!(
+                "reranker model '{tag}' has no pinned download"
+            ))
+            .hint(format!(
+                "Point {RERANKER_MODEL_ENV} at its GGUF file, or serve it and set \
+                         reranker.url."
+            )),
+        }
+    }
+}
+
+/// Bring-up refused because the reranker model a profile promises
+/// cannot be found. Operator input: every state it carries has a next
+/// step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RerankerModelRefusal {
+    /// The profile that promises the reranker stage.
+    pub profile: String,
+    /// How the model is missing; never [`RerankerModelState::Found`].
+    pub state: RerankerModelState,
+}
+
+impl std::fmt::Display for RerankerModelRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let problem = self.state.explain();
+        write!(f, "profile '{}': {}", self.profile, problem.summary)?;
+        if let Some(hint) = &problem.data.hint {
+            write!(f, ". {hint}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for RerankerModelRefusal {}
+
+impl Explain for RerankerModelRefusal {
+    fn explain(&self) -> Problem {
+        self.state.explain().detail(format!(
+            "Profile '{}' promises a cross-encoder reranker stage.",
+            self.profile
+        ))
+    }
+}
+
 /// The mode dispatch behind [`bring_up_reranker`], after the profile
 /// has resolved and demanded a reranker: operator URL → one hard
 /// probe, otherwise locate the artifacts and supervise. Factored out
@@ -451,16 +563,23 @@ async fn bring_up_backend(
             ),
         }
     } else {
+        // The model first: an unpinned tag or a broken explicit path is
+        // not repaired by the installer that also provides the binary,
+        // so its refusal must not hide behind the binary's.
+        let model = match reranker_model_state(model_tag, locate_reranker_model(model_tag)) {
+            RerankerModelState::Found(path) => path,
+            missing => {
+                return Err(RerankerModelRefusal {
+                    profile: profile.to_string(),
+                    state: missing,
+                }
+                .into());
+            }
+        };
         let bin = locate_llama_server().path.ok_or_else(|| {
             eyre!(
                 "profile '{profile}' promises a reranker stage but no llama-server binary \
                  is installed; run `bookrack doctor --install-reranker`"
-            )
-        })?;
-        let model = locate_reranker_model(model_tag).path.ok_or_else(|| {
-            eyre!(
-                "profile '{profile}' promises reranker model '{model_tag}' but no model \
-                 file is installed; run `bookrack doctor --install-reranker`"
             )
         })?;
         let mut config = RerankSupervisorConfig::new(bin, model);
@@ -1116,6 +1235,50 @@ mod tests {
         let supervisor = RerankSupervisor::start(config, None).await.expect("starts");
         assert!(matches!(supervisor.state().await, SupervisorState::Ready));
         supervisor.shutdown().await;
+    }
+
+    #[test]
+    fn a_reranker_model_search_is_classified_by_its_way_out() {
+        use bookrack_config::reranker_model_pin::RerankerModelLocation;
+        let location = |path: Option<&str>, probed: &[&str], explicit| RerankerModelLocation {
+            path: path.map(PathBuf::from),
+            probed: probed.iter().map(PathBuf::from).collect(),
+            explicit,
+        };
+        let pinned = "Qwen3-Reranker-0.6B";
+        let unpinned = "synthetic-reranker:unpinned";
+
+        assert_eq!(
+            reranker_model_state(pinned, location(Some("m.gguf"), &["m.gguf"], false)),
+            RerankerModelState::Found(PathBuf::from("m.gguf"))
+        );
+        // A broken explicit path wins over the pin: the install it would
+        // otherwise point at writes a file the override hides.
+        assert_eq!(
+            reranker_model_state(pinned, location(None, &["explicit.gguf"], true)),
+            RerankerModelState::ExplicitPathMissing(PathBuf::from("explicit.gguf"))
+        );
+        assert_eq!(
+            reranker_model_state(pinned, location(None, &["managed.gguf"], false)),
+            RerankerModelState::NotInstalled {
+                tag: pinned.to_string()
+            }
+        );
+        assert_eq!(
+            reranker_model_state(unpinned, location(None, &[], false)),
+            RerankerModelState::Unpinned {
+                tag: unpinned.to_string()
+            }
+        );
+        for state in [
+            reranker_model_state(pinned, location(None, &["explicit.gguf"], true)),
+            reranker_model_state(unpinned, location(None, &[], false)),
+        ] {
+            let problem = state.explain();
+            let hint = problem.data.hint.unwrap_or_default();
+            assert!(!hint.contains("--install-reranker"), "{state:?}: {hint}");
+            assert!(hint.contains(RERANKER_MODEL_ENV), "{state:?}: {hint}");
+        }
     }
 
     #[tokio::test]

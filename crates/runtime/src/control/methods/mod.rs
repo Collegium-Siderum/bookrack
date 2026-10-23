@@ -352,6 +352,7 @@ methods! {
     write no_queue async   process                    "queue.pause" => queue_writes::pause,
     write no_queue async   process                    "queue.resume" => queue_writes::resume,
     write no_queue async   process                    "queue.clear" => queue_writes::clear,
+    write queue    async   process                    "queue.retry" => queue_writes::retry,
 
     // library admin
     read  no_queue sync    unrouted                   "library.list" => reads::library_list_rpc,
@@ -974,6 +975,7 @@ mod tests {
         for name in [
             "ingest.submit",
             "ingest.cancel",
+            "queue.retry",
             "glean.submit",
             "intake.ocr",
             "vectors.rebuild",

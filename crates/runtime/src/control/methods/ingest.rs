@@ -156,8 +156,8 @@ pub struct IngestCancelParams {
     job_id: String,
 }
 
-/// Cancel the one pending or running job whose id starts with
-/// `job_id`. The reply carries the full id the prefix resolved to.
+/// Cancel the one pending or running job whose id contains `job_id`
+/// anywhere. The reply carries the full id the fragment resolved to.
 pub async fn cancel(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: IngestCancelParams = match params {
         Some(v) if !v.is_null() => serde_json::from_value(v.clone()).map_err(|e| {
@@ -174,7 +174,7 @@ pub async fn cancel(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         &ctx.queue_state,
         &ctx.queue_state_path,
         |guard| {
-            queue::cancel_with_prefix(guard, &parsed.job_id).map_err(|err| {
+            queue::cancel_matching(guard, &parsed.job_id).map_err(|err| {
                 RpcError::new(
                     crate::control::jsonrpc::JOB_NOT_FOUND,
                     format!("ingest.cancel: {err}"),

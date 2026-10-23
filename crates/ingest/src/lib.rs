@@ -26,18 +26,20 @@ pub mod sentences;
 mod structure;
 
 pub use bookrack_corpus::IndexStamps;
-pub use chunk::{CHUNK_VERSION, ChunkParams, ChunkPlan};
+pub use chunk::{CHUNK_VERSION, ChunkParams, ChunkPlan, FROZEN_SPLITTER_DEPS};
 pub use dryrun::{
     BiblioOut, ChunkStatsOut, DryrunBookReport, DryrunParams, DryrunSummary, FieldOut,
     StructureOut, TocStatsOut, collect_files, dryrun_book, dryrun_path, summarize,
 };
-pub use embed_run::{EmbedRunReport, embed_book_chunks, now_rfc3339};
+pub use embed_run::{
+    EmbedRunReport, OnEmbedBatch, embed_book_chunks, embed_book_chunks_with_progress, now_rfc3339,
+};
 
 use std::path::Path;
 
 use bookrack_catalog::{
     ActorKind, Catalog, IntakeStatus, NewContributor, NewIntake, NewItemPipelineAudit,
-    NewItemState, NewPublicationAttrs, NewReview,
+    NewItemState, NewPublicationAttrs,
 };
 use bookrack_config::EmbedConfig;
 use bookrack_core::{ItemKind, NodeId, NodeType, PartitionIdx, error_chain};
@@ -403,11 +405,6 @@ pub struct IngestReport {
 /// than duplicating them. `lancedb_dir` is the vector store directory;
 /// `embedder` turns chunk text into vectors. A file whose text layer is
 /// unusable yields [`IngestError::NeedsOcr`].
-#[tracing::instrument(
-    name = "book",
-    skip_all,
-    fields(file = %file.display(), intake_id = tracing::field::Empty)
-)]
 pub async fn ingest_book<E: Embedder>(
     file: &Path,
     corpus: &mut Corpus,
@@ -416,6 +413,41 @@ pub async fn ingest_book<E: Embedder>(
     books_dir: &Path,
     embedder: &E,
     params: &IngestParams,
+) -> Result<IngestReport> {
+    ingest_book_with_progress(
+        file,
+        corpus,
+        catalog,
+        lancedb_dir,
+        books_dir,
+        embedder,
+        params,
+        &|_, _| {},
+    )
+    .await
+}
+
+/// [`ingest_book`], reporting each EMBED batch to `on_embed_batch` once
+/// it is written. Only the EMBED stage reports; the stages before it
+/// run without callbacks.
+#[tracing::instrument(
+    name = "book",
+    skip_all,
+    fields(file = %file.display(), intake_id = tracing::field::Empty)
+)]
+// `ingest_book`'s seven parameters plus the callback; folding the
+// callback into `IngestParams` would put a borrowed closure into a
+// plain configuration value that callers clone and build from defaults.
+#[allow(clippy::too_many_arguments)]
+pub async fn ingest_book_with_progress<E: Embedder>(
+    file: &Path,
+    corpus: &mut Corpus,
+    catalog: &mut Catalog,
+    lancedb_dir: &Path,
+    books_dir: &Path,
+    embedder: &E,
+    params: &IngestParams,
+    on_embed_batch: &OnEmbedBatch<'_>,
 ) -> Result<IngestReport> {
     // One run id ties every audit row from this invocation together; the
     // whole-file hash anchors the rows to a source that survives deletion.
@@ -642,11 +674,12 @@ pub async fn ingest_book<E: Embedder>(
 
     // METADATA (non-blocking): seed the publication-attrs base from the
     // extracted biblio, run the deterministic audit over the resulting
-    // effective record, and persist a `pending` review row plus the
+    // effective record, and persist the review row's report plus the
     // confidence rollup. The audit never gates the pipeline and never
     // marks a record reviewed: it only assesses how plausible the
     // metadata looks. A human or LLM must `metadata approve`,
-    // `metadata ack`, or `metadata reject` to advance status.
+    // `metadata ack`, or `metadata reject` to advance status, and a
+    // re-ingest leaves an advanced status in place.
     let source_stem = file.file_stem().and_then(|s| s.to_str());
     let filename_biblio = source_stem
         .map(|stem| bookrack_metadata::parse_filename(stem, &params.audit_profile.filename_parser));
@@ -706,6 +739,7 @@ pub async fn ingest_book<E: Embedder>(
         &run_id,
         &source_sha,
         &parsed_at,
+        on_embed_batch,
     )
     .await?;
 
@@ -799,6 +833,9 @@ fn noop_if_up_to_date(
 /// prose leaves out of `corpus` and feeds them straight into the
 /// chunker. A book whose STRUCTURE never ran first cannot be advanced
 /// through this entry point.
+///
+/// `on_embed_batch` receives each EMBED batch once it is written; see
+/// [`OnEmbedBatch`].
 #[allow(clippy::too_many_arguments)]
 pub async fn resume_from_chunk<E: Embedder>(
     corpus: &mut Corpus,
@@ -811,6 +848,7 @@ pub async fn resume_from_chunk<E: Embedder>(
     run_id: &str,
     source_sha: &str,
     parsed_at: &str,
+    on_embed_batch: &OnEmbedBatch<'_>,
 ) -> Result<EmbedRunReport> {
     let book_root_raw = book_root_id.get();
 
@@ -858,35 +896,41 @@ pub async fn resume_from_chunk<E: Embedder>(
 
     // EMBED.
     let started = std::time::Instant::now();
-    let embed =
-        match embed_run::embed_book_chunks(&plans, embedder, corpus, lancedb_dir, &params.embed)
-            .instrument(tracing::info_span!("operation", stage = "embed"))
-            .await
-        {
-            Ok(report) => report,
-            Err(e) => {
-                audit(
-                    catalog,
-                    run_id,
-                    source_sha,
-                    Some(book_root_raw),
-                    "embed",
-                    "embed",
-                    "fail",
-                    started,
-                    None,
-                    Some(&error_chain(&e)),
-                );
-                set_state(
-                    catalog,
-                    NewItemState::new(book_root_raw, intake_id, "embed")
-                        .parsed_at(parsed_at)
-                        .embed_model(&params.embed.model)
-                        .last_error(error_chain(&e)),
-                );
-                return Err(e);
-            }
-        };
+    let embed = match embed_run::embed_book_chunks_with_progress(
+        &plans,
+        embedder,
+        corpus,
+        lancedb_dir,
+        &params.embed,
+        on_embed_batch,
+    )
+    .instrument(tracing::info_span!("operation", stage = "embed"))
+    .await
+    {
+        Ok(report) => report,
+        Err(e) => {
+            audit(
+                catalog,
+                run_id,
+                source_sha,
+                Some(book_root_raw),
+                "embed",
+                "embed",
+                "fail",
+                started,
+                None,
+                Some(&error_chain(&e)),
+            );
+            set_state(
+                catalog,
+                NewItemState::new(book_root_raw, intake_id, "embed")
+                    .parsed_at(parsed_at)
+                    .embed_model(&params.embed.model)
+                    .last_error(error_chain(&e)),
+            );
+            return Err(e);
+        }
+    };
     let metric = format!(
         r#"{{"chunks":{},"batches":{},"shrink_events":{},"chars":{}}}"#,
         embed.chunks_written, embed.batches, embed.shrink_events, embed.total_chars
@@ -1087,27 +1131,22 @@ pub(crate) fn run_metadata_substep(
     write_contributors(catalog, intake_id, &extraction.biblio, filename_biblio);
 
     // trust-source short-circuit: when the profile disables the audit,
-    // record the substep as skipped and write a `pending` review row
-    // with a profile-stamped reviewer so a downstream query can tell a
-    // "no audit ran" pending from a "audit flagged" pending. No
+    // record the substep as skipped and write the review row with a
+    // profile-stamped reviewer so a downstream query can tell a "no
+    // audit ran" pending from a "audit flagged" pending. No
     // MetadataReport is produced and no audit-derived columns are
     // written.
     if !audit_profile.audit_enabled {
         let reviewer = format!("bookrack-ingest:{}", audit_profile.name);
-        if let Err(e) = catalog.upsert_review(
-            &NewReview::new(
-                intake_id,
-                ItemKind::Book,
-                &reviewer,
-                bookrack_catalog::STATUS_PENDING,
-            )
-            .notes(format!(
+        write_review(
+            catalog,
+            intake_id,
+            &reviewer,
+            &format!(
                 "audit skipped: {} profile disables the metadata audit",
                 audit_profile.name,
-            )),
-        ) {
-            tracing::warn!(error = %e, "metadata: failed to write node_reviews row");
-        }
+            ),
+        );
         audit(
             catalog,
             run_id,
@@ -1186,22 +1225,13 @@ pub(crate) fn run_metadata_substep(
     // Review status reflects human/LLM confirmation, never the audit.
     // The audit's plausibility verdict travels in the notes column for
     // forensic context and through the `book_pipeline_audit` row below;
-    // status itself stays at `pending` until a human or LLM advances it.
+    // status itself stays at `pending` until a human or LLM advances it,
+    // and a verdict already given stays through a re-ingest.
     // The reviewed_by string carries the active profile name so a query
     // can tell `default` flavour pending from a `strict`-flavour pending
     // or from the audit-skipped `trust-source` flavour written above.
     let reviewer = format!("bookrack-ingest:{}", audit_profile.name);
-    if let Err(e) = catalog.upsert_review(
-        &NewReview::new(
-            intake_id,
-            ItemKind::Book,
-            &reviewer,
-            bookrack_catalog::STATUS_PENDING,
-        )
-        .notes(report_notes(&report)),
-    ) {
-        tracing::warn!(error = %e, "metadata: failed to write node_reviews row");
-    }
+    write_review(catalog, intake_id, &reviewer, &report_notes(&report));
 
     tracing::info!(
         verdict = report.verdict.as_token(),
@@ -1698,6 +1728,19 @@ fn report_notes(report: &bookrack_metadata::MetadataReport) -> String {
     }
     flagged.sort();
     format!("audit verdict={verdict}, flagged: {}", flagged.join(", "))
+}
+
+/// Write the book's review row through
+/// [`Catalog::record_pipeline_review`], best-effort for the same reason
+/// as [`audit`]. A verdict the row already carries is kept and logged.
+fn write_review(catalog: &Catalog, intake_id: i64, reviewer: &str, notes: &str) {
+    match catalog.record_pipeline_review(intake_id, ItemKind::Book, reviewer, notes) {
+        Ok(status) if status != bookrack_catalog::STATUS_PENDING => {
+            tracing::info!(%status, "metadata: kept the review verdict, refreshed its report");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "metadata: failed to write node_reviews row"),
+    }
 }
 
 /// Upsert a book's pipeline state, best-effort for the same reason as
@@ -2486,6 +2529,166 @@ mod book_pipeline_tests {
         assert!(after > baseline, "forced ingest must add new audit rows");
     }
 
+    /// Ingest the sample, then rewrite its catalog row as if an older
+    /// extractor had produced it. Returns the first report and the
+    /// stale version written.
+    async fn ingest_then_mark_stale(
+        file: &Path,
+        dir: &Path,
+        corpus: &mut Corpus,
+        catalog: &mut Catalog,
+    ) -> (IngestReport, u32) {
+        let first = ingest_book(
+            file,
+            corpus,
+            catalog,
+            dir,
+            dir,
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("first ingest");
+        let intake = catalog
+            .intake_by_id(first.intake_id)
+            .expect("intake")
+            .expect("present");
+        let stale = bookrack_extract::EXTRACTOR_VERSION - 1;
+        catalog
+            .set_extraction(
+                ItemKind::Book,
+                first.intake_id,
+                intake.adapter.as_deref().expect("adapter stamped"),
+                stale,
+            )
+            .expect("stale extractor_version stamp");
+        assert_eq!(
+            catalog
+                .stale_partitions(bookrack_extract::EXTRACTOR_VERSION)
+                .expect("stale partitions"),
+            [first.intake_id],
+        );
+        (first, stale)
+    }
+
+    #[tokio::test]
+    async fn re_ingest_without_force_refreshes_a_stale_extractor_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let (first, _) = ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
+        let baseline = catalog
+            .pipeline_audit_for_book(first.book_root_id.get())
+            .expect("audit")
+            .len();
+        // Damage the cached envelope: only a fresh extraction can put a
+        // readable one back.
+        let envelope_path = dir
+            .path()
+            .join(envelope_filename(ItemKind::Book, first.intake_id));
+        std::fs::write(&envelope_path, b"not an envelope").expect("overwrite envelope");
+
+        let again = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("re-ingest");
+        assert!(
+            !again.no_op,
+            "a stale extractor_version must not take the no-op path"
+        );
+        assert!(!again.forced);
+        assert!(again.already_registered);
+        assert_eq!(again.intake_id, first.intake_id);
+        assert!(again.chunks_written > 0, "the chunks must be re-derived");
+        let after = catalog
+            .pipeline_audit_for_book(first.book_root_id.get())
+            .expect("audit")
+            .len();
+        assert!(after > baseline, "every stage must run again");
+
+        let intake = catalog
+            .intake_by_id(first.intake_id)
+            .expect("intake")
+            .expect("present");
+        assert_eq!(
+            intake.extractor_version,
+            bookrack_extract::EXTRACTOR_VERSION
+        );
+        assert_eq!(intake.status, bookrack_catalog::IntakeStatus::Embedded);
+        assert!(
+            catalog
+                .stale_partitions(bookrack_extract::EXTRACTOR_VERSION)
+                .expect("stale partitions")
+                .is_empty(),
+            "the re-ingested intake must no longer read as stale"
+        );
+        let envelope = read_envelope(&envelope_path).expect("envelope replaced");
+        assert_eq!(
+            envelope.extraction.provenance.extractor_version,
+            bookrack_extract::EXTRACTOR_VERSION
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_only_rebuild_and_reembed_leave_the_extractor_version_stale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let (first, stale) =
+            ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
+
+        let rebuilt = crate::rebuild::rebuild_from_intakes(
+            &mut corpus,
+            &catalog,
+            &crate::rebuild::RebuildParams {
+                stale_only: true,
+                ..Default::default()
+            },
+        )
+        .expect("rebuild");
+        assert_eq!(rebuilt.rebuilt, [first.intake_id]);
+        let reembedded = crate::reembed::reembed_all(
+            &catalog,
+            &corpus,
+            dir.path(),
+            &IngestParams::default().embed,
+            &Fake { dim: 8 },
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("reembed");
+        let ids: Vec<i64> = reembedded.intakes.iter().map(|o| o.intake_id).collect();
+        assert_eq!(
+            ids,
+            [first.intake_id],
+            "the rebuild must leave the intake stale for the reembed's filter"
+        );
+
+        let intake = catalog
+            .intake_by_id(first.intake_id)
+            .expect("intake")
+            .expect("present");
+        assert_eq!(intake.extractor_version, stale);
+        assert_eq!(
+            catalog
+                .stale_partitions(bookrack_extract::EXTRACTOR_VERSION)
+                .expect("stale partitions"),
+            [first.intake_id],
+            "neither sweep re-extracts, so the intake must still read as stale"
+        );
+    }
+
     #[tokio::test]
     async fn ingest_writes_envelope_and_records_stored_path() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2715,6 +2918,295 @@ mod book_pipeline_tests {
         assert_eq!(attrs.title.as_deref(), Some("A Complete Book"));
         assert!(attrs.confidence.is_none());
         assert!(attrs.audit_verdict.is_none());
+    }
+
+    /// The token a human review write records in `reviewed_by`.
+    const HUMAN_REVIEWER: &str = "human:reviewer";
+
+    /// The extracted title of the metadata-substep fixture.
+    const BOOK_TITLE: &str = "A Complete Book";
+
+    /// A note no ingest writes, standing in for an earlier run's report.
+    const EARLIER_REPORT: &str = "an earlier report";
+
+    /// Every status a human or LLM can move a review to.
+    const REVIEWED_STATUSES: [&str; 3] = [
+        bookrack_catalog::STATUS_APPROVED,
+        bookrack_catalog::STATUS_ACKNOWLEDGED,
+        bookrack_catalog::STATUS_REJECTED,
+    ];
+
+    /// Run the metadata substep on a fixed born-digital extraction
+    /// whose title is `title`.
+    fn run_metadata_once(
+        catalog: &Catalog,
+        intake_id: i64,
+        profile: &bookrack_metadata::AuditProfile,
+        title: Option<&str>,
+    ) {
+        let extraction = bookrack_extract::Extraction {
+            blocks: vec![bookrack_extract::Block {
+                kind: bookrack_extract::BlockKind::Body,
+                text: "A short English body sample for the audit.".to_string(),
+                source_unit: 0,
+                style: None,
+            }],
+            toc: bookrack_extract::Toc {
+                entries: Vec::new(),
+            },
+            biblio: bookrack_extract::Biblio {
+                title: title.map(str::to_string),
+                language: Some("en".to_string()),
+                publisher: Some("Oxford University Press".to_string()),
+                year: Some(2010),
+                ..Default::default()
+            },
+            provenance: bookrack_extract::Provenance {
+                adapter: "epub".to_string(),
+                extractor_version: 1,
+                text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
+                skipped_units: Vec::new(),
+                derived_from_sha256: None,
+                partial_pages: None,
+                source_of_structure: None,
+                fallbacks: Vec::new(),
+            },
+        };
+        super::run_metadata_substep(
+            catalog,
+            intake_id,
+            42,
+            &extraction,
+            &TocStats::default(),
+            Some("a-complete-book"),
+            None,
+            &bookrack_metadata::AuditData::empty(),
+            profile,
+            "run-1",
+            "dummy-sha",
+        );
+    }
+
+    /// Both review writes of the metadata substep — the audit's and the
+    /// audit-skipped one — against every reviewed status: the first run
+    /// opens a `pending` row, and a second run after a human verdict
+    /// refreshes the report without moving the verdict.
+    #[test]
+    fn a_rerun_of_the_metadata_substep_keeps_a_reviewed_verdict() {
+        let profiles = [
+            bookrack_metadata::AuditProfile::default(),
+            bookrack_metadata::AuditProfile::trust_source(),
+        ];
+        for profile in &profiles {
+            for status in REVIEWED_STATUSES {
+                let case = format!("{} profile, {status}", profile.name);
+                let mut catalog = Catalog::open_in_memory().expect("catalog");
+                let intake_id = catalog
+                    .register_intake(
+                        ItemKind::Book,
+                        &bookrack_catalog::NewIntake::new("dummy-sha".to_string()),
+                    )
+                    .expect("register")
+                    .intake()
+                    .intake_id;
+
+                run_metadata_once(&catalog, intake_id, profile, Some(BOOK_TITLE));
+                let opened = catalog
+                    .review(intake_id, ItemKind::Book)
+                    .expect("review")
+                    .expect("the first ingest opens a review row");
+                assert_eq!(opened.status, bookrack_catalog::STATUS_PENDING, "{case}");
+                assert_eq!(
+                    opened.reviewed_by,
+                    format!("bookrack-ingest:{}", profile.name),
+                    "{case}",
+                );
+                let report = opened.notes.expect("the ingest writes its report");
+
+                catalog
+                    .upsert_review(&bookrack_catalog::NewReview::new(
+                        intake_id,
+                        ItemKind::Book,
+                        HUMAN_REVIEWER,
+                        status,
+                    ))
+                    .expect("verdict");
+                assert!(
+                    catalog
+                        .update_review_notes(intake_id, ItemKind::Book, EARLIER_REPORT)
+                        .expect("age the report")
+                );
+
+                run_metadata_once(&catalog, intake_id, profile, Some(BOOK_TITLE));
+                let kept = catalog
+                    .review(intake_id, ItemKind::Book)
+                    .expect("review")
+                    .expect("present");
+                assert_eq!(
+                    kept.status, status,
+                    "{case}: a re-ingest must not walk the verdict back to pending"
+                );
+                assert_eq!(
+                    kept.reviewed_by, HUMAN_REVIEWER,
+                    "{case}: the verdict must stay attributed to its reviewer"
+                );
+                assert_eq!(
+                    kept.notes.as_deref(),
+                    Some(report.as_str()),
+                    "{case}: the re-ingest must refresh the report"
+                );
+            }
+        }
+    }
+
+    /// A row nobody has reviewed yet carries the latest run: its
+    /// reviewer token and report follow the profile that ran.
+    #[test]
+    fn a_rerun_of_the_metadata_substep_restamps_a_pending_review() {
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let intake_id = catalog
+            .register_intake(
+                ItemKind::Book,
+                &bookrack_catalog::NewIntake::new("dummy-sha".to_string()),
+            )
+            .expect("register")
+            .intake()
+            .intake_id;
+        run_metadata_once(
+            &catalog,
+            intake_id,
+            &bookrack_metadata::AuditProfile::default(),
+            Some(BOOK_TITLE),
+        );
+        run_metadata_once(
+            &catalog,
+            intake_id,
+            &bookrack_metadata::AuditProfile::trust_source(),
+            Some(BOOK_TITLE),
+        );
+
+        let review = catalog
+            .review(intake_id, ItemKind::Book)
+            .expect("review")
+            .expect("present");
+        assert_eq!(review.status, bookrack_catalog::STATUS_PENDING);
+        assert_eq!(review.reviewed_by, "bookrack-ingest:trust-source");
+        assert!(
+            review
+                .notes
+                .as_deref()
+                .unwrap_or_default()
+                .contains("audit skipped"),
+            "the report must be the latest run's: {:?}",
+            review.notes,
+        );
+    }
+
+    /// A verdict is not re-examined against the new extraction: a
+    /// re-ingest that loses a field the reviewer saw keeps the
+    /// approval, and only the refreshed report shows the change.
+    #[test]
+    fn a_reviewed_verdict_survives_a_re_ingest_that_changes_the_metadata() {
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let intake_id = catalog
+            .register_intake(
+                ItemKind::Book,
+                &bookrack_catalog::NewIntake::new("dummy-sha".to_string()),
+            )
+            .expect("register")
+            .intake()
+            .intake_id;
+        let profile = bookrack_metadata::AuditProfile::default();
+        run_metadata_once(&catalog, intake_id, &profile, Some(BOOK_TITLE));
+        catalog
+            .upsert_review(&bookrack_catalog::NewReview::new(
+                intake_id,
+                ItemKind::Book,
+                HUMAN_REVIEWER,
+                bookrack_catalog::STATUS_APPROVED,
+            ))
+            .expect("approve");
+
+        run_metadata_once(&catalog, intake_id, &profile, None);
+        let attrs = catalog
+            .publication_attrs(intake_id, ItemKind::Book)
+            .expect("attrs")
+            .expect("present");
+        assert_eq!(attrs.title, None, "the re-ingest must change the record");
+        let review = catalog
+            .review(intake_id, ItemKind::Book)
+            .expect("review")
+            .expect("present");
+        assert_eq!(review.status, bookrack_catalog::STATUS_APPROVED);
+        assert_eq!(review.reviewed_by, HUMAN_REVIEWER);
+        let notes = review.notes.unwrap_or_default();
+        assert!(
+            notes.contains("flagged:") && notes.contains("title"),
+            "the report must flag the lost title: {notes:?}"
+        );
+    }
+
+    /// The refresh the upgrade runbook prescribes — re-ingesting a
+    /// stale source, with or without `--force` — keeps the verdict.
+    #[tokio::test]
+    async fn re_ingest_keeps_a_reviewed_verdict() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let (first, _) = ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
+        catalog
+            .upsert_review(&bookrack_catalog::NewReview::new(
+                first.intake_id,
+                ItemKind::Book,
+                HUMAN_REVIEWER,
+                bookrack_catalog::STATUS_APPROVED,
+            ))
+            .expect("approve");
+
+        for force in [false, true] {
+            assert!(
+                catalog
+                    .update_review_notes(first.intake_id, ItemKind::Book, EARLIER_REPORT)
+                    .expect("age the report")
+            );
+            let again = ingest_book(
+                &file,
+                &mut corpus,
+                &mut catalog,
+                dir.path(),
+                dir.path(),
+                &Fake { dim: 8 },
+                &IngestParams {
+                    force,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("re-ingest");
+            assert!(!again.no_op, "force={force}: the pipeline must run");
+            assert_eq!(again.forced, force);
+
+            let review = catalog
+                .review(first.intake_id, ItemKind::Book)
+                .expect("review")
+                .expect("present");
+            assert_eq!(
+                review.status,
+                bookrack_catalog::STATUS_APPROVED,
+                "force={force}: a re-ingest must not walk the verdict back to pending"
+            );
+            assert_eq!(review.reviewed_by, HUMAN_REVIEWER, "force={force}");
+            assert!(
+                review
+                    .notes
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("audit verdict="),
+                "force={force}: the re-ingest must refresh the report: {:?}",
+                review.notes,
+            );
+        }
     }
 
     #[tokio::test]
@@ -3104,6 +3596,7 @@ mod book_pipeline_tests {
             "advance-test",
             "test-sha",
             state.parsed_at.as_deref().unwrap_or("now"),
+            &|_, _| {},
         )
         .await
         .expect("resume");

@@ -199,15 +199,37 @@ where
 }
 
 /// Convert a live `tracing::Event` into a serialisable [`LogEvent`].
+///
+/// The ring and the broadcast channel both leave the process
+/// (`logs.tail`, `Event::Log`, the MCP log tool), and a dependency can
+/// log an error's text without it passing through any bookrack error
+/// type. The build-machine prefix of a dependency source location is
+/// therefore removed here, from the message and from every string
+/// field ([`bookrack_core::redact_source_paths`]). The events carry
+/// diagnostics, not a book's text.
 fn pack_event(event: &Event<'_>) -> LogEvent {
     let mut visitor = FieldVisitor::default();
     event.record(&mut visitor);
+    let mut fields = visitor.fields;
+    for value in fields.values_mut() {
+        if let serde_json::Value::String(text) = value {
+            redact_in_place(text);
+        }
+    }
+    let mut message = visitor.message.unwrap_or_default();
+    redact_in_place(&mut message);
     LogEvent {
         ts: chrono::Utc::now(),
         level: event.metadata().level().to_string(),
         target: event.metadata().target().to_string(),
-        message: visitor.message.unwrap_or_default(),
-        fields: visitor.fields,
+        message,
+        fields,
+    }
+}
+
+fn redact_in_place(text: &mut String) {
+    if let std::borrow::Cow::Owned(redacted) = bookrack_core::redact_source_paths(text) {
+        *text = redacted;
     }
 }
 
@@ -367,6 +389,55 @@ mod tests {
         assert_eq!(ev.fields.get("count").and_then(|v| v.as_i64()), Some(42));
         assert_eq!(ev.fields.get("flag").and_then(|v| v.as_bool()), Some(true));
         assert_eq!(ev.fields.get("ratio").and_then(|v| v.as_f64()), Some(0.5));
+    }
+
+    /// A dependency that logs an error's text itself — the way LanceDB
+    /// warns about an index it cannot describe — bypasses every error
+    /// type bookrack wraps. The capture layer drops the build-machine
+    /// prefix of a source location from the message and from every
+    /// string field, for the ring and for subscribers alike.
+    #[test]
+    fn captured_events_lose_build_prefixes_in_message_and_fields() {
+        const LOCATED: &str = "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/\
+                               dep-1.0.0/src/index.rs:402:9";
+        const KEPT: &str = "dep-1.0.0/src/index.rs:402:9";
+        let handle = LogStreamHandle::new(16, 16);
+        let mut rx = handle.subscribe();
+        let subscriber = Registry::default().with(BroadcastLayer::new(handle.clone()));
+
+        with_default(subscriber, || {
+            tracing::warn!(
+                target: "dep_test",
+                shown = %format!("at {LOCATED}"),
+                debugged = ?format!("at {LOCATED}"),
+                "Could not infer vector index details for vector_idx: failed, {}: failed",
+                LOCATED
+            );
+        });
+
+        let events = handle.tail(10);
+        let delivered = rx.try_recv().expect("event delivered");
+        for ev in [&events[0], &delivered] {
+            assert_eq!(
+                ev.message,
+                format!(
+                    "Could not infer vector index details for vector_idx: failed, {KEPT}: failed"
+                )
+            );
+            assert_eq!(
+                ev.fields.get("shown").and_then(|v| v.as_str()),
+                Some(format!("at {KEPT}").as_str())
+            );
+            let debugged = ev
+                .fields
+                .get("debugged")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            assert!(
+                debugged.contains(KEPT) && !debugged.contains("/disk/cache"),
+                "{debugged}"
+            );
+        }
     }
 
     #[test]

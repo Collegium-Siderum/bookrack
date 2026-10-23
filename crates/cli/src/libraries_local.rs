@@ -457,6 +457,20 @@ pub fn config(name: String, sets: Vec<(String, String)>, unset: Vec<String>) -> 
         .find(|(key, _)| key == "index_profile")
         .map(|(_, value)| value.clone());
     let profile_unset = unset.iter().any(|key| key == "index_profile");
+
+    // The registry's remarks on the profile being set, computed before
+    // the write mints a manifest: a root with none has been shown
+    // nothing. Printed, and recorded as shown, only for a human reader.
+    let show_advice = !ctx().is_json() && !ctx().is_quiet();
+    let advised_profile = profile_set
+        .as_deref()
+        .and_then(bookrack_runtime::profile::resolve_named_profile);
+    let pending_advice = match (&advised_profile, show_advice) {
+        (Some(profile), true) => {
+            bookrack_runtime::profile::pending_advice(&data_dir, Some(profile))
+        }
+        _ => Vec::new(),
+    };
     let file_sets: Vec<(String, String)> = sets
         .iter()
         .filter(|(key, _)| key != "index_profile")
@@ -509,6 +523,17 @@ pub fn config(name: String, sets: Vec<(String, String)>, unset: Vec<String>) -> 
     };
 
     render_config_write(&name, &data_dir, &sets, &unset, registry_refreshed);
+    if profile_unset {
+        bookrack_runtime::profile::acknowledge_advice(&data_dir, None);
+    } else if let Some(profile) = advised_profile.as_ref().filter(|_| show_advice) {
+        for advice in &pending_advice {
+            println!(
+                "{}",
+                bookrack_runtime::cmd::index_profile::advice_line(advice)
+            );
+        }
+        bookrack_runtime::profile::acknowledge_advice(&data_dir, Some(profile));
+    }
     Ok(())
 }
 

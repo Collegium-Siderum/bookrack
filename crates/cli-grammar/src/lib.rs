@@ -36,16 +36,31 @@ macro_rules! examples {
 /// each variant to the matching control-plane RPC.
 #[derive(clap::Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum QueueAction {
-    /// List every row in the queue document, oldest first.
+    /// List the rows in the queue document, oldest first.
+    ///
+    /// `--state` keeps the rows in one state; `--limit` caps the
+    /// rows shown. The per-state count footer always counts the
+    /// whole queue, so a capped or filtered listing still reports
+    /// how many rows the queue holds in each state.
     #[command(after_long_help = crate::examples![
         "queue list",
         "queue list --long",
+        "queue list --state failed",
+        "queue list --state pending --limit 20",
     ])]
     List {
-        /// Print full UUIDv7 job ids instead of the 8-character
-        /// prefix the table shows by default.
+        /// Print full UUIDv7 job ids instead of the last eight
+        /// characters the table shows by default.
         #[arg(long)]
         long: bool,
+        /// Show only the rows in this state. The `failed` listing
+        /// groups its rows by cause.
+        #[arg(long, value_name = "STATE")]
+        state: Option<QueueStateFilter>,
+        /// Show at most this many rows, the oldest first. With
+        /// `--state` the cap applies to the matching rows.
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        limit: Option<u32>,
     },
     /// Pause the worker loop. Running jobs run to completion; pending
     /// rows stay pending until `resume`.
@@ -67,19 +82,146 @@ pub enum QueueAction {
         "queue clear --json",
     ])]
     Clear,
-    /// Cancel the unique job whose id starts with `<JOB_ID>`.
+    /// Cancel the one pending or running job whose id contains `<JOB_ID>`.
     ///
-    /// Empty prefixes are rejected. An ambiguous prefix returns an
+    /// The id `queue list` prints, the full id, or any other part of it
+    /// that no second pending or running job shares will do. An empty
+    /// fragment is rejected; one that matches several jobs returns an
     /// error without cancelling anything.
     #[command(after_long_help = crate::examples![
         "queue cancel a1b2c3d4",
         "queue cancel a1b2c3d4 --json",
     ])]
     Cancel {
-        /// Prefix of the job's UUIDv7 to cancel. The first eight
-        /// characters listed by `queue list` are usually enough.
+        /// The job's UUIDv7, or any part of it no other pending or
+        /// running job shares, such as the id `queue list` prints.
         job_id: String,
     },
+    /// Flip terminal jobs back to pending so the worker runs them again.
+    ///
+    /// Without a selector, every `failed` row is retried. `--state`
+    /// retries every row in one of the three retryable states;
+    /// `--job` retries the one row whose id contains the fragment.
+    /// The row keeps its id and place in the queue; `done` and
+    /// `skipped-duplicate` rows are not retryable — re-ingest those
+    /// with `ingest --force`.
+    #[command(after_long_help = crate::examples![
+        "queue retry",
+        "queue retry --state needs-ocr",
+        "queue retry --job a1b2c3d4",
+        "queue retry --json",
+    ])]
+    Retry {
+        /// Retry every row in this state. Defaults to `failed`.
+        #[arg(long, value_name = "STATE", conflicts_with = "job")]
+        state: Option<RetryStateFilter>,
+        /// Retry the one row whose UUIDv7 contains this fragment, such
+        /// as the id `queue list` prints.
+        #[arg(long, value_name = "JOB_ID", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        job: Option<String>,
+    },
+    /// Wait for queue jobs to finish and report how each ended.
+    ///
+    /// Without `--job`, waits on every job that is pending or running
+    /// when the queue is read; jobs submitted later are not waited on.
+    /// `--job` names a job by its id or any part of it, as `queue list`
+    /// prints it, and may repeat; a named job that has already finished
+    /// is reported as it ended. Exits 5 when any of the jobs failed or
+    /// was cancelled.
+    #[command(after_long_help = crate::examples![
+        "queue wait",
+        "queue wait --job a1b2c3d4 --job e5f6a7b8",
+        "queue wait --json",
+    ])]
+    Wait {
+        /// A job to wait on: its UUIDv7, or any part of it no other job
+        /// in the queue shares. Repeat for several jobs.
+        #[arg(long = "job", value_name = "JOB_ID", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        jobs: Vec<String>,
+    },
+}
+
+/// The job states `queue list --state` accepts, one per
+/// [`bookrack_core::queue::JobState`] variant.
+///
+/// The flag spells the two-word states with a hyphen, as clap renders
+/// them; the `snake_case` token the wire carries is accepted as an
+/// alias so a value copied out of a `--json` listing parses too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum QueueStateFilter {
+    Pending,
+    Running,
+    Done,
+    #[value(alias = "skipped_duplicate")]
+    SkippedDuplicate,
+    #[value(alias = "needs_ocr")]
+    NeedsOcr,
+    Failed,
+    Cancelled,
+}
+
+impl QueueStateFilter {
+    /// The queue state this filter selects.
+    pub fn job_state(self) -> bookrack_core::queue::JobState {
+        use bookrack_core::queue::JobState;
+        match self {
+            QueueStateFilter::Pending => JobState::Pending,
+            QueueStateFilter::Running => JobState::Running,
+            QueueStateFilter::Done => JobState::Done,
+            QueueStateFilter::SkippedDuplicate => JobState::SkippedDuplicate,
+            QueueStateFilter::NeedsOcr => JobState::NeedsOcr,
+            QueueStateFilter::Failed => JobState::Failed,
+            QueueStateFilter::Cancelled => JobState::Cancelled,
+        }
+    }
+}
+
+impl std::fmt::Display for QueueStateFilter {
+    /// Renders the value clap accepts, read back off the derived
+    /// vocabulary so the two cannot disagree.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        clap::ValueEnum::to_possible_value(self)
+            .expect("no variant is skipped")
+            .get_name()
+            .fmt(f)
+    }
+}
+
+/// The job states `queue retry --state` accepts: the three terminals
+/// the daemon flips back to pending. A separate vocabulary from
+/// [`QueueStateFilter`] so `--help` lists only the values that work.
+///
+/// The flag spells `needs-ocr` with a hyphen, as clap renders it; the
+/// `snake_case` token the wire carries is accepted as an alias.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum RetryStateFilter {
+    Failed,
+    #[value(alias = "needs_ocr")]
+    NeedsOcr,
+    Cancelled,
+}
+
+impl RetryStateFilter {
+    /// The queue state this filter selects.
+    pub fn job_state(self) -> bookrack_core::queue::JobState {
+        use bookrack_core::queue::JobState;
+        match self {
+            RetryStateFilter::Failed => JobState::Failed,
+            RetryStateFilter::NeedsOcr => JobState::NeedsOcr,
+            RetryStateFilter::Cancelled => JobState::Cancelled,
+        }
+    }
+}
+
+impl std::fmt::Display for RetryStateFilter {
+    /// Renders the value clap accepts, read back off the derived
+    /// vocabulary so the two cannot disagree.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        clap::ValueEnum::to_possible_value(self)
+            .expect("no variant is skipped")
+            .get_name()
+            .fmt(f)
+    }
 }
 
 /// Positional + flag bundle for `ingest`. Lives in a standalone struct
@@ -1656,6 +1798,166 @@ mod tests {
             TestCommand::Intake { action } => action,
             other => panic!("expected intake, got {other:?}"),
         }
+    }
+
+    fn parse_queue(tokens: &[&str]) -> QueueAction {
+        match TestCli::try_parse_from(tokens).expect("parse").command {
+            TestCommand::Queue { action } => action,
+            other => panic!("expected queue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn queue_list_defaults_to_the_whole_queue() {
+        assert_eq!(
+            parse_queue(&["queue", "list"]),
+            QueueAction::List {
+                long: false,
+                state: None,
+                limit: None,
+            }
+        );
+    }
+
+    /// The hyphenated spelling clap renders and the `snake_case` token
+    /// the wire carries name the same state.
+    #[test]
+    fn queue_list_state_accepts_both_spellings() {
+        for spelling in ["needs-ocr", "needs_ocr"] {
+            let QueueAction::List { state, .. } =
+                parse_queue(&["queue", "list", "--state", spelling])
+            else {
+                panic!("expected list")
+            };
+            assert_eq!(state, Some(QueueStateFilter::NeedsOcr), "{spelling}");
+        }
+        for spelling in ["skipped-duplicate", "skipped_duplicate"] {
+            let QueueAction::List { state, .. } =
+                parse_queue(&["queue", "list", "--state", spelling])
+            else {
+                panic!("expected list")
+            };
+            assert_eq!(
+                state,
+                Some(QueueStateFilter::SkippedDuplicate),
+                "{spelling}"
+            );
+        }
+    }
+
+    /// Every filter value maps onto the wire token of its state, so a
+    /// client comparing the two strings selects the rows it names.
+    #[test]
+    fn queue_state_filter_names_its_wire_state() {
+        use clap::ValueEnum;
+        for filter in QueueStateFilter::value_variants() {
+            let wire = filter.job_state().as_wire_str();
+            assert_eq!(filter.to_string(), wire.replace('_', "-"), "{filter:?}");
+        }
+    }
+
+    #[test]
+    fn queue_list_rejects_a_zero_limit() {
+        let err = TestCli::try_parse_from(["queue", "list", "--limit", "0"])
+            .expect_err("a zero limit must be rejected");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation, "{err}");
+        let QueueAction::List { limit, .. } = parse_queue(&["queue", "list", "--limit", "20"])
+        else {
+            panic!("expected list")
+        };
+        assert_eq!(limit, Some(20));
+    }
+
+    /// The default state is filled in at dispatch, not here, so the
+    /// params a `--json` call sends always name the state explicitly.
+    #[test]
+    fn queue_retry_defaults_to_no_selector() {
+        assert_eq!(
+            parse_queue(&["queue", "retry"]),
+            QueueAction::Retry {
+                state: None,
+                job: None,
+            }
+        );
+    }
+
+    #[test]
+    fn queue_retry_state_accepts_both_spellings() {
+        for spelling in ["needs-ocr", "needs_ocr"] {
+            let QueueAction::Retry { state, .. } =
+                parse_queue(&["queue", "retry", "--state", spelling])
+            else {
+                panic!("expected retry")
+            };
+            assert_eq!(state, Some(RetryStateFilter::NeedsOcr), "{spelling}");
+        }
+    }
+
+    /// Every retry value maps onto the wire token of its state, and
+    /// the set is exactly the three terminals the daemon retries. The
+    /// grammar crate cannot see the daemon's constant; the two sets are
+    /// matched end to end by the CLI's `queue retry` test.
+    #[test]
+    fn retry_state_filter_names_its_wire_state() {
+        use bookrack_core::queue::JobState;
+        use clap::ValueEnum;
+        let mut states = Vec::new();
+        for filter in RetryStateFilter::value_variants() {
+            let wire = filter.job_state().as_wire_str();
+            assert_eq!(filter.to_string(), wire.replace('_', "-"), "{filter:?}");
+            states.push(filter.job_state());
+        }
+        assert_eq!(
+            states,
+            [JobState::Failed, JobState::NeedsOcr, JobState::Cancelled]
+        );
+    }
+
+    #[test]
+    fn queue_retry_rejects_done_and_a_state_with_a_job() {
+        let err = TestCli::try_parse_from(["queue", "retry", "--state", "done"])
+            .expect_err("done is not retryable");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue, "{err}");
+        let err = TestCli::try_parse_from(["queue", "retry", "--state", "failed", "--job", "ab"])
+            .expect_err("the two selectors are exclusive");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "{err}"
+        );
+        let err = TestCli::try_parse_from(["queue", "retry", "--job", ""])
+            .expect_err("an empty prefix is refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue, "{err}");
+        let QueueAction::Retry { state, job } = parse_queue(&["queue", "retry", "--job", "ab"])
+        else {
+            panic!("expected retry")
+        };
+        assert_eq!((state, job.as_deref()), (None, Some("ab")));
+    }
+
+    #[test]
+    fn queue_wait_without_a_job_names_none() {
+        assert_eq!(
+            parse_queue(&["queue", "wait"]),
+            QueueAction::Wait { jobs: Vec::new() }
+        );
+    }
+
+    #[test]
+    fn queue_wait_keeps_repeated_jobs_in_order() {
+        assert_eq!(
+            parse_queue(&["queue", "wait", "--job", "bb", "--job", "aa"]),
+            QueueAction::Wait {
+                jobs: vec!["bb".to_string(), "aa".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn queue_wait_refuses_an_empty_job() {
+        let err = TestCli::try_parse_from(["queue", "wait", "--job", ""])
+            .expect_err("an empty fragment is refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue, "{err}");
     }
 
     /// Every book-side position that takes an intake id, paired with

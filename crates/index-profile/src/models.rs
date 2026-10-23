@@ -2,9 +2,10 @@
 
 //! Static, offline model registry. Validation consults these tables
 //! instead of querying Ollama, because a network round-trip at validate
-//! time would break the project's offline guarantee. A model the tables
-//! do not list is rejected unless the caller opts into
-//! `--allow-unknown-model`.
+//! time would break the project's offline guarantee. The tables record
+//! what is known about the qualified models, not which models may be
+//! used: a listed model must be declared at the dimension it emits, and
+//! a model the tables do not list draws a remark, not a refusal.
 
 /// One embedding model's fixed properties: the vector dimension it emits
 /// and the model family it belongs to.
@@ -27,9 +28,9 @@ pub struct RerankerModelInfo {
     pub family: &'static str,
 }
 
-/// Known embedding models. Extend this table when a new embed backend is
-/// qualified; the dimension must match what the model actually emits, or
-/// a built index will fail its stamp check at serve time.
+/// Known embedding models. Extend this table when a new embed model is
+/// qualified; the dimension must be the one the model actually emits,
+/// since a profile naming the model is held to it.
 pub const EMBED_MODELS: &[EmbedModelInfo] = &[
     EmbedModelInfo {
         tag: "qwen3-embedding:0.6b",

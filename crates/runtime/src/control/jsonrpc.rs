@@ -8,6 +8,9 @@
 //! every incoming line; the connection task in [`super::socket`]
 //! writes the serialised form back with a trailing `\n`.
 
+use std::borrow::Cow;
+
+use bookrack_core::redact_source_paths;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -36,8 +39,8 @@ pub const NOT_READY: i32 = -32002;
 /// field that does not exist in the registry.
 #[allow(dead_code)]
 pub const INVALID_LIBRARY: i32 = -32010;
-/// bookrack-specific: `ingest.cancel` referenced a job id no longer
-/// in the queue document.
+/// bookrack-specific: `ingest.cancel` or `queue.retry` named a job id,
+/// or a fragment of one, that matches no row or more than one.
 pub const JOB_NOT_FOUND: i32 = -32011;
 /// bookrack-specific: a destructive RPC was issued without the
 /// caller-side confirmation flag. The control plane never prompts
@@ -112,13 +115,40 @@ impl Response {
         }
     }
 
-    pub fn error(id: Value, error: RpcError) -> Self {
+    /// An error response. The envelope leaves the process here, so the
+    /// build-machine prefix of any dependency source location is
+    /// removed from the message and from every string in `data`
+    /// ([`bookrack_core::redact_source_paths`]). A success response is
+    /// left as it is: it can carry a book's text.
+    pub fn error(id: Value, mut error: RpcError) -> Self {
+        if let Cow::Owned(redacted) = redact_source_paths(&error.message) {
+            error.message = redacted;
+        }
+        if let Some(data) = error.data.as_mut() {
+            redact_strings(data);
+        }
         Self {
             jsonrpc: JSONRPC_VERSION,
             id,
             result: None,
             error: Some(error),
         }
+    }
+}
+
+/// Redact every string in `value`, at any depth
+/// ([`bookrack_core::redact_source_paths`]). Shared with the MCP error
+/// envelope, which wraps the same `data` object.
+pub fn redact_strings(value: &mut Value) {
+    match value {
+        Value::String(text) => {
+            if let Cow::Owned(redacted) = redact_source_paths(text) {
+                *text = redacted;
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(redact_strings),
+        Value::Object(fields) => fields.values_mut().for_each(redact_strings),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 
@@ -252,6 +282,48 @@ pub fn parse_request(line: &str) -> Result<Request, (Option<Value>, RpcError)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// A synthetic dependency location under a build-machine prefix,
+    /// as a third-party error prints it.
+    const LOCATED: &str =
+        "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/io.rs:7:3";
+
+    /// The error envelope is the last stop before the socket. A string
+    /// anywhere in it — the message, or any depth of `data` — loses the
+    /// build-machine prefix of a dependency location, even when the
+    /// error never passed through the store's own redaction; numbers,
+    /// booleans, nulls, and a plain data path are left as they are.
+    #[test]
+    fn the_error_envelope_drops_build_prefixes_at_every_depth() {
+        let mut error = RpcError::new(
+            INTERNAL_ERROR,
+            format!("read failed, {LOCATED}: read failed"),
+        );
+        error.data = Some(json!({
+            "detail": format!("at {LOCATED}"),
+            "nested": { "list": [format!("({LOCATED})"), 3, true, null] },
+            "path": "/srv/library/catalog.db",
+            "retryable": false,
+        }));
+        let wire = serde_json::to_value(Response::error(Value::from(1), error)).expect("serialize");
+        let text = wire.to_string();
+        assert!(!text.contains("/disk/cache/cargo"), "{text}");
+        assert_eq!(
+            wire["error"]["message"],
+            "read failed, dep-1.0.0/src/io.rs:7:3: read failed"
+        );
+        assert_eq!(
+            wire["error"]["data"]["detail"],
+            "at dep-1.0.0/src/io.rs:7:3"
+        );
+        assert_eq!(
+            wire["error"]["data"]["nested"]["list"],
+            json!(["(dep-1.0.0/src/io.rs:7:3)", 3, true, null])
+        );
+        assert_eq!(wire["error"]["data"]["path"], "/srv/library/catalog.db");
+        assert_eq!(wire["error"]["data"]["retryable"], false);
+    }
 
     #[test]
     fn parse_request_round_trip() {

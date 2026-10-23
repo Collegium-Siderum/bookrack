@@ -76,5 +76,8 @@ bookrack-core = { path = "../core" }
 # Stamp `vector_dim` on a fixture corpus, so a vector write gets past
 # the "this library has no chunks" leg and reaches the one under test.
 bookrack-corpus = { path = "../corpus" }
+# Gate the OCR-intake progress test on a loadable PDFium library; the
+# gate lives beside the adapter that needs it.
+bookrack-extract = { path = "../extract" }
 bookrack-test-support.workspace = true
 tempfile.workspace = true
