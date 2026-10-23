@@ -83,7 +83,7 @@ async fn spawn_daemon(sandbox: &Sandbox, primary: &str) -> DaemonProcess {
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(sandbox)
             .without_data_dir()
-            .ollama_url(EmbedStub::url())
+            .ollama_url(EmbedStub::shared().url())
             .build(),
     );
     daemon_cmd.args(["--library", primary, "run"]);

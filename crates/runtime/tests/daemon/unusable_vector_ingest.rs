@@ -10,9 +10,10 @@
 //! batches written before the bad one stay. The paper pipeline embeds
 //! a paper's chunks in one batch, so nothing of it lands.
 //!
-//! `EmbedStub::set_failure` is process-global, so this file relies on
-//! the per-test process `cargo nextest` runs it in; under a plain
-//! `cargo test` its flipped switch reaches every test in the binary.
+//! The daemon reads its embedder URL from the process environment, so
+//! the switch this file flips is the shared stub's and it relies on the
+//! per-test process `cargo nextest` runs it in; under a plain
+//! `cargo test` the flipped switch reaches every test in the binary.
 
 #![cfg(unix)]
 
@@ -194,7 +195,7 @@ async fn a_book_batch_with_an_unusable_vector_fails_the_job_and_keeps_earlier_ba
         let book = sources.path().join("synthetic-survey.txt");
         std::fs::write(&book, synthetic_text(40, 32))?;
 
-        EmbedStub::set_failure(EmbedFailure::UnusableVector);
+        EmbedStub::shared().set_failure(EmbedFailure::UnusableVector);
         let row = run_to_end(&mut r, &mut w, BOOKS, &book).await?;
         assert_failed_on_the_vector(BOOKS, &row, &root)?;
         assert!(
@@ -216,7 +217,7 @@ async fn a_paper_with_an_unusable_vector_fails_the_job_and_writes_nothing() -> R
         let paper = sources.path().join("synthetic-paper.txt");
         std::fs::write(&paper, synthetic_text(3, 0))?;
 
-        EmbedStub::set_failure(EmbedFailure::UnusableVector);
+        EmbedStub::shared().set_failure(EmbedFailure::UnusableVector);
         let row = run_to_end(&mut r, &mut w, PAPERS, &paper).await?;
         assert_failed_on_the_vector(PAPERS, &row, &root)?;
         assert_eq!(chunk_rows(&root, PAPERS).await?, 0);

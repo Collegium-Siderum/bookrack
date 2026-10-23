@@ -4,13 +4,12 @@
 
 use std::io::{BufRead, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use bookrack_config::DEFAULT_EMBED_MODEL;
 
-static URL: OnceLock<String> = OnceLock::new();
-static FAILURE: AtomicU8 = AtomicU8::new(0);
+static SHARED: OnceLock<EmbedStub> = OnceLock::new();
 
 /// What the `/api/embed` arm answers.
 ///
@@ -36,8 +35,8 @@ pub enum EmbedFailure {
 }
 
 impl EmbedFailure {
-    /// Wire form for [`FAILURE`]. Written out rather than cast from the
-    /// discriminant so adding a variant is a compile error here.
+    /// Wire form for a stub's switch. Written out rather than cast from
+    /// the discriminant so adding a variant is a compile error here.
     fn as_u8(self) -> u8 {
         match self {
             EmbedFailure::None => 0,
@@ -67,16 +66,21 @@ impl EmbedFailure {
 /// [`EmbedStub::ALTERNATE_MODEL`] so a fixture can give two libraries
 /// different embedding models and still pass that pre-flight.
 ///
-/// One stub serves a whole test binary; the listener runs on detached
-/// threads for the process's lifetime.
+/// Each stub owns a listener and a failure switch. [`EmbedStub::start`]
+/// makes one that nothing else in the process can reach, for a test
+/// that hands the URL to its daemon itself; [`EmbedStub::shared`] is
+/// the one the whole binary shares, whose URL `process_env` installs in
+/// the environment. Flipping the shared switch flips it for every test
+/// in the process, so a test that does so relies on the one process per
+/// test `cargo nextest` runs it in, exactly as the process environment
+/// it was installed into does.
 ///
-/// [`EmbedStub::set_failure`] switches the embed arm to a failure shape
-/// so a client's error classification can be exercised end to end. The
-/// switch is **process-global**: one stub serves the whole binary, so it
-/// relies on the per-test process isolation `cargo nextest` gives.
-/// Under a plain `cargo test` fallback, a flipped switch is visible to
-/// every other test in the same binary.
-pub struct EmbedStub;
+/// A listener runs on detached threads for the process's lifetime; a
+/// dropped stub stops answering only when the process ends.
+pub struct EmbedStub {
+    url: String,
+    failure: Arc<AtomicU8>,
+}
 
 impl EmbedStub {
     /// Vector width the stub reports for every input.
@@ -95,38 +99,51 @@ impl EmbedStub {
     /// [`EmbedFailure::UnusableVector`].
     pub const UNUSABLE_MARKER: &'static str = "zero-vector-marker";
 
+    /// Start a stub of its own on a kernel-assigned port, answering
+    /// healthily until its switch is flipped.
+    pub fn start() -> EmbedStub {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind embed stub");
+        let url = format!("http://{}", listener.local_addr().expect("embed stub addr"));
+        let failure = Arc::new(AtomicU8::new(EmbedFailure::None.as_u8()));
+        let switch = Arc::clone(&failure);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let switch = Arc::clone(&switch);
+                std::thread::spawn(move || {
+                    let _ = serve(stream, &switch);
+                });
+            }
+        });
+        EmbedStub { url, failure }
+    }
+
+    /// The stub shared by the whole binary, started on first call.
+    pub fn shared() -> &'static EmbedStub {
+        SHARED.get_or_init(EmbedStub::start)
+    }
+
+    /// The stub's base URL.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
     /// Make the embed arm answer `failure` from the next request on.
     /// Takes effect for requests already in flight only after they are
     /// answered; a test flips it before the call it is pinning.
-    pub fn set_failure(failure: EmbedFailure) {
-        FAILURE.store(failure.as_u8(), Ordering::SeqCst);
+    pub fn set_failure(&self, failure: EmbedFailure) {
+        self.failure.store(failure.as_u8(), Ordering::SeqCst);
     }
 
     /// The mode the embed arm is currently answering.
-    pub fn failure() -> EmbedFailure {
-        EmbedFailure::from_u8(FAILURE.load(Ordering::SeqCst))
-    }
-
-    /// Start the stub on first call and return its base URL.
-    pub fn url() -> &'static str {
-        URL.get_or_init(|| {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind embed stub");
-            let url = format!("http://{}", listener.local_addr().expect("embed stub addr"));
-            std::thread::spawn(move || {
-                for stream in listener.incoming().flatten() {
-                    std::thread::spawn(move || {
-                        let _ = serve(stream);
-                    });
-                }
-            });
-            url
-        })
+    pub fn failure(&self) -> EmbedFailure {
+        EmbedFailure::from_u8(self.failure.load(Ordering::SeqCst))
     }
 }
 
-/// Serve one connection until the client hangs up. Connections stay
-/// open across requests so a pooled HTTP client can reuse them.
-fn serve(stream: TcpStream) -> std::io::Result<()> {
+/// Serve one connection until the client hangs up, reading `switch`
+/// afresh for every request. Connections stay open across requests so
+/// a pooled HTTP client can reuse them.
+fn serve(stream: TcpStream, switch: &AtomicU8) -> std::io::Result<()> {
     let mut reader = std::io::BufReader::new(stream.try_clone()?);
     let mut out = stream;
     loop {
@@ -150,7 +167,8 @@ fn serve(stream: TcpStream) -> std::io::Result<()> {
         }
         let mut body = vec![0u8; content_length];
         reader.read_exact(&mut body)?;
-        let (status, response) = respond(&request_line, &body, EmbedStub::failure());
+        let failure = EmbedFailure::from_u8(switch.load(Ordering::SeqCst));
+        let (status, response) = respond(&request_line, &body, failure);
         let payload = response.to_string();
         write!(
             out,
@@ -176,8 +194,8 @@ fn status_line(status: u16) -> &'static str {
 /// Status and body for one request, factored out so the contract is
 /// testable without a socket.
 ///
-/// `failure` is passed in rather than read from the global switch, so a
-/// unit test can drive every mode without the whole binary seeing it.
+/// `failure` is passed in rather than read from a switch, so a unit
+/// test can drive every mode without starting a listener.
 fn respond(request_line: &str, body: &[u8], failure: EmbedFailure) -> (u16, serde_json::Value) {
     if request_line.starts_with("POST /api/embed") {
         let inputs: Vec<String> = serde_json::from_slice::<serde_json::Value>(body)
@@ -337,18 +355,71 @@ mod tests {
         assert_eq!(status, 200);
     }
 
-    /// The global switch round-trips through its atomic representation:
+    /// A stub's switch round-trips through its atomic representation:
     /// a mode stored is the mode `serve` reads back.
     #[test]
-    fn the_global_switch_round_trips_every_mode() {
+    fn a_switch_round_trips_every_mode() {
+        let stub = EmbedStub::start();
         for failure in [
             EmbedFailure::ModelNotFound,
             EmbedFailure::Overloaded,
             EmbedFailure::UnusableVector,
             EmbedFailure::None,
         ] {
-            EmbedStub::set_failure(failure);
-            assert_eq!(EmbedStub::failure(), failure);
+            stub.set_failure(failure);
+            assert_eq!(stub.failure(), failure);
         }
+    }
+
+    /// Send one embed request to `url` over a fresh connection and
+    /// return the HTTP status the stub answers with.
+    fn embed_status(url: &str) -> u16 {
+        let addr = url.strip_prefix("http://").expect("loopback url");
+        let mut stream = TcpStream::connect(addr).expect("connect to the stub");
+        let body = br#"{"input":["a"]}"#;
+        write!(
+            stream,
+            "POST /api/embed HTTP/1.1\r\nhost: {addr}\r\ncontent-length: {}\r\n\r\n",
+            body.len(),
+        )
+        .expect("write request head");
+        stream.write_all(body).expect("write request body");
+        stream.flush().expect("flush request");
+        let mut reader = std::io::BufReader::new(stream);
+        let mut status_line = String::new();
+        reader
+            .read_line(&mut status_line)
+            .expect("read status line");
+        status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or_else(|| panic!("no status in {status_line:?}"))
+    }
+
+    /// Two stubs started in one process keep their switches apart:
+    /// flipping one leaves the other answering healthily, over the
+    /// socket, which is the only path a daemon reaches a stub by.
+    #[test]
+    fn two_stubs_keep_their_switches_apart() {
+        let flipped = EmbedStub::start();
+        let untouched = EmbedStub::start();
+        assert_ne!(flipped.url(), untouched.url());
+
+        flipped.set_failure(EmbedFailure::ModelNotFound);
+        assert_eq!(embed_status(flipped.url()), 404);
+        assert_eq!(embed_status(untouched.url()), 200);
+
+        flipped.set_failure(EmbedFailure::None);
+        assert_eq!(embed_status(flipped.url()), 200);
+    }
+
+    /// The shared stub is one stub: every call hands back the same
+    /// listener, so the URL the process environment installs and the
+    /// switch a test flips belong to the same server.
+    #[test]
+    fn the_shared_stub_is_started_once() {
+        assert_eq!(EmbedStub::shared().url(), EmbedStub::shared().url());
+        assert!(std::ptr::eq(EmbedStub::shared(), EmbedStub::shared()));
     }
 }

@@ -161,7 +161,7 @@ fn apply(spec: &ProcessEnv, sandbox: &Sandbox) {
             std::env::set_var(key, value);
         }
         if spec.embedder {
-            std::env::set_var(OLLAMA_URL_ENV, EmbedStub::url());
+            std::env::set_var(OLLAMA_URL_ENV, EmbedStub::shared().url());
         }
         // An in-process daemon binds its MCP address during bring-up,
         // so leaving the built-in default in place would make one

@@ -97,7 +97,7 @@ async fn a_dimension_left_divergent_is_reported_with_both_values() {
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
             .without_data_dir()
-            .ollama_url(EmbedStub::url())
+            .ollama_url(EmbedStub::shared().url())
             .build(),
     );
     daemon_cmd.args(["--library", LIBRARY, "run"]);

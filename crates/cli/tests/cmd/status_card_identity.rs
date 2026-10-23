@@ -51,7 +51,7 @@ async fn the_card_counts_the_library_it_names() {
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
             .without_data_dir()
-            .ollama_url(EmbedStub::url())
+            .ollama_url(EmbedStub::shared().url())
             .build(),
     );
     daemon_cmd.args(["--library", "beta", "run"]);

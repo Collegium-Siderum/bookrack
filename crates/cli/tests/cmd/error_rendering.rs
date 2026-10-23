@@ -25,8 +25,11 @@ async fn client_stderr_against_daemon(args: &[&str]) -> (Option<i32>, String) {
     let sandbox = Sandbox::new();
     let lock_path = sandbox.tty_lock_path();
 
-    let mut daemon_cmd =
-        Command::from(bookrack_cmd!(&sandbox).ollama_url(EmbedStub::url()).build());
+    let mut daemon_cmd = Command::from(
+        bookrack_cmd!(&sandbox)
+            .ollama_url(EmbedStub::shared().url())
+            .build(),
+    );
     daemon_cmd.arg("run");
     let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
 
@@ -93,10 +96,12 @@ that both columns agreed with each other in every fictional respect.
 /// A re-embed sends real chunk text, which the cache never covers.
 async fn reembed_against_a_failing_backend(failure: EmbedFailure) -> (Option<i32>, String) {
     let sandbox = Sandbox::new();
+    // A stub of this test's own: the switch below is flipped on it and
+    // on nothing any other test in the binary is talking to.
+    let stub = EmbedStub::start();
     let lock_path = sandbox.tty_lock_path();
 
-    let mut daemon_cmd =
-        Command::from(bookrack_cmd!(&sandbox).ollama_url(EmbedStub::url()).build());
+    let mut daemon_cmd = Command::from(bookrack_cmd!(&sandbox).ollama_url(stub.url()).build());
     daemon_cmd.arg("run");
     let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
 
@@ -129,7 +134,7 @@ async fn reembed_against_a_failing_backend(failure: EmbedFailure) -> (Option<i32
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    EmbedStub::set_failure(failure);
+    stub.set_failure(failure);
     let output = Command::from(bookrack_cmd!(&sandbox).build())
         .args(["vectors", "reembed", "--yes"])
         .output()

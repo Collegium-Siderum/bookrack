@@ -46,7 +46,10 @@ mod tests {
     #[tokio::test]
     async fn reconcile_reports_the_stamps_it_wrote_on_the_paper_corpus() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let cfg = Config::new(dir.path().to_path_buf(), EmbedStub::url().to_string());
+        let cfg = Config::new(
+            dir.path().to_path_buf(),
+            EmbedStub::shared().url().to_string(),
+        );
         Corpus::open(&cfg.papers_corpus_db()).expect("seed paper corpus");
 
         let report = reconcile(&cfg).await.expect("reconcile");

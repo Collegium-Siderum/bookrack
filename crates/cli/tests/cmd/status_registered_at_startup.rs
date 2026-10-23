@@ -59,7 +59,7 @@ async fn the_card_names_the_root_bring_up_registered() {
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
             .without_data_dir()
-            .ollama_url(EmbedStub::url())
+            .ollama_url(EmbedStub::shared().url())
             .build(),
     );
     daemon_cmd.args(["--data-dir", &gamma.display().to_string(), "run"]);
@@ -93,7 +93,7 @@ async fn the_card_has_no_such_row_when_bring_up_registered_nothing() {
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
             .without_data_dir()
-            .ollama_url(EmbedStub::url())
+            .ollama_url(EmbedStub::shared().url())
             .build(),
     );
     daemon_cmd.args(["--library", "alpha", "run"]);

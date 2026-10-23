@@ -81,7 +81,7 @@ async fn the_daemon_follows_a_default_moved_from_the_cli() {
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
             .without_data_dir()
-            .ollama_url(EmbedStub::url())
+            .ollama_url(EmbedStub::shared().url())
             .build(),
     );
     daemon_cmd.args(["--library", "alpha", "run"]);

@@ -67,8 +67,11 @@ async fn the_listed_id_locates_its_job() {
         std::fs::write(batch.join(name), b"").expect("create a source file");
     }
 
-    let mut daemon_cmd =
-        Command::from(bookrack_cmd!(&sandbox).ollama_url(EmbedStub::url()).build());
+    let mut daemon_cmd = Command::from(
+        bookrack_cmd!(&sandbox)
+            .ollama_url(EmbedStub::shared().url())
+            .build(),
+    );
     daemon_cmd.arg("run");
     let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
     assert!(

@@ -80,7 +80,7 @@ async fn a_listing_names_the_library_its_rows_came_from() {
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
             .without_data_dir()
-            .ollama_url(EmbedStub::url())
+            .ollama_url(EmbedStub::shared().url())
             .build(),
     );
     daemon_cmd.args(["--library", "beta", "run"]);

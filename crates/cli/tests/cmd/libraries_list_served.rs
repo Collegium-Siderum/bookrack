@@ -73,7 +73,7 @@ async fn every_entry_is_served_when_the_daemon_came_up_through_the_registry() {
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
             .without_data_dir()
-            .ollama_url(EmbedStub::url())
+            .ollama_url(EmbedStub::shared().url())
             .build(),
     );
     daemon_cmd.args(["--library", "alpha", "run"]);
@@ -100,7 +100,7 @@ async fn no_entry_is_served_when_the_daemon_holds_a_root_the_registry_does_not_n
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
             .without_data_dir()
-            .ollama_url(EmbedStub::url())
+            .ollama_url(EmbedStub::shared().url())
             .build(),
     );
     daemon_cmd.args(["--data-dir", &stranger.display().to_string(), "run"]);

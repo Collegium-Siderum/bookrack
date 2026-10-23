@@ -59,7 +59,7 @@ async fn cli_second_launch_prints_addr_and_exits_zero() -> Result<()> {
             bookrack_cmd!(sandbox)
                 .runtime_dir(runtime_dir_for_subprocess)
                 .data_dir(data_dir_for_subprocess)
-                .ollama_url(EmbedStub::url())
+                .ollama_url(EmbedStub::shared().url())
                 .build(),
         )
         .args(["run", "--no-mcp"])
@@ -103,7 +103,7 @@ async fn status_against_a_live_daemon_prints_the_card() -> Result<()> {
             bookrack_cmd!(sandbox)
                 .runtime_dir(runtime_dir_for_subprocess)
                 .data_dir(data_dir_for_subprocess)
-                .ollama_url(EmbedStub::url())
+                .ollama_url(EmbedStub::shared().url())
                 .build(),
         )
         .args(["status"])
@@ -169,7 +169,7 @@ async fn stale_lock_exits_three() -> Result<()> {
         bookrack_cmd!(sandbox)
             .runtime_dir(runtime_root.path())
             .data_dir(data_root.path())
-            .ollama_url(EmbedStub::url())
+            .ollama_url(EmbedStub::shared().url())
             .build(),
     )
     .args(["run", "--no-mcp"])

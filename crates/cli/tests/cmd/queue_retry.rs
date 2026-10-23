@@ -112,8 +112,11 @@ async fn retry_reruns_terminal_rows_through_the_command_entry() {
     )
     .expect("seed the queue document");
 
-    let mut daemon_cmd =
-        Command::from(bookrack_cmd!(&sandbox).ollama_url(EmbedStub::url()).build());
+    let mut daemon_cmd = Command::from(
+        bookrack_cmd!(&sandbox)
+            .ollama_url(EmbedStub::shared().url())
+            .build(),
+    );
     daemon_cmd.arg("run");
     let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
     assert!(

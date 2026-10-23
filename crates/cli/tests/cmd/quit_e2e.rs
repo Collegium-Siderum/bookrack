@@ -21,8 +21,11 @@ async fn quit_terminates_the_daemon_process() {
     let sandbox = Sandbox::new();
     let lock_path = sandbox.tty_lock_path();
 
-    let mut daemon_cmd =
-        Command::from(bookrack_cmd!(&sandbox).ollama_url(EmbedStub::url()).build());
+    let mut daemon_cmd = Command::from(
+        bookrack_cmd!(&sandbox)
+            .ollama_url(EmbedStub::shared().url())
+            .build(),
+    );
     daemon_cmd.arg("run");
     let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
 

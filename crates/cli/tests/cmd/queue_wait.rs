@@ -132,7 +132,7 @@ async fn wait_reports_ended_and_awaited_jobs_through_the_command_entry() {
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
             .without_data_dir()
-            .ollama_url(EmbedStub::url())
+            .ollama_url(EmbedStub::shared().url())
             .build(),
     );
     daemon_cmd.args(["--library", LIBRARY, "run"]);

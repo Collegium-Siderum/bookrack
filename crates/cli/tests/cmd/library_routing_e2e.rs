@@ -56,7 +56,7 @@ async fn a_library_the_daemon_serves_answers_for_itself() {
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
             .without_data_dir()
-            .ollama_url(EmbedStub::url())
+            .ollama_url(EmbedStub::shared().url())
             .build(),
     );
     daemon_cmd.args(["--library", "alpha", "run"]);
@@ -132,7 +132,7 @@ async fn a_path_selection_reaches_the_library_that_owns_the_root() {
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
             .without_data_dir()
-            .ollama_url(EmbedStub::url())
+            .ollama_url(EmbedStub::shared().url())
             .build(),
     );
     daemon_cmd.args(["--library", "alpha", "run"]);

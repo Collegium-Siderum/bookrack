@@ -131,8 +131,8 @@ impl Spawn {
         self
     }
 
-    /// Point the child's embedder at `url`, normally
-    /// [`crate::EmbedStub::url`].
+    /// Point the child's embedder at `url`, normally the shared
+    /// [`crate::EmbedStub`]'s or one the test started itself.
     pub fn ollama_url(mut self, url: impl Into<String>) -> Spawn {
         self.ollama_url = Some(url.into());
         self

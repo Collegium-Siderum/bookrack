@@ -38,11 +38,15 @@ async fn run_against_a_newer_queue_document(
 
     let mut args: Vec<&str> = extra.to_vec();
     args.push("run");
-    let output = Command::from(bookrack_cmd!(&sandbox).ollama_url(EmbedStub::url()).build())
-        .args(&args)
-        .output()
-        .await
-        .expect("run bookrack run");
+    let output = Command::from(
+        bookrack_cmd!(&sandbox)
+            .ollama_url(EmbedStub::shared().url())
+            .build(),
+    )
+    .args(&args)
+    .output()
+    .await
+    .expect("run bookrack run");
 
     let after = std::fs::read_to_string(&queue_path).expect("read the queue document back");
     (

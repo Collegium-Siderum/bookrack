@@ -15,9 +15,10 @@
 //! the stamps, and the catalog are left exactly as they were, and the
 //! refusal is caller input with no resume step.
 //!
-//! `EmbedStub::set_failure` is process-global, so this file relies on
-//! the per-test process `cargo nextest` runs it in; under a plain
-//! `cargo test` its flipped switch reaches every test in the binary.
+//! The daemon reads its embedder URL from the process environment, so
+//! the switch this file flips is the shared stub's and it relies on the
+//! per-test process `cargo nextest` runs it in; under a plain
+//! `cargo test` the flipped switch reaches every test in the binary.
 
 #![cfg(unix)]
 
@@ -308,7 +309,7 @@ async fn a_reset_interrupted_mid_pass_adds_the_resume_step(
         .as_str()
         .with_context(|| format!("no plan id: {plan}"))?
         .to_string();
-    EmbedStub::set_failure(EmbedFailure::Overloaded);
+    EmbedStub::shared().set_failure(EmbedFailure::Overloaded);
     let plain = error_of(
         &mut r,
         &mut w,
@@ -318,7 +319,7 @@ async fn a_reset_interrupted_mid_pass_adds_the_resume_step(
     )
     .await?;
     let reset = error_of(&mut r, &mut w, 5, side.reset, json!({ "yes": true })).await?;
-    EmbedStub::set_failure(EmbedFailure::None);
+    EmbedStub::shared().set_failure(EmbedFailure::None);
 
     assert_eq!(reset["code"], plain["code"], "{reset} vs {plain}");
     assert_eq!(reset["message"], plain["message"], "{reset} vs {plain}");
@@ -458,9 +459,9 @@ async fn a_resumed_reset_against_an_unreachable_dimension_is_refused(
     let (mut r, mut w) = connect(&sock).await?;
     let sources = tempfile::tempdir()?;
     fill_one(&mut r, &mut w, side, &write_source(sources.path())?).await?;
-    EmbedStub::set_failure(EmbedFailure::Overloaded);
+    EmbedStub::shared().set_failure(EmbedFailure::Overloaded);
     let interrupted = error_of(&mut r, &mut w, 3, side.reset, json!({ "yes": true })).await;
-    EmbedStub::set_failure(EmbedFailure::None);
+    EmbedStub::shared().set_failure(EmbedFailure::None);
     interrupted?;
     let before = side_state(&root, side).await?;
     assert!(
@@ -576,9 +577,9 @@ async fn a_model_missing_mid_pass_is_caller_input_and_still_resumable(
         EmbedStub::DIMENSION as u32,
     )?;
 
-    EmbedStub::set_failure(EmbedFailure::ModelNotFound);
+    EmbedStub::shared().set_failure(EmbedFailure::ModelNotFound);
     let err = error_of(&mut r, &mut w, 3, side.reset, json!({ "yes": true })).await;
-    EmbedStub::set_failure(EmbedFailure::None);
+    EmbedStub::shared().set_failure(EmbedFailure::None);
     let err = err?;
     assert_eq!(err["code"].as_i64(), Some(-32602), "{}: {err}", side.reset);
     let hint = err["data"]["hint"].as_str().unwrap_or_default();
