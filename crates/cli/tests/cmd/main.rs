@@ -42,6 +42,7 @@ mod quit_e2e;
 mod registry_absolute_roots;
 mod retrieval_weak_advisory;
 mod rpc_e2e;
+mod run_ready_line;
 mod status_card_identity;
 mod status_registered_at_startup;
 mod verify_exit_code;

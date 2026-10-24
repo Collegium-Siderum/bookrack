@@ -194,7 +194,33 @@ fn compose_card(
     if let Some(registered) = registered_at_startup(status) {
         card["library"]["registered_at_startup"] = Value::String(registered);
     }
+    // And for the libraries bring-up did not mount: a section only when
+    // there is one, each with its root and reason.
+    if let Some(unmounted) = unmounted_libraries(status) {
+        card["library"]["unmounted"] = unmounted;
+    }
     card
+}
+
+/// The libraries bring-up did not mount, keyed by name, each
+/// `{ data_dir, reason }`; `None` when every registered library came up
+/// or the daemon predates the field.
+fn unmounted_libraries(status: &Value) -> Option<Value> {
+    let rows = status.get("unmounted")?.as_array()?;
+    let mut out = serde_json::Map::new();
+    for row in rows {
+        let Some(name) = row["name"].as_str() else {
+            continue;
+        };
+        out.insert(
+            name.to_string(),
+            json!({
+                "data_dir": row.get("data_dir").cloned().unwrap_or(Value::Null),
+                "reason": row.get("reason").cloned().unwrap_or(Value::Null),
+            }),
+        );
+    }
+    (!out.is_empty()).then_some(Value::Object(out))
 }
 
 /// The names bring-up registered for the selected root, joined for one
@@ -258,14 +284,28 @@ pub(super) fn default_served(served: &Value) -> Option<&str> {
 /// card just reported as unreadable. `doctor` takes no selection, so
 /// that hint stays bare.
 fn card_hint(card: &Value) -> String {
-    if card["library"].get("unreadable").is_none() {
-        return "run 'bookrack doctor' for health checks".to_string();
+    if card["library"].get("unreadable").is_some() {
+        let verify = match card["library"]["name"].as_str() {
+            Some(name) => format!("bookrack --library {name} verify"),
+            None => "bookrack verify".to_string(),
+        };
+        return format!(
+            "a store could not be read -- run '{verify}' for the per-store schema check"
+        );
     }
-    let verify = match card["library"]["name"].as_str() {
-        Some(name) => format!("bookrack --library {name} verify"),
-        None => "bookrack verify".to_string(),
-    };
-    format!("a store could not be read -- run '{verify}' for the per-store schema check")
+    // A library bring-up skipped has its own next step: the reason
+    // under `unmounted` says what to repair, and the mount command
+    // brings it in afterwards.
+    if let Some(unmounted) = card["library"].get("unmounted").and_then(Value::as_object)
+        && !unmounted.is_empty()
+    {
+        let names: Vec<&str> = unmounted.keys().map(String::as_str).collect();
+        return format!(
+            "a registered library is not mounted -- fix it, then 'bookrack libraries mount {}'",
+            names.join(" ")
+        );
+    }
+    "run 'bookrack doctor' for health checks".to_string()
 }
 
 /// Every store `library.info` reports a read failure for, keyed by the
@@ -419,6 +459,12 @@ fn for_human(card: &Value) -> Value {
     if let Some(served) = card.pointer("/library/served").and_then(Value::as_array) {
         human["library"]["served"] = Value::Object(served_rows(served));
     }
+    if let Some(unmounted) = card
+        .pointer("/library/unmounted")
+        .and_then(Value::as_object)
+    {
+        human["library"]["unmounted"] = Value::Object(unmounted_rows(unmounted));
+    }
     match card.pointer("/registry/default") {
         Some(Value::Null) => {
             human["registry"]["default"] = Value::String("(none)".to_string());
@@ -431,6 +477,19 @@ fn for_human(card: &Value) -> Value {
         _ => {}
     }
     human
+}
+
+/// One `<name>: <root>: <summary>` entry per library bring-up skipped.
+fn unmounted_rows(unmounted: &serde_json::Map<String, Value>) -> serde_json::Map<String, Value> {
+    let mut rows = serde_json::Map::new();
+    for (name, row) in unmounted {
+        let root = row["data_dir"].as_str().unwrap_or("(unknown root)");
+        let summary = row["reason"]["summary"]
+            .as_str()
+            .unwrap_or("(no reason recorded)");
+        rows.insert(name.clone(), Value::String(format!("{root}: {summary}")));
+    }
+    rows
 }
 
 /// One `<name> -> <root> (<marks>)` entry per served library.
@@ -738,6 +797,64 @@ mod tests {
             card["library"].get("registered_at_startup").is_none(),
             "a daemon without the field gets no row: {card}",
         );
+    }
+
+    /// A library bring-up skipped gets a section with its root and
+    /// reason, a human line that reads `<root>: <summary>`, and a hint
+    /// naming the mount command; a daemon that skipped nothing, or
+    /// predates the field, gets neither.
+    #[test]
+    fn a_skipped_library_gets_a_section_a_line_and_the_mount_hint() {
+        let status = json!({
+            "library": "alpha",
+            "data_dir": "/data/alpha",
+            "served": [
+                { "name": "alpha", "data_dir": "/data/alpha", "default": true, "primary": true },
+            ],
+            "unmounted": [{
+                "name": "beta",
+                "data_dir": "/data/beta",
+                "reason": {
+                    "summary": "cannot read the catalog",
+                    "hint": "Upgrade bookrack.",
+                    "retryable": false,
+                },
+            }],
+        });
+        let card = compose_card(
+            Path::new("/run/bookrack.tty.lock"),
+            &lock_info(None),
+            &json!({ "version": "0.1.0" }),
+            &status,
+            &json!({}),
+        );
+        assert_eq!(
+            card["library"]["unmounted"]["beta"]["reason"]["summary"], "cannot read the catalog",
+            "{card}"
+        );
+        assert_eq!(
+            card["library"]["unmounted"]["beta"]["data_dir"],
+            "/data/beta"
+        );
+        let human = for_human(&card);
+        assert_eq!(
+            human["library"]["unmounted"]["beta"], "/data/beta: cannot read the catalog",
+            "{human}"
+        );
+        let hint = card_hint(&card);
+        assert!(hint.contains("bookrack libraries mount beta"), "{hint}");
+
+        let mut quiet = status.clone();
+        quiet["unmounted"] = json!([]);
+        let card = compose_card(
+            Path::new("/run/bookrack.tty.lock"),
+            &lock_info(None),
+            &json!({ "version": "0.1.0" }),
+            &quiet,
+            &json!({}),
+        );
+        assert!(card["library"].get("unmounted").is_none(), "{card}");
+        assert!(card_hint(&card).contains("bookrack doctor"));
     }
 
     /// Coming up under the default is the ordinary multi-library case:

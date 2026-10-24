@@ -16,19 +16,45 @@ use bookrack_config::{
 };
 use eyre::{Context, ContextCompat, Result, bail};
 
+use bookrack_core::Problem;
+
 use crate::cmd::input_error::CmdInputError;
 use crate::render;
 
-/// Render the registry. `served` names the libraries a running daemon
-/// holds, or `None` when the caller could not ask or was not answered —
-/// the registry read itself never needs a daemon, so the listing is the
-/// same either way apart from that one column.
-pub fn list(json: bool, served: Option<&[String]>) -> Result<()> {
+/// What a running daemon says about the registered libraries: the ones
+/// it serves, and the ones bring-up did not mount with the reason each
+/// was skipped for. Built by the client from `daemon.status` and read
+/// by the listing; a daemon that predates the unmounted list reports an
+/// empty one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DaemonLibraries {
+    /// Names of the libraries the daemon serves.
+    pub served: Vec<String>,
+    /// Each library the daemon did not mount, with its reason.
+    pub unmounted: Vec<(String, Problem)>,
+}
+
+impl DaemonLibraries {
+    /// The reason `name` was not mounted, when the daemon skipped it.
+    pub fn skipped(&self, name: &str) -> Option<&Problem> {
+        self.unmounted
+            .iter()
+            .find(|(skipped, _)| skipped == name)
+            .map(|(_, reason)| reason)
+    }
+}
+
+/// Render the registry. `daemon` is what a running daemon said about
+/// the entries, or `None` when the caller could not ask or was not
+/// answered — the registry read itself never needs a daemon, so the
+/// listing is the same either way apart from the served column and the
+/// skipped libraries' reasons.
+pub fn list(json: bool, daemon: Option<&DaemonLibraries>) -> Result<()> {
     let entries = bookrack_config::list_libraries().context("list libraries")?;
     if json {
-        render::libraries_list_json(entries.as_deref(), served);
+        render::libraries_list_json(entries.as_deref(), daemon);
     } else {
-        render::libraries_list(entries.as_deref(), served);
+        render::libraries_list(entries.as_deref(), daemon);
     }
     Ok(())
 }

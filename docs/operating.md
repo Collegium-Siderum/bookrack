@@ -43,13 +43,18 @@ library is served on the same command.
 
 `bookrack libraries list` reads the registry file, so it works with no
 daemon and always shows every registered library. When a daemon does
-answer, a `served` column marks the ones it holds — the two differ
+answer, a `served` column marks the ones it holds — `yes` — and the
+ones it tried and could not bring up — `skipped`, with each one's
+reason and next step listed under the table (`--json` carries the
+reason as `unmounted` on the entry). The two differ from the registry
 whenever the daemon came up on a root the registry does not name, since
 such a daemon serves that root alone. With no daemon the column is
 absent rather than empty: nobody was asked, which is not the same
-answer as nobody serving them. `bookrack status` reports the same set
-from the other side, with each library's root and which one an
-unqualified command reaches.
+answer as nobody serving them. `bookrack status` reports the same sets
+from the other side, with each library's root, which one an unqualified
+command reaches, and the skipped libraries with their reasons. The
+`bookrack run` ready output names what was skipped on the lines after
+the ready line.
 
 It takes the session lock plus one data-root lock per mounted library
 for its lifetime, and they answer different questions. The session lock
@@ -331,7 +336,13 @@ deliberately skips (embedder and reranker reachability involve network
 round-trips; status stays fast). The identity rows come from the
 daemon over RPC, so they name what is actually served, not what a lock
 file once recorded. `library.name` is empty when the served data root
-was selected directly by path — a normal state, not a fault.
+was selected directly by path — a normal state, not a fault. When
+bring-up skipped a registered library, the card carries a
+`library.unmounted` section — one line per skipped library, its root
+and the reason — and the hint names the `libraries mount` command that
+brings it in once repaired; when the skipped library is the one the
+daemon was started under, the card keeps its identity rows and shows no
+counts for it.
 
 The short card answers one thing the full card has no use for: the
 `registry.default` row names the library a `bookrack run` here would

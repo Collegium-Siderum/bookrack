@@ -1320,8 +1320,8 @@ async fn run() -> Result<()> {
                         bookrack_config::list_libraries()?;
                         Ok(())
                     } else {
-                        let served = cmd::cli_client::helpers::served_library_names(None).await;
-                        bookrack_runtime::cmd::libraries::list(json, served.as_deref())
+                        let daemon = cmd::cli_client::helpers::daemon_library_view(None).await;
+                        bookrack_runtime::cmd::libraries::list(json, daemon.as_ref())
                     }
                 }
                 LibrariesAction::Default { name } => {

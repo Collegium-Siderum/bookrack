@@ -13,6 +13,7 @@ use bookrack_cli::render::confirm::{ConfirmMode, Confirmation};
 use bookrack_cli::render::job_report::JobOutcomeReport;
 use bookrack_cli::render::{OutputMode, ctx};
 use bookrack_control_client::{ControlClient, ControlError};
+use bookrack_runtime::cmd::libraries::DaemonLibraries;
 use eyre::{Context, Result};
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -55,8 +56,9 @@ pub async fn connect(runtime_dir: Option<&Path>) -> Result<Arc<ControlClient>> {
 // exceeding it drops one annotation column, so there is nothing to tune
 const SERVED_PROBE_WINDOW: Duration = Duration::from_secs(2);
 
-/// Names of the libraries a running daemon serves, or `None` when no
-/// daemon answered.
+/// What a running daemon says about the registered libraries — the
+/// served names and the skipped ones with their reasons — or `None`
+/// when no daemon answered.
 ///
 /// Deliberately below both gates the ordinary call path goes through:
 ///
@@ -65,33 +67,54 @@ const SERVED_PROBE_WINDOW: Duration = Duration::from_secs(2);
 ///   [`connect`] would send a path-shaped selection to the daemon for
 ///   translation, so a command that only wanted to annotate a listing
 ///   could fail on a selection it never used;
-/// * **no selection injection** — `library.list` takes none, and this
+/// * **no selection injection** — `daemon.status` takes none, and this
 ///   call is the command's own rather than the operator's.
 ///
 /// Every failure collapses to `None`: no daemon, an unreachable socket,
 /// a daemon that does not answer inside [`SERVED_PROBE_WINDOW`], or a
 /// reply in an unexpected shape. A caller therefore cannot tell an
 /// unserved library from an unanswered question, and must render
-/// neither as the other.
-pub async fn served_library_names(runtime_dir: Option<&Path>) -> Option<Vec<String>> {
+/// neither as the other. A daemon that predates the `unmounted` list
+/// reports an empty one.
+pub async fn daemon_library_view(runtime_dir: Option<&Path>) -> Option<DaemonLibraries> {
     let socket = bookrack_control_client::discover(runtime_dir).ok()?;
-    let names = tokio::time::timeout(SERVED_PROBE_WINDOW, async move {
+    tokio::time::timeout(SERVED_PROBE_WINDOW, async move {
         let client =
             bookrack_control_client::connect_with_default_timeout(&socket, SERVED_PROBE_WINDOW)
                 .await
                 .ok()?;
-        let value = client.call_raw("library.list", Value::Null).await.ok()?;
-        Some(
-            value
-                .as_array()?
-                .iter()
-                .filter_map(|row| row["name"].as_str().map(String::from))
-                .collect::<Vec<String>>(),
-        )
+        let status = client.call_raw("daemon.status", Value::Null).await.ok()?;
+        daemon_libraries_from(&status)
     })
     .await
-    .ok()??;
-    Some(names)
+    .ok()?
+}
+
+/// The listing's view of a `daemon.status` reply: `None` when the reply
+/// carries no served rows, since the served column cannot then be
+/// filled.
+fn daemon_libraries_from(status: &Value) -> Option<DaemonLibraries> {
+    let served = status
+        .get("served")?
+        .as_array()?
+        .iter()
+        .filter_map(|row| row["name"].as_str().map(String::from))
+        .collect::<Vec<String>>();
+    let unmounted = status
+        .get("unmounted")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let name = row["name"].as_str()?.to_string();
+                    let reason: bookrack_core::Problem =
+                        serde_json::from_value(row["reason"].clone()).ok()?;
+                    Some((name, reason))
+                })
+                .collect::<Vec<(String, bookrack_core::Problem)>>()
+        })
+        .unwrap_or_default();
+    Some(DaemonLibraries { served, unmounted })
 }
 
 /// Decide, once a connection exists, which library name this

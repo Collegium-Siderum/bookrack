@@ -8,6 +8,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Skipped libraries are reported.** `daemon.status` and the MCP
+  `session.info` tool carry `unmounted` — each registered library
+  bring-up did not mount, with its root and three-part reason — and
+  `bookrack status`, `bookrack libraries list` (a `skipped` mark, the
+  reasons under the table, `unmounted` on the JSON entry), and the
+  `bookrack run` ready output show them. A successful
+  `bookrack libraries mount` takes the library off the list.
+
 ### Changed
 
 - **An unnamed call reaches the registry default only when it is

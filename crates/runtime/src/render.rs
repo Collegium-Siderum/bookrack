@@ -7,6 +7,8 @@
 
 use bookrack_audit_profile::AuditProfile;
 use bookrack_config::LibraryEntry;
+
+use crate::cmd::libraries::DaemonLibraries;
 use bookrack_ingest::IngestReport;
 use bookrack_ingest::ocr::OcrIngestReport;
 
@@ -210,11 +212,14 @@ pub fn audit_profile_diff(a_name: &str, a: &AuditProfile, b_name: &str, b: &Audi
 /// argument means the registry is not configured at all — surfaced as
 /// a single explanatory line rather than an empty body.
 ///
-/// `served` names the libraries a running daemon holds. `None` means
-/// nobody was asked or nobody answered, and the column is left out
+/// `daemon` is what a running daemon said about the entries: which it
+/// serves, and which it skipped with what reason. `None` means nobody
+/// was asked or nobody answered, and the served column is left out
 /// entirely: printing it empty would state that no library is served,
-/// which is a different claim from having no answer.
-pub fn libraries_list(entries: Option<&[LibraryEntry]>, served: Option<&[String]>) {
+/// which is a different claim from having no answer. The column reads
+/// `yes`, `skipped`, or blank, and each skipped library's reason and
+/// next step follow the table.
+pub fn libraries_list(entries: Option<&[LibraryEntry]>, daemon: Option<&DaemonLibraries>) {
     let Some(entries) = entries else {
         println!("No registry found (run `bookrack init`, or set BOOKRACK_REGISTRY).");
         return;
@@ -223,25 +228,38 @@ pub fn libraries_list(entries: Option<&[LibraryEntry]>, served: Option<&[String]
         println!("Registry has no library entries.");
         return;
     }
-    match served {
-        Some(served) => {
+    match daemon {
+        Some(daemon) => {
             println!(
                 "{:<20}  {:<10}  {:<8}  {:<8}  data_dir",
                 "name", "default", "kind", "served"
             );
             for entry in entries {
+                let served = if daemon.served.contains(&entry.name) {
+                    "yes"
+                } else if daemon.skipped(&entry.name).is_some() {
+                    "skipped"
+                } else {
+                    ""
+                };
                 println!(
                     "{:<20}  {:<10}  {:<8}  {:<8}  {}",
                     entry.name,
                     default_mark(entry),
                     entry.kind.as_str(),
-                    if served.contains(&entry.name) {
-                        "yes"
-                    } else {
-                        ""
-                    },
+                    served,
                     entry.data_dir.display(),
                 );
+            }
+            if !daemon.unmounted.is_empty() {
+                println!();
+                println!("not mounted:");
+                for (name, reason) in &daemon.unmounted {
+                    println!("  {name}: {}", reason.summary);
+                    if let Some(hint) = &reason.data.hint {
+                        println!("    {hint}");
+                    }
+                }
             }
         }
         None => {
@@ -265,10 +283,11 @@ fn default_mark(entry: &LibraryEntry) -> &'static str {
 
 /// Same registry as a JSON array — `null` when no registry is set.
 ///
-/// `served` follows the human listing: each object carries a `served`
+/// `daemon` follows the human listing: each object carries a `served`
 /// boolean when a daemon answered, and the key is absent from every
-/// object when none did.
-pub fn libraries_list_json(entries: Option<&[LibraryEntry]>, served: Option<&[String]>) {
+/// object when none did; an entry the daemon skipped also carries
+/// `unmounted`, the reason as a three-part diagnostic.
+pub fn libraries_list_json(entries: Option<&[LibraryEntry]>, daemon: Option<&DaemonLibraries>) {
     let Some(entries) = entries else {
         println!("null");
         return;
@@ -286,9 +305,18 @@ pub fn libraries_list_json(entries: Option<&[LibraryEntry]>, served: Option<&[St
         write_string_field(&mut out, "kind", entry.kind.as_str());
         out.push(',');
         out.push_str(&format!("\"is_default\":{}", entry.is_default));
-        if let Some(served) = served {
+        if let Some(daemon) = daemon {
             out.push(',');
-            out.push_str(&format!("\"served\":{}", served.contains(&entry.name)));
+            out.push_str(&format!(
+                "\"served\":{}",
+                daemon.served.contains(&entry.name)
+            ));
+            if let Some(reason) = daemon.skipped(&entry.name)
+                && let Ok(reason) = serde_json::to_string(reason)
+            {
+                out.push(',');
+                out.push_str(&format!("\"unmounted\":{reason}"));
+            }
         }
         out.push('}');
     }

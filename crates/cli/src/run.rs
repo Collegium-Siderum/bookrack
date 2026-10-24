@@ -23,6 +23,7 @@ use bookrack_cli::error::BookrackCliError;
 use bookrack_config::{LibrarySelection, LogConfig};
 use bookrack_core::Explain;
 use bookrack_ops::Caller;
+use bookrack_ops::registry::UnmountedLibrary;
 use bookrack_runtime::backend_probe::PreflightRefusal;
 use bookrack_runtime::control::HealthProbe;
 use bookrack_runtime::mcp_endpoint::McpBindRefusal;
@@ -31,6 +32,24 @@ use bookrack_runtime::rerank_supervisor::RerankerModelRefusal;
 use bookrack_runtime::unmounted::NoServableLibrary;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use eyre::{Context, Result};
+
+/// The lines that follow the ready line when bring-up skipped a
+/// library: each skipped library with its reason's summary, then where
+/// the full reason and the mount command are. `None` when every
+/// registered library came up.
+fn not_mounted_lines(unmounted: &[UnmountedLibrary]) -> Option<String> {
+    if unmounted.is_empty() {
+        return None;
+    }
+    let skipped: Vec<String> = unmounted
+        .iter()
+        .map(|library| format!("{} ({})", library.name(), library.reason().summary))
+        .collect();
+    Some(format!(
+        "not mounted: {}\nsee `bookrack libraries list` for each reason and the mount command",
+        skipped.join("; ")
+    ))
+}
 
 /// CLI inputs for [`run_daemon`]. Parsed from the `Run` clap variant.
 pub struct RunOpts {
@@ -133,6 +152,11 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
         runtime.mcp_label,
         runtime.control_sock.path.display(),
     );
+    // The libraries bring-up did not mount, after the ready line and
+    // never in it: tooling matches the first line as it always has.
+    if let Some(lines) = not_mounted_lines(&runtime.registry.unmounted().unwrap_or_default()) {
+        println!("{lines}");
+    }
     println!("stop with Ctrl-C or `bookrack quit`");
 
     let mcp_handle = bookrack_mcp::spawn_listener(&mut runtime);

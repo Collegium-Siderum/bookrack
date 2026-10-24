@@ -136,3 +136,65 @@ async fn the_served_column_is_absent_when_no_daemon_answers() {
         "with nobody asked, the column must be absent rather than false: {stdout}",
     );
 }
+
+/// An entry the daemon could not bring up is marked skipped, with the
+/// reason beside it, instead of reading like an entry nobody serves.
+#[tokio::test]
+async fn a_skipped_entry_is_marked_with_its_reason() {
+    let sandbox = two_library_world();
+    let beta = sandbox.data_root("beta-root");
+    // This process holds beta's root, so the daemon skips it.
+    let _held = bookrack_session::RootLock::acquire(&beta, std::process::id(), "test")
+        .expect("hold the beta root");
+    let mut daemon_cmd = Command::from(
+        bookrack_cmd!(&sandbox)
+            .without_data_dir()
+            .ollama_url(EmbedStub::shared().url())
+            .build(),
+    );
+    daemon_cmd.args(["--library", "alpha", "run"]);
+    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
+    assert!(
+        wait_for_lock(&sandbox.tty_lock_path(), Duration::from_secs(20)).await,
+        "session lock did not appear; bookrack run may have failed to start",
+    );
+
+    let stdout = listing(&sandbox).await;
+    let rows: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"));
+    let row = |name: &str| {
+        rows.as_array()
+            .and_then(|rows| rows.iter().find(|row| row["name"] == name))
+            .cloned()
+            .unwrap_or_else(|| panic!("no row for {name}: {stdout}"))
+    };
+    let alpha = row("alpha");
+    assert_eq!(alpha["served"], true, "{stdout}");
+    assert!(alpha.get("unmounted").is_none(), "{stdout}");
+    let beta = row("beta");
+    assert_eq!(beta["served"], false, "{stdout}");
+    let summary = beta["unmounted"]["summary"]
+        .as_str()
+        .unwrap_or_else(|| panic!("beta carries no reason: {stdout}"));
+    assert!(
+        summary.contains("lock"),
+        "the reason names the lock: {stdout}"
+    );
+
+    let output = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+        .args(["libraries", "list"])
+        .output()
+        .await
+        .expect("run bookrack libraries list");
+    let human = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        human.contains("skipped"),
+        "the human column reads skipped: {human}"
+    );
+    assert!(
+        human.contains("not mounted:"),
+        "the reasons follow the table: {human}"
+    );
+
+    stop(daemon).await;
+}
