@@ -509,6 +509,57 @@ async fn a_library_bring_up_skipped_is_invalid_params_with_the_mount_hint() {
     fx.stop().await;
 }
 
+/// `session.info` lists the libraries bring-up skipped beside the ones
+/// it mounted, each with its root and three-part reason, and the reason
+/// arrives clean of build-machine source prefixes.
+#[tokio::test]
+async fn session_info_lists_skipped_libraries_with_a_clean_reason() {
+    let fx = Fixture::start().await;
+    let located =
+        "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/io.rs:7:3";
+    fx.registry
+        .record_unmounted(bookrack_ops::registry::UnmountedLibrary::new(
+            "beta",
+            "/disk/library/beta",
+            bookrack_core::Problem::new("cannot read the catalog")
+                .detail(format!("read failed at {located} under /disk/library/beta"))
+                .hint("Upgrade bookrack."),
+        ))
+        .expect("record the skipped library");
+    let client = fx.connect().await;
+
+    let body = body_json(
+        &client
+            .call_tool(call("session.info", serde_json::json!({})))
+            .await
+            .expect("session.info"),
+    );
+    let unmounted = body["unmounted"]
+        .as_array()
+        .unwrap_or_else(|| panic!("session.info carries no unmounted rows: {body}"));
+    assert_eq!(unmounted.len(), 1, "{body}");
+    let row = &unmounted[0];
+    assert_eq!(row["name"], "beta", "{body}");
+    assert_eq!(row["data_dir"], "/disk/library/beta", "{body}");
+    assert_eq!(
+        row["reason"]["summary"], "cannot read the catalog",
+        "{body}"
+    );
+    assert_eq!(row["reason"]["hint"], "Upgrade bookrack.", "{body}");
+    let detail = row["reason"]["detail"].as_str().unwrap_or_default();
+    assert!(!detail.contains("/disk/cache/cargo"), "{detail}");
+    assert!(detail.contains("io.rs:7:3"), "{detail}");
+    assert!(detail.contains("/disk/library/beta"), "{detail}");
+    assert_eq!(
+        body["libraries"].as_array().map(Vec::len),
+        Some(2),
+        "the mounted rows are unchanged: {body}"
+    );
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
 /// A client that negotiates protocol version 2026-07-28 sends no
 /// `initialize` and is served one request at a time. A tool's
 /// `invalid_params` for the caller's input reaches it as a JSON-RPC

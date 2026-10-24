@@ -528,6 +528,11 @@ pub struct SessionInfoResult {
     /// tool call without a `library` selector resolves to — or empty
     /// when no row carries the mark.
     pub default_library: String,
+    /// The registered libraries bring-up did not mount, one row each,
+    /// sorted by name, each with its root and the reason; empty when
+    /// every registered library came up. Read in the same instant as
+    /// `libraries`, so no name appears in both.
+    pub unmounted: Vec<SessionUnmounted>,
     /// MCP listener address (`host:port`), or `disabled` when the
     /// daemon is running without `/mcp`.
     pub mcp_addr: String,
@@ -549,6 +554,35 @@ pub struct SessionLibrary {
     /// Whether this is the library a tool call without a `library`
     /// selector resolves to.
     pub default: bool,
+}
+
+/// One registered library the daemon did not mount, as `session.info`
+/// reports it.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SessionUnmounted {
+    /// The library's registered short name.
+    pub name: String,
+    /// The data root the registry records for it (rendered).
+    pub data_dir: String,
+    /// Why bring-up did not mount it.
+    pub reason: SessionProblem,
+}
+
+/// A three-part diagnostic as `session.info` carries it: the same four
+/// fields a `Problem` serializes to, mirrored so the tool's schema can
+/// describe them.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SessionProblem {
+    /// One line stating what failed.
+    pub summary: String,
+    /// Implementation-level evidence for the summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// What the operator should do next.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    /// Whether the same action, repeated unchanged, may succeed.
+    pub retryable: bool,
 }
 
 /// Arguments for `session.logs_tail`.
@@ -1663,25 +1697,43 @@ impl BookrackServer {
         name = "session.info",
         description = "Daemon runtime summary: bookrack version, uptime, the libraries \
                        this session has mounted (each with its data root and whether \
-                       it is the default), the default library, MCP listener address, \
-                       and Ollama endpoint."
+                       it is the default), the registered libraries it did not mount \
+                       (each with its data root and the reason), the default library, \
+                       MCP listener address, and Ollama endpoint."
     )]
     async fn session_info(
         &self,
         Parameters(_): Parameters<SessionInfoArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        // One registry read yields both the rows and the default name,
-        // so a default pointer moved mid-call cannot leave the card
-        // naming one default and marking another.
-        let libraries: Vec<SessionLibrary> = self
+        // One registry read yields the mounted rows, the default name,
+        // and the unmounted rows, so a default pointer moved mid-call
+        // cannot leave the card naming one default and marking another,
+        // and a mount landing mid-call cannot list one name twice.
+        let snapshot = self
             .registry
-            .list()
-            .map_err(|e| internal_message(format!("read library registry: {e}")))?
+            .snapshot()
+            .map_err(|e| internal_message(format!("read library registry: {e}")))?;
+        let libraries: Vec<SessionLibrary> = snapshot
+            .mounted
             .into_iter()
             .map(|s| SessionLibrary {
                 name: s.name,
                 data_dir: s.data_dir.display().to_string(),
                 default: s.is_default,
+            })
+            .collect();
+        let unmounted: Vec<SessionUnmounted> = snapshot
+            .unmounted
+            .iter()
+            .map(|library| SessionUnmounted {
+                name: library.name().to_string(),
+                data_dir: library.data_dir().display().to_string(),
+                reason: SessionProblem {
+                    summary: library.reason().summary.clone(),
+                    detail: library.reason().data.detail.clone(),
+                    hint: library.reason().data.hint.clone(),
+                    retryable: library.reason().data.retryable,
+                },
             })
             .collect();
         let default_library = libraries
@@ -1694,6 +1746,7 @@ impl BookrackServer {
             uptime_seconds: self.started_at.elapsed().as_secs(),
             libraries,
             default_library,
+            unmounted,
             mcp_addr: self.info_context.mcp_addr.clone(),
             ollama_url: self.info_context.ollama_url.clone(),
         };
