@@ -42,7 +42,10 @@ which source selected the root, and where the registry default
 points — so a default that did not decide the root is visible rather
 than silently passed over. It is a statement, not a verdict: on a
 daemon serving the registry, an unnamed call still reaches that
-default (see [operating.md](operating.md)).
+default while it is mounted (see [operating.md](operating.md)). A
+`default` naming no registered library still counts as declared: an
+unnamed call is then refused with the mounted names and `--library` in
+the reply, rather than routed to another library.
 
 A path-class root whose manifest identity the registry records at
 another path is claimed by no name: it is one library in two places,
@@ -141,7 +144,10 @@ into the registry — turning `scan --volumes --register` into a
 one-command rebuild after a reinstall. It records entries only: the
 `default` pointer is left for `libraries default`, as it is by every
 write that merely refreshes an entry (`index-profile apply`,
-`libraries config`).
+`libraries config`). On a running daemon the pointer routes an unnamed
+call only while the library it names is mounted; with no pointer, the
+only mounted library takes the call, and with several the call is
+refused until one is named.
 
 The daemon is a registry writer too. `bookrack run` on a path-class
 root (`--data-dir`, `BOOKRACK_DATA_DIR`, the portable layout) that

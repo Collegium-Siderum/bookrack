@@ -119,8 +119,8 @@ async fn set_default_flips_the_registry_and_the_in_memory_pointer() -> Result<()
     // that has shut down has given its libraries back and holds no
     // handles to resolve.
     assert_eq!(
-        registry_handle.default_name()?,
-        "beta",
+        registry_handle.default_name()?.as_deref(),
+        Some("beta"),
         "the in-memory default pointer must follow the persisted flip"
     );
     Ok(())

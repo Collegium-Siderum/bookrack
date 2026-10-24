@@ -27,9 +27,8 @@ pub struct MetadataSetParams {
     reason: Option<String>,
     #[serde(default)]
     confirmed: bool,
-    /// The library this call acts on. Absent means the registry's
-    /// current default, the pointer `library.set_default` moves at run
-    /// time.
+    /// The library this call acts on. Absent means the library a call
+    /// naming none is routed to: `select_library`'s rule.
     #[serde(default)]
     library: Option<String>,
 }
@@ -40,9 +39,8 @@ pub struct MetadataClearParams {
     field: String,
     #[serde(default)]
     reason: Option<String>,
-    /// The library this call acts on. Absent means the registry's
-    /// current default, the pointer `library.set_default` moves at run
-    /// time.
+    /// The library this call acts on. Absent means the library a call
+    /// naming none is routed to: `select_library`'s rule.
     #[serde(default)]
     library: Option<String>,
 }
@@ -53,9 +51,8 @@ pub struct MetadataVoidParams {
     field: String,
     #[serde(default)]
     reason: Option<String>,
-    /// The library this call acts on. Absent means the registry's
-    /// current default, the pointer `library.set_default` moves at run
-    /// time.
+    /// The library this call acts on. Absent means the library a call
+    /// naming none is routed to: `select_library`'s rule.
     #[serde(default)]
     library: Option<String>,
 }
@@ -69,9 +66,8 @@ pub struct MetadataReauditParams {
     /// profile.
     #[serde(default)]
     audit_profile: Option<String>,
-    /// The library this call acts on. Absent means the registry's
-    /// current default, the pointer `library.set_default` moves at run
-    /// time.
+    /// The library this call acts on. Absent means the library a call
+    /// naming none is routed to: `select_library`'s rule.
     #[serde(default)]
     library: Option<String>,
 }
@@ -85,9 +81,8 @@ pub struct MetadataContributorAddParams {
     nationality: Option<String>,
     #[serde(default)]
     reason: Option<String>,
-    /// The library this call acts on. Absent means the registry's
-    /// current default, the pointer `library.set_default` moves at run
-    /// time.
+    /// The library this call acts on. Absent means the library a call
+    /// naming none is routed to: `select_library`'s rule.
     #[serde(default)]
     library: Option<String>,
 }
@@ -98,9 +93,8 @@ pub struct MetadataContributorRemoveParams {
     contributor_id: i64,
     #[serde(default)]
     reason: Option<String>,
-    /// The library this call acts on. Absent means the registry's
-    /// current default, the pointer `library.set_default` moves at run
-    /// time.
+    /// The library this call acts on. Absent means the library a call
+    /// naming none is routed to: `select_library`'s rule.
     #[serde(default)]
     library: Option<String>,
 }
@@ -109,9 +103,8 @@ pub struct MetadataContributorRemoveParams {
 pub struct MetadataAckParams {
     book: i64,
     reason: String,
-    /// The library this call acts on. Absent means the registry's
-    /// current default, the pointer `library.set_default` moves at run
-    /// time.
+    /// The library this call acts on. Absent means the library a call
+    /// naming none is routed to: `select_library`'s rule.
     #[serde(default)]
     library: Option<String>,
 }
@@ -121,9 +114,8 @@ pub struct MetadataApproveParams {
     book: i64,
     #[serde(default)]
     reason: Option<String>,
-    /// The library this call acts on. Absent means the registry's
-    /// current default, the pointer `library.set_default` moves at run
-    /// time.
+    /// The library this call acts on. Absent means the library a call
+    /// naming none is routed to: `select_library`'s rule.
     #[serde(default)]
     library: Option<String>,
 }
@@ -132,9 +124,8 @@ pub struct MetadataApproveParams {
 pub struct MetadataRejectParams {
     book: i64,
     reason: String,
-    /// The library this call acts on. Absent means the registry's
-    /// current default, the pointer `library.set_default` moves at run
-    /// time.
+    /// The library this call acts on. Absent means the library a call
+    /// naming none is routed to: `select_library`'s rule.
     #[serde(default)]
     library: Option<String>,
 }
@@ -149,9 +140,8 @@ pub struct MetadataAdvanceParams {
     /// overlay-resolved default profile.
     #[serde(default)]
     audit_profile: Option<String>,
-    /// The library this call acts on. Absent means the registry's
-    /// current default, the pointer `library.set_default` moves at run
-    /// time.
+    /// The library this call acts on. Absent means the library a call
+    /// naming none is routed to: `select_library`'s rule.
     #[serde(default)]
     library: Option<String>,
 }

@@ -136,7 +136,7 @@ pub struct MethodContext {
     /// snapshot a subscriber receives on connect; per-library status
     /// surfaces are a later milestone. It is not a routing fallback:
     /// a call that names no library resolves through
-    /// [`select_library`] to the registry's current default pointer.
+    /// [`select_library`], whose rule never consults this field.
     /// A `library.changed` published *by a write* names the library
     /// that write touched instead — [`run_write`] takes it from the
     /// handler's own handle.
@@ -607,11 +607,14 @@ pub fn refuses_library(method: &str) -> bool {
         .any(|sig| sig.name == method && sig.selection == "unrouted")
 }
 
-/// The handle a routed method acts on: the library `name` names, or
-/// the registry's current default when the caller named none. One
-/// lookup shared by every library-level method, so "unnamed means the
-/// current default pointer" is decided in one place; a name the
-/// registry does not hold is `-32010`.
+/// The handle a routed method acts on: the library `name` names, or,
+/// when the caller named none, the one the registry routes an unnamed
+/// call to — the registry default while it is mounted, the only
+/// mounted library when no default is declared, and otherwise a
+/// refusal. One lookup shared by every library-level method, so the
+/// unnamed route is decided in one place, at the registry; a name the
+/// registry does not hold and an unnamed call it cannot route are
+/// both `-32010`.
 pub fn select_library(
     ctx: &MethodContext,
     name: Option<&str>,
@@ -623,10 +626,11 @@ pub fn select_library(
 
 /// The registry name a queue-submitting method writes into its job:
 /// [`select_library`]'s answer for `name`, so an unnamed submit is
-/// pinned to the registry's current default at enqueue time and a
-/// name the registry does not hold is `-32010` before any row exists.
-/// The job carries the resolved name from then on; moving the default
-/// pointer later does not move a queued job.
+/// pinned to the library the registry routes it to at enqueue time,
+/// and a name the registry does not hold or an unnamed submit it
+/// cannot route is `-32010` before any row exists. The job carries the
+/// resolved name from then on; moving the default pointer later does
+/// not move a queued job.
 pub fn resolve_submit_target(ctx: &MethodContext, name: Option<&str>) -> Result<String, RpcError> {
     Ok(select_library(ctx, name)?.name().to_string())
 }

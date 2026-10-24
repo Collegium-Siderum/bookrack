@@ -998,21 +998,44 @@ pub struct LibraryEntry {
 /// is missing, malformed, or unreadable surfaces as the matching
 /// error; a missing platform-default file is simply `Ok(None)`.
 pub fn list_libraries() -> Result<Option<Vec<LibraryEntry>>, ConfigError> {
-    if let Some(entries) = list_libraries_from(std::env::var(REGISTRY_ENV).ok())? {
-        return Ok(Some(entries));
-    }
-    Ok(load_default_registry()?.map(|registry| library_entries(&registry)))
+    Ok(list_libraries_with_default()?.map(|(entries, _)| entries))
 }
 
-/// The [`REGISTRY_ENV`] layer of [`list_libraries`], pure so tests do
-/// not mutate the process environment. `Ok(None)` means the env var is
-/// unset or blank; the caller falls through to the platform default.
-fn list_libraries_from(env: Option<String>) -> Result<Option<Vec<LibraryEntry>>, ConfigError> {
+/// [`list_libraries`] plus the registry's `default` pointer as written,
+/// `None` when the file declares none. Both come from one read of the
+/// file, so a registry rewritten between two reads cannot hand back the
+/// entries of one version and the pointer of another. The pointer is
+/// returned as declared: a `default` naming no entry is `Some`, which
+/// no entry's `is_default` can show.
+pub fn list_libraries_with_default() -> Result<Option<RegistryListing>, ConfigError> {
+    if let Some(listing) = libraries_with_default_from(std::env::var(REGISTRY_ENV).ok())? {
+        return Ok(Some(listing));
+    }
+    Ok(load_default_registry()?.map(|registry| libraries_with_default(&registry)))
+}
+
+/// The [`REGISTRY_ENV`] layer of [`list_libraries_with_default`], pure
+/// so tests do not mutate the process environment. `Ok(None)` means the
+/// env var is unset or blank; the caller falls through to the platform
+/// default.
+fn libraries_with_default_from(
+    env: Option<String>,
+) -> Result<Option<RegistryListing>, ConfigError> {
     let Some(registry) = load_registry(env)? else {
         return Ok(None);
     };
-    Ok(Some(library_entries(&registry)))
+    Ok(Some(libraries_with_default(&registry)))
 }
+
+/// [`library_entries`] beside the registry's `default` pointer as
+/// declared.
+fn libraries_with_default(registry: &Registry) -> RegistryListing {
+    (library_entries(registry), registry.default.clone())
+}
+
+/// A registry read in full: its entries, sorted by name, and its
+/// `default` pointer as declared, `None` when it declares none.
+pub type RegistryListing = (Vec<LibraryEntry>, Option<String>);
 
 /// List the entries of the registry at an explicit `path`, bypassing
 /// [`REGISTRY_ENV`] and the platform default. A missing file resolves
@@ -5408,12 +5431,25 @@ mod tests {
     }
 
     #[test]
-    fn list_libraries_from_returns_none_when_unset_or_blank() {
-        assert!(matches!(list_libraries_from(None), Ok(None)));
+    fn libraries_with_default_from_returns_none_when_unset_or_blank() {
+        assert!(matches!(libraries_with_default_from(None), Ok(None)));
         assert!(matches!(
-            list_libraries_from(Some("   ".to_string())),
+            libraries_with_default_from(Some("   ".to_string())),
             Ok(None)
         ));
+    }
+
+    /// The pointer travels as written: a `default` naming no entry is
+    /// `Some`, which the entries' `is_default` flags cannot show.
+    #[test]
+    fn libraries_with_default_keeps_a_dangling_pointer() {
+        let registry: Registry =
+            toml::from_str("default = \"ghost\"\n\n[libraries.beta]\ndata_dir = \"/roots/beta\"\n")
+                .expect("parse");
+        let (entries, default) = libraries_with_default(&registry);
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].is_default);
+        assert_eq!(default.as_deref(), Some("ghost"));
     }
 
     #[test]

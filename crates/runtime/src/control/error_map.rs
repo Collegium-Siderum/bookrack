@@ -607,10 +607,19 @@ fn from_corpus(e: &CorpusError) -> RpcError {
     }
 }
 
+/// Map a registry refusal. Every variant has its own arm because the
+/// enum is `#[non_exhaustive]`: the `_` arm is there for the compiler,
+/// and a variant that reached it would be an internal error without a
+/// hint, so a new variant is named here before it ships.
 fn from_registry(e: &RegistryError) -> RpcError {
     let code = match e {
-        RegistryError::LibraryUnknown { .. } => INVALID_LIBRARY,
+        RegistryError::LibraryUnknown { .. } | RegistryError::UnnamedAmbiguous { .. } => {
+            INVALID_LIBRARY
+        }
         RegistryError::Empty => INVALID_PARAMS,
+        RegistryError::AlreadyMounted { .. }
+        | RegistryError::DefaultLockPoisoned
+        | RegistryError::LibsLockPoisoned => INTERNAL_ERROR,
         _ => INTERNAL_ERROR,
     };
     rpc_from_problem(code, e.explain())
@@ -708,6 +717,30 @@ mod tests {
         for available in ["alpha", "beta"] {
             assert!(hint.contains(available), "{hint}");
         }
+        assert!(!data.retryable);
+    }
+
+    /// `RegistryError` is `#[non_exhaustive]`, so a variant the mapping
+    /// does not name falls through to `-32603` without a hint. The
+    /// unnamed-route refusal is caller input with a next step and takes
+    /// the library code.
+    #[test]
+    fn unnamed_ambiguous_is_invalid_library_with_a_hint() {
+        let err: Report = RegistryError::UnnamedAmbiguous {
+            mounted: vec!["alpha".into(), "beta".into()],
+            default: None,
+        }
+        .into();
+        let rpc = handler_err("library.stats", err);
+        assert_eq!(rpc.code, INVALID_LIBRARY, "{}", rpc.message);
+        assert_eq!(
+            rpc.message,
+            "cannot tell which library a call naming none is for"
+        );
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(rpc.data.expect("data")).expect("ProblemData");
+        let hint = data.hint.expect("naming a library is the next step");
+        assert!(hint.contains("--library"), "{hint}");
         assert!(!data.retryable);
     }
 

@@ -166,7 +166,7 @@ fn served_libraries(ctx: &MethodContext) -> Value {
 #[derive(Debug, Default, Deserialize)]
 pub struct DoctorGatherParams {
     /// The library whose root, stores, open runs, and free disk the
-    /// report covers. Absent means the registry's current default.
+    /// report covers. Absent means the library a call naming none is routed to.
     #[serde(default)]
     library: Option<String>,
 }

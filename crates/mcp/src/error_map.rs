@@ -232,6 +232,33 @@ mod tests {
         assert_eq!(mapped.code, ErrorCode::INTERNAL_ERROR, "{}", mapped.message);
     }
 
+    /// An unnamed tool call the daemon cannot route is the agent's
+    /// input to fix: invalid params, with the `library` argument as
+    /// the next step in the data slot.
+    #[test]
+    fn an_unroutable_unnamed_call_is_invalid_params_with_a_hint() {
+        let err = registry_err(&RegistryError::UnnamedAmbiguous {
+            mounted: vec!["alpha".into(), "beta".into()],
+            default: Some("gamma".into()),
+        });
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "{}", err.message);
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(err.data.expect("data slot filled")).expect("ProblemData");
+        assert!(
+            data.hint
+                .as_deref()
+                .unwrap_or("")
+                .contains("`library` argument"),
+            "hint: {:?}",
+            data.hint
+        );
+        assert!(
+            data.detail.as_deref().unwrap_or("").contains("gamma"),
+            "detail: {:?}",
+            data.detail
+        );
+    }
+
     /// A synthetic dependency location under a build-machine prefix.
     const LOCATED: &str =
         "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/io.rs:7:3";

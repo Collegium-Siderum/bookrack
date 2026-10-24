@@ -28,9 +28,8 @@ pub struct DryrunParams {
     /// that built-in; any other name is refused as invalid params.
     #[serde(default)]
     audit_profile: Option<String>,
-    /// The library this call acts on. Absent means the registry's
-    /// current default, the pointer `library.set_default` moves at run
-    /// time.
+    /// The library this call acts on. Absent means the library a call
+    /// naming none is routed to: `select_library`'s rule.
     #[serde(default)]
     library: Option<String>,
 }

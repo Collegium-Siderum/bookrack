@@ -21,9 +21,8 @@ pub struct PapersDryrunParams {
     out: Option<PathBuf>,
     #[serde(default)]
     no_chunk: bool,
-    /// The library this call acts on. Absent means the registry's
-    /// current default, the pointer `library.set_default` moves at run
-    /// time.
+    /// The library this call acts on. Absent means the library a call
+    /// naming none is routed to: `select_library`'s rule.
     #[serde(default)]
     library: Option<String>,
 }

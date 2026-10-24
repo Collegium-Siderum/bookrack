@@ -124,7 +124,7 @@ impl Fixture {
 
         let registry = LibraryRegistry::from_handles(
             [handle("fixture", cfg), handle("second", second_cfg)],
-            "fixture",
+            Some("fixture".into()),
         )
         .expect("two-library registry");
 

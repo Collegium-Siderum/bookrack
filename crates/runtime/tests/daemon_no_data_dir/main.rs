@@ -26,4 +26,5 @@ mod routed_diagnostics;
 mod runtime_mount;
 mod submit_library_routing;
 mod unknown_library_is_symmetric;
+mod unnamed_routing;
 mod write_reply_names_library;

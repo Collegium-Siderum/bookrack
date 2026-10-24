@@ -644,8 +644,8 @@ pub(crate) enum LibrariesAction {
         "libraries info --name demo",
     ])]
     Info {
-        /// Library short name. When omitted, the daemon picks the
-        /// registry's current default.
+        /// Library short name. When omitted, the daemon routes the
+        /// call as it does one naming no library.
         #[arg(long, value_name = "NAME")]
         name: Option<String>,
     },

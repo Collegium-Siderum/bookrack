@@ -251,7 +251,8 @@ impl Mounter {
             .registry
             .default_name()
             .map_err(MountRefusal::Registry)?
-            == name
+            .as_deref()
+            == Some(name)
         {
             return Err(MountRefusal::Refused {
                 library: name.to_string(),
@@ -406,4 +407,59 @@ impl Mounter {
 /// check uses.
 fn canonical(root: &std::path::Path) -> PathBuf {
     std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookrack_ops::registry::JobTemplates;
+    use bookrack_ops::{Caller, Ops};
+
+    /// A catalog-only handle whose mount guard is the real root lock
+    /// on `dir`, so releasing it is observable as the lock becoming
+    /// takeable again.
+    fn locked_handle(name: &str, dir: &std::path::Path) -> Arc<LibraryHandle<OllamaEmbedClient>> {
+        let ops = Ops::<OllamaEmbedClient>::catalog_only(
+            dir.join("corpus.db"),
+            dir.join("catalog.db"),
+            &dir.join("lancedb"),
+            dir.join("books"),
+            dir.join("backup"),
+            Caller::cli(),
+        );
+        let cfg = Arc::new(Config::new(
+            dir.to_path_buf(),
+            "http://127.0.0.1:11434".to_string(),
+        ));
+        let lock =
+            RootLock::acquire(dir, std::process::id(), "daemon").expect("take the root lock");
+        let guard: MountGuard = Arc::new(lock);
+        LibraryHandle::with_templates(name, cfg, ops, JobTemplates::default(), Some(guard))
+    }
+
+    /// `Drop` walks the registry's listing. A listing that treated an
+    /// unroutable unnamed call as its own failure would return early on
+    /// a two-library set with no default and leave both roots locked.
+    #[test]
+    fn dropping_the_mounted_set_unmounts_every_library_without_a_default() {
+        let a = tempfile::tempdir().expect("tempdir");
+        let b = tempfile::tempdir().expect("tempdir");
+        let registry = LibraryRegistry::from_handles(
+            [locked_handle("a", a.path()), locked_handle("b", b.path())],
+            None,
+        )
+        .expect("two libraries, no default");
+        let observer = Arc::clone(&registry);
+
+        drop(MountedSet::new(registry));
+
+        assert!(
+            observer.is_empty(),
+            "every library leaves the registry on drop"
+        );
+        for root in [a.path(), b.path()] {
+            RootLock::acquire(root, std::process::id(), "daemon")
+                .expect("the root lock is released once its library is unmounted");
+        }
+    }
 }

@@ -38,9 +38,8 @@ pub async fn run(library: Option<&str>, ctx: &MethodContext) -> Result<Value, Rp
 /// Which library to verify.
 #[derive(Debug, Default, Deserialize)]
 pub struct VerifyParams {
-    /// The library this call acts on. Absent means the registry's
-    /// current default, the pointer `library.set_default` moves at run
-    /// time.
+    /// The library this call acts on. Absent means the library a call
+    /// naming none is routed to: `select_library`'s rule.
     #[serde(default)]
     library: Option<String>,
 }

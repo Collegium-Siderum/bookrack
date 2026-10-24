@@ -102,10 +102,12 @@ systems. bookrack is a local-first system and does not probe for it.
 - `-32002` not ready (bookrack-specific; the runtime has not finished
   initialising the resource the method needs)
 - `-32010` invalid library (bookrack-specific; a `library` param does
-  not exist in the registry). Raised by every handler that resolves
-  that parameter — the write class, the `library.*` read proxies, and
-  `library.info` against its own `name` key — so a client branches on
-  the code alone, without knowing which class it called. The message
+  not exist in the registry, or a call naming none has no single
+  library to go to — see *Unnamed calls* below). Raised by every
+  handler that resolves that parameter — the write class, the
+  `library.*` read proxies, and `library.info` against its own `name`
+  key — so a client branches on the code alone, without knowing which
+  class it called. The message
   names the library it could not resolve and the names it could.
 - `-32011` job not found (bookrack-specific; `ingest.cancel` or
   `queue.retry` named a job id, or a part of one, that matches no row,
@@ -239,6 +241,12 @@ onto.
   hold** (`-32010`): `RegistryError::LibraryUnknown`, raised by any
   handler that resolves that parameter. The message names the name
   that did not resolve; the names that would are in `error.data.hint`.
+- **A call naming no library that the registry cannot route**
+  (`-32010`): `RegistryError::UnnamedAmbiguous`, raised by the same
+  handlers when the parameter is absent and the rule under *Unnamed
+  calls* refuses. `error.data.detail` lists the mounted libraries and
+  says why the default is not the route; the hint names `--library`
+  and the MCP `library` argument.
 - **An embedding model the Ollama daemon does not hold** (`-32602`):
   `EmbedError::ModelNotFound`, whether raised bare or wrapped in
   `IngestError::Embed`, `GleanError::Embed`, or
@@ -399,14 +407,17 @@ the exit-code bucket does not distinguish the two.
 
   `served` is the plural face: one row per mounted library, sorted by
   name, each `{ name, data_dir, default, primary }`. `default` marks
-  the library a call that names none resolves to, `primary` the one
-  the daemon came up under. They are separate bits because they are
-  separate facts — a daemon started under a library that is not the
-  registry's default carries them on different rows — and a client
-  answering "which library does an unnamed call reach" must read
-  `default`, not `primary`. `served` is `null` when the registry could
-  not be read; that is not the same as an empty set, which cannot
-  occur (a daemon serves at least the library it came up under).
+  the library a call that names none is routed to — the registry
+  default while it is mounted, the only mounted library when the
+  registry declares none — and no row carries it when such a call is
+  refused (see *Unnamed calls*); `primary` marks the one the daemon
+  came up under. They are separate bits because they are separate
+  facts — a daemon started under a library that is not the registry's
+  default carries them on different rows — and a client answering
+  "which library does an unnamed call reach" must read `default`, not
+  `primary`. `served` is `null` when the registry could not be read;
+  that is not the same as an empty set, which cannot occur (a daemon
+  serves at least the library it came up under).
 
   `auto_registered` lists the registry names bring-up recorded for the
   selected root — a path-class root carrying an identity manifest the
@@ -857,10 +868,20 @@ the exit-code bucket does not distinguish the two.
   write session is taken.
 
 Every write method takes an optional `library`: the registry name of
-the library it acts on. Absent, it resolves to the registry's current
-default pointer, which `library.set_default` moves at run time; the
-pointer is not the library the daemon was brought up under, and the two
-differ whenever the daemon came up under a non-default library.
+the library it acts on. Absent, the call is routed by one rule, decided
+at the registry (*Unnamed calls*):
+
+1. the registry's `default` pointer, when it names a mounted library;
+2. the only mounted library, when the registry declares no default;
+3. otherwise the call is refused with `-32010 invalid library` — two or
+   more libraries and no default, or a declared default that is not
+   mounted. A `default` naming no registered library counts as
+   declared, so it refuses rather than falling back. The detail lists
+   the mounted names; the hint says how to name one.
+
+The pointer is what `library.set_default` moves at run time; it is not
+the library the daemon was brought up under, and the two differ
+whenever the daemon came up under a non-default library.
 `bookrack libraries default` sends that method whenever a daemon is
 listening, so the running daemon follows a pointer moved from the CLI
 rather than keeping the value it read at bring-up; with nothing
@@ -868,7 +889,8 @@ listening it writes the registry directly and the next start picks the
 change up. The queue-submitting methods — `ingest.submit`,
 `glean.submit`, `intake.ocr` — resolve the name the same way before the
 job is written, so the row carries the library it will run under and a
-later move of the pointer does not move a queued job. A name the
+later move of the pointer does not move a queued job, and an unnamed
+submit the rule refuses writes no row. A name the
 registry does not know is
 refused with `-32010 invalid library` before any store is opened, and
 a plan id minted against one library is not redeemable against
@@ -877,8 +899,8 @@ another (`-32015`). `papers.remove` and the `remove` / `corpus.rebuild`
 
 Every method that goes through the write mutex names the library it
 acted on in its success reply: `library` is the registry name the call
-resolved to — the explicit parameter, or the default pointer at the
-moment of the call. A method that already returns an object keeps
+resolved to — the explicit parameter, or the library the unnamed-call
+rule routed to at the moment of the call. A method that already returns an object keeps
 every field it had; `library` is added beside them. `library.fork`
 reports the source library there, next to `new_name`;
 `library.mount` and `library.unmount` report the same name in `name`
@@ -926,9 +948,11 @@ of these methods take the write mutex; they read straight from the
 catalog and corpus handles the daemon already holds.
 
 All of them accept an optional `library` param naming a mounted
-library. A name the registry does not carry is reported as
-`-32010 invalid library`, the same code the write-class handlers raise
-for the same parameter. Every other failure takes the code the shared
+library; absent, the call is routed by the rule under *Unnamed calls*.
+A name the registry does not carry, or an unnamed call the rule
+refuses, is reported as `-32010 invalid library`, the same code the
+write-class handlers raise for the same parameter. Every other failure
+takes the code the shared
 mapping layer assigns (see *Error mapping* above): a node addressed
 with the wrong read shape, an `index_profile` reference naming no
 defined profile, or an embedding model the backend does not hold is

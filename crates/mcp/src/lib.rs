@@ -5,8 +5,10 @@
 //!
 //! The server is a thin shell. It holds the warm [`LibraryRegistry`]
 //! behind an `Arc` and routes every tool call through it — the
-//! tool's `library` selector picks the target handle, or falls back
-//! to the registry's current default when absent. The crate depends
+//! tool's `library` selector picks the target handle; absent, the
+//! registry routes the call as it does one naming no library — the
+//! default when it is mounted, else the only mounted library, else a
+//! refusal. The crate depends
 //! only on `bookrack-ops`, never on the database crates behind it, so
 //! a schema change downstream leaves it untouched.
 
@@ -65,8 +67,9 @@ pub struct SearchArgs {
     /// The persisted meta default applies when omitted.
     #[serde(default)]
     pub refine_factor: Option<u32>,
-    /// Library short name from the registry. Omit to target the
-    /// session's default library.
+    /// Library short name from the registry. Omit to let the daemon
+    /// route the call: the registry default when it is mounted, else
+    /// the only mounted library; otherwise the call is refused.
     #[serde(default)]
     pub library: Option<String>,
     /// Which side of the library to search: `"book"` (the default —
@@ -108,8 +111,9 @@ pub struct SearchInBookArgs {
     /// Override the IVF-PQ refinement multiplier for this query only.
     #[serde(default)]
     pub refine_factor: Option<u32>,
-    /// Library short name from the registry. Omit to target the
-    /// session's default library.
+    /// Library short name from the registry. Omit to let the daemon
+    /// route the call: the registry default when it is mounted, else
+    /// the only mounted library; otherwise the call is refused.
     #[serde(default)]
     pub library: Option<String>,
 }
@@ -167,8 +171,9 @@ pub struct ListBooksArgs {
     /// Number of leading rows to skip.
     #[serde(default)]
     pub offset: Option<u32>,
-    /// Library short name from the registry. Omit to target the
-    /// session's default library.
+    /// Library short name from the registry. Omit to let the daemon
+    /// route the call: the registry default when it is mounted, else
+    /// the only mounted library; otherwise the call is refused.
     #[serde(default)]
     pub library: Option<String>,
 }
@@ -217,8 +222,9 @@ pub struct FindBooksArgs {
     /// Number of leading rows to skip.
     #[serde(default)]
     pub offset: Option<u32>,
-    /// Library short name from the registry. Omit to target the
-    /// session's default library.
+    /// Library short name from the registry. Omit to let the daemon
+    /// route the call: the registry default when it is mounted, else
+    /// the only mounted library; otherwise the call is refused.
     #[serde(default)]
     pub library: Option<String>,
 }
@@ -228,8 +234,9 @@ pub struct FindBooksArgs {
 pub struct BookIdArgs {
     /// Catalog intake id of the book.
     pub intake_id: i64,
-    /// Library short name from the registry. Omit to target the
-    /// session's default library.
+    /// Library short name from the registry. Omit to let the daemon
+    /// route the call: the registry default when it is mounted, else
+    /// the only mounted library; otherwise the call is refused.
     #[serde(default)]
     pub library: Option<String>,
 }
@@ -263,8 +270,9 @@ pub struct ShowTocArgs {
     /// section by name.
     #[serde(default)]
     pub title_substring: Option<String>,
-    /// Library short name from the registry. Omit to target the
-    /// session's default library.
+    /// Library short name from the registry. Omit to let the daemon
+    /// route the call: the registry default when it is mounted, else
+    /// the only mounted library; otherwise the call is refused.
     #[serde(default)]
     pub library: Option<String>,
 }
@@ -292,8 +300,9 @@ pub struct ListPapersArgs {
     /// Number of leading rows to skip.
     #[serde(default)]
     pub offset: Option<u32>,
-    /// Library short name from the registry. Omit to target the
-    /// session's default library.
+    /// Library short name from the registry. Omit to let the daemon
+    /// route the call: the registry default when it is mounted, else
+    /// the only mounted library; otherwise the call is refused.
     #[serde(default)]
     pub library: Option<String>,
 }
@@ -344,8 +353,9 @@ pub struct FindPapersArgs {
     /// Number of leading rows to skip.
     #[serde(default)]
     pub offset: Option<u32>,
-    /// Library short name from the registry. Omit to target the
-    /// session's default library.
+    /// Library short name from the registry. Omit to let the daemon
+    /// route the call: the registry default when it is mounted, else
+    /// the only mounted library; otherwise the call is refused.
     #[serde(default)]
     pub library: Option<String>,
 }
@@ -355,8 +365,9 @@ pub struct FindPapersArgs {
 pub struct PaperIdArgs {
     /// Catalog intake id of the paper.
     pub intake_id: i64,
-    /// Library short name from the registry. Omit to target the
-    /// session's default library.
+    /// Library short name from the registry. Omit to let the daemon
+    /// route the call: the registry default when it is mounted, else
+    /// the only mounted library; otherwise the call is refused.
     #[serde(default)]
     pub library: Option<String>,
 }
@@ -379,8 +390,9 @@ pub struct SearchInPaperArgs {
     /// Override the IVF-PQ refinement multiplier for this query only.
     #[serde(default)]
     pub refine_factor: Option<u32>,
-    /// Library short name from the registry. Omit to target the
-    /// session's default library.
+    /// Library short name from the registry. Omit to let the daemon
+    /// route the call: the registry default when it is mounted, else
+    /// the only mounted library; otherwise the call is refused.
     #[serde(default)]
     pub library: Option<String>,
 }
@@ -420,8 +432,9 @@ pub struct ReadContextArgs {
     /// clamped server-side.
     #[serde(default)]
     pub after: Option<u32>,
-    /// Library short name from the registry. Omit to target the
-    /// session's default library. Unrelated to `kind`.
+    /// Library short name from the registry. Omit to let the daemon
+    /// route the call: the registry default when it is mounted, else
+    /// the only mounted library; otherwise the call is refused. Unrelated to `kind`.
     #[serde(default)]
     pub library: Option<String>,
 }
@@ -443,8 +456,9 @@ pub struct ReadSpanArgs {
     /// read from the span's start.
     #[serde(default)]
     pub start_after: Option<i64>,
-    /// Library short name from the registry. Omit to target the
-    /// session's default library. Unrelated to `kind`.
+    /// Library short name from the registry. Omit to let the daemon
+    /// route the call: the registry default when it is mounted, else
+    /// the only mounted library; otherwise the call is refused. Unrelated to `kind`.
     #[serde(default)]
     pub library: Option<String>,
 }
@@ -477,8 +491,9 @@ pub struct MetadataPageArgs {
     /// Number of leading rows to skip.
     #[serde(default)]
     pub offset: Option<u32>,
-    /// Library short name from the registry. Omit to target the
-    /// session's default library.
+    /// Library short name from the registry. Omit to let the daemon
+    /// route the call: the registry default when it is mounted, else
+    /// the only mounted library; otherwise the call is refused.
     #[serde(default)]
     pub library: Option<String>,
 }
@@ -487,8 +502,9 @@ pub struct MetadataPageArgs {
 /// the library selector; the tools themselves accept no other inputs.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct LibraryOnlyArgs {
-    /// Library short name from the registry. Omit to target the
-    /// session's default library.
+    /// Library short name from the registry. Omit to let the daemon
+    /// route the call: the registry default when it is mounted, else
+    /// the only mounted library; otherwise the call is refused.
     #[serde(default)]
     pub library: Option<String>,
 }
@@ -830,9 +846,9 @@ impl BookrackServer {
     /// of the ingest queue the daemon-REPL drives; a host that spawns
     /// no queue worker passes an inert default. `shutdown_tx` carries the session-wide graceful-shutdown
     /// signal so the `session.shutdown` tool can ask the daemon to
-    /// stop. Tools route each call through the registry, scoped to
-    /// either an explicit `library` selector or the current default
-    /// when the selector is absent.
+    /// stop. Tools route each call through the registry, scoped to an
+    /// explicit `library` selector or, when the selector is absent, to
+    /// the library the registry routes an unnamed call to.
     pub fn new(
         registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
         info_context: LibraryInfoContext,
@@ -2170,7 +2186,7 @@ impl ServerHandler for BookrackServer {
 /// * `/mcp` — the MCP streamable-HTTP service. Connect an MCP client
 ///   to `http://<addr>/mcp`. Every tool resolves its target library
 ///   through the registry — by the `library` selector when present,
-///   by the registry's current default when absent. Write tools
+///   by the registry's rule for an unnamed call when absent. Write tools
 ///   require an explicit `library` name in their input; read tools
 ///   accept `library` as optional.
 /// * `/session/logs` — a Server-Sent Events endpoint that streams

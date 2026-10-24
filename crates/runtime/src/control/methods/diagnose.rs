@@ -17,7 +17,7 @@ use super::MethodContext;
 pub struct DiagnoseRunParams {
     /// The library whose catalog, stores, and audit overlay the bundle
     /// snapshots, and under whose root it lands unless `out` says
-    /// otherwise. Absent means the registry's current default.
+    /// otherwise. Absent means the library a call naming none is routed to.
     #[serde(default)]
     pub library: Option<String>,
     #[serde(default)]

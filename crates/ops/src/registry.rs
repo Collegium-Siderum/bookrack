@@ -64,6 +64,26 @@ pub enum RegistryError {
         name: String,
     },
 
+    /// A call naming no library has no single library to go to: the
+    /// registry default is not mounted, or none is declared and more
+    /// than one library is. `mounted` lists the names an explicit call
+    /// would reach, sorted; `default` is the registry's pointer as
+    /// declared, `None` when it declares none.
+    #[error(
+        "cannot tell which library a call naming none is for (mounted: {}; {})",
+        mounted.join(", "),
+        match default {
+            Some(name) => format!("the registry default {name:?} is not mounted"),
+            None => "the registry names no default".to_string(),
+        }
+    )]
+    UnnamedAmbiguous {
+        /// Names the registry currently carries, sorted.
+        mounted: Vec<String>,
+        /// The registry's `default` pointer as declared.
+        default: Option<String>,
+    },
+
     /// The internal `RwLock` guarding the default-library name was
     /// poisoned. Indicates a bug — a panic while a writer held the lock
     /// — rather than a misuse path the caller can recover from.
@@ -95,6 +115,24 @@ impl Explain for RegistryError {
                 .hint("Register a library with `bookrack libraries register`."),
             Self::AlreadyMounted { .. } => Problem::new(self.to_string())
                 .hint("It is already being served, so there is nothing to mount."),
+            // The summary states the fact; which libraries are mounted
+            // and why none of them is the route are the evidence, and
+            // naming one is the next step.
+            Self::UnnamedAmbiguous { mounted, default } => {
+                let pointer = match default {
+                    Some(name) => format!("The registry default {name:?} is not mounted."),
+                    None => "The registry names no default.".to_string(),
+                };
+                Problem::new("cannot tell which library a call naming none is for")
+                    .detail(format!(
+                        "Mounted libraries: {}. {pointer}",
+                        mounted.join(", ")
+                    ))
+                    .hint(
+                        "Name one with `--library <name>` on the command line, or pass the \
+                         `library` argument over MCP.",
+                    )
+            }
             // A poisoned lock is a bug: there is no next step to write.
             Self::DefaultLockPoisoned | Self::LibsLockPoisoned => Problem::from_error_chain(self),
         }
@@ -514,15 +552,19 @@ pub struct LibrarySummary {
 }
 
 /// The in-process scheduler: a map of registered libraries keyed by
-/// short name, plus a mutable pointer to the default library used when
-/// a caller does not name one.
+/// short name, plus a mutable pointer to the default library a caller
+/// that names none is routed to.
 ///
 /// The default pointer is a cache of the on-disk registry's `default`
 /// selection, not a second source of truth: it is seeded from the
 /// registry at bring-up and re-synced whenever `library.set_default`
 /// writes the registry, so the two agree after every write the daemon
 /// performs. An external write to the registry does not push into this
-/// cache; a restart re-seeds it.
+/// cache; a restart re-seeds it. The pointer may name a library that is
+/// not mounted, or nothing at all; where an unnamed call then goes is
+/// [`get`]'s rule.
+///
+/// [`get`]: LibraryRegistry::get
 ///
 /// Held behind an `Arc` and shared across the REPL task, the MCP
 /// server, and the queue worker. Routing in this phase is "look up
@@ -539,17 +581,21 @@ pub struct LibrarySummary {
 /// [`unmount`]: LibraryRegistry::unmount
 pub struct LibraryRegistry<E: Embedder> {
     libs: RwLock<HashMap<String, Arc<LibraryHandle<E>>>>,
-    default: RwLock<String>,
+    default: RwLock<Option<String>>,
 }
 
 impl<E: Embedder> LibraryRegistry<E> {
-    /// Build a registry from an iterator of [`LibraryHandle`]s and a
-    /// chosen default name. Returns [`RegistryError::Empty`] if the
-    /// iterator yields no handle, and [`RegistryError::LibraryUnknown`]
-    /// if the default name is not among the handles' names.
+    /// Build a registry from an iterator of [`LibraryHandle`]s and the
+    /// registry's `default` pointer as declared, `None` when it declares
+    /// none. The pointer need not name a handle: a default the mounted
+    /// set lacks is kept, and [`get`] refuses the unnamed call for as
+    /// long as that is so. Returns [`RegistryError::Empty`] if the
+    /// iterator yields no handle.
+    ///
+    /// [`get`]: LibraryRegistry::get
     pub fn from_handles(
         handles: impl IntoIterator<Item = Arc<LibraryHandle<E>>>,
-        default: impl Into<String>,
+        default: Option<String>,
     ) -> Result<Arc<LibraryRegistry<E>>> {
         let mut libs: HashMap<String, Arc<LibraryHandle<E>>> = HashMap::new();
         for handle in handles {
@@ -557,13 +603,6 @@ impl<E: Embedder> LibraryRegistry<E> {
         }
         if libs.is_empty() {
             return Err(RegistryError::Empty);
-        }
-        let default = default.into();
-        if !libs.contains_key(&default) {
-            return Err(RegistryError::LibraryUnknown {
-                name: default,
-                available: sorted_names(&libs),
-            });
         }
         Ok(Arc::new(LibraryRegistry {
             libs: RwLock::new(libs),
@@ -583,30 +622,35 @@ impl<E: Embedder> LibraryRegistry<E> {
         libs.insert(name.clone(), handle);
         Arc::new(LibraryRegistry {
             libs: RwLock::new(libs),
-            default: RwLock::new(name),
+            default: RwLock::new(Some(name)),
         })
     }
 
-    /// Look up a handle. `None` means "use the current default".
+    /// Look up a handle. `None` is a call that names no library, routed
+    /// by `unnamed_route`: the default pointer when it is mounted, the
+    /// only mounted library when no default is declared, and otherwise
+    /// [`RegistryError::UnnamedAmbiguous`] — a declared default that is
+    /// not mounted refuses rather than falling back to whatever is.
     pub fn get(&self, name: Option<&str>) -> Result<Arc<LibraryHandle<E>>> {
-        let key = match name {
-            Some(n) => n.to_string(),
-            None => self
-                .default
-                .read()
-                .map_err(|_| RegistryError::DefaultLockPoisoned)?
-                .clone(),
-        };
+        let default = self
+            .default
+            .read()
+            .map_err(|_| RegistryError::DefaultLockPoisoned)?
+            .clone();
         let libs = self
             .libs
             .read()
             .map_err(|_| RegistryError::LibsLockPoisoned)?;
-        libs.get(&key)
-            .cloned()
-            .ok_or_else(|| RegistryError::LibraryUnknown {
-                name: key,
-                available: sorted_names(&libs),
-            })
+        match name {
+            Some(key) => libs
+                .get(key)
+                .cloned()
+                .ok_or_else(|| RegistryError::LibraryUnknown {
+                    name: key.to_string(),
+                    available: sorted_names(&libs),
+                }),
+            None => unnamed_route(&libs, default.as_deref()).cloned(),
+        }
     }
 
     /// Move the default-library pointer to `name`. Returns
@@ -629,7 +673,7 @@ impl<E: Embedder> LibraryRegistry<E> {
             .default
             .write()
             .map_err(|_| RegistryError::DefaultLockPoisoned)?;
-        *guard = name.to_string();
+        *guard = Some(name.to_string());
         Ok(())
     }
 
@@ -673,8 +717,9 @@ impl<E: Embedder> LibraryRegistry<E> {
             })
     }
 
-    /// Read the current default-library name.
-    pub fn default_name(&self) -> Result<String> {
+    /// Read the current default-library name; `None` when the registry
+    /// declares none.
+    pub fn default_name(&self) -> Result<Option<String>> {
         self.default
             .read()
             .map(|guard| guard.clone())
@@ -682,7 +727,13 @@ impl<E: Embedder> LibraryRegistry<E> {
     }
 
     /// Project every registered library to a [`LibrarySummary`], sorted
-    /// by name. The current default is flagged in `is_default`.
+    /// by name. `is_default` marks the library an unnamed call reaches,
+    /// by the same rule [`get`] routes with; when that rule refuses, no
+    /// row is marked and the listing still carries every row — the
+    /// listing is what the shutdown path walks to release each root,
+    /// and a route with nowhere to go is not a reason to skip one.
+    ///
+    /// [`get`]: LibraryRegistry::get
     pub fn list(&self) -> Result<Vec<LibrarySummary>> {
         let default = self
             .default
@@ -693,13 +744,16 @@ impl<E: Embedder> LibraryRegistry<E> {
             .libs
             .read()
             .map_err(|_| RegistryError::LibsLockPoisoned)?;
+        let route = unnamed_route(&libs, default.as_deref())
+            .ok()
+            .map(|h| h.name().to_string());
         let mut out: Vec<LibrarySummary> = libs
             .values()
             .map(|h| LibrarySummary {
                 name: h.name().to_string(),
                 data_dir: h.cfg().data_dir().to_path_buf(),
                 dimension: h.ops().dimension(),
-                is_default: h.name() == default,
+                is_default: Some(h.name()) == route.as_deref(),
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -721,6 +775,39 @@ impl<E: Embedder> LibraryRegistry<E> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// Where a call that names no library goes, from the mounted set and
+/// the default pointer as declared:
+///
+/// 1. the default, when it names a mounted library;
+/// 2. the only mounted library, when no default is declared;
+/// 3. [`RegistryError::Empty`] when nothing is mounted;
+/// 4. [`RegistryError::UnnamedAmbiguous`] otherwise — several
+///    libraries and no default, or a declared default that is not
+///    mounted, which refuses rather than landing on whatever is.
+fn unnamed_route<'a, E: Embedder>(
+    libs: &'a HashMap<String, Arc<LibraryHandle<E>>>,
+    default: Option<&str>,
+) -> Result<&'a Arc<LibraryHandle<E>>> {
+    if let Some(name) = default
+        && let Some(handle) = libs.get(name)
+    {
+        return Ok(handle);
+    }
+    if libs.is_empty() {
+        return Err(RegistryError::Empty);
+    }
+    if default.is_none()
+        && libs.len() == 1
+        && let Some(only) = libs.values().next()
+    {
+        return Ok(only);
+    }
+    Err(RegistryError::UnnamedAmbiguous {
+        mounted: sorted_names(libs),
+        default: default.map(str::to_string),
+    })
 }
 
 /// Open a `pipeline_runs` row on the paper catalog for one glean
@@ -902,7 +989,7 @@ mod tests {
     #[test]
     fn single_registers_one_default() {
         let reg = LibraryRegistry::single(handle("prod"));
-        assert_eq!(reg.default_name().unwrap(), "prod");
+        assert_eq!(reg.default_name().unwrap().as_deref(), Some("prod"));
         assert!(reg.get(None).is_ok());
         assert_eq!(reg.get(None).unwrap().name(), "prod");
         assert_eq!(reg.len(), 1);
@@ -911,7 +998,8 @@ mod tests {
 
     #[test]
     fn get_named_returns_named_handle() {
-        let reg = LibraryRegistry::from_handles([handle("a"), handle("b")], "a").unwrap();
+        let reg =
+            LibraryRegistry::from_handles([handle("a"), handle("b")], Some("a".into())).unwrap();
         assert_eq!(reg.get(Some("b")).unwrap().name(), "b");
         assert_eq!(reg.get(None).unwrap().name(), "a");
     }
@@ -919,7 +1007,8 @@ mod tests {
     #[test]
     fn get_unknown_lists_available_sorted() {
         let reg =
-            LibraryRegistry::from_handles([handle("paper"), handle("books")], "paper").unwrap();
+            LibraryRegistry::from_handles([handle("paper"), handle("books")], Some("paper".into()))
+                .unwrap();
         match reg.get(Some("missing")) {
             Err(RegistryError::LibraryUnknown { name, available }) => {
                 assert_eq!(name, "missing");
@@ -932,41 +1021,156 @@ mod tests {
 
     #[test]
     fn set_default_moves_pointer_and_get_none_follows() {
-        let reg = LibraryRegistry::from_handles([handle("a"), handle("b")], "a").unwrap();
+        let reg =
+            LibraryRegistry::from_handles([handle("a"), handle("b")], Some("a".into())).unwrap();
         reg.set_default("b").unwrap();
-        assert_eq!(reg.default_name().unwrap(), "b");
+        assert_eq!(reg.default_name().unwrap().as_deref(), Some("b"));
         assert_eq!(reg.get(None).unwrap().name(), "b");
     }
 
     #[test]
     fn set_default_unknown_rejects_without_mutation() {
-        let reg = LibraryRegistry::from_handles([handle("a"), handle("b")], "a").unwrap();
+        let reg =
+            LibraryRegistry::from_handles([handle("a"), handle("b")], Some("a".into())).unwrap();
         assert!(matches!(
             reg.set_default("zzz"),
             Err(RegistryError::LibraryUnknown { .. })
         ));
-        assert_eq!(reg.default_name().unwrap(), "a");
+        assert_eq!(reg.default_name().unwrap().as_deref(), Some("a"));
     }
 
     #[test]
     fn from_handles_rejects_empty() {
         let empty: [std::sync::Arc<LibraryHandle<FakeEmbedder>>; 0] = [];
         assert!(matches!(
-            LibraryRegistry::from_handles(empty, "anything"),
+            LibraryRegistry::from_handles(empty, Some("anything".into())),
             Err(RegistryError::Empty)
         ));
     }
 
-    #[test]
-    fn from_handles_rejects_unknown_default() {
-        match LibraryRegistry::from_handles([handle("a")], "ghost") {
-            Err(RegistryError::LibraryUnknown { name, available }) => {
-                assert_eq!(name, "ghost");
-                assert_eq!(available, vec!["a".to_string()]);
-            }
-            Err(other) => panic!("expected LibraryUnknown, got {other:?}"),
-            Ok(_) => panic!("expected error, got Ok"),
+    fn expect_unnamed_ambiguous<T>(result: super::Result<T>) -> (Vec<String>, Option<String>) {
+        match result {
+            Err(RegistryError::UnnamedAmbiguous { mounted, default }) => (mounted, default),
+            Err(other) => panic!("expected UnnamedAmbiguous, got {other:?}"),
+            Ok(_) => panic!("expected UnnamedAmbiguous, got Ok"),
         }
+    }
+
+    /// A default the mounted set lacks is a routing fact, not a build
+    /// error: the registry comes up and refuses the unnamed call.
+    #[test]
+    fn from_handles_keeps_an_unmounted_default() {
+        let reg = LibraryRegistry::from_handles([handle("a")], Some("ghost".into()))
+            .expect("an unmounted default is kept, not refused");
+        let (mounted, default) = expect_unnamed_ambiguous(reg.get(None));
+        assert_eq!(mounted, vec!["a".to_string()]);
+        assert_eq!(default.as_deref(), Some("ghost"));
+    }
+
+    #[test]
+    fn get_none_refuses_when_the_declared_default_is_not_mounted() {
+        let reg = LibraryRegistry::from_handles(
+            [handle("a"), handle("b"), handle("c")],
+            Some("a".into()),
+        )
+        .unwrap();
+        reg.unmount("a").unwrap();
+        let (mounted, default) = expect_unnamed_ambiguous(reg.get(None));
+        assert_eq!(mounted, vec!["b".to_string(), "c".to_string()]);
+        assert_eq!(default.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn get_none_routes_the_only_library_when_no_default_is_declared() {
+        let reg = LibraryRegistry::from_handles([handle("only")], None).unwrap();
+        assert_eq!(reg.get(None).unwrap().name(), "only");
+        assert_eq!(reg.default_name().unwrap(), None);
+    }
+
+    #[test]
+    fn get_none_refuses_two_libraries_without_a_default() {
+        let reg = LibraryRegistry::from_handles([handle("a"), handle("b")], None).unwrap();
+        let (mounted, default) = expect_unnamed_ambiguous(reg.get(None));
+        assert_eq!(mounted, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(default, None);
+    }
+
+    /// `is_default` is where an unnamed call lands. When it lands
+    /// nowhere the listing still succeeds and carries every row, with
+    /// no row marked: the listing is read by the shutdown path, which
+    /// has to walk every library whether or not one of them is the
+    /// route.
+    #[test]
+    fn list_marks_the_unnamed_route_without_failing() {
+        let two_no_default =
+            LibraryRegistry::from_handles([handle("a"), handle("b")], None).unwrap();
+        let rows = two_no_default.list().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| !row.is_default), "{rows:?}");
+
+        let default_not_mounted =
+            LibraryRegistry::from_handles([handle("a"), handle("b")], Some("ghost".into()))
+                .unwrap();
+        let rows = default_not_mounted.list().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| !row.is_default), "{rows:?}");
+
+        let one_no_default = LibraryRegistry::from_handles([handle("a")], None).unwrap();
+        let rows = one_no_default.list().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].is_default, "{rows:?}");
+    }
+
+    /// The unnamed route is refused with the mounted set as evidence
+    /// and a way to name a library as the next step; the summary
+    /// carries neither.
+    #[test]
+    fn unnamed_ambiguous_explains_the_mounted_set_and_the_pointer() {
+        use bookrack_core::Explain;
+        let problem = RegistryError::UnnamedAmbiguous {
+            mounted: vec!["alpha".into(), "beta".into()],
+            default: Some("gamma".into()),
+        }
+        .explain();
+        assert_eq!(
+            problem.summary,
+            "cannot tell which library a call naming none is for"
+        );
+        let detail = problem.data.detail.expect("detail");
+        assert!(detail.contains("alpha, beta"), "{detail}");
+        assert!(detail.contains("\"gamma\" is not mounted"), "{detail}");
+        let hint = problem.data.hint.expect("hint");
+        assert!(hint.contains("--library <name>"), "{hint}");
+        assert!(hint.contains("`library` argument"), "{hint}");
+
+        let undeclared = RegistryError::UnnamedAmbiguous {
+            mounted: vec!["alpha".into(), "beta".into()],
+            default: None,
+        }
+        .explain();
+        let detail = undeclared.data.detail.expect("detail");
+        assert!(detail.contains("names no default"), "{detail}");
+    }
+
+    /// Compile-time registration: every variant is named here, so a
+    /// variant added to the `#[non_exhaustive]` enum stops its author
+    /// at a same-crate `match` and sends them to the wire mappings in
+    /// the runtime and MCP crates, where a downstream `match` cannot
+    /// be exhaustive and a new variant would otherwise take a default
+    /// code.
+    #[test]
+    fn every_registry_error_variant_is_registered_for_wire_mapping() {
+        fn assert_classified(e: &RegistryError) {
+            match e {
+                RegistryError::LibraryUnknown { .. }
+                | RegistryError::Empty
+                | RegistryError::AlreadyMounted { .. }
+                | RegistryError::UnnamedAmbiguous { .. }
+                | RegistryError::DefaultLockPoisoned
+                | RegistryError::LibsLockPoisoned => {}
+            }
+        }
+        assert_classified(&RegistryError::Empty);
     }
 
     #[tokio::test]
@@ -1038,7 +1242,7 @@ mod tests {
 
     #[test]
     fn mount_adds_a_name_to_the_listing() {
-        let reg = LibraryRegistry::from_handles([handle("a")], "a").unwrap();
+        let reg = LibraryRegistry::from_handles([handle("a")], Some("a".into())).unwrap();
         reg.mount(handle("b")).unwrap();
         let names: Vec<String> = reg.list().unwrap().into_iter().map(|s| s.name).collect();
         assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
@@ -1049,7 +1253,7 @@ mod tests {
     #[test]
     fn unmount_removes_it_and_drops_the_guard() {
         let (b, flag) = guarded_handle("b");
-        let reg = LibraryRegistry::from_handles([handle("a")], "a").unwrap();
+        let reg = LibraryRegistry::from_handles([handle("a")], Some("a".into())).unwrap();
         reg.mount(b).unwrap();
         assert!(
             !released(&flag),
@@ -1079,7 +1283,7 @@ mod tests {
     #[test]
     fn unmount_keeps_the_guard_alive_while_a_handle_clone_lives() {
         let (b, flag) = guarded_handle("b");
-        let reg = LibraryRegistry::from_handles([handle("a")], "a").unwrap();
+        let reg = LibraryRegistry::from_handles([handle("a")], Some("a".into())).unwrap();
         reg.mount(b).unwrap();
 
         let in_flight = reg.get(Some("b")).unwrap();
@@ -1098,7 +1302,7 @@ mod tests {
 
     #[test]
     fn mount_refuses_a_name_already_mounted() {
-        let reg = LibraryRegistry::from_handles([handle("a")], "a").unwrap();
+        let reg = LibraryRegistry::from_handles([handle("a")], Some("a".into())).unwrap();
         match reg.mount(handle("a")) {
             Err(RegistryError::AlreadyMounted { name }) => assert_eq!(name, "a"),
             Err(other) => panic!("expected AlreadyMounted, got {other:?}"),
@@ -1109,7 +1313,7 @@ mod tests {
 
     #[test]
     fn unmount_refuses_a_name_that_is_not_mounted() {
-        let reg = LibraryRegistry::from_handles([handle("a")], "a").unwrap();
+        let reg = LibraryRegistry::from_handles([handle("a")], Some("a".into())).unwrap();
         match reg.unmount("ghost") {
             Err(RegistryError::LibraryUnknown { name, available }) => {
                 assert_eq!(name, "ghost");
@@ -1124,7 +1328,7 @@ mod tests {
     fn list_returns_sorted_entries_with_default_flagged() {
         let reg = LibraryRegistry::from_handles(
             [handle("paper"), handle("books"), handle("journals")],
-            "books",
+            Some("books".into()),
         )
         .unwrap();
         let summaries = reg.list().unwrap();

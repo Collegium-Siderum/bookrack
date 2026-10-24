@@ -8,6 +8,22 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **An unnamed call reaches the registry default only when it is
+  mounted.** A call that names no library used to go to the daemon's
+  default pointer, which was seeded from the library the daemon came
+  up under when the registry declared none. It now goes to the
+  registry default when that library is mounted, to the only mounted
+  library when the registry declares no default, and is otherwise
+  refused — `-32010` on the control socket, invalid params (`-32602`)
+  from the MCP tools — with the mounted names in the detail and how to
+  name one (`--library <name>` or the `library` argument) in the hint.
+  A registry default that names no registered library counts as
+  declared, so it refuses rather than falling back. `served[].default`,
+  `library.list`, and `session.info` mark the library an unnamed call
+  reaches, and mark none when it is refused.
+
 ## [0.13.0] - 2026-10-24
 
 ### Added

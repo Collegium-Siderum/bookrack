@@ -16,9 +16,8 @@ use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 /// Which library's stamps to reconcile.
 #[derive(Debug, Default, Deserialize)]
 pub struct ReconcileParams {
-    /// The library this call acts on. Absent means the registry's
-    /// current default, the pointer `library.set_default` moves at run
-    /// time.
+    /// The library this call acts on. Absent means the library a call
+    /// naming none is routed to: `select_library`'s rule.
     #[serde(default)]
     library: Option<String>,
 }

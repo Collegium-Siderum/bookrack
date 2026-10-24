@@ -363,14 +363,18 @@ impl DaemonRuntime {
         //     registry) keeps the single-library form. The set changes
         //     at runtime through `library.mount` / `library.unmount`.
         let primary_name = cfg.library().unwrap_or("default").to_string();
-        let registry_entries = if cfg.library().is_some() {
-            bookrack_config::list_libraries()
+        let (registry_entries, registry_default) = if cfg.library().is_some() {
+            bookrack_config::list_libraries_with_default()
                 .context("read the library registry for eager mounting")?
                 .unwrap_or_default()
         } else {
-            Vec::new()
+            (Vec::new(), None)
         };
-        let plan = plan_mounts(&primary_name, &registry_entries);
+        let plan = plan_mounts(
+            &primary_name,
+            &registry_entries,
+            registry_default.as_deref(),
+        );
         let mut mounts: Vec<(String, Arc<Config>)> = Vec::with_capacity(plan.names.len());
         if plan.eager {
             for name in &plan.names {
@@ -542,13 +546,13 @@ impl DaemonRuntime {
         }
         let registry = LibraryRegistry::from_handles(handles, plan.default_name.clone())
             .context("assemble the library registry")?;
-        // Single-value snapshot consumed by `library.changed` and the
-        // queue worker's no-name fallback; per-library status surfaces
-        // are a later milestone.
+        // Single-value snapshot consumed by the `status` card and the
+        // `library.changed` snapshot; it is not a routing fallback.
+        // Per-library status surfaces are a later milestone.
         let library_name = primary_name;
         tracing::info!(
             libraries = mounts.len(),
-            default = %plan.default_name,
+            default = ?plan.default_name,
             auto_registered = ?auto_registered,
             "library registry warmed up",
         );
@@ -611,8 +615,8 @@ impl DaemonRuntime {
                             // A submit pins the job to a registry name
                             // at enqueue time. An empty name is a row
                             // from a queue document written before the
-                            // field was filled, and reads as the
-                            // registry's current default.
+                            // field was filled, and is routed as a call
+                            // naming no library is.
                             let library: Option<&str> = if job.library.is_empty() {
                                 None
                             } else {
@@ -946,8 +950,9 @@ impl DaemonRuntime {
 struct MountPlan {
     /// Libraries to mount, in registry order for the eager form.
     names: Vec<String>,
-    /// Name the registry's default pointer starts at.
-    default_name: String,
+    /// The registry's `default` pointer as declared; `None` when it
+    /// declares none, and for a root the registry does not know.
+    default_name: Option<String>,
     /// Whether each name resolves through the registry (`true`) or
     /// the set is the single primary selection (`false`).
     eager: bool,
@@ -1007,24 +1012,25 @@ fn relocated_identity_problem(root: &Path, name: &str, entry_root: &Path) -> Pro
 /// bring-up selection's resolved name; when it matches a registry
 /// entry the daemon mounts every entry, otherwise it serves the
 /// primary root alone (a path-class root the registry does not know,
-/// or a machine with no registry). The default pointer starts at the
-/// registry's `default` entry, falling back to the primary when the
-/// registry declares none.
-fn plan_mounts(primary_name: &str, entries: &[LibraryEntry]) -> MountPlan {
+/// or a machine with no registry). The default pointer is
+/// `registry_default` as the registry declares it — a pointer naming
+/// no entry is carried as such, not inferred from the entries or the
+/// bring-up selection — and `None` for the single-root form.
+fn plan_mounts(
+    primary_name: &str,
+    entries: &[LibraryEntry],
+    registry_default: Option<&str>,
+) -> MountPlan {
     if entries.iter().any(|e| e.name == primary_name) {
         MountPlan {
             names: entries.iter().map(|e| e.name.clone()).collect(),
-            default_name: entries
-                .iter()
-                .find(|e| e.is_default)
-                .map(|e| e.name.clone())
-                .unwrap_or_else(|| primary_name.to_string()),
+            default_name: registry_default.map(str::to_string),
             eager: true,
         }
     } else {
         MountPlan {
             names: vec![primary_name.to_string()],
-            default_name: primary_name.to_string(),
+            default_name: None,
             eager: false,
         }
     }
@@ -1442,31 +1448,46 @@ mod tests {
     fn plan_mounts_registered_primary_mounts_every_entry() {
         let root = Path::new("root");
         let entries = [entry("a", root, true), entry("b", root, false)];
-        let plan = plan_mounts("b", &entries);
+        let plan = plan_mounts("b", &entries, Some("a"));
         assert!(plan.eager);
         assert_eq!(plan.names, ["a", "b"]);
         // The default pointer starts at the registry's default entry,
         // not at the bring-up selection.
-        assert_eq!(plan.default_name, "a");
+        assert_eq!(plan.default_name.as_deref(), Some("a"));
     }
 
     #[test]
     fn plan_mounts_unregistered_primary_keeps_the_single_library_form() {
         let root = Path::new("root");
         let entries = [entry("a", root, true)];
-        let plan = plan_mounts("default", &entries);
+        let plan = plan_mounts("default", &entries, Some("a"));
         assert!(!plan.eager);
         assert_eq!(plan.names, ["default"]);
-        assert_eq!(plan.default_name, "default");
+        // A root the registry does not know has no pointer: the only
+        // mounted library is the route by the registry's own rule.
+        assert_eq!(plan.default_name, None);
     }
 
     #[test]
-    fn plan_mounts_default_falls_back_to_the_primary_without_a_registry_default() {
+    fn plan_mounts_default_is_none_without_a_registry_default() {
         let root = Path::new("root");
         let entries = [entry("a", root, false), entry("b", root, false)];
-        let plan = plan_mounts("b", &entries);
+        let plan = plan_mounts("b", &entries, None);
         assert!(plan.eager);
-        assert_eq!(plan.default_name, "b");
+        assert_eq!(plan.default_name, None);
+    }
+
+    /// The pointer is the registry's `default` as written. A pointer
+    /// naming no entry is still a declared default: it is carried as
+    /// such, so the registry refuses an unnamed call instead of
+    /// inferring a default from the entries or the bring-up selection.
+    #[test]
+    fn plan_mounts_keeps_a_dangling_default() {
+        let root = Path::new("root");
+        let entries = [entry("beta", root, false)];
+        let plan = plan_mounts("beta", &entries, Some("ghost"));
+        assert!(plan.eager);
+        assert_eq!(plan.default_name.as_deref(), Some("ghost"));
     }
 
     #[test]
