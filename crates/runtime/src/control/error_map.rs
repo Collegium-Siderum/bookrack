@@ -115,6 +115,30 @@ pub fn handler_err(method: &str, err: Report) -> RpcError {
     })
 }
 
+/// The three-part reading of `err` for a surface that is not an RPC
+/// reply: the classified wording when the chain carries a type this
+/// map knows — the inverse of [`rpc_from_problem`], so the two
+/// surfaces word one failure alike — and the flattened chain otherwise.
+pub(crate) fn report_problem(err: &Report) -> Problem {
+    match classify(err) {
+        Some(rpc) => {
+            let data = rpc
+                .data
+                .and_then(|data| serde_json::from_value::<bookrack_core::ProblemData>(data).ok())
+                .unwrap_or(bookrack_core::ProblemData {
+                    detail: None,
+                    hint: None,
+                    retryable: false,
+                });
+            Problem {
+                summary: rpc.message,
+                data,
+            }
+        }
+        None => Problem::from_error_chain(err.as_ref()),
+    }
+}
+
 /// The envelope `err` takes when its chain carries a type this map
 /// knows, or `None` when it does not and the caller falls back to the
 /// residual `INTERNAL_ERROR`.
@@ -613,9 +637,9 @@ fn from_corpus(e: &CorpusError) -> RpcError {
 /// hint, so a new variant is named here before it ships.
 fn from_registry(e: &RegistryError) -> RpcError {
     let code = match e {
-        RegistryError::LibraryUnknown { .. } | RegistryError::UnnamedAmbiguous { .. } => {
-            INVALID_LIBRARY
-        }
+        RegistryError::LibraryUnknown { .. }
+        | RegistryError::UnnamedAmbiguous { .. }
+        | RegistryError::LibraryUnmounted { .. } => INVALID_LIBRARY,
         RegistryError::Empty => INVALID_PARAMS,
         RegistryError::AlreadyMounted { .. }
         | RegistryError::DefaultLockPoisoned
@@ -742,6 +766,59 @@ mod tests {
         let hint = data.hint.expect("naming a library is the next step");
         assert!(hint.contains("--library"), "{hint}");
         assert!(!data.retryable);
+    }
+
+    /// A library bring-up skipped is caller input to fix: the library
+    /// code, with the skip's reason and the mount command in the data.
+    #[test]
+    fn registry_library_unmounted_is_invalid_library_with_the_mount_hint() {
+        let err: Report = RegistryError::LibraryUnmounted {
+            name: "beta".into(),
+            reason: Box::new(Problem::new("cannot read the catalog").hint("Upgrade bookrack.")),
+        }
+        .into();
+        let rpc = handler_err("library.stats", err);
+        assert_eq!(rpc.code, INVALID_LIBRARY, "{}", rpc.message);
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(rpc.data.expect("data")).expect("ProblemData");
+        let detail = data.detail.expect("the skip's reason is the evidence");
+        assert!(detail.contains("cannot read the catalog"), "{detail}");
+        let hint = data.hint.expect("the mount command is the next step");
+        assert!(hint.contains("Upgrade bookrack."), "{hint}");
+        assert!(hint.contains("bookrack libraries mount beta"), "{hint}");
+    }
+
+    /// `report_problem` is `rpc_from_problem`'s inverse on a classified
+    /// chain, and the flattened chain on one the map does not know.
+    #[test]
+    fn report_problem_round_trips_a_classified_chain() {
+        let err: Report = RegistryError::LibraryUnknown {
+            name: "ghost".into(),
+            available: vec!["alpha".into()],
+        }
+        .into();
+        let direct = RegistryError::LibraryUnknown {
+            name: "ghost".into(),
+            available: vec!["alpha".into()],
+        }
+        .explain();
+        let err = err.wrap_err("bring up library 'ghost'");
+        assert_eq!(report_problem(&err), direct);
+
+        let unknown: Report = eyre::eyre!("a cause this map does not know");
+        let unknown = unknown.wrap_err("resolve configuration for library 'beta'");
+        let problem = report_problem(&unknown);
+        assert!(
+            problem.summary.contains("resolve configuration"),
+            "{}",
+            problem.summary
+        );
+        assert!(
+            problem.summary.contains("does not know"),
+            "{}",
+            problem.summary
+        );
+        assert!(problem.data.hint.is_none());
     }
 
     /// An empty registry has one next step, and it is not a name.

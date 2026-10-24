@@ -107,7 +107,21 @@ pub struct PreflightRefusal {
 pub async fn preflight_embed_backends(
     mounts: &[(String, std::sync::Arc<bookrack_config::Config>)],
 ) -> Result<(), PreflightRefusal> {
-    let mut seen: Vec<(String, String)> = Vec::new();
+    match embed_backend_problems(mounts).await.into_iter().next() {
+        Some((library, problem)) => Err(PreflightRefusal { library, problem }),
+        None => Ok(()),
+    }
+}
+
+/// Every mount whose embed backend cannot serve, with the backend's
+/// judgement, in mount order. Each distinct `(base_url, model)` pair is
+/// probed once, and every mount sharing an unusable pair is named, so
+/// a bring-up that skips the unusable ones skips them all.
+pub async fn embed_backend_problems(
+    mounts: &[(String, std::sync::Arc<bookrack_config::Config>)],
+) -> Vec<(String, Problem)> {
+    let mut judged: Vec<((String, String), Option<Problem>)> = Vec::new();
+    let mut problems = Vec::new();
     for (name, cfg) in mounts {
         let embed = match crate::profile::effective_embed_config(cfg) {
             Ok(embed) => embed,
@@ -116,19 +130,20 @@ pub async fn preflight_embed_backends(
             Err(_) => continue,
         };
         let pair = (cfg.ollama_url().to_string(), embed.model.clone());
-        if seen.contains(&pair) {
-            continue;
-        }
-        seen.push(pair.clone());
-        let state = check_embed_backend(&pair.0, &pair.1).await;
-        if !state.is_usable() {
-            return Err(PreflightRefusal {
-                library: name.clone(),
-                problem: state.explain(),
-            });
+        let verdict = match judged.iter().find(|(seen, _)| *seen == pair) {
+            Some((_, verdict)) => verdict.clone(),
+            None => {
+                let state = check_embed_backend(&pair.0, &pair.1).await;
+                let verdict = (!state.is_usable()).then(|| state.explain());
+                judged.push((pair, verdict.clone()));
+                verdict
+            }
+        };
+        if let Some(problem) = verdict {
+            problems.push((name.clone(), problem));
         }
     }
-    Ok(())
+    problems
 }
 
 impl Explain for EmbedBackendState {

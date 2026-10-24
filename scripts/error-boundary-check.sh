@@ -47,6 +47,7 @@ fi
 boundary_files="
 crates/runtime/src/control/error_map.rs
 crates/runtime/src/control/methods/reads_library.rs
+crates/runtime/src/unmounted.rs
 crates/mcp/src/error_map.rs
 "
 

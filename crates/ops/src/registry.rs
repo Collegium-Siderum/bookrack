@@ -15,7 +15,7 @@
 //!
 //! [`get`]: LibraryRegistry::get
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -84,6 +84,17 @@ pub enum RegistryError {
         default: Option<String>,
     },
 
+    /// The named library is registered but the host decided not to
+    /// serve it; `reason` is why, as recorded at that decision.
+    #[error("library {name:?} is registered but not mounted: {}", .reason.summary)]
+    LibraryUnmounted {
+        /// The name the caller asked for.
+        name: String,
+        /// Why the host does not serve it. Boxed to keep the error
+        /// small on every `Result` that carries it.
+        reason: Box<Problem>,
+    },
+
     /// The internal `RwLock` guarding the default-library name was
     /// poisoned. Indicates a bug — a panic while a writer held the lock
     /// — rather than a misuse path the caller can recover from.
@@ -118,6 +129,23 @@ impl Explain for RegistryError {
             // The summary states the fact; which libraries are mounted
             // and why none of them is the route are the evidence, and
             // naming one is the next step.
+            // The record's own detail and hint travel with it; the hint
+            // ends with the step that clears the record.
+            Self::LibraryUnmounted { name, reason } => {
+                let mut problem = Problem::new(format!(
+                    "library {name:?} is registered but not mounted"
+                ))
+                .detail(match &reason.data.detail {
+                    Some(detail) => format!("Bring-up skipped it: {}. {detail}", reason.summary),
+                    None => format!("Bring-up skipped it: {}.", reason.summary),
+                });
+                let mount = format!("Then run `bookrack libraries mount {name}`.");
+                problem = problem.hint(match &reason.data.hint {
+                    Some(hint) => format!("{hint} {mount}"),
+                    None => mount,
+                });
+                problem
+            }
             Self::UnnamedAmbiguous { mounted, default } => {
                 let pointer = match default {
                     Some(name) => format!("The registry default {name:?} is not mounted."),
@@ -551,6 +579,64 @@ pub struct LibrarySummary {
     pub is_default: bool,
 }
 
+/// A registered library the host decided not to serve, and why.
+///
+/// Built only through [`UnmountedLibrary::new`], which runs every part
+/// of the reason through [`redact_source_paths`]: the reason reaches
+/// status cards and queue rows as plain text, so it is cleaned where
+/// it is made rather than at each surface that shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmountedLibrary {
+    name: String,
+    data_dir: PathBuf,
+    reason: Problem,
+}
+
+impl UnmountedLibrary {
+    /// Record that `name`, registered at `data_dir`, is not served
+    /// because of `reason`.
+    pub fn new(name: impl Into<String>, data_dir: impl Into<PathBuf>, reason: Problem) -> Self {
+        UnmountedLibrary {
+            name: name.into(),
+            data_dir: data_dir.into(),
+            reason: reason.redacted(),
+        }
+    }
+
+    /// The library's registered short name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The data root the registry records for the library.
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    /// Why the library is not served.
+    pub fn reason(&self) -> &Problem {
+        &self.reason
+    }
+}
+
+/// Both of a registry's tables, read under one lock: the libraries it
+/// serves and the ones it recorded as not served.
+#[derive(Debug, Clone)]
+pub struct RegistrySnapshot {
+    /// The served libraries, sorted by name, with the unnamed route
+    /// marked as [`LibraryRegistry::list`] marks it.
+    pub mounted: Vec<LibrarySummary>,
+    /// The libraries recorded as not served, sorted by name.
+    pub unmounted: Vec<UnmountedLibrary>,
+}
+
+/// The two tables behind one lock: a name is in at most one of them,
+/// and a reader sees both at the same instant.
+struct Sets<E: Embedder> {
+    mounted: HashMap<String, Arc<LibraryHandle<E>>>,
+    unmounted: BTreeMap<String, UnmountedLibrary>,
+}
+
 /// The in-process scheduler: a map of registered libraries keyed by
 /// short name, plus a mutable pointer to the default library a caller
 /// that names none is routed to.
@@ -564,7 +650,11 @@ pub struct LibrarySummary {
 /// not mounted, or nothing at all; where an unnamed call then goes is
 /// [`get`]'s rule.
 ///
-/// [`get`]: LibraryRegistry::get
+/// Beside the mounted set the registry keeps the libraries the host
+/// decided not to serve, each with its reason
+/// ([`record_unmounted`]). A call naming one of them is refused with
+/// that reason, and [`mount`] clears the record when the library comes
+/// up after all.
 ///
 /// Held behind an `Arc` and shared across the REPL task, the MCP
 /// server, and the queue worker. Routing in this phase is "look up
@@ -577,10 +667,12 @@ pub struct LibrarySummary {
 /// and keeps that handle's [`MountGuard`] alive — after the name has
 /// left the map.
 ///
+/// [`get`]: LibraryRegistry::get
 /// [`mount`]: LibraryRegistry::mount
 /// [`unmount`]: LibraryRegistry::unmount
+/// [`record_unmounted`]: LibraryRegistry::record_unmounted
 pub struct LibraryRegistry<E: Embedder> {
-    libs: RwLock<HashMap<String, Arc<LibraryHandle<E>>>>,
+    sets: RwLock<Sets<E>>,
     default: RwLock<Option<String>>,
 }
 
@@ -597,15 +689,18 @@ impl<E: Embedder> LibraryRegistry<E> {
         handles: impl IntoIterator<Item = Arc<LibraryHandle<E>>>,
         default: Option<String>,
     ) -> Result<Arc<LibraryRegistry<E>>> {
-        let mut libs: HashMap<String, Arc<LibraryHandle<E>>> = HashMap::new();
+        let mut mounted: HashMap<String, Arc<LibraryHandle<E>>> = HashMap::new();
         for handle in handles {
-            libs.insert(handle.name().to_string(), handle);
+            mounted.insert(handle.name().to_string(), handle);
         }
-        if libs.is_empty() {
+        if mounted.is_empty() {
             return Err(RegistryError::Empty);
         }
         Ok(Arc::new(LibraryRegistry {
-            libs: RwLock::new(libs),
+            sets: RwLock::new(Sets {
+                mounted,
+                unmounted: BTreeMap::new(),
+            }),
             default: RwLock::new(default),
         }))
     }
@@ -618,12 +713,34 @@ impl<E: Embedder> LibraryRegistry<E> {
     /// [`get`]: LibraryRegistry::get
     pub fn single(handle: Arc<LibraryHandle<E>>) -> Arc<LibraryRegistry<E>> {
         let name = handle.name().to_string();
-        let mut libs: HashMap<String, Arc<LibraryHandle<E>>> = HashMap::new();
-        libs.insert(name.clone(), handle);
+        let mut mounted: HashMap<String, Arc<LibraryHandle<E>>> = HashMap::new();
+        mounted.insert(name.clone(), handle);
         Arc::new(LibraryRegistry {
-            libs: RwLock::new(libs),
+            sets: RwLock::new(Sets {
+                mounted,
+                unmounted: BTreeMap::new(),
+            }),
             default: RwLock::new(Some(name)),
         })
+    }
+
+    fn read_sets(&self) -> Result<std::sync::RwLockReadGuard<'_, Sets<E>>> {
+        self.sets
+            .read()
+            .map_err(|_| RegistryError::LibsLockPoisoned)
+    }
+
+    fn write_sets(&self) -> Result<std::sync::RwLockWriteGuard<'_, Sets<E>>> {
+        self.sets
+            .write()
+            .map_err(|_| RegistryError::LibsLockPoisoned)
+    }
+
+    fn read_default(&self) -> Result<Option<String>> {
+        self.default
+            .read()
+            .map(|guard| guard.clone())
+            .map_err(|_| RegistryError::DefaultLockPoisoned)
     }
 
     /// Look up a handle. `None` is a call that names no library, routed
@@ -631,25 +748,28 @@ impl<E: Embedder> LibraryRegistry<E> {
     /// only mounted library when no default is declared, and otherwise
     /// [`RegistryError::UnnamedAmbiguous`] — a declared default that is
     /// not mounted refuses rather than falling back to whatever is.
+    ///
+    /// A name recorded as not served is
+    /// [`RegistryError::LibraryUnmounted`], carrying the reason; a name
+    /// in neither table is [`RegistryError::LibraryUnknown`].
     pub fn get(&self, name: Option<&str>) -> Result<Arc<LibraryHandle<E>>> {
-        let default = self
-            .default
-            .read()
-            .map_err(|_| RegistryError::DefaultLockPoisoned)?
-            .clone();
-        let libs = self
-            .libs
-            .read()
-            .map_err(|_| RegistryError::LibsLockPoisoned)?;
+        let default = self.read_default()?;
+        let sets = self.read_sets()?;
         match name {
-            Some(key) => libs
-                .get(key)
-                .cloned()
-                .ok_or_else(|| RegistryError::LibraryUnknown {
-                    name: key.to_string(),
-                    available: sorted_names(&libs),
-                }),
-            None => unnamed_route(&libs, default.as_deref()).cloned(),
+            Some(key) => match sets.mounted.get(key) {
+                Some(handle) => Ok(Arc::clone(handle)),
+                None => match sets.unmounted.get(key) {
+                    Some(record) => Err(RegistryError::LibraryUnmounted {
+                        name: key.to_string(),
+                        reason: Box::new(record.reason.clone()),
+                    }),
+                    None => Err(RegistryError::LibraryUnknown {
+                        name: key.to_string(),
+                        available: sorted_names(&sets.mounted),
+                    }),
+                },
+            },
+            None => unnamed_route(&sets.mounted, default.as_deref()).cloned(),
         }
     }
 
@@ -658,14 +778,11 @@ impl<E: Embedder> LibraryRegistry<E> {
     /// no state is changed in that case.
     pub fn set_default(&self, name: &str) -> Result<()> {
         {
-            let libs = self
-                .libs
-                .read()
-                .map_err(|_| RegistryError::LibsLockPoisoned)?;
-            if !libs.contains_key(name) {
+            let sets = self.read_sets()?;
+            if !sets.mounted.contains_key(name) {
                 return Err(RegistryError::LibraryUnknown {
                     name: name.to_string(),
-                    available: sorted_names(&libs),
+                    available: sorted_names(&sets.mounted),
                 });
             }
         }
@@ -677,21 +794,32 @@ impl<E: Embedder> LibraryRegistry<E> {
         Ok(())
     }
 
-    /// Add a library to the mounted set. Returns
-    /// [`RegistryError::AlreadyMounted`] when the name is already
-    /// served; the caller's handle is dropped in that case and nothing
-    /// changes.
+    /// Add a library to the mounted set, clearing any record of it as
+    /// not served. Returns [`RegistryError::AlreadyMounted`] when the
+    /// name is already served; the caller's handle is dropped in that
+    /// case and nothing changes.
     pub fn mount(&self, handle: Arc<LibraryHandle<E>>) -> Result<()> {
-        let mut libs = self
-            .libs
-            .write()
-            .map_err(|_| RegistryError::LibsLockPoisoned)?;
-        if libs.contains_key(handle.name()) {
+        let mut sets = self.write_sets()?;
+        if sets.mounted.contains_key(handle.name()) {
             return Err(RegistryError::AlreadyMounted {
                 name: handle.name().to_string(),
             });
         }
-        libs.insert(handle.name().to_string(), handle);
+        sets.unmounted.remove(handle.name());
+        sets.mounted.insert(handle.name().to_string(), handle);
+        Ok(())
+    }
+
+    /// Record a library the host decided not to serve. Returns
+    /// [`RegistryError::AlreadyMounted`] when the name is served, since
+    /// a library cannot be both; a record under the same name is
+    /// replaced.
+    pub fn record_unmounted(&self, library: UnmountedLibrary) -> Result<()> {
+        let mut sets = self.write_sets()?;
+        if sets.mounted.contains_key(&library.name) {
+            return Err(RegistryError::AlreadyMounted { name: library.name });
+        }
+        sets.unmounted.insert(library.name.clone(), library);
         Ok(())
     }
 
@@ -706,24 +834,20 @@ impl<E: Embedder> LibraryRegistry<E> {
     /// therefore a request to release, not a guarantee that the release
     /// has happened.
     pub fn unmount(&self, name: &str) -> Result<Arc<LibraryHandle<E>>> {
-        let mut libs = self
-            .libs
-            .write()
-            .map_err(|_| RegistryError::LibsLockPoisoned)?;
-        libs.remove(name)
-            .ok_or_else(|| RegistryError::LibraryUnknown {
+        let mut sets = self.write_sets()?;
+        match sets.mounted.remove(name) {
+            Some(handle) => Ok(handle),
+            None => Err(RegistryError::LibraryUnknown {
                 name: name.to_string(),
-                available: sorted_names(&libs),
-            })
+                available: sorted_names(&sets.mounted),
+            }),
+        }
     }
 
     /// Read the current default-library name; `None` when the registry
     /// declares none.
     pub fn default_name(&self) -> Result<Option<String>> {
-        self.default
-            .read()
-            .map(|guard| guard.clone())
-            .map_err(|_| RegistryError::DefaultLockPoisoned)
+        self.read_default()
     }
 
     /// Project every registered library to a [`LibrarySummary`], sorted
@@ -735,35 +859,36 @@ impl<E: Embedder> LibraryRegistry<E> {
     ///
     /// [`get`]: LibraryRegistry::get
     pub fn list(&self) -> Result<Vec<LibrarySummary>> {
-        let default = self
-            .default
-            .read()
-            .map_err(|_| RegistryError::DefaultLockPoisoned)?
-            .clone();
-        let libs = self
-            .libs
-            .read()
-            .map_err(|_| RegistryError::LibsLockPoisoned)?;
-        let route = unnamed_route(&libs, default.as_deref())
-            .ok()
-            .map(|h| h.name().to_string());
-        let mut out: Vec<LibrarySummary> = libs
-            .values()
-            .map(|h| LibrarySummary {
-                name: h.name().to_string(),
-                data_dir: h.cfg().data_dir().to_path_buf(),
-                dimension: h.ops().dimension(),
-                is_default: Some(h.name()) == route.as_deref(),
-            })
-            .collect();
-        out.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(out)
+        let default = self.read_default()?;
+        let sets = self.read_sets()?;
+        Ok(summaries(&sets.mounted, default.as_deref()))
+    }
+
+    /// The libraries recorded as not served, sorted by name.
+    pub fn unmounted(&self) -> Result<Vec<UnmountedLibrary>> {
+        Ok(self.read_sets()?.unmounted.values().cloned().collect())
+    }
+
+    /// Both tables at one instant. A surface that reports the served
+    /// and the unserved libraries side by side reads them here rather
+    /// than through [`list`] and [`unmounted`] in turn: a mount landing
+    /// between those two reads would show one name in both lists.
+    ///
+    /// [`list`]: LibraryRegistry::list
+    /// [`unmounted`]: LibraryRegistry::unmounted
+    pub fn snapshot(&self) -> Result<RegistrySnapshot> {
+        let default = self.read_default()?;
+        let sets = self.read_sets()?;
+        Ok(RegistrySnapshot {
+            mounted: summaries(&sets.mounted, default.as_deref()),
+            unmounted: sets.unmounted.values().cloned().collect(),
+        })
     }
 
     /// Number of mounted libraries. A poisoned map reads as zero, the
     /// same shape a caller already handles for an empty registry.
     pub fn len(&self) -> usize {
-        self.libs.read().map(|libs| libs.len()).unwrap_or(0)
+        self.sets.read().map(|sets| sets.mounted.len()).unwrap_or(0)
     }
 
     /// Whether the registry holds no libraries. `false` for registries
@@ -777,6 +902,26 @@ impl<E: Embedder> LibraryRegistry<E> {
     }
 }
 
+/// The mounted set as sorted summaries, with the unnamed route marked.
+fn summaries<E: Embedder>(
+    mounted: &HashMap<String, Arc<LibraryHandle<E>>>,
+    default: Option<&str>,
+) -> Vec<LibrarySummary> {
+    let route = unnamed_route(mounted, default)
+        .ok()
+        .map(|h| h.name().to_string());
+    let mut out: Vec<LibrarySummary> = mounted
+        .values()
+        .map(|h| LibrarySummary {
+            name: h.name().to_string(),
+            data_dir: h.cfg().data_dir().to_path_buf(),
+            dimension: h.ops().dimension(),
+            is_default: Some(h.name()) == route.as_deref(),
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
 /// Where a call that names no library goes, from the mounted set and
 /// the default pointer as declared:
 ///
@@ -1166,6 +1311,7 @@ mod tests {
                 | RegistryError::Empty
                 | RegistryError::AlreadyMounted { .. }
                 | RegistryError::UnnamedAmbiguous { .. }
+                | RegistryError::LibraryUnmounted { .. }
                 | RegistryError::DefaultLockPoisoned
                 | RegistryError::LibsLockPoisoned => {}
             }
@@ -1372,5 +1518,111 @@ mod tests {
             assert_eq!(problem.summary, err.to_string());
             assert!(problem.data.hint.is_none(), "{:?}", problem.data.hint);
         }
+    }
+
+    /// A library recorded as not served is refused by name with its
+    /// reason, listed as unmounted, and both end when it is mounted.
+    #[test]
+    fn a_recorded_unmounted_library_is_refused_with_its_reason_until_mounted() {
+        let reg = LibraryRegistry::from_handles([handle("a")], Some("a".into())).unwrap();
+        reg.record_unmounted(super::UnmountedLibrary::new(
+            "b",
+            "/disk/library/b",
+            bookrack_core::Problem::new("cannot read the catalog").hint("Upgrade bookrack."),
+        ))
+        .unwrap();
+        match reg.get(Some("b")) {
+            Err(RegistryError::LibraryUnmounted { name, reason }) => {
+                assert_eq!(name, "b");
+                assert_eq!(reason.summary, "cannot read the catalog");
+            }
+            Err(other) => panic!("expected LibraryUnmounted, got {other:?}"),
+            Ok(_) => panic!("a recorded library must not resolve to a handle"),
+        }
+        let unmounted = reg.unmounted().unwrap();
+        assert_eq!(unmounted.len(), 1);
+        assert_eq!(unmounted[0].name(), "b");
+        assert_eq!(unmounted[0].data_dir(), Path::new("/disk/library/b"));
+        assert_eq!(reg.len(), 1, "a recorded library is not counted as mounted");
+
+        reg.mount(handle("b")).unwrap();
+        assert!(
+            reg.unmounted().unwrap().is_empty(),
+            "mounting clears the record"
+        );
+        assert_eq!(reg.get(Some("b")).unwrap().name(), "b");
+    }
+
+    #[test]
+    fn recording_a_mounted_name_as_unmounted_is_refused() {
+        let reg = LibraryRegistry::from_handles([handle("a")], Some("a".into())).unwrap();
+        let err = reg
+            .record_unmounted(super::UnmountedLibrary::new(
+                "a",
+                "/disk/library/a",
+                bookrack_core::Problem::new("root locked"),
+            ))
+            .expect_err("a served library cannot also be unmounted");
+        assert!(matches!(err, RegistryError::AlreadyMounted { name } if name == "a"));
+        assert!(reg.unmounted().unwrap().is_empty());
+    }
+
+    /// The snapshot reads both tables under one lock and marks the
+    /// unnamed route as the listing does.
+    #[test]
+    fn snapshot_reads_both_tables_at_once() {
+        let reg =
+            LibraryRegistry::from_handles([handle("a"), handle("b")], Some("b".into())).unwrap();
+        reg.record_unmounted(super::UnmountedLibrary::new(
+            "c",
+            "/disk/library/c",
+            bookrack_core::Problem::new("root locked"),
+        ))
+        .unwrap();
+        let snapshot = reg.snapshot().unwrap();
+        let mounted: Vec<(&str, bool)> = snapshot
+            .mounted
+            .iter()
+            .map(|row| (row.name.as_str(), row.is_default))
+            .collect();
+        assert_eq!(mounted, vec![("a", false), ("b", true)]);
+        assert_eq!(snapshot.unmounted.len(), 1);
+        assert_eq!(snapshot.unmounted[0].name(), "c");
+    }
+
+    /// The reason is cleaned where the record is made: a dependency
+    /// source location loses its build-machine prefix in every part,
+    /// while a data path, which names the operator's own file, stays.
+    #[test]
+    fn skip_reason_is_redacted_at_construction() {
+        let located = "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/io.rs:7:3";
+        let record = super::UnmountedLibrary::new(
+            "beta",
+            "/disk/library/beta",
+            bookrack_core::Problem::new(format!("cannot open the store, {located}"))
+                .detail(format!("read failed at {located} under /disk/library/beta"))
+                .hint(format!("See {located}.")),
+        );
+        let reason = record.reason();
+        for text in [
+            reason.summary.as_str(),
+            reason.data.detail.as_deref().unwrap_or(""),
+            reason.data.hint.as_deref().unwrap_or(""),
+        ] {
+            assert!(!text.contains("/disk/cache/cargo"), "{text}");
+            assert!(
+                text.contains("io.rs:7:3"),
+                "the crate-relative tail stays: {text}"
+            );
+        }
+        assert!(
+            reason
+                .data
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("/disk/library/beta")),
+            "a data path is not a source location: {:?}",
+            reason.data.detail
+        );
     }
 }

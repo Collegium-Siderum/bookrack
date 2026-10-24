@@ -342,36 +342,53 @@ pub fn agreed_reranker_config(
 ) -> Result<Option<&Config>, PreflightRefusal> {
     let mut agreed: Option<(&str, RerankerSpec, &Config)> = None;
     for (name, cfg) in mounts {
-        let spec = match crate::profile::effective_index_profile(cfg) {
-            Ok(Some(effective)) => effective.profile.reranker,
-            Ok(None) => RerankerSpec::default(),
-            Err(_) => continue,
+        let Ok(spec) = reranker_spec(cfg) else {
+            continue;
         };
         match &agreed {
             None => agreed = Some((name, spec, cfg)),
             Some((first, first_spec, _)) if *first_spec != spec => {
                 return Err(PreflightRefusal {
                     library: name.clone(),
-                    problem: Problem::new(
-                        "cannot serve libraries whose index profiles disagree on the reranker stage",
-                    )
-                    .detail(format!(
-                        "Library {first:?} resolves to {}; library {name:?} resolves to {}.",
-                        render_reranker(first_spec),
-                        render_reranker(&spec),
-                    ))
-                    .hint(
-                        "One reranker backend serves every mounted library, so the mounted set \
-                         has to agree on it. Point the libraries at the same index profile, or \
-                         serve them from separate daemons. Run `bookrack index-profile current` \
-                         against each library to see what it resolves to.",
-                    ),
+                    problem: disagreement_problem(first, first_spec, name, &spec),
                 });
             }
             Some(_) => {}
         }
     }
     Ok(agreed.map(|(_, _, cfg)| cfg))
+}
+
+/// The reranker stage a library's effective index profile declares; a
+/// library referencing no profile declares none. Fails when the
+/// profile does not resolve.
+pub(crate) fn reranker_spec(cfg: &Config) -> eyre::Result<RerankerSpec> {
+    Ok(crate::profile::effective_index_profile(cfg)?
+        .map(|effective| effective.profile.reranker)
+        .unwrap_or_default())
+}
+
+/// The refusal for a library whose reranker stage differs from the one
+/// the set is served under: bring-up skips the library with it, a
+/// runtime mount refuses with it.
+pub(crate) fn disagreement_problem(
+    reference: &str,
+    reference_spec: &RerankerSpec,
+    name: &str,
+    spec: &RerankerSpec,
+) -> Problem {
+    Problem::new("cannot serve libraries whose index profiles disagree on the reranker stage")
+        .detail(format!(
+            "Library {reference:?} resolves to {}; library {name:?} resolves to {}.",
+            render_reranker(reference_spec),
+            render_reranker(spec),
+        ))
+        .hint(
+            "One reranker backend serves every mounted library, so the mounted set has to \
+             agree on it. Point the libraries at the same index profile, or serve them from \
+             separate daemons. Run `bookrack index-profile current` against each library to \
+             see what it resolves to.",
+        )
 }
 
 /// Bring up the reranker backend the mounted set's agreed profile

@@ -16,9 +16,10 @@ not read-only: see *MCP tool surface* below.
 - Discovery: clients read `<runtime_dir>/bookrack.tty.lock` and pick
   up the `control_sock=<path>` line. The lock file's `pid=` and
   `mcp=` lines are unchanged. The lock records no library identity at
-  all: a daemon mounts every registered library, so any single name or
-  root it carried would name one mount among several. Which libraries
-  a daemon serves is answered over RPC (`status`, `library.list`,
+  all: a daemon mounts every registered library it can bring up, so any
+  single name or root it carried would name one mount among several.
+  Which libraries a daemon serves — and which it skipped, with the
+  reason — is answered over RPC (`status`, `library.list`,
   `library.info`).
 
 ## Locks
@@ -37,17 +38,24 @@ The daemon takes one data-root lock per mounted library during
 bring-up, after resolving its configuration and before opening
 anything under a root, and holds them until shutdown: mounting a root
 means owning it. When the primary root is selected through the
-registry, the daemon mounts — and so locks — every registered
-library's root; a path-class root the registry does not know is served
-alone. A second daemon pointed at a served root — even from a
-different runtime directory — fails to start and names the holder's
+registry, the daemon mounts — and so locks — the root of every
+registered library it brings up; a path-class root the registry does
+not know is served alone. A library bring-up skipped — its root
+missing, its lock held elsewhere, its stores unreadable, its backend
+unusable — holds no lock: its root can be purged, repaired, or served
+by another daemon, and `bookrack libraries mount <name>` brings it in
+once it is whole. A second daemon pointed at a served root — even from
+a different runtime directory — fails to start and names the holder's
 recorded `pid=` and `role=`. `bookrack libraries remove --purge` takes
 the same lock before its detect gate, so purging a root a daemon is
 serving is refused (exit 2) rather than silently destroying live data.
-Eager mounting covers every registered library, so a purge always
-meets a held root; `bookrack libraries unmount <name>` gives that one
-root back without stopping the daemon, except for the registry default
-and the library the daemon came up under, which still need a restart.
+Eager mounting covers every registered library that came up, so a
+purge of a served root always meets a held lock; `bookrack libraries
+unmount <name>` gives that one root back without stopping the daemon,
+except for the library the daemon came up under and the last mounted
+library, which still need a restart. An offline `doctor` repair still
+requires that no daemon answers on the session lock's control socket,
+whether or not the daemon serves the library in question.
 
 The registry lock is different in kind: short, not long. The library
 registry has two kinds of writer — the offline CLI verbs and the daemon
@@ -102,8 +110,9 @@ systems. bookrack is a local-first system and does not probe for it.
 - `-32002` not ready (bookrack-specific; the runtime has not finished
   initialising the resource the method needs)
 - `-32010` invalid library (bookrack-specific; a `library` param does
-  not exist in the registry, or a call naming none has no single
-  library to go to — see *Unnamed calls* below). Raised by every
+  not exist in the registry or names a library bring-up did not mount,
+  or a call naming none has no single library to go to — see *Unnamed
+  calls* below). Raised by every
   handler that resolves that parameter — the write class, the
   `library.*` read proxies, and `library.info` against its own `name`
   key — so a client branches on the code alone, without knowing which
@@ -241,6 +250,12 @@ onto.
   hold** (`-32010`): `RegistryError::LibraryUnknown`, raised by any
   handler that resolves that parameter. The message names the name
   that did not resolve; the names that would are in `error.data.hint`.
+- **A `library` parameter naming a library bring-up did not mount**
+  (`-32010`): `RegistryError::LibraryUnmounted`, raised by any handler
+  that resolves that parameter. The message names the library and the
+  fact; `error.data.detail` carries the reason it was skipped and
+  `error.data.hint` that reason's next step followed by
+  `bookrack libraries mount <name>`.
 - **A call naming no library that the registry cannot route**
   (`-32010`): `RegistryError::UnnamedAmbiguous`, raised by the same
   handlers when the parameter is absent and the rule under *Unnamed
@@ -374,7 +389,7 @@ the kind of failure without parsing stderr.
 | --- | --- | --- |
 | `0` | success | — |
 | `1` | internal / unexpected error | color-eyre fallback for unclassified errors; `-32700 parse error`, `-32600 invalid request`, `-32603 internal error`, and unknown JSON-RPC codes; `SessionLockUnreadable` (`bookrack run` on a lock it cannot interpret; an offline `doctor` repair on a lock it cannot read, or a held one naming no control socket, since neither shows the library unserved); `doctor` reported a FAIL row; `verify` judged a finding as damage (see `verify.run` below for the table); `libraries detect` returned a not-a-library or unreadable-manifest verdict |
-| `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32016` plan-id mismatches and plan-target drift, `-32018 state unusable` (a store from another build or with drifted stamps; the hint names the rebuild or the build to run); an offline `doctor` repair (`--backfill-ocr-derivation`, `--close-abandoned-runs`) asked for while a daemon answers on the session lock's control socket; a locally-resolved command rejected operator input (a global `--audit-profile` on a subcommand that does not consume it, judged before any dispatch so the four subcommands that run ahead of the shared resolver — `doctor`, `init`, `run`, `rpc` — refuse it too; `libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate, `config effective` given a data root that does not resolve — the report is still printed, with the failure at its head, because a configuration report that fails when the configuration is broken is useless exactly when it is needed); a wait on queue jobs was refused — `bookrack queue wait`, or `bookrack ingest`, `bookrack papers ingest` and `bookrack intake ocr` once they have submitted and wait — because a `--job` fragment matches no job or more than one, a selected job is pending on a paused queue, or the daemon has no queue worker; the queue is read and judged when the wait attaches and again whenever the event stream goes quiet, drops events, or carries `daemon.state = degraded`, and the report of what the last read showed still goes to stdout (the jobs that had ended as records, the rest by id under `unfinished`); a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0`; `bookrack run` refused to start because an external backend it needs is unusable (the embed model is not pulled, or the Ollama endpoint does not answer), or because the selected data root carries the identity of a library the registry records at another path — either check runs before any library is opened, so nothing was half-started. The same judgement on a live write RPC splits: an unpulled model stays `-32602` and exit `2`, while an unreachable or overloaded backend is `-32017` and exit `4`, because a call that failed mid-session may succeed on the next attempt; `bookrack rpc call` was handed params that are not valid JSON (`RpcParamsInvalid`) or a method name carrying no namespace (`RpcMethodNotNamespaced`), both judged locally before the call is sent; `bookrack init` refused on its input or the host (`--non-interactive` without `--data-dir`, a data root inside the application bundle, a path that is not a directory, a root that already holds a library without `--force`, Ollama unreachable or the embed model not pulled) — each decided before anything is written |
+| `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32016` plan-id mismatches and plan-target drift, `-32018 state unusable` (a store from another build or with drifted stamps; the hint names the rebuild or the build to run); an offline `doctor` repair (`--backfill-ocr-derivation`, `--close-abandoned-runs`) asked for while a daemon answers on the session lock's control socket; a locally-resolved command rejected operator input (a global `--audit-profile` on a subcommand that does not consume it, judged before any dispatch so the four subcommands that run ahead of the shared resolver — `doctor`, `init`, `run`, `rpc` — refuse it too; `libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate, `config effective` given a data root that does not resolve — the report is still printed, with the failure at its head, because a configuration report that fails when the configuration is broken is useless exactly when it is needed); a wait on queue jobs was refused — `bookrack queue wait`, or `bookrack ingest`, `bookrack papers ingest` and `bookrack intake ocr` once they have submitted and wait — because a `--job` fragment matches no job or more than one, a selected job is pending on a paused queue, or the daemon has no queue worker; the queue is read and judged when the wait attaches and again whenever the event stream goes quiet, drops events, or carries `daemon.state = degraded`, and the report of what the last read showed still goes to stdout (the jobs that had ended as records, the rest by id under `unfinished`); a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0`; `bookrack run` refused to start because an external backend it needs is unusable (the embed model is not pulled, or the Ollama endpoint does not answer), or because the selected data root carries the identity of a library the registry records at another path — either check runs before any library is opened, so nothing was half-started; or because none of several registered libraries could be mounted — the refusal names each one with its reason, while a bring-up with a single library to try reports that library's failure as itself, with that error's own exit code. A registered library that fails while others come up does not stop the daemon: it is skipped with its reason and reached again through `libraries mount` once repaired, except that the library the daemon is started under must still resolve (its data root must exist) and the reranker must still start. The same judgement on a live write RPC splits: an unpulled model stays `-32602` and exit `2`, while an unreachable or overloaded backend is `-32017` and exit `4`, because a call that failed mid-session may succeed on the next attempt; `bookrack rpc call` was handed params that are not valid JSON (`RpcParamsInvalid`) or a method name carrying no namespace (`RpcMethodNotNamespaced`), both judged locally before the call is sent; `bookrack init` refused on its input or the host (`--non-interactive` without `--data-dir`, a data root inside the application bundle, a path that is not a directory, a root that already holds a library without `--force`, Ollama unreachable or the embed model not pulled) — each decided before anything is written |
 | `3` | needs operator cleanup | a held session lock whose recorded daemon does not answer (`bookrack run`, `bookrack status`, and the offline `doctor` repairs all judge it the same way); the operator finds and stops the process holding it, which releases it; the file is never removed by hand |
 | `4` | busy / not ready (retryable) | `-32001 busy`, `-32002 not ready` and `queue worker disabled`; `-32017 backend unavailable` (the Ollama daemon did not answer, or reported itself overloaded); a scripted caller can sleep and retry |
 | `5` | async job batch had failures | `bookrack ingest`, `bookrack papers ingest`, `bookrack intake ocr`, and `bookrack queue wait` return this when the wait saw every job end and at least one ended in `Failed` or `Cancelled` — for `queue wait`, a job named with `--job` that had already ended counts too. A wait refused before every job ended exits `2` instead, with the failures it had seen in the report on stdout. `Done`, `SkippedDuplicate`, and `NeedsOcr` are terminal successes and do not trigger it — a batch of scan sources that all end in `needs_ocr` returns `0` and points at `bookrack intake list-ocr-pending`. The per-job summary on stdout names the offenders; `--no-wait` returns `0` because the batch is not awaited |
@@ -540,7 +555,9 @@ the exit-code bucket does not distinguish the two.
   serve are each refused, so a library that starts cleanly also mounts
   cleanly. Returns `-32010` when the registry does not carry the
   name, `-32602` for a refused consistency check, and `-32017` when
-  another process holds the root's lock. Being a write, it takes the
+  another process holds the root's lock. A library bring-up skipped is
+  mounted the same way once repaired, and a success clears its record,
+  so a call naming it resolves from then on. Being a write, it takes the
   write mutex — a concurrent write sees `-32001 busy` for the second or
   so a mount takes — and fires `library.changed` on success.
 - `library.unmount` — `{ name }` → `{ ok: true, name, library }`. Stop serving

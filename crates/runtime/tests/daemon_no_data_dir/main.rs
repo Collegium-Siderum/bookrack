@@ -24,6 +24,7 @@ mod multi_library_params;
 mod relocated_identity_refusal;
 mod routed_diagnostics;
 mod runtime_mount;
+mod skip_and_degrade;
 mod submit_library_routing;
 mod unknown_library_is_symmetric;
 mod unnamed_routing;

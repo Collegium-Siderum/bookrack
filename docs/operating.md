@@ -16,12 +16,24 @@ where the one-shot write subcommands arrive.
 
 When its root is selected through the registry (`--library`, or the
 registry's `default`), the daemon mounts **every** registered library
-at bring-up: each one answers reads, and queue jobs route to their
-target library by name. A root selected directly by path that the
-registry does not know is served alone, as before. The set is not
-fixed at bring-up: `bookrack libraries mount <name>` adds a registered
-library to it and `bookrack libraries unmount <name>` takes one back
-out, both without a restart. `libraries unmount` refuses the library
+it can bring up: each one answers reads, and queue jobs route to their
+target library by name. A library that cannot come up — its root
+missing or on a volume that is not connected, its lock held by another
+process, its stores unreadable by this build, its embed backend
+unusable, or its index profile disagreeing with the rest on the
+reranker — does not stop the daemon: it is skipped with the reason, its
+queued jobs are marked failed with that reason, and a command naming it
+is refused with the reason and `bookrack libraries mount <name>`, which
+brings it in once it is repaired. Two failures still stop the daemon:
+the library it was started under cannot be resolved (for example, its
+data root is missing), or the reranker cannot start. When no library
+comes up at all, the daemon refuses: with that library's own error when
+there was one to try, naming each library with its reason when there
+were several. A root selected directly by path that the registry does
+not know is served alone, as before. The set is not fixed at bring-up:
+`bookrack libraries mount <name>` adds a registered library to it and
+`bookrack libraries unmount <name>` takes one back out, both without a
+restart. `libraries unmount` refuses the library
 the daemon came up under — what `bookrack status` reports the daemon
 as — the last mounted library, and a library with queue jobs still to
 run. The registry default can be taken out; every unqualified command
@@ -48,9 +60,11 @@ library: a second daemon pointed at a served root — even from a
 different `BOOKRACK_RUNTIME_DIR` — fails to start and names the holder.
 Offline commands that would destroy data take it too, so `bookrack
 libraries remove --purge` refuses a root a daemon is serving rather
-than deleting it underneath. An eager daemon holds the lock on every
-registered library's root, so a purge always meets a held one: give
-that root back with `bookrack libraries unmount <name>` first, or —
+than deleting it underneath. An eager daemon holds the lock on the
+root of every registered library it serves, so a purge of a served
+root always meets a held lock — a library skipped at bring-up holds
+none: give that root back with `bookrack libraries unmount <name>`
+first, or —
 for the library the daemon came up under and the last mounted library,
 which unmounting refuses — `bookrack quit`. The root is released once
 any call still using that library finishes, so a purge racing a long

@@ -5,13 +5,15 @@
 //!
 //! [`DaemonRuntime::start`] performs the fixed eleven-step bring-up:
 //! resolve the runtime directory, acquire the session [`TtyLock`],
-//! decide the mount set and acquire every served root's [`RootLock`],
-//! initialise observability, build one warm handle per mounted
-//! library ([`build_library_handle`]: embedding clients, catalog
+//! decide the mount set and acquire each candidate root's
+//! [`RootLock`], initialise observability, preflight each candidate's
+//! embed backend and reranker stage, build one warm handle per
+//! candidate ([`build_library_handle`]: embedding clients, catalog
 //! preflight, query [`Library`] opens, the [`Ops`] wrap), assemble
-//! the [`LibraryRegistry`], install the platform signal aggregator,
-//! load the persistent ingest queue state, and — in the `bookrack
-//! run` profile — spawn the queue worker.
+//! the [`LibraryRegistry`] with the libraries that failed any of
+//! those steps recorded beside it, install the platform signal
+//! aggregator, load the persistent ingest queue state, and — in the
+//! `bookrack run` profile — spawn the queue worker.
 //!
 //! Callers wire the MCP listener and any REPL surface as separate
 //! [`tokio::task::JoinHandle`]s and hand them to
@@ -40,7 +42,9 @@ use bookrack_ingest::IngestParams;
 use bookrack_obs::WorkerGuard;
 use bookrack_obs::stream::LogStreamHandle;
 use bookrack_ops::reads::info::LibraryInfoContext;
-use bookrack_ops::registry::{JobTemplates, LibraryHandle, LibraryRegistry, MountGuard};
+use bookrack_ops::registry::{
+    JobTemplates, LibraryHandle, LibraryRegistry, MountGuard, UnmountedLibrary,
+};
 use bookrack_ops::{Caller, Ops, PapersPaths};
 use bookrack_query::Library;
 use bookrack_session::{
@@ -67,6 +71,7 @@ use crate::control::socket::{
 };
 use crate::queue;
 use crate::rerank_supervisor::SupervisorState;
+use crate::unmounted::{self, Skips};
 
 /// Caller-facing bring-up options. Public fields keep construction
 /// declarative; helper constructors capture the two stable entry-point
@@ -354,14 +359,15 @@ impl DaemonRuntime {
             }
         };
         let cfg = Arc::new(cfg);
-        // 4b. Decide the mount set and take every served root's lock
-        //     before anything expensive comes up, so a contended root
-        //     fails with no reranker spawned and no half-open handles.
-        //     With the primary root selected through the registry the
-        //     daemon serves every registered library; a path-class
-        //     root the registry does not know (or a machine with no
-        //     registry) keeps the single-library form. The set changes
-        //     at runtime through `library.mount` / `library.unmount`.
+        // 4b. Decide the mount set. With the primary root selected
+        //     through the registry the daemon serves every registered
+        //     library; a path-class root the registry does not know (or
+        //     a machine with no registry) keeps the single-library form.
+        //     From here to step 8 each candidate stands or falls on its
+        //     own: a library that fails a step is skipped with its
+        //     reason, its lock is released with it, and the rest go on.
+        //     The set changes at runtime through `library.mount` /
+        //     `library.unmount`.
         let primary_name = cfg.library().unwrap_or("default").to_string();
         let (registry_entries, registry_default) = if cfg.library().is_some() {
             bookrack_config::list_libraries_with_default()
@@ -375,64 +381,132 @@ impl DaemonRuntime {
             &registry_entries,
             registry_default.as_deref(),
         );
-        let mut mounts: Vec<(String, Arc<Config>)> = Vec::with_capacity(plan.names.len());
+        let mut skips = Skips::default();
+        let mut candidates: Vec<Candidate> = Vec::with_capacity(plan.names.len());
         if plan.eager {
             for name in &plan.names {
+                let entry = registry_entries.iter().find(|entry| &entry.name == name);
+                let data_dir = entry
+                    .map(|entry| entry.data_dir.clone())
+                    .unwrap_or_default();
                 // A named selection resolves through the registry and
                 // is immune to a set BOOKRACK_DATA_DIR.
-                let lib_cfg = Config::resolve(&LibrarySelection {
+                let lib_cfg = match Config::resolve(&LibrarySelection {
                     data_dir: None,
                     library: Some(name.clone()),
-                })
-                .with_context(|| format!("resolve configuration for library '{name}'"))?;
+                }) {
+                    Ok(lib_cfg) => lib_cfg,
+                    Err(err) => {
+                        let problem = unmounted::resolve_problem(name, &err);
+                        skips.push(
+                            UnmountedLibrary::new(name, data_dir, problem),
+                            eyre::Report::new(err)
+                                .wrap_err(format!("resolve configuration for library '{name}'")),
+                        );
+                        continue;
+                    }
+                };
                 // A root that does not carry the identity the entry
-                // cached is refused before it is locked: an empty
-                // mount point passes the directory check and would
-                // otherwise be served as an empty library.
-                if let Some(entry) = registry_entries.iter().find(|entry| &entry.name == name) {
-                    crate::identity_check::verify_registered_identity(
+                // cached is skipped before it is locked: an empty mount
+                // point passes the directory check and would otherwise
+                // be served as an empty library.
+                if let Some(entry) = entry
+                    && let Err(refusal) = crate::identity_check::verify_registered_identity(
                         entry,
                         lib_cfg.data_dir(),
                         crate::identity_check::MountOccasion::BringUp,
-                    )?;
+                    )
+                {
+                    skips.push(
+                        UnmountedLibrary::new(name, lib_cfg.data_dir(), refusal.problem.clone()),
+                        refusal.into(),
+                    );
+                    continue;
                 }
-                mounts.push((name.clone(), Arc::new(lib_cfg)));
+                candidates.push(Candidate::new(name, Arc::new(lib_cfg)));
             }
         } else {
-            mounts.push((primary_name.clone(), Arc::clone(&cfg)));
+            candidates.push(Candidate::new(&primary_name, Arc::clone(&cfg)));
         }
-        // A root that cannot host a lock file at all — a read-only
-        // volume, which `libraries add` already supports — is served
-        // unlocked: read-only media have no writers to exclude.
+
+        // 4c. One library per root. The default claims its root first,
+        //     then the rest in registry order; a later claimant on a
+        //     claimed root is skipped with a reason naming both.
         let mut roots_seen: HashMap<PathBuf, String> = HashMap::new();
-        // Each lock is keyed by the library it guards, so step 6 can
-        // hand it to that library's handle: from there on the lock is
-        // released when the handle is, not when this scope ends.
-        let mut root_locks: HashMap<String, MountGuard> = HashMap::new();
-        for (name, lib_cfg) in &mounts {
-            claim_unique_root(&mut roots_seen, lib_cfg.data_dir(), name)?;
-            match RootLock::acquire(lib_cfg.data_dir(), std::process::id(), "daemon") {
+        let mut claim_order: Vec<usize> = (0..candidates.len()).collect();
+        if let Some(default) = plan.default_name.as_deref()
+            && let Some(position) = candidates
+                .iter()
+                .position(|candidate| candidate.name == default)
+        {
+            claim_order.remove(position);
+            claim_order.insert(0, position);
+        }
+        let mut duplicates: Vec<usize> = Vec::new();
+        for index in claim_order {
+            let candidate = &candidates[index];
+            if let Some(previous) =
+                claim_unique_root(&mut roots_seen, candidate.cfg.data_dir(), &candidate.name)
+            {
+                let root = candidate.cfg.data_dir();
+                skips.push(
+                    UnmountedLibrary::new(
+                        &candidate.name,
+                        root,
+                        crate::mount::duplicate_root_problem(&previous, root),
+                    ),
+                    eyre::eyre!(
+                        "registry entries '{previous}' and '{}' point at the same data root {}; \
+                         fix the registry before starting the daemon",
+                        candidate.name,
+                        root.display(),
+                    ),
+                );
+                duplicates.push(index);
+            }
+        }
+        duplicates.sort_unstable();
+        for index in duplicates.into_iter().rev() {
+            candidates.remove(index);
+        }
+
+        // 4d. Take every candidate's root lock before anything expensive
+        //     comes up, so a contended root is skipped with no reranker
+        //     spawned and no half-open handle. A root that cannot host a
+        //     lock file at all — a read-only volume, which `libraries
+        //     add` already supports — is served unlocked: read-only
+        //     media have no writers to exclude. The lock rides on the
+        //     candidate, and from step 6 on the library's handle, so it
+        //     is released when the holder is, not when this scope ends.
+        let mut unlocked: Vec<(String, PathBuf, String)> = Vec::new();
+        let mut kept = Vec::with_capacity(candidates.len());
+        for mut candidate in candidates {
+            match RootLock::acquire(candidate.cfg.data_dir(), std::process::id(), "daemon") {
                 Ok(lock) => {
-                    tracing::info!(
-                        library = %name,
-                        path = %root_lock_path(lib_cfg.data_dir()).display(),
-                        "bookrack data root lock acquired",
-                    );
-                    root_locks.insert(name.clone(), Arc::new(lock) as MountGuard);
+                    candidate.guard = Some(Arc::new(lock) as MountGuard);
+                    kept.push(candidate);
                 }
                 Err(err) if is_root_lock_conflict(&err) => {
-                    return Err(err.wrap_err(format!("lock the data root of library '{name}'")));
+                    let problem = crate::mount::root_locked_problem(&err);
+                    skips.push(
+                        UnmountedLibrary::new(&candidate.name, candidate.cfg.data_dir(), problem),
+                        err.wrap_err(format!(
+                            "lock the data root of library '{}'",
+                            candidate.name
+                        )),
+                    );
                 }
                 Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        library = %name,
-                        root = %lib_cfg.data_dir().display(),
-                        "data root lock could not be created; serving the root unlocked",
-                    );
+                    unlocked.push((
+                        candidate.name.clone(),
+                        candidate.cfg.data_dir().to_path_buf(),
+                        format!("{err}"),
+                    ));
+                    kept.push(candidate);
                 }
             }
         }
+        let candidates = kept;
         // The daemon state directory holds process-scoped assets that
         // span libraries: the log stream (below) and the queue
         // snapshot (step 11). Resolved once, before the subscriber
@@ -464,32 +538,102 @@ impl DaemonRuntime {
             ),
             Err(e) => tracing::warn!(error = %e, "failed to raise RLIMIT_NOFILE"),
         }
+        // The lock stage ran before the subscriber existed; its outcomes
+        // are recorded now so the log carries them.
+        for candidate in &candidates {
+            if candidate.guard.is_some() {
+                tracing::info!(
+                    library = %candidate.name,
+                    path = %root_lock_path(candidate.cfg.data_dir()).display(),
+                    "bookrack data root lock acquired",
+                );
+            }
+        }
+        for (name, root, error) in &unlocked {
+            tracing::warn!(
+                error = %error,
+                library = %name,
+                root = %root.display(),
+                "data root lock could not be created; serving the root unlocked",
+            );
+        }
 
-        // 5. Effective embed configuration for the served library. The
-        //    model resolves from the index profile, else the built-in
-        //    default, so an undefined or unloadable profile refuses
-        //    startup here with the repair spelled out, rather than
-        //    embedding under a combination the operator never
-        //    declared. `build_library_handle` below re-runs the same
-        //    (pure) resolution for the handle's own clients; this copy
-        //    feeds the queue templates and `library.info`.
-        let embed_cfg = crate::profile::effective_embed_config(&cfg)
-            .context("resolve effective embed configuration")?;
+        // 5. The primary's embed model, for the status card's snapshot
+        //    alone: each handle resolves its own configuration in step
+        //    6, and a primary whose profile does not resolve is skipped
+        //    in 5a like any other candidate rather than refused here.
+        let embed_model = crate::profile::effective_embed_config(&cfg)
+            .map(|embed| embed.model)
+            .unwrap_or_default();
 
-        // 5a. Every mount's embed backend, before anything expensive
-        //     starts. Step 6 opens each library, and opening one
-        //     probes `/api/embed` unconditionally — so a backend that
-        //     cannot serve already fails the bring-up, just later and
-        //     with the failure buried under a wrapper chain. Refusing
-        //     here costs nothing extra and puts one readable sentence
-        //     and one command in front of the operator.
+        // 5a. Every candidate's embed configuration and backend, before
+        //     anything expensive starts. Step 6 opens each library, and
+        //     opening one probes `/api/embed` unconditionally — so a
+        //     backend that cannot serve would fail the library anyway,
+        //     just later and with the failure buried under a wrapper
+        //     chain. Judging here costs nothing extra and puts one
+        //     readable sentence and one command on the record; every
+        //     candidate sharing an unusable backend is skipped, not
+        //     only the first.
         //
         //     Ahead of 5b on purpose: `bring_up_reranker` may spawn a
         //     supervised llama-server and hold it to readiness, which
         //     is the most expensive step in the sequence. Paying for
         //     it before a bring-up that is certain to fail is waste
         //     the operator waits through.
-        crate::backend_probe::preflight_embed_backends(&mounts).await?;
+        let mut kept = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            match crate::profile::effective_embed_config(&candidate.cfg) {
+                Ok(_) => kept.push(candidate),
+                Err(err) => {
+                    let err = err.wrap_err(format!(
+                        "resolve effective embed configuration for library '{}'",
+                        candidate.name
+                    ));
+                    skips.push(
+                        UnmountedLibrary::new(
+                            &candidate.name,
+                            candidate.cfg.data_dir(),
+                            crate::control::error_map::report_problem(&err),
+                        ),
+                        err,
+                    );
+                }
+            }
+        }
+        let mounts: Vec<(String, Arc<Config>)> = kept
+            .iter()
+            .map(|candidate| (candidate.name.clone(), Arc::clone(&candidate.cfg)))
+            .collect();
+        let backend_problems = crate::backend_probe::embed_backend_problems(&mounts).await;
+        let mut candidates = Vec::with_capacity(kept.len());
+        for candidate in kept {
+            match backend_problems
+                .iter()
+                .find(|(name, _)| *name == candidate.name)
+            {
+                None => candidates.push(candidate),
+                Some((_, problem)) => skips.push(
+                    UnmountedLibrary::new(
+                        &candidate.name,
+                        candidate.cfg.data_dir(),
+                        problem.clone(),
+                    ),
+                    crate::backend_probe::PreflightRefusal {
+                        library: candidate.name.clone(),
+                        problem: problem.clone(),
+                    }
+                    .into(),
+                ),
+            }
+        }
+        // Nothing left to serve, and nothing expensive paid for yet:
+        // the one cause when there was one library, every library's
+        // reason when there were several. Zero-library bring-up is a
+        // later step.
+        if candidates.is_empty() {
+            return Err(skips.into_refusal());
+        }
 
         // Event stream and daemon-state flag come up before the
         // reranker so the supervisor's state observer can drive the
@@ -506,16 +650,73 @@ impl DaemonRuntime {
         //     way a profile that promises a reranker gets a verified
         //     backend or the daemon refuses to start.
         //
-        //     The stage is taken from the mounted set, not from the
-        //     primary: one backend serves every mounted library, so a
-        //     set that disagrees on the section is refused here rather
-        //     than served under whichever library bring-up happened to
-        //     select.
-        let rerank_cfg =
-            crate::rerank_supervisor::agreed_reranker_config(&mounts)?.unwrap_or(cfg.as_ref());
+        //     One backend serves every mounted library, so the set has
+        //     to agree on the stage. The reference is the registry
+        //     default when it is still a candidate, else the first
+        //     candidate; a candidate whose profile disagrees with the
+        //     reference is skipped rather than served under a stage it
+        //     did not declare.
+        let reference = plan
+            .default_name
+            .as_deref()
+            .and_then(|default| {
+                candidates
+                    .iter()
+                    .position(|candidate| candidate.name == default)
+            })
+            .unwrap_or(0);
+        let reference_name = candidates[reference].name.clone();
+        let reference_cfg = Arc::clone(&candidates[reference].cfg);
+        let reference_spec = crate::rerank_supervisor::reranker_spec(&reference_cfg)
+            .with_context(|| format!("resolve the index profile of library '{reference_name}'"))?;
+        let mut kept = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            if candidate.name == reference_name {
+                kept.push(candidate);
+                continue;
+            }
+            match crate::rerank_supervisor::reranker_spec(&candidate.cfg) {
+                Ok(spec) if spec == reference_spec => kept.push(candidate),
+                Ok(spec) => {
+                    let problem = crate::rerank_supervisor::disagreement_problem(
+                        &reference_name,
+                        &reference_spec,
+                        &candidate.name,
+                        &spec,
+                    );
+                    skips.push(
+                        UnmountedLibrary::new(
+                            &candidate.name,
+                            candidate.cfg.data_dir(),
+                            problem.clone(),
+                        ),
+                        crate::backend_probe::PreflightRefusal {
+                            library: candidate.name.clone(),
+                            problem,
+                        }
+                        .into(),
+                    );
+                }
+                Err(err) => {
+                    let err = err.wrap_err(format!(
+                        "resolve the index profile of library '{}'",
+                        candidate.name
+                    ));
+                    skips.push(
+                        UnmountedLibrary::new(
+                            &candidate.name,
+                            candidate.cfg.data_dir(),
+                            crate::control::error_map::report_problem(&err),
+                        ),
+                        err,
+                    );
+                }
+            }
+        }
+        let candidates = kept;
         let events_for_rerank = event_stream.clone();
         let reranker = crate::rerank_supervisor::bring_up_reranker(
-            rerank_cfg,
+            &reference_cfg,
             &runtime_dir,
             Some(Arc::new(move |state: &SupervisorState| {
                 if let Some(active) = rerank_degraded_transition(state) {
@@ -527,38 +728,73 @@ impl DaemonRuntime {
         .context("bring up the reranker backend")?;
         let rerank_supervisor = reranker.as_ref().and_then(|r| r.supervisor.clone());
 
-        // 6.-8. One warm handle per mounted library, then the
-        //    registry. Any library failing to come up fails the whole
-        //    bring-up with its name on the error; skip-and-degrade is
-        //    a later milestone.
-        let mut handles = Vec::with_capacity(mounts.len());
-        for (name, lib_cfg) in &mounts {
-            let handle = build_library_handle(
-                Arc::clone(lib_cfg),
+        // 6.-8. One warm handle per candidate, then the registry. A
+        //    library that fails to come up is skipped with its reason;
+        //    its root lock went in with the call and is released with
+        //    it. The skipped libraries are recorded beside the served
+        //    ones, so a call naming one is refused with the reason.
+        let mut handles = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let Candidate {
                 name,
+                cfg: lib_cfg,
+                guard,
+            } = candidate;
+            match build_library_handle(
+                Arc::clone(&lib_cfg),
+                &name,
                 reranker.as_ref().map(|r| &r.stage),
                 opts.caller.clone(),
-                root_locks.remove(name),
+                guard,
             )
             .await
-            .with_context(|| format!("bring up library '{name}'"))?;
-            handles.push(handle);
+            {
+                Ok(handle) => handles.push(handle),
+                Err(err) => {
+                    let err = err.wrap_err(format!("bring up library '{name}'"));
+                    skips.push(
+                        UnmountedLibrary::new(
+                            &name,
+                            lib_cfg.data_dir(),
+                            crate::control::error_map::report_problem(&err),
+                        ),
+                        err,
+                    );
+                }
+            }
         }
+        if handles.is_empty() {
+            return Err(skips.into_refusal());
+        }
+        let served = handles.len();
         let registry = LibraryRegistry::from_handles(handles, plan.default_name.clone())
             .context("assemble the library registry")?;
+        for skip in skips.iter() {
+            registry
+                .record_unmounted(skip.library.clone())
+                .context("record a library bring-up did not mount")?;
+            tracing::warn!(
+                library = %skip.library.name(),
+                root = %skip.library.data_dir().display(),
+                reason = %skip.library.reason().summary,
+                hint = skip.library.reason().data.hint.as_deref().unwrap_or(""),
+                "library not mounted at bring-up",
+            );
+        }
         // Single-value snapshot consumed by the `status` card and the
         // `library.changed` snapshot; it is not a routing fallback.
         // Per-library status surfaces are a later milestone.
-        let library_name = primary_name;
+        let library_name = primary_name.clone();
         tracing::info!(
-            libraries = mounts.len(),
+            libraries = served,
+            unmounted = skips.iter().count(),
             default = ?plan.default_name,
             auto_registered = ?auto_registered,
             "library registry warmed up",
         );
 
         // 9. LibraryInfoContext
-        let info_context = library_info_context(&cfg, &embed_cfg.model, &mcp_label);
+        let info_context = library_info_context(&cfg, &embed_model, &mcp_label);
 
         // 10. broadcast::channel; signal_task::spawn
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(8);
@@ -583,7 +819,38 @@ impl DaemonRuntime {
         .context("migrate the queue snapshot into the daemon state directory")?;
         // No eyre context: `QueueLoadError` is self-sufficient in the
         // log and carries its own three-part wording to the front end.
-        let initial_queue_state = queue::load(&queue_state_path)?;
+        let mut initial_queue_state = queue::load(&queue_state_path)?;
+        // 11a. A row written before `library` was filled is pinned to
+        //      the library the old unnamed route sent it to — the
+        //      registry's default entry, else the bring-up library —
+        //      and a row against a library bring-up skipped is failed
+        //      with the reason. Both are redone at every start, so a
+        //      save that fails is logged and the daemon comes up on the
+        //      adjusted in-memory state.
+        let pin_target = registry_entries
+            .iter()
+            .find(|entry| entry.is_default)
+            .map(|entry| entry.name.clone())
+            .unwrap_or_else(|| primary_name.clone());
+        let mut adjusted = queue::pin_unnamed_jobs(&mut initial_queue_state, &pin_target);
+        for library in skips.libraries() {
+            let failure = queue::JobFailure {
+                message: unmounted::queue_failure_message(library),
+                problem: Some(library.reason().clone()),
+            };
+            adjusted +=
+                queue::fail_jobs_against(&mut initial_queue_state, library.name(), &failure);
+        }
+        if adjusted > 0
+            && let Err(err) = queue::save_atomic(&mut initial_queue_state, &queue_state_path)
+        {
+            tracing::error!(
+                error = %err,
+                path = %queue_state_path.display(),
+                adjusted,
+                "queue document could not be saved after bring-up adjusted its rows",
+            );
+        }
         let queue_paused = Arc::new(AtomicBool::new(initial_queue_state.paused));
         let queue_state = Arc::new(Mutex::new(initial_queue_state));
         let write_guard = Arc::new(tokio::sync::Mutex::new(()));
@@ -613,15 +880,10 @@ impl DaemonRuntime {
                         tokio::task::spawn_blocking(move || {
                             let runtime = tokio::runtime::Handle::current();
                             // A submit pins the job to a registry name
-                            // at enqueue time. An empty name is a row
-                            // from a queue document written before the
-                            // field was filled, and is routed as a call
-                            // naming no library is.
-                            let library: Option<&str> = if job.library.is_empty() {
-                                None
-                            } else {
-                                Some(job.library.as_str())
-                            };
+                            // at enqueue time, and bring-up pins every
+                            // row that predates the field, so a row
+                            // reaching here unnamed cannot be routed.
+                            let library = job.library.clone();
                             let force = job.force;
                             let hold_for_metadata = job.hold_for_metadata;
                             let job_kind = job.kind;
@@ -629,7 +891,13 @@ impl DaemonRuntime {
                             let intake_ocr = job.intake_ocr.clone();
                             let audit_profile = job.audit_profile.clone();
                             runtime.block_on(async move {
-                                let handle = registry.get(library).map_err(|e| {
+                                if library.is_empty() {
+                                    return Err(queue::JobError::Book(queue::JobFailure::text(
+                                        "this job names no library, so it cannot be routed; \
+                                         retry it after a restart, which pins such rows",
+                                    )));
+                                }
+                                let handle = registry.get(Some(&library)).map_err(|e| {
                                     queue::JobError::Book(queue::JobFailure::text(format!(
                                         "registry: {e}"
                                     )))
@@ -1037,20 +1305,43 @@ fn plan_mounts(
 }
 
 /// Register `root` as claimed by library `name`, canonicalizing so two
-/// registry spellings of one directory collide. Two entries naming the
-/// same root is a registry error the operator must fix: the second
-/// lock acquisition would fail against the first, so the duplicate is
-/// reported up front with both entry names.
-fn claim_unique_root(seen: &mut HashMap<PathBuf, String>, root: &Path, name: &str) -> Result<()> {
+/// registry spellings of one directory collide. Returns the name that
+/// already claimed the root, when one did: two entries naming the same
+/// root is a registry error the operator must fix, and the second lock
+/// acquisition would fail against the first, so the later claimant is
+/// skipped up front with both entry names.
+fn claim_unique_root(
+    seen: &mut HashMap<PathBuf, String>,
+    root: &Path,
+    name: &str,
+) -> Option<String> {
     let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    if let Some(previous) = seen.insert(canonical, name.to_string()) {
-        eyre::bail!(
-            "registry entries '{previous}' and '{name}' point at the same data root {}; \
-             fix the registry before starting the daemon",
-            root.display(),
-        );
+    match seen.get(&canonical) {
+        Some(previous) => Some(previous.clone()),
+        None => {
+            seen.insert(canonical, name.to_string());
+            None
+        }
     }
-    Ok(())
+}
+
+/// A library bring-up is still trying to serve: its name, its
+/// configuration, and its root lock once taken. Dropping a candidate
+/// releases the lock.
+struct Candidate {
+    name: String,
+    cfg: Arc<Config>,
+    guard: Option<MountGuard>,
+}
+
+impl Candidate {
+    fn new(name: &str, cfg: Arc<Config>) -> Candidate {
+        Candidate {
+            name: name.to_string(),
+            cfg,
+            guard: None,
+        }
+    }
 }
 
 /// Build one library's warm [`LibraryHandle`]: resolve the library's
@@ -1494,12 +1785,11 @@ mod tests {
     fn claim_unique_root_rejects_two_entries_on_one_root() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut seen = HashMap::new();
-        claim_unique_root(&mut seen, dir.path(), "a").expect("first claim");
-        let err = claim_unique_root(&mut seen, dir.path(), "b").expect_err("duplicate root");
-        let message = format!("{err:#}");
-        assert!(
-            message.contains("'a'") && message.contains("'b'"),
-            "{message}"
+        assert_eq!(claim_unique_root(&mut seen, dir.path(), "a"), None);
+        assert_eq!(
+            claim_unique_root(&mut seen, dir.path(), "b").as_deref(),
+            Some("a"),
+            "the later claimant learns who holds the root"
         );
     }
 
@@ -1508,8 +1798,8 @@ mod tests {
         let dir_a = tempfile::tempdir().expect("tempdir");
         let dir_b = tempfile::tempdir().expect("tempdir");
         let mut seen = HashMap::new();
-        claim_unique_root(&mut seen, dir_a.path(), "a").expect("first claim");
-        claim_unique_root(&mut seen, dir_b.path(), "b").expect("second claim");
+        assert_eq!(claim_unique_root(&mut seen, dir_a.path(), "a"), None);
+        assert_eq!(claim_unique_root(&mut seen, dir_b.path(), "b"), None);
     }
 
     #[test]

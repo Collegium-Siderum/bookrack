@@ -26,6 +26,24 @@ release workflow extracts the matching section verbatim from this file.
 - **`libraries unmount` takes the registry default and refuses the last
   mounted library.** The library the daemon came up under is still
   refused, now including a root selected by path.
+- **A library that cannot come up no longer stops the daemon.**
+  `bookrack run` used to refuse to start when any registered library
+  failed to come up. Such a library is now skipped with its reason: its
+  data-root lock is released, its queued jobs are marked failed with the
+  reason, and a call naming it is refused — `-32010` on the control
+  socket, invalid params (`-32602`) from the MCP tools — with
+  `bookrack libraries mount <name>` in the hint. Two failures still stop
+  bring-up: the library the daemon is started under cannot be resolved
+  (for example, its data root is missing), or the reranker cannot start.
+  When no library comes up and there was only one to try, its error
+  reads as before; when there were several, the daemon refuses (exit 2)
+  and names each one. Index profiles that disagree on the reranker now
+  skip the libraries that disagree with the reference — the registry
+  default, or the first library to pass the earlier checks when the
+  default does not — instead of refusing the whole set. A queue row
+  written before jobs carried a library name is pinned at start to the
+  library it would have been routed to, and a row the worker still
+  finds unnamed fails instead of being routed.
 
 ## [0.13.0] - 2026-10-24
 

@@ -321,16 +321,7 @@ impl Mounter {
         if let Some(previous) = mounted.get(&root) {
             return Err(MountRefusal::Refused {
                 library: name.to_string(),
-                problem: Problem::new("cannot mount two libraries on one data root")
-                    .detail(format!(
-                        "Library {previous:?} is already served from {}.",
-                        cfg.data_dir().display(),
-                    ))
-                    .hint(
-                        "Registry entries have to name distinct roots. Run \
-                         `bookrack libraries list` to see what each entry points at, \
-                         then repoint or remove one of them.",
-                    ),
+                problem: duplicate_root_problem(previous, cfg.data_dir()),
             });
         }
         Ok(())
@@ -374,12 +365,7 @@ impl Mounter {
             }
             Err(err) if is_root_lock_conflict(&err) => Err(MountRefusal::RootLocked {
                 library: name.to_string(),
-                problem: Problem::new("cannot lock the data root of the library being mounted")
-                    .detail(format!("{err:#}"))
-                    .hint(
-                        "Another process holds the root. Stop whatever is using it — \
-                         a second daemon, or an offline destructive command — then mount again.",
-                    ),
+                problem: root_locked_problem(&err),
             }),
             Err(err) => {
                 tracing::warn!(
@@ -392,6 +378,31 @@ impl Mounter {
             }
         }
     }
+}
+
+/// The refusal for a root another served library already claims:
+/// bring-up and a runtime mount read it out alike.
+pub(crate) fn duplicate_root_problem(previous: &str, root: &std::path::Path) -> Problem {
+    Problem::new("cannot mount two libraries on one data root")
+        .detail(format!(
+            "Library {previous:?} is already served from {}.",
+            root.display(),
+        ))
+        .hint(
+            "Registry entries have to name distinct roots. Run `bookrack libraries list` to \
+             see what each entry points at, then repoint or remove one of them.",
+        )
+}
+
+/// The refusal for a root another process holds the lock on; `err` is
+/// the lock conflict, whose chain names the holder.
+pub(crate) fn root_locked_problem(err: &eyre::Report) -> Problem {
+    Problem::new("cannot lock the library's data root")
+        .detail(format!("{err:#}"))
+        .hint(
+            "Another process holds the root. Stop whatever is using it — a second daemon, \
+             or an offline destructive command — then mount the library again.",
+        )
 }
 
 /// A path compared by identity where the filesystem can answer, by

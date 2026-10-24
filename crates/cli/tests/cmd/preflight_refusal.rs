@@ -20,7 +20,7 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
-use bookrack_test_support::{Sandbox, bookrack_cmd};
+use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
 
 /// A loopback stand-in for Ollama that is up and answering but holds
@@ -189,5 +189,57 @@ async fn the_refusal_is_structured_under_json() {
         parsed.get("retryable"),
         Some(&serde_json::Value::Bool(false)),
         "a model that is not pulled will not appear on a retry: {parsed}"
+    );
+}
+
+/// Every registered library failed to come up and there was more than
+/// one to try: the daemon refuses at exit 2 and names each library
+/// with its reason, so the operator does not fix one to find the next.
+#[tokio::test]
+async fn no_servable_library_exits_two_naming_each() {
+    let sandbox = Sandbox::new();
+    let alpha = sandbox.data_root("alpha-root");
+    let beta = sandbox.path().join("roots").join("beta-missing");
+    sandbox.write_registry_entries(
+        Some("alpha"),
+        &[("alpha", alpha.as_path()), ("beta", beta.as_path())],
+    );
+    // `alpha` resolves, so bring-up gets past its own selection, and is
+    // then skipped because this process holds its root; `beta` has no
+    // root at all.
+    let _held = bookrack_session::RootLock::acquire(&alpha, std::process::id(), "test")
+        .expect("hold the alpha root");
+
+    let output = Command::from(
+        bookrack_cmd!(&sandbox)
+            .without_data_dir()
+            .ollama_url(EmbedStub::shared().url())
+            .build(),
+    )
+    .args(["--library", "alpha", "run"])
+    .output()
+    .await
+    .expect("run bookrack run");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "no servable library is operator input: {stderr}"
+    );
+    assert!(
+        stderr.contains("no registered library could be mounted"),
+        "the summary states the fact: {stderr}"
+    );
+    for name in ["\"alpha\"", "\"beta\""] {
+        assert!(stderr.contains(name), "each library is named: {stderr}");
+    }
+    assert!(
+        stderr.contains("Another process holds the root"),
+        "alpha's reason carries its hint: {stderr}"
+    );
+    assert!(
+        stderr.contains("Reconnect the volume"),
+        "beta's reason carries its hint: {stderr}"
     );
 }

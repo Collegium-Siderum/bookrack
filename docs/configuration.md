@@ -72,8 +72,10 @@ daemon already serves its libraries, and what travels with the call is
 a library *name*.
 
 - `--library <name>` travels as itself. A daemon mounts every
-  registered library, so any of them is reachable; a name the registry
-  does not hold is refused by the daemon as caller input.
+  registered library it could bring up, so any served one is reachable;
+  a name the registry does not hold is refused by the daemon as caller
+  input, and one bring-up skipped is refused with the reason and the
+  `libraries mount` command that brings it in once repaired.
 - `--data-dir <path>` and `BOOKRACK_DATA_DIR` name a place on disk,
   which is not a name a daemon can be asked for, so the registry
   translates: the entry whose manifest identity matches the root wins,

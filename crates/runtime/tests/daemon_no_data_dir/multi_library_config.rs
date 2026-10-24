@@ -14,7 +14,6 @@
 use std::sync::OnceLock;
 
 use bookrack_config::{LibraryKind, ManifestIdentitySeed, set_manifest_index_profile};
-use bookrack_runtime::backend_probe::PreflightRefusal;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use bookrack_test_support::{ProcessEnv, Sandbox, process_env};
 use eyre::Result;
@@ -138,15 +137,18 @@ async fn a_single_mount_is_served_under_its_own_declaration() -> Result<()> {
 }
 
 /// Bring-up serves one reranker stage for the whole mounted set, so a
-/// set whose profiles disagree on that stage cannot be served under any
-/// of them: the refusal has to name the libraries that disagree.
+/// library whose profile disagrees with the reference — the registry
+/// default, here `alpha` — is not served under a stage it did not
+/// declare: it is skipped, with a reason that names both libraries and
+/// the command that shows what each resolves to, and the daemon comes
+/// up on the rest.
 ///
 /// Without this check the disagreement is silent — the primary's
 /// profile decides, and a library declaring a cross-encoder is served
 /// with no reranker at all, which is exactly the promise
 /// `bring_up_reranker` documents that it upholds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_mounted_set_whose_profiles_disagree_on_the_reranker_refuses_bring_up() -> Result<()> {
+async fn a_library_disagreeing_on_the_reranker_is_skipped_with_both_named() -> Result<()> {
     world();
     let runtime_root = tempfile::tempdir()?;
 
@@ -154,48 +156,45 @@ async fn a_mounted_set_whose_profiles_disagree_on_the_reranker_refuses_bring_up(
     opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
 
-    let err = match DaemonRuntime::start(opts).await {
-        Ok(runtime) => {
-            let shutdown_tx = runtime.shutdown_tx.clone();
-            let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
-            let _ = shutdown_tx.send(());
-            runtime.run_until_shutdown(None, repl_handle).await?;
-            panic!(
-                "bring-up served a mounted set whose profiles disagree on the reranker stage; \
-                 expected a refusal naming both libraries"
-            );
-        }
-        Err(e) => e,
-    };
-
-    // Assert on the `Problem` the CLI's exit-2 path carries, not on the
-    // `Display` line: the detail sentence is what reaches the operator,
-    // and naming both libraries is the point — a refusal that only says
+    let runtime = DaemonRuntime::start(opts).await?;
+    assert!(
+        runtime.registry.get(Some("alpha")).is_ok(),
+        "the reference is served"
+    );
+    let skipped = runtime.registry.unmounted()?;
+    let beta = skipped
+        .iter()
+        .find(|library| library.name() == "beta")
+        .unwrap_or_else(|| panic!("beta must be skipped, recorded: {skipped:?}"));
+    // Assert on the `Problem` the status surfaces carry, not on a log
+    // line: the detail sentence is what reaches the operator, and
+    // naming both libraries is the point — a reason that only says
     // "the profiles disagree" leaves them to find which two.
-    let refusal = err
-        .downcast_ref::<PreflightRefusal>()
-        .unwrap_or_else(|| panic!("bring-up must refuse with a PreflightRefusal: {err:#}"));
-    let detail = refusal
-        .problem
+    let detail = beta
+        .reason()
         .data
         .detail
         .as_deref()
-        .unwrap_or_else(|| panic!("the refusal carries no detail: {:?}", refusal.problem));
+        .unwrap_or_else(|| panic!("the reason carries no detail: {:?}", beta.reason()));
     for name in ["alpha", "beta"] {
         assert!(
             detail.contains(name),
-            "the refusal must name {name}: {detail}"
+            "the reason must name {name}: {detail}"
         );
     }
     assert!(
-        refusal
-            .problem
+        beta.reason()
             .data
             .hint
             .as_deref()
             .is_some_and(|hint| hint.contains("index-profile current")),
         "the hint must point at the command that answers it: {:?}",
-        refusal.problem
+        beta.reason()
     );
+
+    let shutdown_tx = runtime.shutdown_tx.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+    let _ = shutdown_tx.send(());
+    runtime.run_until_shutdown(None, repl_handle).await?;
     Ok(())
 }

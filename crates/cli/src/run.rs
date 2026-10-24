@@ -28,6 +28,7 @@ use bookrack_runtime::control::HealthProbe;
 use bookrack_runtime::mcp_endpoint::McpBindRefusal;
 use bookrack_runtime::queue::QueueLoadError;
 use bookrack_runtime::rerank_supervisor::RerankerModelRefusal;
+use bookrack_runtime::unmounted::NoServableLibrary;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use eyre::{Context, Result};
 
@@ -95,6 +96,15 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
             // is operator input of the same kind: the refusal names the
             // route that does provide it.
             if let Some(refusal) = err.downcast_ref::<RerankerModelRefusal>() {
+                return Err(BookrackCliError::PreflightRefused {
+                    problem: refusal.explain(),
+                }
+                .into());
+            }
+            // No registered library could be served, and there was
+            // more than one to try: each is named with its reason, and
+            // each reason carries its own next step.
+            if let Some(refusal) = err.downcast_ref::<NoServableLibrary>() {
                 return Err(BookrackCliError::PreflightRefused {
                     problem: refusal.explain(),
                 }

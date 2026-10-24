@@ -34,6 +34,7 @@ pub mod render;
 pub mod rerank_supervisor;
 pub mod reranker_install;
 pub mod rlimit;
+pub mod unmounted;
 pub mod wizard;
 
 pub use daemon::{DaemonRuntime, RuntimeOpts};

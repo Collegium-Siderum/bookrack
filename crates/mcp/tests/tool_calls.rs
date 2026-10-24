@@ -463,6 +463,52 @@ async fn an_unknown_library_selector_is_invalid_params() {
     fx.stop().await;
 }
 
+/// A library bring-up skipped is refused by name with the reason it
+/// was skipped for and the command that mounts it, as invalid params:
+/// the agent's input names a library that is registered but not
+/// served.
+#[tokio::test]
+async fn a_library_bring_up_skipped_is_invalid_params_with_the_mount_hint() {
+    let fx = Fixture::start().await;
+    fx.registry
+        .record_unmounted(bookrack_ops::registry::UnmountedLibrary::new(
+            "beta",
+            "/disk/library/beta",
+            bookrack_core::Problem::new("cannot read the catalog").hint("Upgrade bookrack."),
+        ))
+        .expect("record the skipped library");
+    let client = fx.connect().await;
+
+    let err = client
+        .call_tool(call(
+            "library.stats",
+            serde_json::json!({ "library": "beta" }),
+        ))
+        .await
+        .expect_err("a skipped library must be refused");
+    let data = rpc_error(err);
+    assert_eq!(data.code, ErrorCode::INVALID_PARAMS, "{}", data.message);
+    assert!(
+        data.message.contains("beta") && data.message.contains("not mounted"),
+        "the message names the library and the fact: {}",
+        data.message
+    );
+    let problem: bookrack_core::ProblemData =
+        serde_json::from_value(data.data.expect("data slot filled")).expect("ProblemData");
+    let hint = problem.hint.expect("a skipped library has a next step");
+    assert!(
+        hint.contains("Upgrade bookrack."),
+        "the skip's own hint travels: {hint}"
+    );
+    assert!(
+        hint.contains("bookrack libraries mount beta"),
+        "the mount command ends the hint: {hint}"
+    );
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
 /// A client that negotiates protocol version 2026-07-28 sends no
 /// `initialize` and is served one request at a time. A tool's
 /// `invalid_params` for the caller's input reaches it as a JSON-RPC

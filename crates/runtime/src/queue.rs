@@ -311,6 +311,49 @@ pub fn crash_recovery_reset(state: &mut QueueState) {
     }
 }
 
+/// Give every job that names no library the name `target`, and return
+/// how many were changed. A row with an empty `library` predates the
+/// field; the worker refuses such a row, so bring-up pins it to the
+/// library the row would have been routed to when it was written.
+/// Only rows that can still run are pinned — pending, running, and
+/// the retryable terminals — since a retry does not fill the name in;
+/// a finished row keeps its history. Nothing but `library` changes.
+pub fn pin_unnamed_jobs(state: &mut QueueState, target: &str) -> usize {
+    let mut pinned = 0;
+    for job in state.jobs.iter_mut() {
+        if !job.library.is_empty() {
+            continue;
+        }
+        let runnable = matches!(job.state, JobState::Pending | JobState::Running)
+            || RETRYABLE_STATES.contains(&job.state);
+        if !runnable {
+            continue;
+        }
+        job.library = target.to_string();
+        pinned += 1;
+    }
+    pinned
+}
+
+/// Fail every pending or running job against `library` with `failure`,
+/// through [`apply_outcome`], and return how many were failed. Bring-up
+/// calls this for a library it did not mount, so the rows read as
+/// failed with the reason instead of burning on the worker's next pull.
+pub fn fail_jobs_against(state: &mut QueueState, library: &str, failure: &JobFailure) -> usize {
+    let ids: Vec<String> = state
+        .jobs
+        .iter()
+        .filter(|job| {
+            job.library == library && matches!(job.state, JobState::Pending | JobState::Running)
+        })
+        .map(|job| job.id.clone())
+        .collect();
+    for id in &ids {
+        apply_outcome(state, id, JobOutcome::Failed(failure.clone()));
+    }
+    ids.len()
+}
+
 /// Return a terminal row to `Pending` as a fresh submission: the state
 /// flips and the five fields a run writes — `started_at`,
 /// `finished_at`, `error`, `problem`, `merged_into` — are cleared. The id,
@@ -1027,6 +1070,94 @@ mod tests {
             problem: None,
             merged_into: None,
         }
+    }
+
+    /// Every runnable state is pinned, the two finished states are
+    /// not, and a pinned row changes in nothing but its library.
+    #[test]
+    fn pin_unnamed_jobs_pins_runnable_rows_and_leaves_finished_ones() {
+        let runnable = [
+            JobState::Pending,
+            JobState::Running,
+            JobState::Failed,
+            JobState::NeedsOcr,
+            JobState::Cancelled,
+        ];
+        for state in runnable {
+            let mut unnamed = sample_job();
+            unnamed.library = String::new();
+            unnamed.state = state;
+            unnamed.finished_at = Some(unnamed.queued_at);
+            let before = unnamed.clone();
+            let mut queue = QueueState {
+                jobs: vec![unnamed],
+                ..QueueState::default()
+            };
+            assert_eq!(pin_unnamed_jobs(&mut queue, "alpha"), 1, "{state:?}");
+            let after = &queue.jobs[0];
+            assert_eq!(after.library, "alpha", "{state:?}");
+            let mut expected = before.clone();
+            expected.library = "alpha".to_string();
+            assert_eq!(*after, expected, "{state:?}: only `library` may change");
+        }
+        for state in [JobState::Done, JobState::SkippedDuplicate] {
+            let mut finished = sample_job();
+            finished.library = String::new();
+            finished.state = state;
+            let mut queue = QueueState {
+                jobs: vec![finished],
+                ..QueueState::default()
+            };
+            assert_eq!(pin_unnamed_jobs(&mut queue, "alpha"), 0, "{state:?}");
+            assert_eq!(
+                queue.jobs[0].library, "",
+                "{state:?}: a finished row keeps its history"
+            );
+        }
+        // A row that already names a library is never moved.
+        let named = sample_job();
+        let mut queue = QueueState {
+            jobs: vec![named.clone()],
+            ..QueueState::default()
+        };
+        assert_eq!(pin_unnamed_jobs(&mut queue, "alpha"), 0);
+        assert_eq!(queue.jobs[0], named);
+    }
+
+    /// Only the pending and running rows of the named library fail;
+    /// another library's rows and finished rows are untouched.
+    #[test]
+    fn fail_jobs_against_marks_the_librarys_live_rows_only() {
+        let mut beta_pending = sample_job();
+        beta_pending.id = "b1".to_string();
+        beta_pending.library = "beta".to_string();
+        let mut beta_running = sample_job();
+        beta_running.id = "b2".to_string();
+        beta_running.library = "beta".to_string();
+        beta_running.state = JobState::Running;
+        let mut beta_done = sample_job();
+        beta_done.id = "b3".to_string();
+        beta_done.library = "beta".to_string();
+        beta_done.state = JobState::Done;
+        let mut alpha_pending = sample_job();
+        alpha_pending.id = "a1".to_string();
+        alpha_pending.library = "alpha".to_string();
+        let mut queue = QueueState {
+            jobs: vec![beta_pending, beta_running, beta_done, alpha_pending],
+            ..QueueState::default()
+        };
+        let failure = JobFailure::text("library \"beta\" was not mounted at bring-up");
+        assert_eq!(fail_jobs_against(&mut queue, "beta", &failure), 2);
+        let by_id = |id: &str| queue.jobs.iter().find(|j| j.id == id).unwrap();
+        for id in ["b1", "b2"] {
+            let job = by_id(id);
+            assert_eq!(job.state, JobState::Failed, "{id}");
+            assert!(job.finished_at.is_some(), "{id}");
+            assert_eq!(job.error.as_deref(), Some(failure.message.as_str()), "{id}");
+        }
+        assert_eq!(by_id("b3").state, JobState::Done);
+        assert_eq!(by_id("a1").state, JobState::Pending);
+        assert!(by_id("a1").error.is_none());
     }
 
     #[test]
