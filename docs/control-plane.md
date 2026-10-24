@@ -406,7 +406,8 @@ the exit-code bucket does not distinguish the two.
 - `daemon.shutdown` — fires the shared shutdown broadcast; the
   response is `null` and is written before the listener stops.
 - `daemon.status` — `{ state, queue_pending, queue_running,
-  queue_worker_enabled, library, data_dir, served, auto_registered }`.
+  queue_worker_enabled, library, data_dir, served, unmounted,
+  auto_registered }`.
   The canonical name; `status` is a compatibility alias answered by
   the same handler.
   `state` is one of
@@ -433,8 +434,19 @@ the exit-code bucket does not distinguish the two.
   default carries them on different rows — and a client answering
   "which library does an unnamed call reach" must read `default`, not
   `primary`. `served` is `null` when the registry could not be read;
-  that is not the same as an empty set, which cannot occur (a daemon
-  serves at least the library it came up under).
+  that is not the same as an empty set, which does not occur today:
+  the last mounted library cannot be unmounted, and a bring-up with no
+  library to serve refuses rather than coming up.
+
+  `unmounted` lists the registered libraries bring-up did not mount,
+  sorted by name, each `{ name, data_dir, reason }` with `reason` in
+  the four flat fields a three-part diagnostic serializes to —
+  `summary`, `detail`, `hint`, `retryable`. It is `[]` when every
+  registered library came up, and `null` with `served` when the
+  registry could not be read. Both lists come from one read, so no
+  name is in both; a successful `library.mount` moves a name from
+  `unmounted` to `served`. The reason is redacted of build-machine
+  source prefixes where it is recorded.
 
   `auto_registered` lists the registry names bring-up recorded for the
   selected root — a path-class root carrying an identity manifest the
@@ -1123,6 +1135,10 @@ Eleven of the tools write:
   `library.metadata.reject` — move the review row.
 - `reference.overlay_set` — layer a user edit on a reference entry.
 - `session.shutdown` — stop the daemon.
+
+`session.info` reports the same served and unmounted sets as
+`daemon.status`: `libraries` and `unmounted` are read from the registry
+in one instant, with each skipped library's root and three-part reason.
 
 Every write tool runs attributed to `Caller::mcp()`, so its audit rows
 carry `actor_kind=llm` / `actor_detail=mcp` regardless of the surface

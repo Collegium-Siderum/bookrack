@@ -11,6 +11,7 @@
 //! freshly connected one.
 
 use bookrack_ops::reads::info::show_library_info;
+use bookrack_ops::registry::{LibrarySummary, UnmountedLibrary};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -103,6 +104,16 @@ pub fn status(ctx: &MethodContext) -> Value {
         queue_pending = pending as u32;
         queue_running = running as u32;
     }
+    // A poisoned lock is the only way this read fails. The rest of the
+    // card is still worth printing, and `null` says the sets could not
+    // be read rather than implying empty ones.
+    let (served, unmounted) = match ctx.registry.snapshot() {
+        Ok(snapshot) => (
+            served_rows(ctx, snapshot.mounted),
+            unmounted_rows(&snapshot.unmounted),
+        ),
+        Err(_) => (Value::Null, Value::Null),
+    };
     json!({
         "state": ctx.event_stream.current_state(),
         "queue_pending": queue_pending,
@@ -121,7 +132,12 @@ pub fn status(ctx: &MethodContext) -> Value {
         // registry entry claims that root.
         "library": ctx.info_context.library_name,
         "data_dir": ctx.info_context.data_dir,
-        "served": served_libraries(ctx),
+        "served": served,
+        // The registered libraries bring-up did not mount, each with
+        // its root and the three-part reason; `[]` when every one came
+        // up. Read in the same instant as `served`, so a mount landing
+        // between two reads cannot show one name in both lists.
+        "unmounted": unmounted,
         // What bring-up registered for the selected root this session;
         // empty when nothing was. Not persisted: a restart on the same
         // root finds it registered and reports nothing here.
@@ -129,8 +145,8 @@ pub fn status(ctx: &MethodContext) -> Value {
     })
 }
 
-/// Every library this daemon has mounted, one row each, sorted by name;
-/// `null` when the registry could not be read.
+/// Every library this daemon has mounted, one row each, sorted by name,
+/// from the registry snapshot `summaries` was read in.
 ///
 /// `default` marks the library an unnamed call resolves to, `primary`
 /// the one the daemon came up under. They are two bits rather than one
@@ -142,13 +158,7 @@ pub fn status(ctx: &MethodContext) -> Value {
 /// `library` above reports as `null` — still has its row marked.
 /// `data_dir` is each library's own root, so a registry pointing two
 /// names at one root is visible as such.
-fn served_libraries(ctx: &MethodContext) -> Value {
-    // A poisoned default-pointer lock is the only way this read fails.
-    // The rest of the card is still worth printing, and `null` says the
-    // set could not be read rather than implying an empty one.
-    let Ok(summaries) = ctx.registry.list() else {
-        return Value::Null;
-    };
+fn served_rows(ctx: &MethodContext, summaries: Vec<LibrarySummary>) -> Value {
     let primary = ctx.library_name.as_str();
     let rows: Vec<Value> = summaries
         .into_iter()
@@ -159,6 +169,24 @@ fn served_libraries(ctx: &MethodContext) -> Value {
                 "data_dir": s.data_dir.display().to_string(),
                 "default": s.is_default,
                 "primary": is_primary,
+            })
+        })
+        .collect();
+    Value::Array(rows)
+}
+
+/// The registered libraries bring-up did not mount, one row each,
+/// sorted by name: `{ name, data_dir, reason }`, the reason in the four
+/// flat fields a `Problem` serializes to. A record is redacted where it
+/// is made, so the reason goes out as it is.
+fn unmounted_rows(unmounted: &[UnmountedLibrary]) -> Value {
+    let rows: Vec<Value> = unmounted
+        .iter()
+        .map(|library| {
+            json!({
+                "name": library.name(),
+                "data_dir": library.data_dir().display().to_string(),
+                "reason": serde_json::to_value(library.reason()).unwrap_or(Value::Null),
             })
         })
         .collect();
@@ -545,5 +573,44 @@ mod tests {
         assert_eq!(served.len(), 1, "{card}");
         assert_eq!(served[0]["name"], "default", "{card}");
         assert_eq!(served[0]["primary"], Value::Bool(true), "{card}");
+    }
+
+    /// A library bring-up skipped is listed under `unmounted` with its
+    /// root and reason, beside the served rows. The reason reaches the
+    /// client clean of build-machine source prefixes: a success reply is
+    /// not redacted on its way out, so the record has to be.
+    #[test]
+    fn status_lists_skipped_libraries_with_a_clean_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = method_context(dir.path(), Some("alpha"));
+        let located = "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/io.rs:7:3";
+        ctx.registry
+            .record_unmounted(bookrack_ops::registry::UnmountedLibrary::new(
+                "beta",
+                "/disk/library/beta",
+                bookrack_core::Problem::new("cannot read the catalog")
+                    .detail(format!("read failed at {located} under /disk/library/beta"))
+                    .hint("Upgrade bookrack."),
+            ))
+            .unwrap();
+        let card = status(&ctx);
+        let unmounted = card["unmounted"]
+            .as_array()
+            .unwrap_or_else(|| panic!("status carries no unmounted rows: {card}"));
+        assert_eq!(unmounted.len(), 1, "{card}");
+        let row = &unmounted[0];
+        assert_eq!(row["name"], "beta", "{card}");
+        assert_eq!(row["data_dir"], "/disk/library/beta", "{card}");
+        assert_eq!(
+            row["reason"]["summary"], "cannot read the catalog",
+            "{card}"
+        );
+        assert_eq!(row["reason"]["hint"], "Upgrade bookrack.", "{card}");
+        assert_eq!(row["reason"]["retryable"], Value::Bool(false), "{card}");
+        let detail = row["reason"]["detail"].as_str().unwrap_or_default();
+        assert!(!detail.contains("/disk/cache/cargo"), "{detail}");
+        assert!(detail.contains("io.rs:7:3"), "{detail}");
+        assert!(detail.contains("/disk/library/beta"), "{detail}");
+        assert_eq!(card["served"].as_array().map(Vec::len), Some(1), "{card}");
     }
 }
