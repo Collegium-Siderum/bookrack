@@ -445,6 +445,19 @@ async fn an_unknown_library_selector_is_invalid_params() {
         "the message must name the rejected selector: {}",
         data.message
     );
+    // The names that would resolve are the remedy, so they belong in
+    // the hint rather than in the summary line.
+    let problem: bookrack_core::ProblemData =
+        serde_json::from_value(data.data.expect("data slot filled")).expect("ProblemData");
+    let hint = problem.hint.expect("an unknown library has a next step");
+    for name in ["fixture", "second"] {
+        assert!(hint.contains(name), "the hint must offer {name}: {hint}");
+    }
+    assert!(
+        !data.message.contains("available"),
+        "the summary states the failure alone: {}",
+        data.message
+    );
 
     let _ = client.cancel().await;
     fx.stop().await;

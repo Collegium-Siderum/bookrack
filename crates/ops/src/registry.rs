@@ -29,6 +29,8 @@ use bookrack_ingest::{IngestParams, IngestReport, OnEmbedBatch};
 use eyre::WrapErr;
 use tokio::sync::Mutex as AsyncMutex;
 
+use bookrack_core::{Explain, Problem};
+
 use crate::Ops;
 use crate::OpsError;
 
@@ -73,6 +75,30 @@ pub enum RegistryError {
     /// — rather than a misuse path the caller can recover from.
     #[error("internal: mounted-library lock poisoned")]
     LibsLockPoisoned,
+}
+
+impl Explain for RegistryError {
+    fn explain(&self) -> Problem {
+        match self {
+            // The summary names the name that did not resolve; the
+            // names that would are the caller's next step, so they go
+            // in the hint rather than beside the failure.
+            Self::LibraryUnknown { name, available } => {
+                let problem = Problem::new(format!("no library named {name:?}"));
+                if available.is_empty() {
+                    problem.hint("Register one with `bookrack libraries register`.")
+                } else {
+                    problem.hint(format!("Use one of: {}.", available.join(", ")))
+                }
+            }
+            Self::Empty => Problem::new(self.to_string())
+                .hint("Register a library with `bookrack libraries register`."),
+            Self::AlreadyMounted { .. } => Problem::new(self.to_string())
+                .hint("It is already being served, so there is nothing to mount."),
+            // A poisoned lock is a bug: there is no next step to write.
+            Self::DefaultLockPoisoned | Self::LibsLockPoisoned => Problem::from_error_chain(self),
+        }
+    }
 }
 
 /// A fallible registry operation.
@@ -1111,6 +1137,36 @@ mod tests {
         assert!(!summaries[2].is_default);
         for summary in summaries {
             assert!(summary.dimension.is_none());
+        }
+    }
+
+    /// With no library to offer, the hint names the registering step
+    /// instead of an empty list.
+    #[test]
+    fn unknown_library_against_an_empty_registry_hints_at_registering() {
+        use bookrack_core::Explain;
+        let problem = RegistryError::LibraryUnknown {
+            name: "ghost".into(),
+            available: Vec::new(),
+        }
+        .explain();
+        assert_eq!(problem.summary, "no library named \"ghost\"");
+        assert!(problem.data.detail.is_none(), "{:?}", problem.data.detail);
+        let hint = problem.data.hint.expect("hint");
+        assert!(hint.contains("libraries register"), "{hint}");
+    }
+
+    /// A poisoned lock is a bug: it has no next step to write.
+    #[test]
+    fn a_poisoned_lock_explains_without_a_hint() {
+        use bookrack_core::Explain;
+        for err in [
+            RegistryError::DefaultLockPoisoned,
+            RegistryError::LibsLockPoisoned,
+        ] {
+            let problem = err.explain();
+            assert_eq!(problem.summary, err.to_string());
+            assert!(problem.data.hint.is_none(), "{:?}", problem.data.hint);
         }
     }
 }

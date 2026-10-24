@@ -237,7 +237,8 @@ onto.
   `OcrPagesMissing`, `OcrPagesExcess`, `IntakeNotRebuildable`.
 - **A `library` parameter naming a library the registry does not
   hold** (`-32010`): `RegistryError::LibraryUnknown`, raised by any
-  handler that resolves that parameter.
+  handler that resolves that parameter. The message names the name
+  that did not resolve; the names that would are in `error.data.hint`.
 - **An embedding model the Ollama daemon does not hold** (`-32602`):
   `EmbedError::ModelNotFound`, whether raised bare or wrapped in
   `IngestError::Embed`, `GleanError::Embed`, or
@@ -552,8 +553,9 @@ the exit-code bucket does not distinguish the two.
   carries but this daemon is not serving is mounted first, so the
   daemon is serving whatever it is about to route unnamed calls to;
   without that the pointer could only ever move between the libraries
-  that happened to be mounted. Returns `-32010` (invalid library) with
-  the list of known libraries when `name` is not registered at all.
+  that happened to be mounted. Returns `-32010` (invalid library) when
+  `name` is not registered at all, with the names the registry does
+  carry in `error.data.hint`.
   Fires a `library.changed` event so subscribers can refresh their view.
 - `events.subscribe` — `{ subscribed: true }` followed by an
   immediate snapshot bundle of `daemon.state`, `queue.list`,

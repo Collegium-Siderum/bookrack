@@ -37,7 +37,7 @@ mod error_map;
 mod reference;
 use error_map::{
     internal_message, invalid_params_err, invalid_params_message, ops_error_to_mcp,
-    reference_error_to_mcp, report_to_mcp, respond_with, unknown_filter_value_to_mcp,
+    reference_error_to_mcp, registry_err, report_to_mcp, respond_with, unknown_filter_value_to_mcp,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -857,16 +857,14 @@ impl BookrackServer {
     /// front (their args carry `library: String`, not `Option`) so the
     /// resolution never falls back silently.
     ///
-    /// An unknown name produces an MCP `InvalidParams` error carrying
-    /// the registry's listed available names — the same diagnostic
-    /// shape the CLI surface uses for `--library` typos.
+    /// An unknown name produces an MCP `InvalidParams` error whose
+    /// hint lists the registry's names — the same three parts the
+    /// control plane puts on its `-32010` envelope.
     fn resolve_handle(
         &self,
         library: Option<&str>,
     ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>, ErrorData> {
-        self.registry
-            .get(library)
-            .map_err(|e| invalid_params_err(&e))
+        self.registry.get(library).map_err(|e| registry_err(&e))
     }
 
     /// Search the library and return cited passages as a JSON array.

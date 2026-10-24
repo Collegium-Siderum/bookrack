@@ -113,13 +113,19 @@ async fn every_handler_resolving_a_library_param_refuses_an_unknown_name_alike()
             );
             // The available set is what lets an operator correct the
             // call without a separate listing round trip; it is carried
-            // by the error type and must survive the mapping.
+            // by the error type and must survive the mapping, in the
+            // hint: it is the next step, not the failure.
+            let hint = resp["error"]["data"]["hint"].as_str().unwrap_or_default();
             for available in ["alpha", "beta"] {
                 assert!(
-                    message.contains(available),
-                    "{method} must offer {available} as a name that does resolve: {resp}"
+                    hint.contains(available),
+                    "{method} must offer {available} in the hint as a name that does resolve: {resp}"
                 );
             }
+            assert!(
+                !message.contains("available"),
+                "{method} must keep the available set out of the summary: {resp}"
+            );
             // A wrapper noun in place of the fact is what rule 2 of the
             // error-message discipline forbids on the wire.
             assert!(

@@ -591,9 +591,7 @@ fn from_registry(e: &RegistryError) -> RpcError {
         RegistryError::Empty => INVALID_PARAMS,
         _ => INTERNAL_ERROR,
     };
-    // No `Explain` impl on the registry errors yet, so the fallback
-    // applies: a flattened summary and no hint.
-    rpc_from_problem(code, Problem::from_error_chain(e))
+    rpc_from_problem(code, e.explain())
 }
 
 /// Map a refusal a write command raised on its own input.
@@ -670,15 +668,37 @@ mod tests {
         assert!(rpc.message.contains("no text layer"));
     }
 
+    /// The summary names only the name that did not resolve; the names
+    /// that would are the next step, so they travel in the hint.
     #[test]
     fn registry_library_unknown_is_invalid_library() {
         let err: Report = RegistryError::LibraryUnknown {
             name: "ghost".into(),
-            available: vec!["main".into()],
+            available: vec!["alpha".into(), "beta".into()],
         }
         .into();
         let rpc = handler_err("library.set_default", err);
         assert_eq!(rpc.code, INVALID_LIBRARY);
+        assert_eq!(rpc.message, "no library named \"ghost\"");
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(rpc.data.expect("data")).expect("ProblemData");
+        let hint = data.hint.expect("the available names are the next step");
+        for available in ["alpha", "beta"] {
+            assert!(hint.contains(available), "{hint}");
+        }
+        assert!(!data.retryable);
+    }
+
+    /// An empty registry has one next step, and it is not a name.
+    #[test]
+    fn registry_empty_hints_at_registering() {
+        let err: Report = RegistryError::Empty.into();
+        let rpc = handler_err("library.set_default", err);
+        assert_eq!(rpc.code, INVALID_PARAMS);
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(rpc.data.expect("data")).expect("ProblemData");
+        let hint = data.hint.expect("an empty registry has a next step");
+        assert!(hint.contains("libraries register"), "{hint}");
     }
 
     #[test]

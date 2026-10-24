@@ -94,6 +94,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **An unknown library name is refused with the names that would
+  resolve as the hint.** `-32010 invalid library` carried the
+  registry's names inside the message, `no library named "x"
+  (available: a, b)`, and nothing in `error.data`. The message now
+  states only the failure, and `error.data.hint` reads `Use one of: a,
+  b.`; against an empty registry it names `bookrack libraries
+  register`. The command line prints the hint under the summary line,
+  so the names are still shown. The MCP tools' refusal of an unknown
+  `library` argument carries the same parts.
 - **A dry run no longer announces a library change.** `dryrun`,
   `papers.dryrun`, and the `dry_run` legs of `remove`, `papers.remove`,
   `corpus.rebuild`, `papers.corpus_rebuild`, `vectors.reembed` and

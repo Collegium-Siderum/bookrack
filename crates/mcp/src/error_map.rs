@@ -14,9 +14,10 @@
 //! where the caller can no longer reach it.
 //! `scripts/error-boundary-check.sh` enforces that for this file.
 
-use bookrack_core::Problem;
+use bookrack_core::{Explain, Problem};
 use bookrack_ops::OpsError;
 use bookrack_ops::dto::UnknownFilterValue;
+use bookrack_ops::registry::RegistryError;
 use rmcp::ErrorData;
 use rmcp::model::{CallToolResult, ContentBlock, ErrorCode};
 use serde::Serialize;
@@ -78,12 +79,19 @@ fn envelope(code: ErrorCode, message: String, mut data: Option<serde_json::Value
 /// Map a validation or argument-shape error to an MCP `invalid_params`.
 ///
 /// The tool bodies reject caller input in a handful of places that hold
-/// no typed enum worth matching on (exclusion-list validation, registry
-/// lookup, single-variant arms). They all funnel here so the outbound
+/// no typed enum worth matching on (exclusion-list validation,
+/// single-variant arms). They all funnel here so the outbound
 /// message stays flattened and this file remains the crate's only
 /// unguarded exit.
 pub(crate) fn invalid_params_err<E: std::error::Error + 'static>(e: &E) -> ErrorData {
     mcp_from_problem(ErrorCode::INVALID_PARAMS, Problem::from_error_chain(e))
+}
+
+/// Map a registry refusal onto an MCP `invalid_params`, through the
+/// error's own wording: the names that would resolve reach the agent
+/// in the hint, as they do on the control plane.
+pub(crate) fn registry_err(e: &RegistryError) -> ErrorData {
+    mcp_from_problem(ErrorCode::INVALID_PARAMS, e.explain())
 }
 
 /// Map a refused filter value to an MCP `invalid_params`.
