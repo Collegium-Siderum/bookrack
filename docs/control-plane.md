@@ -411,7 +411,9 @@ the exit-code bucket does not distinguish the two.
   default while it is mounted, the only mounted library when the
   registry declares none — and no row carries it when such a call is
   refused (see *Unnamed calls*); `primary` marks the one the daemon
-  came up under. They are separate bits because they are separate
+  came up under — a root selected by path under the name the daemon
+  serves it as, `default`, although `library` above is `null` for it.
+  They are separate bits because they are separate
   facts — a daemon started under a library that is not the registry's
   default carries them on different rows — and a client answering
   "which library does an unnamed call reach" must read `default`, not

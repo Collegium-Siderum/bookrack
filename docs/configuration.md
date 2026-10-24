@@ -78,10 +78,14 @@ a library *name*.
   which is not a name a daemon can be asked for, so the registry
   translates: the entry whose manifest identity matches the root wins,
   then the entry whose path matches.
-- A root **no entry claims** has no name to send. The daemon is asked
-  whether that is the root it serves; if it is, the call goes out
-  unnamed and lands there. If the daemon serves something else, the
-  command is refused and names both roots.
+- A root **no entry claims** has no registry name. The daemon is asked
+  which roots it serves; if that root is among them, the call goes out
+  under the name the daemon serves it as — `default` for the root a
+  daemon came up on by path — and lands there even when a registered
+  library is mounted beside it. If the daemon serves something else,
+  the command is refused and names both roots. A root the daemon came
+  up on stays the subject of `bookrack status` when selected this way:
+  the card is not refused as it would be for `--library`.
 - A root whose manifest identity belongs to an entry pointing
   **somewhere else** is refused without asking any daemon: two
   directories claim one library, and acting on either answers for the

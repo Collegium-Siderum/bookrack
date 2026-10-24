@@ -137,8 +137,11 @@ pub fn status(ctx: &MethodContext) -> Value {
 /// because they are two facts: a daemon started under a library that is
 /// not the registry's default carries them on different rows, and a
 /// client that folded them together could not answer which library an
-/// unnamed call reaches. `data_dir` is each library's own root, so a
-/// registry pointing two names at one root is visible as such.
+/// unnamed call reaches. `primary` is compared against the key the
+/// daemon serves the library under, so a root selected by path — which
+/// `library` above reports as `null` — still has its row marked.
+/// `data_dir` is each library's own root, so a registry pointing two
+/// names at one root is visible as such.
 fn served_libraries(ctx: &MethodContext) -> Value {
     // A poisoned default-pointer lock is the only way this read fails.
     // The rest of the card is still worth printing, and `null` says the
@@ -146,11 +149,11 @@ fn served_libraries(ctx: &MethodContext) -> Value {
     let Ok(summaries) = ctx.registry.list() else {
         return Value::Null;
     };
-    let primary = ctx.info_context.library_name.as_deref();
+    let primary = ctx.library_name.as_str();
     let rows: Vec<Value> = summaries
         .into_iter()
         .map(|s| {
-            let is_primary = Some(s.name.as_str()) == primary;
+            let is_primary = s.name == primary;
             json!({
                 "name": s.name,
                 "data_dir": s.data_dir.display().to_string(),
@@ -528,5 +531,19 @@ mod tests {
         ] {
             assert!(value.get(key).is_some(), "missing key {key}: {value}");
         }
+    }
+
+    /// A root selected by path is the library the daemon came up under,
+    /// and its served row says so even though it has no registry name.
+    #[test]
+    fn a_path_selected_root_is_marked_primary_in_served() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = method_context(dir.path(), None);
+        let card = status(&ctx);
+        assert!(card["library"].is_null(), "{card}");
+        let served = card["served"].as_array().expect("served rows");
+        assert_eq!(served.len(), 1, "{card}");
+        assert_eq!(served[0]["name"], "default", "{card}");
+        assert_eq!(served[0]["primary"], Value::Bool(true), "{card}");
     }
 }

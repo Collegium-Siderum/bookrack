@@ -30,6 +30,7 @@ mod libraries_list_served;
 mod library_routing_e2e;
 mod listing_names_its_library;
 mod oneshot_e2e;
+mod path_selected_root_routing;
 mod preflight_refusal;
 mod proxy_bypass;
 mod queue_document_refusal;

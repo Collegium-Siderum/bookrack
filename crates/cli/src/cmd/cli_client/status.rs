@@ -93,14 +93,18 @@ async fn full_card(runtime_dir: Option<&Path>, lock_path: &Path, info: &LockInfo
 /// up under the default. Naming the library is what keeps the card's
 /// counts about the library its identity rows name.
 ///
-/// A root selected by path has no name to send. There the daemon serves
-/// that root alone, so the unnamed call has nowhere else to land.
+/// A root selected by path has no registry name, and `library` is null
+/// for it; the daemon serves it under a key of its own, carried by the
+/// `served` row marked `primary`, and the card asks for it by that key.
+/// Only a `status` with neither — an older daemon — sends the call
+/// unnamed.
 ///
 /// The key is read off the runtime's method registry rather than spelled
 /// out here, so a card built by this client cannot disagree with the
 /// handler about how the selection is named.
 fn library_info_params(status: &Value) -> Value {
-    let Some(name) = status.get("library").and_then(Value::as_str) else {
+    let named = status.get("library").and_then(Value::as_str);
+    let Some(name) = named.or_else(|| primary_served_name(status)) else {
         return Value::Null;
     };
     let Some(key) = library_key_for("library.info") else {
@@ -109,6 +113,17 @@ fn library_info_params(status: &Value) -> Value {
     let mut params = serde_json::Map::new();
     params.insert(key.to_string(), Value::String(name.to_string()));
     Value::Object(params)
+}
+
+/// The name of the `served` row marked `primary`, when `status` carries
+/// the rows.
+fn primary_served_name(status: &Value) -> Option<&str> {
+    status
+        .get("served")?
+        .as_array()?
+        .iter()
+        .find(|row| row["primary"] == Value::Bool(true))?["name"]
+        .as_str()
 }
 
 /// Assemble the full card from the lock snapshot and the three RPC
@@ -767,9 +782,10 @@ mod tests {
         assert_eq!(params, json!({ "name": "beta" }));
     }
 
-    /// A path-selected root reports a null name. Sending `{"name":
-    /// null}` would be a selection the daemon has to reject, so the call
-    /// goes out unnamed — that root is the only one such a daemon holds.
+    /// A path-selected root reports a null name, and a `status` without
+    /// served rows gives no key to ask under. Sending `{"name": null}`
+    /// would be a selection the daemon has to reject, so the call goes
+    /// out unnamed.
     #[test]
     fn a_path_selected_root_is_asked_without_a_name() {
         assert_eq!(
@@ -787,5 +803,22 @@ mod tests {
         );
         assert_eq!(disk_total(&json!({ "disk": {} })), None);
         assert_eq!(disk_total(&json!({})), None);
+    }
+
+    /// A root selected by path has no registry name, but the daemon
+    /// serves it under a key and marks that row `primary`; the card
+    /// asks for it by that key, so its counts cannot land on a library
+    /// mounted beside it.
+    #[test]
+    fn a_path_selected_root_is_asked_for_under_the_name_its_served_row_carries() {
+        let status = json!({
+            "library": Value::Null,
+            "data_dir": "/data/anon",
+            "served": [
+                { "name": "default", "data_dir": "/data/anon", "default": false, "primary": true },
+                { "name": "beta", "data_dir": "/data/beta", "default": false, "primary": false },
+            ],
+        });
+        assert_eq!(library_info_params(&status), json!({ "name": "default" }));
     }
 }

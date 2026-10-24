@@ -35,7 +35,39 @@ use serde_json::Value;
 use crate::error::BookrackCliError;
 
 static PENDING: OnceLock<LibrarySelection> = OnceLock::new();
-static SELECTED: OnceLock<Option<String>> = OnceLock::new();
+static SELECTED: OnceLock<Option<Selected>> = OnceLock::new();
+
+/// The library a daemon-routed invocation acts on, once settled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Selected {
+    /// The name the daemon serves the library under: a registry name,
+    /// or the in-memory key of a root selected by path.
+    pub name: String,
+    /// Whether the selection is the root the daemon came up under,
+    /// reached by path. A process-level method reports on that very
+    /// root, so the selection is honoured by leaving such a call alone
+    /// rather than refusing it; a routed method still gets the name.
+    pub bring_up_root: bool,
+}
+
+impl Selected {
+    /// A selection by registry name, or by a path the registry claims.
+    pub fn named(name: impl Into<String>) -> Selected {
+        Selected {
+            name: name.into(),
+            bring_up_root: false,
+        }
+    }
+
+    /// A path selection the daemon answered is the root it came up
+    /// under, served as `name`.
+    pub fn bring_up_root(name: impl Into<String>) -> Selected {
+        Selected {
+            name: name.into(),
+            bring_up_root: true,
+        }
+    }
+}
 
 /// Record what a daemon-routed invocation selected, before anything is
 /// known about which library that is. Installed at startup; read once a
@@ -57,36 +89,48 @@ pub fn pending() -> Option<&'static LibrarySelection> {
 /// goes out. A second call is ignored, mirroring [`crate::render::init`]:
 /// the selection is a property of the process, not of a call site.
 ///
-/// A selection expressed as a path arrives here already translated, or
-/// as `None` when the root it names belongs to no registry entry and
-/// the daemon serving it needs no name to find it. The translation is
-/// [`crate::path_sugar`]; it happens once a connection exists, because
-/// its last question — is this the root you serve? — is the daemon's to
-/// answer.
-pub fn init(selected: Option<String>) {
+/// A selection expressed as a path arrives here already translated:
+/// into the registry name that claims the root, or into the key the
+/// daemon serves the root under when no entry claims it. The
+/// translation is [`crate::path_sugar`] and the daemon's `status`; it
+/// happens once a connection exists, because its last question — is
+/// this a root you serve? — is the daemon's to answer.
+pub fn init(selected: Option<Selected>) {
     let _ = SELECTED.set(selected);
 }
 
 /// The library this invocation acts on, or `None` when it names none.
 pub fn selected() -> Option<&'static str> {
-    SELECTED.get().and_then(|s| s.as_deref())
+    selection().map(|s| s.name.as_str())
+}
+
+/// The settled selection, with how it was reached.
+fn selection() -> Option<&'static Selected> {
+    SELECTED.get().and_then(|s| s.as_ref())
 }
 
 /// Apply the process-wide selection to one outgoing call.
 pub fn apply(method: &str, params: Value) -> Result<Value, BookrackCliError> {
-    apply_selection(selected(), method, params)
+    apply_selection(selection(), method, params)
 }
 
 /// [`apply`] against an explicit selection rather than the global one.
 pub fn apply_selection(
-    selected: Option<&str>,
+    selected: Option<&Selected>,
     method: &str,
     mut params: Value,
 ) -> Result<Value, BookrackCliError> {
-    let Some(name) = selected else {
+    let Some(selected) = selected else {
         return Ok(params);
     };
+    let name = selected.name.as_str();
     if refuses_library(method) {
+        // A process-level method reports on the daemon, and the daemon
+        // is the one that came up on this root: the selection did not
+        // fall away, so the call goes out as written.
+        if selected.bring_up_root {
+            return Ok(params);
+        }
         return Err(BookrackCliError::LibraryNotRoutable {
             problem: not_routable(name, method),
         });
@@ -144,22 +188,44 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn named(name: &str) -> Option<Selected> {
+        Some(Selected::named(name))
+    }
+
+    /// The root the daemon came up under, selected by path, is the
+    /// subject of a process-level method already: the call goes out as
+    /// written. A routed method still gets the name, and a selection
+    /// reached any other way is refused as before.
+    #[test]
+    fn the_bring_up_root_passes_process_methods_through_and_names_routed_ones() {
+        let root = Selected::bring_up_root("default");
+        let params = apply_selection(Some(&root), "status", json!({}))
+            .expect("the bring-up root is what status reports on");
+        assert_eq!(params, json!({}));
+
+        let params = apply_selection(Some(&root), "library.info", json!({})).unwrap();
+        assert_eq!(params, json!({"name": "default"}));
+
+        apply_selection(Some(&Selected::named("default")), "status", json!({}))
+            .expect_err("a selection reached by name is still refused on status");
+    }
+
     /// The key comes from the registry, not from this module:
     /// `library.info` selects under `name`, every other routed method
     /// under `library`. Asserting both directions here is what makes a
     /// hand-written key in the injector fail.
     #[test]
     fn injection_uses_the_key_the_registry_declares() {
-        let params = apply_selection(Some("beta"), "library.stats", json!({})).unwrap();
+        let params = apply_selection(named("beta").as_ref(), "library.stats", json!({})).unwrap();
         assert_eq!(params, json!({"library": "beta"}));
 
-        let params = apply_selection(Some("beta"), "library.info", json!({})).unwrap();
+        let params = apply_selection(named("beta").as_ref(), "library.info", json!({})).unwrap();
         assert_eq!(params, json!({"name": "beta"}));
     }
 
     #[test]
     fn null_params_become_an_object_so_the_selection_survives() {
-        let params = apply_selection(Some("beta"), "library.stats", Value::Null).unwrap();
+        let params = apply_selection(named("beta").as_ref(), "library.stats", Value::Null).unwrap();
         assert_eq!(params, json!({"library": "beta"}));
     }
 
@@ -167,8 +233,12 @@ mod tests {
     /// already in the params is their decision and outranks the flag.
     #[test]
     fn a_hand_written_key_outranks_the_flag() {
-        let params =
-            apply_selection(Some("beta"), "library.stats", json!({"library": "alpha"})).unwrap();
+        let params = apply_selection(
+            named("beta").as_ref(),
+            "library.stats",
+            json!({"library": "alpha"}),
+        )
+        .unwrap();
         assert_eq!(params, json!({"library": "alpha"}));
     }
 
@@ -177,7 +247,7 @@ mod tests {
     #[test]
     fn process_methods_pass_through_untouched() {
         for method in ["queue.list", "daemon.version", "logs.tail"] {
-            let params = apply_selection(Some("beta"), method, json!({"n": 5})).unwrap();
+            let params = apply_selection(named("beta").as_ref(), method, json!({"n": 5})).unwrap();
             assert_eq!(params, json!({"n": 5}), "{method} must not be rewritten");
         }
     }
@@ -188,7 +258,7 @@ mod tests {
     #[test]
     fn methods_that_cannot_route_are_refused_with_three_parts() {
         for method in ["status", "daemon.status", "library.list"] {
-            let err = apply_selection(Some("beta"), method, json!({}))
+            let err = apply_selection(named("beta").as_ref(), method, json!({}))
                 .expect_err("{method} must refuse an explicit selection");
             let BookrackCliError::LibraryNotRoutable { problem } = err else {
                 panic!("{method} refused with the wrong variant");
@@ -216,7 +286,7 @@ mod tests {
     #[test]
     fn the_two_diagnostics_take_the_selection_under_library() {
         for method in ["doctor.gather", "diagnose.run"] {
-            let params = apply_selection(Some("beta"), method, Value::Null).unwrap();
+            let params = apply_selection(named("beta").as_ref(), method, Value::Null).unwrap();
             assert_eq!(params, json!({"library": "beta"}), "{method}");
         }
     }
@@ -236,7 +306,8 @@ mod tests {
     /// parameter for it would put words in the caller's mouth.
     #[test]
     fn an_unknown_method_is_neither_injected_nor_refused() {
-        let params = apply_selection(Some("beta"), "library.no_such_method", json!({})).unwrap();
+        let params =
+            apply_selection(named("beta").as_ref(), "library.no_such_method", json!({})).unwrap();
         assert_eq!(params, json!({}));
     }
 }

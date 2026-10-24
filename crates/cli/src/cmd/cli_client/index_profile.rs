@@ -571,7 +571,7 @@ mod tests {
         assert_eq!(params["library"], "beta");
 
         let sent = bookrack_cli::library_param::apply_selection(
-            Some("alpha"),
+            Some(&bookrack_cli::library_param::Selected::named("alpha")),
             "vectors.reset",
             params.clone(),
         )

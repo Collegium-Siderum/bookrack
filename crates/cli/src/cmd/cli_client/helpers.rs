@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use bookrack_cli::daemon_call::DEFAULT_CALL_TIMEOUT;
 use bookrack_cli::error::BookrackCliError;
-use bookrack_cli::library_param;
+use bookrack_cli::library_param::{self, Selected};
 use bookrack_cli::path_sugar::{self, Routing};
 use bookrack_cli::render::confirm::{ConfirmMode, Confirmation};
 use bookrack_cli::render::job_report::JobOutcomeReport;
@@ -99,12 +99,12 @@ pub async fn served_library_names(runtime_dir: Option<&Path>) -> Option<Vec<Stri
 ///
 /// A name needs no deciding. A path does: the registry translates it
 /// into the name of the library that claims that root, and a root no
-/// entry claims has no name to send — which is ordinary, and means the
-/// daemon serving it was started on that same path. Whether *this*
-/// daemon is that one is the only thing left to ask, and only the
-/// daemon can answer it, so the question is asked here rather than at
-/// startup: a command that never connects never needed it, and one
-/// that finds no daemon has a better thing to report.
+/// entry claims is known to the daemon alone — ordinarily because the
+/// daemon was started on that same path, and serves it under a name of
+/// its own. Which name, and whether this daemon serves that root at
+/// all, is the daemon's to answer, so the question is asked here rather
+/// than at startup: a command that never connects never needed it, and
+/// one that finds no daemon has a better thing to report.
 ///
 /// The probe calls `status` directly rather than through [`dispatch`]:
 /// the selection it exists to settle is not settled yet, and `status`
@@ -113,32 +113,71 @@ pub(super) async fn settle_library_selection(client: &ControlClient) -> Result<(
     let Some(selection) = library_param::pending() else {
         return Ok(());
     };
-    let name = match path_sugar::routing_for(selection)? {
+    let selected = match path_sugar::routing_for(selection)? {
         Routing::Unselected => None,
-        Routing::Named(name) => Some(name),
+        Routing::Named(name) => Some(Selected::named(name)),
         Routing::UnclaimedRoot(asked) => {
             let status = client
                 .call_raw("status", Value::Null)
                 .await
                 .context("status rpc")?;
-            let served = status.get("data_dir").and_then(Value::as_str);
-            match served {
-                Some(served) if same_root(Path::new(served), &asked) => None,
-                Some(served) => {
-                    return Err(BookrackCliError::RootNotRoutable {
-                        problem: path_sugar::serves_another_root(&asked, Path::new(served)),
-                    }
-                    .into());
-                }
-                // A daemon that does not say which root it serves
-                // cannot be shown to be serving another one. Refusing
-                // on that would turn a missing field into an accusation.
-                None => None,
-            }
+            route_unclaimed_root(&status, &asked)?
         }
     };
-    library_param::init(name);
+    library_param::init(selected);
     Ok(())
+}
+
+/// What a selection naming a root no registry entry claims becomes,
+/// given the daemon's `status`.
+///
+/// The `served` rows decide when the daemon reports them: the row whose
+/// `data_dir` is the asked root names the call, and its `primary` bit
+/// says whether that root is the one the daemon came up under. No row
+/// at that root is a refusal naming both roots — the bring-up snapshot
+/// in `data_dir` is not consulted, because it goes on naming the
+/// bring-up root after that root has stopped being served, and a
+/// selection the operator wrote out must not turn into an unnamed call
+/// that lands on the default. Only a `status` without the rows — an
+/// older daemon — falls back to that snapshot, unnamed as before.
+pub(super) fn route_unclaimed_root(
+    status: &Value,
+    asked: &Path,
+) -> Result<Option<Selected>, BookrackCliError> {
+    let snapshot = status.get("data_dir").and_then(Value::as_str);
+    if let Some(rows) = status.get("served").and_then(Value::as_array)
+        && !rows.is_empty()
+    {
+        let at_root = rows.iter().find(|row| {
+            row["data_dir"]
+                .as_str()
+                .is_some_and(|dir| same_root(Path::new(dir), asked))
+        });
+        return match at_root.and_then(|row| row["name"].as_str().map(|name| (name, row))) {
+            Some((name, row)) => Ok(Some(Selected {
+                name: name.to_string(),
+                bring_up_root: row["primary"] == Value::Bool(true),
+            })),
+            None => {
+                let served = snapshot
+                    .or_else(|| rows.iter().find_map(|row| row["data_dir"].as_str()))
+                    .unwrap_or_default();
+                Err(BookrackCliError::RootNotRoutable {
+                    problem: path_sugar::serves_another_root(asked, Path::new(served)),
+                })
+            }
+        };
+    }
+    match snapshot {
+        Some(served) if same_root(Path::new(served), asked) => Ok(None),
+        Some(served) => Err(BookrackCliError::RootNotRoutable {
+            problem: path_sugar::serves_another_root(asked, Path::new(served)),
+        }),
+        // A daemon that does not say which root it serves cannot be
+        // shown to be serving another one. Refusing on that would turn
+        // a missing field into an accusation.
+        None => Ok(None),
+    }
 }
 
 /// Whether two paths name the same root, comparing canonicalized forms
@@ -602,6 +641,70 @@ mod tests {
     use bookrack_cli::render::job_report::{JobOutcomeRecord, JobOutcomeState};
     use bookrack_runtime::control::methods::REGISTRY;
     use serde_json::json;
+
+    /// With a `served` list to read, the row whose root is the one asked
+    /// for names the call; a daemon whose rows name other roots refuses
+    /// even when its bring-up snapshot still points at the asked root.
+    /// Only a `status` without the list falls back to that snapshot.
+    #[test]
+    fn an_unclaimed_root_is_routed_by_the_served_rows_not_the_bring_up_snapshot() {
+        let asked = Path::new("/data/anon");
+        let other = Path::new("/data/alpha");
+
+        // (1) The snapshot still says the asked root, but nothing served
+        // is at it: the daemon no longer serves that root.
+        let status = json!({
+            "data_dir": asked,
+            "served": [{ "name": "alpha", "data_dir": other, "default": true, "primary": false }],
+        });
+        match route_unclaimed_root(&status, asked) {
+            Err(BookrackCliError::RootNotRoutable { problem }) => {
+                assert!(
+                    problem.summary.contains("/data/anon"),
+                    "{}",
+                    problem.summary
+                );
+            }
+            other => panic!("a root no served row sits at must be refused, got {other:?}"),
+        }
+
+        // (2) A served row at the asked root names the call, and the
+        // row's `primary` bit says whether it is the bring-up root.
+        let status = json!({
+            "data_dir": other,
+            "served": [
+                { "name": "alpha", "data_dir": other, "default": true, "primary": true },
+                { "name": "default", "data_dir": asked, "default": false, "primary": false },
+            ],
+        });
+        let selected = route_unclaimed_root(&status, asked)
+            .expect("a served root routes")
+            .expect("a served root is named");
+        assert_eq!(selected, Selected::named("default"));
+
+        let status = json!({
+            "data_dir": asked,
+            "served": [
+                { "name": "default", "data_dir": asked, "default": true, "primary": true },
+                { "name": "beta", "data_dir": other, "default": false, "primary": false },
+            ],
+        });
+        let selected = route_unclaimed_root(&status, asked)
+            .expect("a served root routes")
+            .expect("a served root is named");
+        assert_eq!(selected, Selected::bring_up_root("default"));
+
+        // (3) No `served` list: the bring-up snapshot decides, and a
+        // match goes out unnamed as it always has.
+        let status = json!({ "data_dir": asked });
+        assert_eq!(route_unclaimed_root(&status, asked).unwrap(), None);
+        let status = json!({ "data_dir": other });
+        assert!(matches!(
+            route_unclaimed_root(&status, asked),
+            Err(BookrackCliError::RootNotRoutable { .. })
+        ));
+        assert_eq!(route_unclaimed_root(&json!({}), asked).unwrap(), None);
+    }
 
     /// Every method name this module tree sends must be one the
     /// daemon answers.
