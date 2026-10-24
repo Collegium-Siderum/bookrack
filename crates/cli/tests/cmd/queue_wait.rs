@@ -450,12 +450,8 @@ async fn wait_reports_ended_and_awaited_jobs_through_the_command_entry() {
     assert_eq!(code, Some(0), "{stderr}");
     assert!(stdout.is_empty(), "{stdout}");
 
-    if let Some(id) = daemon.id() {
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(id.to_string())
-            .status()
-            .await;
-    }
-    let _ = daemon.wait_with_output(Duration::from_secs(10)).await;
+    daemon
+        .stop(Duration::from_secs(10))
+        .await
+        .expect("daemon stops on SIGTERM");
 }

@@ -44,14 +44,10 @@ async fn client_stderr_against_daemon(args: &[&str]) -> (Option<i32>, String) {
         .await
         .expect("run bookrack client");
 
-    if let Some(id) = daemon.id() {
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(id.to_string())
-            .status()
-            .await;
-    }
-    let _ = daemon.wait_with_output(Duration::from_secs(10)).await;
+    daemon
+        .stop(Duration::from_secs(10))
+        .await
+        .expect("daemon stops on SIGTERM");
 
     (
         output.status.code(),
@@ -141,14 +137,10 @@ async fn reembed_against_a_failing_backend(failure: EmbedFailure) -> (Option<i32
         .await
         .expect("run bookrack vectors reembed");
 
-    if let Some(id) = daemon.id() {
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(id.to_string())
-            .status()
-            .await;
-    }
-    let _ = daemon.wait_with_output(Duration::from_secs(10)).await;
+    daemon
+        .stop(Duration::from_secs(10))
+        .await
+        .expect("daemon stops on SIGTERM");
 
     (
         output.status.code(),

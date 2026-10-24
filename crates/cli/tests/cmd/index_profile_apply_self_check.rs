@@ -179,12 +179,8 @@ async fn a_dimension_left_divergent_is_reported_with_both_values() {
         );
     }
 
-    if let Some(id) = daemon.id() {
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(id.to_string())
-            .status()
-            .await;
-    }
-    let _ = daemon.wait_with_output(Duration::from_secs(10)).await;
+    daemon
+        .stop(Duration::from_secs(10))
+        .await
+        .expect("daemon stops on SIGTERM");
 }

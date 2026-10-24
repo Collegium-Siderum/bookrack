@@ -46,10 +46,11 @@ async fn quit_terminates_the_daemon_process() {
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let (status, stdout, _stderr) = daemon
-        .wait_with_output(Duration::from_secs(5))
+    let exit = daemon
+        .exit_within(Duration::from_secs(5))
         .await
         .expect("daemon must exit within 5 s of `bookrack quit`");
+    let (status, stdout) = (exit.status, exit.stdout);
     assert!(status.success(), "daemon exited non-zero: {status:?}");
     assert!(
         stdout.contains("bookrack daemon running:"),

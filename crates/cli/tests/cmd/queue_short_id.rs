@@ -155,12 +155,8 @@ async fn the_listed_id_locates_its_job() {
     let reply: Value = serde_json::from_str(&stdout).expect("cancel reply is JSON");
     assert_eq!(reply["job_id"], beta_id.as_str(), "{reply}");
 
-    if let Some(id) = daemon.id() {
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(id.to_string())
-            .status()
-            .await;
-    }
-    let _ = daemon.wait_with_output(Duration::from_secs(10)).await;
+    daemon
+        .stop(Duration::from_secs(10))
+        .await
+        .expect("daemon stops on SIGTERM");
 }

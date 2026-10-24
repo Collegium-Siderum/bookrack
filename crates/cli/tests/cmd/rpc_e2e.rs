@@ -51,19 +51,11 @@ async fn library_info_round_trips_through_running_daemon() {
         "expected `data_dir` in tool result, got: {stdout}",
     );
 
-    if let Some(id) = daemon.id() {
-        // On stable Rust `Child::kill` is SIGKILL, so a separate
-        // `kill -15` is used to drive a graceful shutdown.
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(id.to_string())
-            .status()
-            .await;
-    }
-    let (status, _stdout, stderr) = daemon
-        .wait_with_output(Duration::from_secs(5))
+    let exit = daemon
+        .stop(Duration::from_secs(5))
         .await
         .expect("daemon must exit within 5 s of SIGTERM");
+    let (status, stderr) = (exit.status, exit.stderr);
     // A signalled shutdown unwinds the session and leaves through
     // `std::process::exit(0)`, so the only acceptable status is a clean
     // zero: dying from the signal itself, or unwinding into an error
@@ -127,14 +119,10 @@ async fn an_unknown_audit_profile_exits_two_from_the_cli() {
         "the refusal must name the profile it rejected: stderr={stderr}",
     );
 
-    if let Some(id) = daemon.id() {
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(id.to_string())
-            .status()
-            .await;
-    }
-    let _ = daemon.wait_with_output(Duration::from_secs(5)).await;
+    daemon
+        .stop(Duration::from_secs(5))
+        .await
+        .expect("daemon stops on SIGTERM");
 }
 
 /// `remove` against an id the library does not hold is caller input,
@@ -175,12 +163,8 @@ async fn a_remove_of_an_unknown_book_exits_two_from_the_cli() {
         "a remove the library cannot satisfy is caller input: stderr={stderr}",
     );
 
-    if let Some(id) = daemon.id() {
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(id.to_string())
-            .status()
-            .await;
-    }
-    let _ = daemon.wait_with_output(Duration::from_secs(5)).await;
+    daemon
+        .stop(Duration::from_secs(5))
+        .await
+        .expect("daemon stops on SIGTERM");
 }

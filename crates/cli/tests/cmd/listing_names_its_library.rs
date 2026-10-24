@@ -136,14 +136,10 @@ async fn a_listing_names_the_library_its_rows_came_from() {
         "rows from two libraries reached one payload: {payload}",
     );
 
-    if let Some(id) = daemon.id() {
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(id.to_string())
-            .status()
-            .await;
-    }
-    let _ = daemon.wait_with_output(Duration::from_secs(5)).await;
+    daemon
+        .stop(Duration::from_secs(5))
+        .await
+        .expect("daemon stops on SIGTERM");
 }
 
 /// Run `bookrack list` with extra leading arguments and return stdout.

@@ -57,14 +57,10 @@ async fn listing(sandbox: &Sandbox) -> String {
 }
 
 async fn stop(daemon: DaemonProcess) {
-    if let Some(id) = daemon.id() {
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(id.to_string())
-            .status()
-            .await;
-    }
-    let _ = daemon.wait_with_output(Duration::from_secs(5)).await;
+    daemon
+        .stop(Duration::from_secs(5))
+        .await
+        .expect("daemon stops on SIGTERM");
 }
 
 #[tokio::test]

@@ -193,12 +193,8 @@ async fn state_filter_selects_on_the_client_and_keeps_the_summary_whole() {
         "the queue is not empty: {stdout}"
     );
 
-    if let Some(id) = daemon.id() {
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(id.to_string())
-            .status()
-            .await;
-    }
-    let _ = daemon.wait_with_output(Duration::from_secs(10)).await;
+    daemon
+        .stop(Duration::from_secs(10))
+        .await
+        .expect("daemon stops on SIGTERM");
 }

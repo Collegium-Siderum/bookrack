@@ -105,14 +105,10 @@ async fn a_library_the_daemon_serves_answers_for_itself() {
         "the refusal must name the library it could not resolve: {stderr}",
     );
 
-    if let Some(id) = daemon.id() {
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(id.to_string())
-            .status()
-            .await;
-    }
-    let _ = daemon.wait_with_output(Duration::from_secs(5)).await;
+    daemon
+        .stop(Duration::from_secs(5))
+        .await
+        .expect("daemon stops on SIGTERM");
 }
 
 /// Both path channels reach the library that owns the root, and a root
@@ -202,14 +198,10 @@ async fn a_path_selection_reaches_the_library_that_owns_the_root() {
         "and the one the daemon serves, so both sides are on screen: {stderr}",
     );
 
-    if let Some(id) = daemon.id() {
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(id.to_string())
-            .status()
-            .await;
-    }
-    let _ = daemon.wait_with_output(Duration::from_secs(5)).await;
+    daemon
+        .stop(Duration::from_secs(5))
+        .await
+        .expect("daemon stops on SIGTERM");
 }
 
 /// A locally resolving command keeps a path selection as what it is

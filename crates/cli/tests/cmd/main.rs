@@ -16,6 +16,7 @@ mod distill_run_lifecycle;
 mod dotenv_entry_point;
 mod error_rendering;
 mod fixed_inventory_gate;
+mod harness_selftest;
 mod index_profile_ann_constraints;
 mod index_profile_apply_selection;
 mod index_profile_apply_self_check;
