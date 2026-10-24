@@ -25,12 +25,11 @@
 use bookrack_core::knob::{
     Candidate, DotenvSupply, KnobOrigin, KnobReach, Layer, ReadAt, env_layers, resolve_knob,
 };
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use eyre::{Context, Result, eyre};
-use fs2::FileExt;
 
 /// Environment variable naming the session runtime directory (lock
 /// file, REPL history). Optional; the default is platform-conventional.
@@ -206,7 +205,10 @@ impl TtyLock {
     /// pid and MCP address when another process already holds the
     /// lock; the file content is read after the conflict, so a stale
     /// pid from a crashed predecessor does not show up here (the next
-    /// successful acquire writes fresh content).
+    /// successful acquire writes fresh content). Only that contended
+    /// case satisfies [`is_lock_conflict`]: a lock file that cannot be
+    /// opened, or a lock call the filesystem refuses, is a plain I/O
+    /// error naming the path.
     pub fn acquire(
         path: &Path,
         pid: u32,
@@ -220,22 +222,8 @@ impl TtyLock {
             .truncate(false)
             .open(path)
             .with_context(|| format!("open session lock {}", path.display()))?;
-        file.try_lock_exclusive().map_err(|err| {
-            let existing = std::fs::read_to_string(path).unwrap_or_default();
-            let detail = existing.trim();
-            if detail.is_empty() {
-                eyre!(
-                    "{LOCK_CONFLICT_MARKER}, lock held at {}: {err}",
-                    path.display()
-                )
-            } else {
-                eyre!(
-                    "{LOCK_CONFLICT_MARKER} ({}), lock held at {}: {err}",
-                    detail.replace('\n', ", "),
-                    path.display()
-                )
-            }
-        })?;
+        file.try_lock()
+            .map_err(|err| lock_failure(LOCK_CONFLICT_MARKER, path, err))?;
         let mut payload = format!("pid={pid}\nmcp={mcp_addr}\n");
         if let Some(sock) = control_sock {
             payload.push_str(&format!("control_sock={}\n", sock.display()));
@@ -356,7 +344,8 @@ impl RootLock {
     /// Two failures are distinguishable through
     /// [`is_root_lock_conflict`]: another process holds the lock (the
     /// error names its pid and role), or the lock file itself could not
-    /// be opened or written.
+    /// be opened, locked, or written. A lock call that fails for any
+    /// reason other than contention falls on the second side.
     pub fn acquire(root: &Path, pid: u32, role: &str) -> Result<RootLock> {
         let path = root_lock_path(root);
         let file = OpenOptions::new()
@@ -366,22 +355,8 @@ impl RootLock {
             .truncate(false)
             .open(&path)
             .with_context(|| format!("open data root lock {}", path.display()))?;
-        file.try_lock_exclusive().map_err(|err| {
-            let existing = std::fs::read_to_string(&path).unwrap_or_default();
-            let detail = existing.trim();
-            if detail.is_empty() {
-                eyre!(
-                    "{ROOT_LOCK_CONFLICT_MARKER}, lock held at {}: {err}",
-                    path.display()
-                )
-            } else {
-                eyre!(
-                    "{ROOT_LOCK_CONFLICT_MARKER} ({}), lock held at {}: {err}",
-                    detail.replace('\n', ", "),
-                    path.display()
-                )
-            }
-        })?;
+        file.try_lock()
+            .map_err(|err| lock_failure(ROOT_LOCK_CONFLICT_MARKER, &path, err))?;
         let mut owned = file;
         owned
             .set_len(0)
@@ -416,11 +391,39 @@ pub fn lock_is_held(path: &Path) -> Result<bool> {
             )));
         }
     };
-    match file.try_lock_exclusive() {
+    match file.try_lock() {
         Ok(()) => Ok(false),
-        Err(e) if e.raw_os_error() == fs2::lock_contended_error().raw_os_error() => Ok(true),
-        Err(e) => Err(eyre::Report::new(e)
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(e)) => Err(eyre::Report::new(e)
             .wrap_err(format!("probe flock on session lock at {}", path.display()))),
+    }
+}
+
+/// Build the error a failed non-blocking lock call on the file at
+/// `path` surfaces as.
+///
+/// A contended lock is the conflict the `marker`-matching predicates
+/// recognise: the error starts with `marker` and quotes the holder's
+/// recorded lines. Any other failure of the lock call is an I/O error
+/// about the lock file, carries no marker, and keeps its cause.
+fn lock_failure(marker: &str, path: &Path, err: TryLockError) -> eyre::Report {
+    match err {
+        TryLockError::WouldBlock => {
+            let existing = std::fs::read_to_string(path).unwrap_or_default();
+            let detail = existing.trim();
+            if detail.is_empty() {
+                eyre!("{marker}, lock held at {}", path.display())
+            } else {
+                eyre!(
+                    "{marker} ({}), lock held at {}",
+                    detail.replace('\n', ", "),
+                    path.display()
+                )
+            }
+        }
+        TryLockError::Error(io_err) => {
+            eyre::Report::new(io_err).wrap_err(format!("lock {}", path.display()))
+        }
     }
 }
 
@@ -501,6 +504,69 @@ mod tests {
     use super::*;
 
     use tempfile::tempdir;
+
+    /// A lock call that fails for a reason other than contention (the
+    /// filesystem does not support `flock`, say) is not a conflict:
+    /// neither predicate may read it as one, and the lock file's
+    /// recorded holder must not be quoted as if it were live.
+    #[test]
+    fn a_non_contended_lock_failure_is_not_a_conflict() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(ROOT_LOCK_NAME_STR);
+        std::fs::write(&path, "pid=31337\nrole=daemon\n").unwrap();
+        let os_err = std::io::Error::new(std::io::ErrorKind::Unsupported, "No locks available");
+
+        let report = lock_failure(
+            ROOT_LOCK_CONFLICT_MARKER,
+            &path,
+            TryLockError::Error(os_err),
+        );
+        let rendered = format!("{report:#}");
+        assert!(
+            !is_root_lock_conflict(&report),
+            "a non-contended failure read as a root conflict: {rendered}"
+        );
+        assert!(
+            !rendered.contains("31337"),
+            "the recorded holder was quoted for a non-contended failure: {rendered}"
+        );
+        assert!(
+            rendered.contains("No locks available"),
+            "the OS cause was dropped: {rendered}"
+        );
+        assert!(
+            rendered.contains(&path.display().to_string()),
+            "the lock path was dropped: {rendered}"
+        );
+
+        let os_err = std::io::Error::new(std::io::ErrorKind::Unsupported, "No locks available");
+        let report = lock_failure(LOCK_CONFLICT_MARKER, &path, TryLockError::Error(os_err));
+        assert!(
+            !is_lock_conflict(&report),
+            "a non-contended failure read as a session conflict: {report:#}"
+        );
+    }
+
+    /// The contended case keeps its shape: the marker leads, and the
+    /// holder's recorded lines follow in parentheses.
+    #[test]
+    fn a_contended_lock_quotes_the_recorded_holder() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(ROOT_LOCK_NAME_STR);
+        std::fs::write(&path, "pid=31337\nrole=daemon\n").unwrap();
+
+        let report = lock_failure(ROOT_LOCK_CONFLICT_MARKER, &path, TryLockError::WouldBlock);
+        let rendered = report.to_string();
+        assert!(is_root_lock_conflict(&report), "{rendered}");
+        assert!(
+            rendered.starts_with(ROOT_LOCK_CONFLICT_MARKER),
+            "marker does not lead: {rendered}"
+        );
+        assert!(
+            rendered.contains("(pid=31337, role=daemon)"),
+            "recorded holder missing: {rendered}"
+        );
+    }
 
     #[test]
     fn tty_lock_blocks_a_second_acquirer_until_dropped() {

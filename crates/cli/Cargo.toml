@@ -54,5 +54,4 @@ anstyle.workspace = true
 # be about a whole library rather than one with a store missing.
 bookrack-corpus = { path = "../corpus" }
 bookrack-test-support.workspace = true
-fs2.workspace = true
 tempfile.workspace = true

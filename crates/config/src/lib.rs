@@ -20,7 +20,6 @@ use std::time::Duration;
 use bookrack_core::knob::{
     Candidate, DotenvSupply, KnobOrigin, KnobReach, Layer, ReadAt, env_layers, resolve_knob,
 };
-use fs2::FileExt;
 
 pub mod advice_record;
 mod detect;
@@ -3533,10 +3532,11 @@ impl RegistryWriteLock {
                 path: lock_path.clone(),
                 source,
             })?;
-        FileExt::lock_exclusive(&file).map_err(|source| ConfigError::RegistryUnreadable {
-            path: lock_path,
-            source,
-        })?;
+        file.lock()
+            .map_err(|source| ConfigError::RegistryUnreadable {
+                path: lock_path,
+                source,
+            })?;
         Ok(Self { _file: file })
     }
 }
@@ -6251,7 +6251,7 @@ mod tests {
             .truncate(false)
             .open(&lock_path)
             .expect("open lock file");
-        FileExt::try_lock_exclusive(&probe).expect("lock is not held after a write");
+        probe.try_lock().expect("lock is not held after a write");
     }
 
     #[test]

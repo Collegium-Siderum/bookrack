@@ -24,7 +24,6 @@ use std::time::Duration;
 use bookrack_catalog::{Catalog, RunLock, run_lock_path, run_locks_dir};
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use bookrack_test_support::{ProcessEnv, Sandbox, bookrack_cmd, process_env};
-use fs2::FileExt;
 use tokio::process::Command;
 
 /// Open a `running` row on a real catalog under `root` and return its id.
@@ -198,7 +197,7 @@ fn write_lock(sandbox: &Sandbox, hold: bool, control_sock: Option<&str>) -> std:
         .open(&lock_path)
         .expect("open lock");
     if hold {
-        file.try_lock_exclusive().expect("hold the lock");
+        file.try_lock().expect("hold the lock");
     }
     let mut writer = &file;
     writeln!(writer, "pid=999999").expect("write");

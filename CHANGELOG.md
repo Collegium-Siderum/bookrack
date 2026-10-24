@@ -94,6 +94,19 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A session or data-root lock that the filesystem refuses is no
+  longer reported as held by another process.** `bookrack run` and the
+  daemon's data-root lock read every failure of the non-blocking lock
+  call as a conflict: on a filesystem whose `flock` fails for some other
+  reason (a network mount, some FUSE drivers) the error said `bookrack
+  session already running` or `bookrack data root already in use`,
+  quoted whatever pid the lock file last recorded, and the callers that
+  branch on that verdict — the second-instance handoff, the daemon's
+  "serve the root unlocked" fallback, `libraries remove --purge` — took
+  the conflict branch. Only a lock held elsewhere is a conflict now; any
+  other failure surfaces as an I/O error naming the lock file and its
+  cause. The conflict message itself no longer ends with the operating
+  system's own text for a contended lock.
 - **The queue document is written at the binary's schema version.** A
   document an earlier build wrote kept its own `schema_version` through
   every write: the daemon loaded it, added the fields it knows, and

@@ -281,8 +281,6 @@ async fn status_without_daemon_prints_a_short_card_and_exits_zero() -> Result<()
 async fn status_with_a_stale_lock_exits_three() -> Result<()> {
     use std::io::Write;
 
-    use fs2::FileExt;
-
     let sandbox = Sandbox::new();
     let lock_path = sandbox.tty_lock_path();
     let holder = std::fs::OpenOptions::new()
@@ -291,7 +289,7 @@ async fn status_with_a_stale_lock_exits_three() -> Result<()> {
         .create(true)
         .truncate(false)
         .open(&lock_path)?;
-    holder.try_lock_exclusive()?;
+    holder.try_lock()?;
     let mut writer = &holder;
     writeln!(writer, "pid=999999")?;
     writeln!(writer, "mcp=disabled")?;

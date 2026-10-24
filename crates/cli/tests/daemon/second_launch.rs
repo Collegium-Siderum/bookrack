@@ -136,8 +136,6 @@ async fn stale_lock_exits_three() -> Result<()> {
     let sandbox = process_env(ProcessEnv::daemon());
     use std::io::Write;
 
-    use fs2::FileExt;
-
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let lock_path = runtime_root.path().join("bookrack.tty.lock");
@@ -147,7 +145,7 @@ async fn stale_lock_exits_three() -> Result<()> {
         .create(true)
         .truncate(false)
         .open(&lock_path)?;
-    holder.try_lock_exclusive()?;
+    holder.try_lock()?;
     let mut writer = &holder;
     writer.set_len(0)?;
     writeln!(writer, "pid=999999")?;

@@ -726,7 +726,6 @@ dependencies = [
  "color-eyre",
  "comfy-table",
  "eyre",
- "fs2",
  "indicatif",
  "serde",
  "serde_json",
@@ -753,7 +752,6 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "dotenvy",
- "fs2",
  "serde",
  "serde_json",
  "tempfile",
@@ -1154,7 +1152,6 @@ dependencies = [
  "bookrack-core",
  "dirs 5.0.1",
  "eyre",
- "fs2",
  "tempfile",
 ]
 

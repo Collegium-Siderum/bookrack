@@ -171,11 +171,11 @@ tar = "0.4"
 # DEFLATE compression for the same diagnose tarball, used to gzip-wrap
 # the TAR stream before write-out.
 flate2 = "1"
-# Cross-platform advisory file locks (Unix flock + Windows LockFileEx)
-# for the `ingest` crate. One sentinel file under the data root is
-# held with a non-blocking write lock for the duration of one ingest
-# run, so two `bookrack ingest` processes pointed at the same library
-# refuse rather than race. License: MIT OR Apache-2.0.
+# Free-space query for the `runtime` crate's doctor report
+# (`available_space` on the data root). File locking goes through
+# `std::fs::File::{lock, try_lock}` throughout the workspace; this crate
+# stays only for the one call std has no equivalent of.
+# License: MIT OR Apache-2.0.
 fs2 = "0.4"
 # Stream adapters for tokio primitives. The `sync` feature pulls in
 # `tokio-stream::wrappers::BroadcastStream`, which the `mcp` crate

@@ -11,7 +11,6 @@ repository.workspace = true
 bookrack-core = { path = "../core" }
 eyre.workspace = true
 dirs.workspace = true
-fs2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
