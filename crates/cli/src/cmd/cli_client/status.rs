@@ -78,20 +78,27 @@ async fn full_card(runtime_dir: Option<&Path>, lock_path: &Path, info: &LockInfo
     let client = helpers::connect(runtime_dir).await?;
     let version = helpers::dispatch(&client, "daemon.version", Value::Null).await?;
     let status = helpers::dispatch(&client, "status", Value::Null).await?;
-    let library = helpers::dispatch(&client, "library.info", library_info_params(&status)).await?;
+    // A primary bring-up skipped is named by `status` but served by no
+    // row: asking for it would be refused, so the card carries no
+    // counts rather than no card.
+    let library = match library_info_target(&status) {
+        Some(params) => helpers::dispatch(&client, "library.info", params).await?,
+        None => json!({}),
+    };
     let card = compose_card(lock_path, info, &version, &status, &library);
     let hint = card_hint(&card);
     emit_card(&card, &hint)
 }
 
 /// Parameters for the card's `library.info` call: the library `status`
-/// named, under the key that method declares.
+/// named, under the key that method declares — or `None` when the call
+/// is not to be made, because the library `status` names is served by
+/// no row: bring-up skipped it, and asking for it would be refused.
 ///
 /// `status` reports the primary — the library the daemon came up under.
-/// An unnamed `library.info` answers for the registry's default pointer
-/// instead, and the two are the same library only when the daemon came
-/// up under the default. Naming the library is what keeps the card's
-/// counts about the library its identity rows name.
+/// An unnamed `library.info` is routed by the registry's own rule, so
+/// naming the library is what keeps the card's counts about the library
+/// its identity rows name.
 ///
 /// A root selected by path has no registry name, and `library` is null
 /// for it; the daemon serves it under a key of its own, carried by the
@@ -102,17 +109,24 @@ async fn full_card(runtime_dir: Option<&Path>, lock_path: &Path, info: &LockInfo
 /// The key is read off the runtime's method registry rather than spelled
 /// out here, so a card built by this client cannot disagree with the
 /// handler about how the selection is named.
-fn library_info_params(status: &Value) -> Value {
+fn library_info_target(status: &Value) -> Option<Value> {
     let named = status.get("library").and_then(Value::as_str);
     let Some(name) = named.or_else(|| primary_served_name(status)) else {
-        return Value::Null;
+        return Some(Value::Null);
     };
+    if let Some(rows) = status.get("served").and_then(Value::as_array)
+        && !rows
+            .iter()
+            .any(|row| row["name"] == Value::String(name.to_string()))
+    {
+        return None;
+    }
     let Some(key) = library_key_for("library.info") else {
-        return Value::Null;
+        return Some(Value::Null);
     };
     let mut params = serde_json::Map::new();
     params.insert(key.to_string(), Value::String(name.to_string()));
-    Value::Object(params)
+    Some(Value::Object(params))
 }
 
 /// The name of the `served` row marked `primary`, when `status` carries
@@ -778,8 +792,8 @@ mod tests {
     /// where every other routed method uses `library`.
     #[test]
     fn library_info_is_asked_about_the_library_status_named() {
-        let params = library_info_params(&json!({ "library": "beta" }));
-        assert_eq!(params, json!({ "name": "beta" }));
+        let params = library_info_target(&json!({ "library": "beta" }));
+        assert_eq!(params, Some(json!({ "name": "beta" })));
     }
 
     /// A path-selected root reports a null name, and a `status` without
@@ -789,10 +803,10 @@ mod tests {
     #[test]
     fn a_path_selected_root_is_asked_without_a_name() {
         assert_eq!(
-            library_info_params(&json!({ "library": Value::Null })),
-            Value::Null
+            library_info_target(&json!({ "library": Value::Null })),
+            Some(Value::Null)
         );
-        assert_eq!(library_info_params(&json!({})), Value::Null);
+        assert_eq!(library_info_target(&json!({})), Some(Value::Null));
     }
 
     #[test]
@@ -819,6 +833,24 @@ mod tests {
                 { "name": "beta", "data_dir": "/data/beta", "default": false, "primary": false },
             ],
         });
-        assert_eq!(library_info_params(&status), json!({ "name": "default" }));
+        assert_eq!(
+            library_info_target(&status),
+            Some(json!({ "name": "default" }))
+        );
+    }
+
+    /// The library `status` names was skipped at bring-up: no served
+    /// row carries it, so the card asks for no counts instead of being
+    /// refused.
+    #[test]
+    fn a_skipped_primary_is_not_asked_for() {
+        let status = json!({
+            "library": "beta",
+            "data_dir": "/data/beta",
+            "served": [
+                { "name": "alpha", "data_dir": "/data/alpha", "default": true, "primary": false },
+            ],
+        });
+        assert_eq!(library_info_target(&status), None);
     }
 }
