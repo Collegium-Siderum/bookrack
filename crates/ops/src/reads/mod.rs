@@ -24,6 +24,17 @@ pub mod pipeline;
 pub mod search;
 pub mod vectors;
 
+/// Open the book catalog of `ops` read-only, if there is one to open.
+///
+/// `Ok(None)` when the catalog file has not been created yet — `init`
+/// or the first ingest materialises it, so a root that was only
+/// registered has none; `Ok(Some)` otherwise. Each book read decides
+/// what "no catalog yet" means for its own shape: an empty page, zero
+/// counts, or an unknown intake. Looking never creates the file.
+pub(crate) fn open_book_catalog<E: Embedder>(ops: &Ops<E>) -> Result<Option<Catalog>> {
+    Ok(Catalog::try_open_read_only(ops.catalog_db())?)
+}
+
 /// Open the paper catalog attached to `ops` read-only, if there is one
 /// to open.
 ///

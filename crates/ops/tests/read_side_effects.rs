@@ -91,9 +91,14 @@ async fn vectors_status_on_an_empty_root_reports_empty_and_creates_nothing() {
 }
 
 #[test]
-fn stats_on_an_empty_root_fails_without_creating_the_catalog() {
+fn stats_on_an_empty_root_count_zero_and_create_nothing() {
     let fx = Fixture::empty_root();
-    show_stats(&fx.ops).expect_err("no catalog to aggregate");
+    let stats = show_stats(&fx.ops).expect("stats on an empty root");
+    assert!(
+        stats.intake_counts_by_status.values().all(|n| *n == 0),
+        "{:?}",
+        stats.intake_counts_by_status
+    );
     assert_eq!(entries(fx.root()), Vec::<PathBuf>::new());
 }
 

@@ -23,7 +23,9 @@ use crate::Result;
 use crate::dto::MetadataFilter;
 use crate::dto::audit::AuditTrailEntry;
 use crate::dto::metadata_report::{MetadataListPage, PaperMetadataAuditReport};
-use crate::reads::metadata::{list_metadata_inner, needs_review_filter, show_audit_trail_inner};
+use crate::reads::metadata::{
+    empty_page, list_metadata_inner, needs_review_filter, show_audit_trail_inner,
+};
 use crate::reads::open_papers_catalog;
 use crate::recorder::record_call_sync;
 
@@ -175,13 +177,4 @@ pub fn list_paper_pending_reviews<E: Embedder>(
             )
         }
     )
-}
-
-/// The page a listing returns before any paper catalog exists.
-fn empty_page() -> MetadataListPage {
-    MetadataListPage {
-        rows: Vec::new(),
-        total: 0,
-        truncated: false,
-    }
 }

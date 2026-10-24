@@ -23,6 +23,7 @@ use crate::dto::{
     BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, OcrPendingItem,
     OcrPendingResult, ShowTocArgs, Toc, TocNodes, TocStats, clamp_limit,
 };
+use crate::reads::open_book_catalog;
 use crate::recorder::record_call_sync;
 
 /// The audit-row args JSON of one TOC read: the intake id plus every
@@ -89,8 +90,14 @@ pub fn find_books<E: Embedder>(
         "offset": offset,
     });
     record_call_sync!(ops, "library.find_books", args, {
+        let Some(catalog) = open_book_catalog(ops)? else {
+            return Ok(ListBooksResult {
+                books: Vec::new(),
+                total: 0,
+                truncated: false,
+            });
+        };
         let (effective_limit, _) = clamp_limit(limit);
-        let catalog = Catalog::open_read_only(ops.catalog_db())?;
         let categories_refs: Vec<&str> = filter.categories.iter().map(String::as_str).collect();
         let language_refs: Vec<&str> = filter.language.iter().map(String::as_str).collect();
         let catalog_filter = IntakeFilter {
@@ -139,7 +146,13 @@ pub fn find_books<E: Embedder>(
 /// `categories`; it is where the library's tag vocabulary can be seen.
 pub fn category_counts<E: Embedder>(ops: &Ops<E>) -> Result<CategoryCounts> {
     record_call_sync!(ops, "library.categories", serde_json::Value::Null, {
-        let catalog = Catalog::open_read_only(ops.catalog_db())?;
+        let Some(catalog) = open_book_catalog(ops)? else {
+            return Ok(CategoryCounts {
+                categories: Vec::new(),
+                uncategorised: 0,
+                total: 0,
+            });
+        };
         let categories = catalog
             .category_counts(ItemKind::Book)?
             .into_iter()
@@ -174,8 +187,14 @@ pub fn list_ocr_pending<E: Embedder>(
         "library.list_ocr_pending",
         serde_json::json!({ "limit": limit, "offset": offset }),
         {
+            let Some(catalog) = open_book_catalog(ops)? else {
+                return Ok(OcrPendingResult {
+                    items: Vec::new(),
+                    total: 0,
+                    truncated: false,
+                });
+            };
             let (effective_limit, _) = clamp_limit(limit);
-            let catalog = Catalog::open_read_only(ops.catalog_db())?;
             let pending = catalog.list_ocr_pending(effective_limit, offset)?;
             let total = catalog.count_ocr_pending()?;
             let items: Vec<OcrPendingItem> = pending
@@ -204,7 +223,9 @@ pub fn show_book<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<BookDetail
         "library.show_book",
         serde_json::json!({ "intake_id": intake_id }),
         {
-            let catalog = Catalog::open_read_only(ops.catalog_db())?;
+            let Some(catalog) = open_book_catalog(ops)? else {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            };
             let Some(intake) = catalog.intake_by_id(intake_id)? else {
                 return Err(OpsError::IntakeNotFound { intake_id });
             };
@@ -244,7 +265,9 @@ pub fn show_book<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<BookDetail
 /// produces an empty [`Toc`] with `total = 0`.
 pub fn show_toc<E: Embedder>(ops: &Ops<E>, intake_id: i64, args: &ShowTocArgs) -> Result<Toc> {
     record_call_sync!(ops, "library.show_toc", toc_call_args(intake_id, args), {
-        let catalog = Catalog::open_read_only(ops.catalog_db())?;
+        let Some(catalog) = open_book_catalog(ops)? else {
+            return Err(OpsError::IntakeNotFound { intake_id });
+        };
         if catalog.intake_by_id(intake_id)?.is_none() {
             return Err(OpsError::IntakeNotFound { intake_id });
         }
@@ -273,7 +296,22 @@ pub fn show_toc<E: Embedder>(ops: &Ops<E>, intake_id: i64, args: &ShowTocArgs) -
 /// Aggregate counts across the catalog.
 pub fn show_stats<E: Embedder>(ops: &Ops<E>) -> Result<LibraryStats> {
     record_call_sync!(ops, "library.stats", serde_json::Value::Null, {
-        let catalog = Catalog::open_read_only(ops.catalog_db())?;
+        let Some(catalog) = open_book_catalog(ops)? else {
+            // A catalog not yet created counts zero in every status, so
+            // the section keeps its shape on a root nothing has
+            // written to.
+            let intake_counts_by_status = IntakeStatus::ALL
+                .iter()
+                .map(|status| (status.as_str().to_string(), 0))
+                .collect();
+            return Ok(LibraryStats {
+                intake_counts_by_status,
+                intake_count_by_format: BTreeMap::new(),
+                book_state_counts_by_stage: BTreeMap::new(),
+                retrieval_issue_counts_by_status: BTreeMap::new(),
+                papers: papers_stats_if_configured(ops)?,
+            });
+        };
         let mut intake_counts_by_status = BTreeMap::new();
         for status in IntakeStatus::ALL {
             let n = catalog.count_intakes_by_status(std::slice::from_ref(&status))?;

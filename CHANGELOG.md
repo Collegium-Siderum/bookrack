@@ -103,6 +103,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **Book-side reads on a library that has not ingested yet answer
+  instead of failing.** The book catalog is created by `init` or the
+  first ingest, so a root that `libraries add` registered and nothing
+  wrote to has none; the book reads opened it read-only and surfaced
+  the SQLite open failure as an internal error. That took down
+  `bookrack list`, `find`, `stats`, `categories`, `ocr-pending`, the
+  per-book `show` family, the metadata listings and the audit trails,
+  and the matching control-plane methods and MCP tools, while
+  `search` and `doctor` on the same root already read it as empty.
+  Those reads now probe for the catalog first, the way the paper-side
+  reads have since 0.12: listings return an empty page, stats and
+  categories count zero, and a per-book read reports the intake as
+  unknown. Nothing is created on disk by looking.
+
 - **A registered library whose root carries no identity manifest is
   refused, not served empty.** With a library's root on a volume that
   was not connected, the mount point was an empty directory that

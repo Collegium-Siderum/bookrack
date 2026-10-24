@@ -2,7 +2,6 @@
 
 //! Read ops over the book-level pipeline audit trail.
 
-use bookrack_catalog::Catalog;
 use bookrack_core::PartitionIdx;
 use bookrack_embed::Embedder;
 
@@ -10,6 +9,7 @@ use crate::Ops;
 use crate::OpsError;
 use crate::Result;
 use crate::dto::audit::PipelineAuditEntry;
+use crate::reads::open_book_catalog;
 use crate::recorder::record_call_sync;
 
 /// Read the book-level pipeline audit trail for one book, oldest first.
@@ -29,7 +29,9 @@ pub fn show_pipeline_trail<E: Embedder>(
         "library.show_pipeline_trail",
         serde_json::json!({ "intake_id": intake_id }),
         {
-            let catalog = Catalog::open_read_only(ops.catalog_db())?;
+            let Some(catalog) = open_book_catalog(ops)? else {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            };
             let book_root_id = PartitionIdx::new(intake_id).root().get();
             let rows = catalog.pipeline_audit_for_book(book_root_id)?;
             if rows.is_empty() && catalog.intake_by_id(intake_id)?.is_none() {

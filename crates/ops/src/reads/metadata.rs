@@ -15,6 +15,7 @@ use crate::dto::metadata_report::{
     MetadataAuditReport, MetadataListPage, MetadataListRow, MetadataReport,
 };
 use crate::dto::{BookDetail, MetadataFilter, TocStats, clamp_limit};
+use crate::reads::open_book_catalog;
 use crate::recorder::record_call_sync;
 
 /// Read the metadata-status record for one book: bibliographic detail
@@ -25,7 +26,9 @@ pub fn show_metadata_audit<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<
         "library.show_metadata_audit",
         serde_json::json!({ "intake_id": intake_id }),
         {
-            let catalog = Catalog::open_read_only(ops.catalog_db())?;
+            let Some(catalog) = open_book_catalog(ops)? else {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            };
             let Some(intake) = catalog.intake_by_id(intake_id)? else {
                 return Err(OpsError::IntakeNotFound { intake_id });
             };
@@ -72,7 +75,9 @@ pub fn show_metadata_report<E: Embedder>(
         "library.show_metadata_report",
         serde_json::json!({ "intake_id": intake_id }),
         {
-            let catalog = Catalog::open_read_only(ops.catalog_db())?;
+            let Some(catalog) = open_book_catalog(ops)? else {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            };
             let report = bookrack_ingest::reaudit::build_report(
                 &catalog,
                 intake_id,
@@ -157,13 +162,10 @@ pub fn list_metadata<E: Embedder>(
                 review_status_in: review_status_in.as_slice(),
                 ..IntakeFilter::default()
             };
-            list_metadata_inner(
-                &Catalog::open_read_only(ops.catalog_db())?,
-                ItemKind::Book,
-                catalog_filter,
-                limit,
-                offset,
-            )
+            let Some(catalog) = open_book_catalog(ops)? else {
+                return Ok(empty_page());
+            };
+            list_metadata_inner(&catalog, ItemKind::Book, catalog_filter, limit, offset)
         }
     )
 }
@@ -184,8 +186,11 @@ pub fn list_pending_reviews<E: Embedder>(
         "library.list_pending_reviews",
         serde_json::json!({ "limit": limit, "offset": offset }),
         {
+            let Some(catalog) = open_book_catalog(ops)? else {
+                return Ok(empty_page());
+            };
             list_metadata_inner(
-                &Catalog::open_read_only(ops.catalog_db())?,
+                &catalog,
                 ItemKind::Book,
                 needs_review_filter(),
                 limit,
@@ -193,6 +198,15 @@ pub fn list_pending_reviews<E: Embedder>(
             )
         }
     )
+}
+
+/// The page a metadata listing returns before its catalog exists.
+pub(crate) fn empty_page() -> MetadataListPage {
+    MetadataListPage {
+        rows: Vec::new(),
+        total: 0,
+        truncated: false,
+    }
 }
 
 /// Shared body of the paginated metadata listings, over whichever
@@ -266,7 +280,12 @@ pub fn show_audit_trail<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<Vec
         ops,
         "library.show_audit_trail",
         serde_json::json!({ "intake_id": intake_id }),
-        { show_audit_trail_inner(&Catalog::open_read_only(ops.catalog_db())?, intake_id) }
+        {
+            let Some(catalog) = open_book_catalog(ops)? else {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            };
+            show_audit_trail_inner(&catalog, intake_id)
+        }
     )
 }
 
