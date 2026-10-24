@@ -40,6 +40,36 @@ fn the_process_sandbox_moves_the_platform_paths() {
     );
 }
 
+/// The platform-default registry lands at the platform's conventional
+/// location under the sandbox, not merely somewhere inside it.
+///
+/// `the_process_sandbox_moves_the_platform_paths` proves the
+/// redirection took; this pins where the redirected path points. The
+/// expected path is the platform convention `dirs` implements — the
+/// `Application Support` directory under `HOME` on macOS,
+/// `XDG_CONFIG_HOME` elsewhere — so a dependency move that changes
+/// that convention turns this red while the prefix check above stays
+/// green.
+#[test]
+fn the_platform_default_registry_sits_at_the_platform_conventional_path() {
+    let sandbox = process_env(ProcessEnv::daemon());
+
+    let registry = bookrack_config::default_registry_path()
+        .expect("the platform config directory resolves under the sandbox home");
+
+    #[cfg(target_os = "macos")]
+    let config_dir = sandbox.home().join("Library").join("Application Support");
+    #[cfg(not(target_os = "macos"))]
+    let config_dir = sandbox.config_home();
+
+    assert_eq!(
+        registry,
+        config_dir
+            .join("bookrack")
+            .join(bookrack_config::DEFAULT_REGISTRY_NAME),
+    );
+}
+
 /// A daemon this binary brings up in process binds its MCP address
 /// during bring-up, so the sandbox pins a kernel-assigned port: the
 /// built-in default would hand one fixed host port a veto over

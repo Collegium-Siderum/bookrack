@@ -36,7 +36,7 @@ toml_edit = "0.25"
 # Platform config-directory discovery for the `config` crate: locates the
 # platform-conventional `<config>/bookrack/registry.toml` so a freshly
 # installed binary can find its data root without an exported variable.
-dirs = "5"
+dirs = "6"
 # `net` and `signal` are for the MCP daemon: a TCP listener and a
 # Ctrl-C graceful-shutdown signal. Additive — other crates ignore them.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
