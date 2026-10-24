@@ -782,3 +782,79 @@ async fn a_failing_default_moves_the_reranker_reference() -> Result<()> {
     );
     stop(runtime).await
 }
+
+/// A runtime mount of a library that is still broken refuses with the
+/// same reason and hint bring-up skipped it for: a store this build
+/// cannot serve is `-32018`, and a root that is not there is `-32018`
+/// with the volume and the mount command in the hint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_runtime_mount_of_a_still_broken_library_refuses_with_the_skips_wording() -> Result<()> {
+    let sandbox = world();
+    let alpha = sandbox.data_root("alpha-root");
+    let beta = sandbox.data_root("beta-root");
+    let gamma = sandbox.path().join("roots").join("gamma-missing");
+    sandbox.write_registry_entries(
+        Some("alpha"),
+        &[
+            ("alpha", alpha.as_path()),
+            ("beta", beta.as_path()),
+            ("gamma", gamma.as_path()),
+        ],
+    );
+    break_catalog(&beta);
+    let runtime_root = tempfile::tempdir()?;
+
+    let runtime = start("alpha", runtime_root.path(), false).await?;
+    let gamma_skip = skip_record(&runtime, "gamma")?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        let resp = call(
+            &mut reader,
+            &mut w,
+            1,
+            "library.mount",
+            json!({ "name": "beta" }),
+        )
+        .await?;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(-32018),
+            "a store this build cannot serve is state-unusable: {resp}"
+        );
+        assert!(
+            resp["error"]["data"]["hint"]
+                .as_str()
+                .is_some_and(|h| !h.is_empty()),
+            "the refusal carries the store's hint: {resp}"
+        );
+
+        let resp = call(
+            &mut reader,
+            &mut w,
+            2,
+            "library.mount",
+            json!({ "name": "gamma" }),
+        )
+        .await?;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(-32018),
+            "a missing root is state-unusable: {resp}"
+        );
+        let hint = resp["error"]["data"]["hint"].as_str().unwrap_or_default();
+        assert_eq!(
+            Some(hint),
+            gamma_skip.reason().data.hint.as_deref(),
+            "the mount's hint is the skip's hint, word for word: {resp}"
+        );
+        assert!(hint.contains("Reconnect the volume"), "{resp}");
+        assert!(hint.contains("bookrack libraries mount gamma"), "{resp}");
+
+        let _ = call(&mut reader, &mut w, 99, "daemon.shutdown", Value::Null).await?;
+        Ok::<(), eyre::Report>(())
+    });
+    join_with_deadline(runtime, repl_handle, driver).await
+}

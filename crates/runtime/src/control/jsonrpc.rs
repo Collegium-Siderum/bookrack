@@ -75,11 +75,12 @@ pub const BACKEND_UNAVAILABLE: i32 = -32017;
 /// build cannot serve — a catalog or corpus written by a newer schema
 /// or demanding a newer reader, an index whose build stamps are
 /// missing or disagree with this build, a vector sidecar naming an
-/// unknown ANN kind or a mismatched dimension. Neither caller input
-/// (`-32602`: the request was fine) nor a fault in this binary
-/// (`-32603`: there is a next step, and it is the operator's — run a
-/// newer build, rebuild the layer, reset the vectors). Not retryable
-/// as sent; exit 2.
+/// unknown ANN kind or a mismatched dimension — or a registered
+/// library's data root that is not there when a mount asks for it.
+/// Neither caller input (`-32602`: the request was fine) nor a fault in
+/// this binary (`-32603`: there is a next step, and it is the
+/// operator's — run a newer build, rebuild the layer, reset the
+/// vectors, reconnect the volume). Not retryable as sent; exit 2.
 pub const STATE_UNUSABLE: i32 = -32018;
 
 /// One inbound JSON-RPC request.

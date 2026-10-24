@@ -45,6 +45,17 @@ release workflow extracts the matching section verbatim from this file.
   library it would have been routed to, and a row the worker still
   finds unnamed fails instead of being routed.
 
+### Fixed
+
+- **`libraries mount` of a library that is still broken explains
+  itself.** A registered library whose data root is not there, or
+  whose stores this build cannot read, used to be refused with an
+  internal error and no hint. The mount now answers with the reason
+  and hint bring-up records when it skips the same library — `-32018`
+  for a missing root or an unreadable store, the classified code for
+  any other failure to open it — so repairing and remounting follow one
+  set of instructions.
+
 ## [0.13.0] - 2026-10-24
 
 ### Added

@@ -554,10 +554,15 @@ the exit-code bucket does not distinguish the two.
   served set on the reranker stage, and an embed backend that cannot
   serve are each refused, so a library that starts cleanly also mounts
   cleanly. Returns `-32010` when the registry does not carry the
-  name, `-32602` for a refused consistency check, and `-32017` when
-  another process holds the root's lock. A library bring-up skipped is
-  mounted the same way once repaired, and a success clears its record,
-  so a call naming it resolves from then on. Being a write, it takes the
+  name, `-32602` for a refused consistency check, `-32017` when
+  another process holds the root's lock, and `-32018` when the entry's
+  data root is not there or the library's stores cannot be served by
+  this build; a failure opening the library takes the code the error
+  mapping assigns its cause. Each of these carries the reason and hint
+  bring-up records when it skips the same library, word for word. A
+  library bring-up skipped is mounted the same way once repaired, and a
+  success clears its record, so a call naming it resolves from then on.
+  Being a write, it takes the
   write mutex — a concurrent write sees `-32001 busy` for the second or
   so a mount takes — and fires `library.changed` on success.
 - `library.unmount` — `{ name }` → `{ ok: true, name, library }`. Stop serving

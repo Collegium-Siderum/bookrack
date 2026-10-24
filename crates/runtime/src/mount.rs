@@ -40,8 +40,14 @@ use crate::backend_probe::PreflightRefusal;
 pub enum MountRefusal {
     /// The name is not in the on-disk registry, or its entry cannot be
     /// resolved to a data root.
-    #[error(transparent)]
-    Unresolvable(#[from] bookrack_config::ConfigError),
+    #[error("library '{library}': {source}")]
+    Unresolvable {
+        /// The library the caller asked to mount.
+        library: String,
+        /// Why the registry entry did not resolve. Boxed to keep the
+        /// refusal small on every `Result` that carries it.
+        source: Box<bookrack_config::ConfigError>,
+    },
 
     /// The registry refused the operation — already mounted, or not
     /// mounted at all.
@@ -179,11 +185,18 @@ impl Mounter {
             .into());
         }
 
-        let cfg = Arc::new(Config::resolve(&LibrarySelection {
-            data_dir: None,
-            library: Some(name.to_string()),
-        })?);
-        if let Some(entry) = crate::identity_check::registry_entry(name)? {
+        let unresolvable = |source| MountRefusal::Unresolvable {
+            library: name.to_string(),
+            source: Box::new(source),
+        };
+        let cfg = Arc::new(
+            Config::resolve(&LibrarySelection {
+                data_dir: None,
+                library: Some(name.to_string()),
+            })
+            .map_err(unresolvable)?,
+        );
+        if let Some(entry) = crate::identity_check::registry_entry(name).map_err(unresolvable)? {
             crate::identity_check::verify_registered_identity(
                 &entry,
                 cfg.data_dir(),

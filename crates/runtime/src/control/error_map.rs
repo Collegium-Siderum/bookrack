@@ -244,17 +244,31 @@ pub(crate) fn config_err(e: ConfigError) -> RpcError {
 /// caller input, a refusal the caller can repair, or a fault, so the
 /// only decision a new one carries is which code it takes — and that
 /// decision should not have a silent default. The refusals carry their
-/// own three-part [`Problem`], so nothing is worded here.
+/// own three-part [`Problem`]; an entry that does not resolve and a
+/// library that fails to open are worded as bring-up words the same
+/// failure when it skips the library, so a mount after a skip reads
+/// the same hint.
 pub(crate) fn mount_err(e: MountRefusal) -> RpcError {
     match e {
-        MountRefusal::Unresolvable(e) => from_config(&e),
+        MountRefusal::Unresolvable { library, source } => {
+            let code = match source.as_ref() {
+                ConfigError::UnknownLibrary { .. } => INVALID_LIBRARY,
+                // The root is not there: the next step is the
+                // operator's, and the same call resent will not help.
+                ConfigError::DataDirNotFound(_) => STATE_UNUSABLE,
+                _ => INTERNAL_ERROR,
+            };
+            rpc_from_problem(code, crate::unmounted::resolve_problem(&library, &source))
+        }
         MountRefusal::Registry(e) => from_registry(&e),
         MountRefusal::Refused { problem, .. } => rpc_from_problem(INVALID_PARAMS, problem),
         MountRefusal::RootLocked { problem, .. } => rpc_from_problem(BACKEND_UNAVAILABLE, problem),
-        MountRefusal::BringUp(err) => rpc_from_problem(
-            INTERNAL_ERROR,
-            Problem::from_error_chain(err.as_ref() as &dyn std::error::Error),
-        ),
+        MountRefusal::BringUp(err) => classify(&err).unwrap_or_else(|| {
+            rpc_from_problem(
+                INTERNAL_ERROR,
+                Problem::from_error_chain(err.as_ref() as &dyn std::error::Error),
+            )
+        }),
     }
 }
 
