@@ -680,8 +680,10 @@ pub(crate) enum LibrariesAction {
     ///
     /// The daemon stops serving the library and lets go of its root
     /// lock, so an offline command can touch that root. Refused for the
-    /// registry default, for the library the daemon came up under, and
-    /// for a library with queued work.
+    /// library the daemon came up under, for the last mounted library,
+    /// and for a library with queued work. The registry default can be
+    /// unmounted; a command naming no library is then refused until one
+    /// is named or the default is mounted again.
     #[command(after_long_help = bookrack_cli_grammar::examples![
         "libraries unmount demo",
         "libraries unmount demo --json",

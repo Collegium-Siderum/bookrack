@@ -379,8 +379,25 @@ async fn unmount_refuses_a_library_with_queued_work() -> Result<()> {
 /// is identified by. The fixture comes up under `beta` while the
 /// registry's default is `alpha`, so the two refusals land on different
 /// libraries and neither can stand in for the other.
+/// The refusal that names the bring-up selection, on `resp`.
+fn assert_refused_as_primary(resp: &Value) {
+    let message = resp["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("came up under"),
+        "the primary's refusal has to say it is the bring-up selection: {resp}"
+    );
+    let hint = resp["error"]["data"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("bookrack quit"),
+        "the primary's refusal points at restarting the daemon: {resp}"
+    );
+}
+
+/// The registry default is not protected from unmounting: once it is
+/// gone, an unnamed call is refused rather than routed to whatever is
+/// left. The library the daemon came up under still is protected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn unmount_refuses_the_default_and_the_primary() -> Result<()> {
+async fn unmount_takes_the_default_but_refuses_the_primary() -> Result<()> {
     let (sandbox, alpha, beta) = world();
     let runtime_root = tempfile::tempdir()?;
     sandbox.write_registry_entries(
@@ -404,47 +421,103 @@ async fn unmount_refuses_the_default_and_the_primary() -> Result<()> {
         let (mut reader, mut w) = connect(&sock).await?;
         send(
             &mut w,
-            r#"{"jsonrpc":"2.0","id":1,"method":"library.unmount","params":{"name":"alpha"}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"library.unmount","params":{"name":"beta"}}"#,
         )
         .await?;
-        let resp = recv(&mut reader).await?;
-        let message = resp["error"]["message"].as_str().unwrap_or_default();
-        assert!(
-            message.contains("default"),
-            "the default's refusal has to say it is the default: {resp}"
-        );
-        let hint = resp["error"]["data"]["hint"].as_str().unwrap_or_default();
-        assert!(
-            hint.contains("libraries default"),
-            "the default's refusal points at moving the pointer: {resp}"
-        );
+        assert_refused_as_primary(&recv(&mut reader).await?);
 
         send(
             &mut w,
-            r#"{"jsonrpc":"2.0","id":2,"method":"library.unmount","params":{"name":"beta"}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"library.unmount","params":{"name":"alpha"}}"#,
         )
         .await?;
         let resp = recv(&mut reader).await?;
-        let message = resp["error"]["message"].as_str().unwrap_or_default();
-        assert!(
-            message.contains("came up under"),
-            "the primary's refusal has to say it is the bring-up selection: {resp}"
+        assert_eq!(
+            resp["result"]["ok"],
+            Value::Bool(true),
+            "the registry default unmounts like any other library: {resp}"
+        );
+
+        // The declared default is no longer mounted, so an unnamed call
+        // is refused instead of landing on the one library left.
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":3,"method":"library.info"}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(-32010),
+            "an unnamed call must not fall back to the remaining library: {resp}"
         );
         let hint = resp["error"]["data"]["hint"].as_str().unwrap_or_default();
-        assert!(
-            hint.contains("bookrack quit"),
-            "the primary's refusal points at restarting the daemon: {resp}"
-        );
+        assert!(hint.contains("--library"), "{resp}");
 
         send(
             &mut w,
-            r#"{"jsonrpc":"2.0","id":3,"method":"library.list"}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"library.unmount","params":{"name":"beta"}}"#,
+        )
+        .await?;
+        assert_refused_as_primary(&recv(&mut reader).await?);
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":5,"method":"library.list"}"#,
         )
         .await?;
         let resp = recv(&mut reader).await?;
-        let mut names = library_names(&resp)?;
-        names.sort_unstable();
-        assert_eq!(names, ["alpha", "beta"], "{resp}");
+        assert_eq!(library_names(&resp)?, ["beta"], "{resp}");
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
+/// A root selected by path is the library the daemon came up under
+/// too, under its in-memory key; mounting a registered library beside
+/// it does not make it unmountable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unmount_refuses_the_path_selected_root_the_daemon_came_up_under() -> Result<()> {
+    let (sandbox, alpha, beta) = world();
+    register_beta(sandbox, &alpha, &beta);
+    let anonymous = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let mut opts = RuntimeOpts::headless(Some(anonymous.path().to_path_buf()), None);
+    opts.no_mcp = true;
+    opts.runtime_dir = Some(runtime_root.path().to_path_buf());
+    let runtime = DaemonRuntime::start(opts).await?;
+    assert_eq!(
+        runtime.registry.len(),
+        1,
+        "a path-selected root is served alone"
+    );
+
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":1,"method":"library.mount","params":{"name":"beta"}}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        assert_eq!(resp["result"]["ok"], Value::Bool(true), "{resp}");
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":2,"method":"library.unmount","params":{"name":"default"}}"#,
+        )
+        .await?;
+        assert_refused_as_primary(&recv(&mut reader).await?);
 
         send(
             &mut w,

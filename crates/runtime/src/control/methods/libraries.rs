@@ -203,10 +203,10 @@ pub async fn mount(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
 
 /// Stop serving a library and let go of its data root.
 ///
-/// Refuses the registry default, the library the daemon came up under,
-/// and a library with queued work; see [`crate::mount::Mounter::unmount`]
-/// for why each of the three would otherwise leave the daemon
-/// describing something it no longer serves.
+/// Refuses the library the daemon came up under, the last mounted
+/// library, and a library with queued work; see
+/// [`crate::mount::Mounter::unmount`] for why each of the three would
+/// otherwise leave the daemon describing something it no longer serves.
 ///
 /// The root lock is released when the last caller holding the library's
 /// handle is done with it, which may be after this call returns: an
@@ -214,7 +214,9 @@ pub async fn mount(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
 pub async fn unmount(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let name = mount_target("library.unmount", params)?;
     let mounter = require_mounter("library.unmount", ctx)?;
-    let primary = ctx.info_context.library_name.clone();
+    // The in-memory key, so a root selected by path is protected under
+    // the name the registry serves it as.
+    let primary = Some(ctx.library_name.clone());
     let queued_jobs = queued_against(ctx, &name)?;
     let target = name.clone();
     run_write(ctx, &name, move || async move {

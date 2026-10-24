@@ -222,19 +222,17 @@ impl Mounter {
     /// Three libraries are refused, each because unmounting it would
     /// leave the daemon describing something it no longer serves:
     ///
-    /// * the **registry default** — the no-name route would resolve to
-    ///   a key the mounted set no longer has, taking every unnamed call
-    ///   down with it;
     /// * the **primary** — the daemon's identity is a bring-up fact, so
     ///   the `status` card would go on naming a library that left;
+    /// * the **last mounted library** — a daemon serves at least one;
     /// * a library with **queued work** — a pending or running job
     ///   against it would burn on the next pull, and the operator would
     ///   see a failed ingest rather than a refused unmount.
     ///
-    /// "The last library" needs no rule of its own: the registry's
-    /// default is always inside the mounted set, so a one-library
-    /// daemon's only library is its default and the first rule catches
-    /// it.
+    /// The registry default is not protected: the registry routes an
+    /// unnamed call by what is mounted, and refuses it while the
+    /// declared default is not, so taking the default out costs the
+    /// unnamed route rather than breaking it.
     pub fn unmount(
         &self,
         name: &str,
@@ -246,29 +244,6 @@ impl Mounter {
         self.registry
             .get(Some(name))
             .map_err(MountRefusal::Registry)?;
-
-        if self
-            .registry
-            .default_name()
-            .map_err(MountRefusal::Registry)?
-            .as_deref()
-            == Some(name)
-        {
-            return Err(MountRefusal::Refused {
-                library: name.to_string(),
-                problem: Problem::new("cannot unmount the registry's default library")
-                    .detail(
-                        "A call that names no library resolves to the default, so unmounting \
-                         it would leave every unnamed call with nothing to route to."
-                            .to_string(),
-                    )
-                    .hint(format!(
-                        "Move the pointer to another served library first — \
-                         `bookrack libraries default <other>` — then `bookrack libraries \
-                         unmount {name}`.",
-                    )),
-            });
-        }
 
         if facts.primary == Some(name) {
             return Err(MountRefusal::Refused {
@@ -285,6 +260,23 @@ impl Mounter {
                         "Stop the daemon with `bookrack quit` and start it under another \
                          library; changing which library a daemon is identified by means \
                          changing the daemon."
+                            .to_string(),
+                    ),
+            });
+        }
+
+        if self.registry.len() == 1 {
+            return Err(MountRefusal::Refused {
+                library: name.to_string(),
+                problem: Problem::new("cannot unmount the last mounted library")
+                    .detail(
+                        "A daemon serves at least one library; with this one gone it would \
+                         answer for none."
+                            .to_string(),
+                    )
+                    .hint(
+                        "Use `bookrack quit` to stop the daemon, or mount another library \
+                         first with `bookrack libraries mount <name>`."
                             .to_string(),
                     ),
             });
@@ -461,5 +453,31 @@ mod tests {
             RootLock::acquire(root, std::process::id(), "daemon")
                 .expect("the root lock is released once its library is unmounted");
         }
+    }
+
+    /// A one-library daemon keeps its library: with no default rule to
+    /// catch it, the last mounted library has a refusal of its own.
+    #[test]
+    fn unmount_refuses_the_last_mounted_library() {
+        let only = tempfile::tempdir().expect("tempdir");
+        let registry = LibraryRegistry::from_handles([locked_handle("only", only.path())], None)
+            .expect("one library");
+        let mounter = Mounter::new(Arc::clone(&registry), None, Caller::cli());
+        let facts = UnmountFacts {
+            primary: None,
+            queued_jobs: 0,
+        };
+        match mounter.unmount("only", facts) {
+            Err(MountRefusal::Refused { library, problem }) => {
+                assert_eq!(library, "only");
+                assert!(problem.summary.contains("last"), "{}", problem.summary);
+                let hint = problem.data.hint.expect("hint");
+                assert!(hint.contains("bookrack quit"), "{hint}");
+                assert!(hint.contains("libraries mount"), "{hint}");
+            }
+            Err(other) => panic!("expected a refusal, got {other:?}"),
+            Ok(_) => panic!("the last mounted library must not unmount"),
+        }
+        assert_eq!(registry.len(), 1, "a refused unmount changes nothing");
     }
 }

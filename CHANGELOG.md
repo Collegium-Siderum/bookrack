@@ -23,6 +23,9 @@ release workflow extracts the matching section verbatim from this file.
   declared, so it refuses rather than falling back. `served[].default`,
   `library.list`, and `session.info` mark the library an unnamed call
   reaches, and mark none when it is refused.
+- **`libraries unmount` takes the registry default and refuses the last
+  mounted library.** The library the daemon came up under is still
+  refused, now including a root selected by path.
 
 ## [0.13.0] - 2026-10-24
 

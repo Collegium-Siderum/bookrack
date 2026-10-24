@@ -21,11 +21,12 @@ target library by name. A root selected directly by path that the
 registry does not know is served alone, as before. The set is not
 fixed at bring-up: `bookrack libraries mount <name>` adds a registered
 library to it and `bookrack libraries unmount <name>` takes one back
-out, both without a restart. `libraries unmount` refuses the registry
-default and the library the daemon came up under — the first is where
-every unqualified command goes, the second is what `bookrack status`
-reports the daemon as — and refuses a library with queue jobs still to
-run. `bookrack libraries fork` mounts the clone it creates, so a forked
+out, both without a restart. `libraries unmount` refuses the library
+the daemon came up under — what `bookrack status` reports the daemon
+as — the last mounted library, and a library with queue jobs still to
+run. The registry default can be taken out; every unqualified command
+is then refused, naming the mounted libraries and `--library`, until
+it is mounted again. `bookrack libraries fork` mounts the clone it creates, so a forked
 library is served on the same command.
 
 `bookrack libraries list` reads the registry file, so it works with no
@@ -50,7 +51,7 @@ libraries remove --purge` refuses a root a daemon is serving rather
 than deleting it underneath. An eager daemon holds the lock on every
 registered library's root, so a purge always meets a held one: give
 that root back with `bookrack libraries unmount <name>` first, or —
-for the registry default and the library the daemon came up under,
+for the library the daemon came up under and the last mounted library,
 which unmounting refuses — `bookrack quit`. The root is released once
 any call still using that library finishes, so a purge racing a long
 read may need a second attempt. Read-only commands take neither.

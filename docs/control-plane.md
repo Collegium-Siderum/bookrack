@@ -543,14 +543,15 @@ the exit-code bucket does not distinguish the two.
   so a mount takes — and fires `library.changed` on success.
 - `library.unmount` — `{ name }` → `{ ok: true, name, library }`. Stop serving
   `name` and give its data root back. Three libraries are refused: the
-  registry's current default (an unnamed call would resolve to a key
-  the served set no longer has), the library the daemon came up under
-  (its identity is a bring-up fact, so the status card would go on
-  naming a library that left), and a library with pending or running
-  queue jobs (each would fail on its next pull). Each refusal is
-  `-32602` and names its own next step. "The last library" needs no
-  rule of its own — the default is always inside the served set, so a
-  one-library daemon's only library is its default. The root lock is
+  library the daemon came up under (its identity is a bring-up fact, so
+  the status card would go on naming a library that left — a root
+  selected by path is refused under the name the daemon serves it as),
+  the last mounted library (a daemon serves at least one), and a
+  library with pending or running queue jobs (each would fail on its
+  next pull). Each refusal is `-32602` and names its own next step. The
+  registry default is not protected: once it is unmounted, a call
+  naming no library is refused by the rule under *Unnamed calls* until
+  the default is mounted again or another library is named. The root lock is
   released when the last caller still using the library is done, which
   may be after this call returns: a read in flight when the unmount
   landed keeps the root held until it finishes, so a client that must
