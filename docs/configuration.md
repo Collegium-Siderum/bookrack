@@ -104,6 +104,16 @@ either. Editing an entry's `index_profile` by hand therefore accomplishes
 nothing durable: the manifest outranks it, and `doctor` reports the
 difference as drift.
 
+An entry that caches a `uuid` is served only from a root whose manifest
+carries that uuid. A root with no manifest — which is what an empty
+mount point looks like while its volume is not connected — is refused
+at bring-up and by `libraries mount`, with the hint to reconnect the
+volume first or, if the library really moved, to register it where it
+now is; a manifest recording another uuid is refused naming both. A
+refused root is left as it was found. An entry with no cached uuid (a
+read-only root registered without a manifest) is served as before, and
+`doctor` reports the gap.
+
 Every registry verb resolves locally with no running daemon, so it
 works during a fresh install or a recovery:
 

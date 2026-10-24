@@ -1245,7 +1245,9 @@ fn registry_entry_issue(entry: &LibraryEntry, probe: &ManifestProbe) -> Option<S
         )),
         ManifestProbe::NoManifest => entry.uuid.as_ref().map(|_| {
             format!(
-                "'{}' has a cached uuid but {root} carries no manifest; re-register to refresh",
+                "'{}' has a cached uuid but {root} carries no manifest, so the daemon refuses to \
+                 serve it; if the root sits on an external volume, reconnect the volume first, \
+                 and re-register only once the manifest is confirmed gone",
                 entry.name
             )
         }),
@@ -2380,9 +2382,18 @@ mod tests {
         // A legacy bare root with no cached uuid is consistent; one that
         // caches a uuid but has lost its manifest is not.
         assert!(registry_entry_issue(&entry("legacy", None), &ManifestProbe::NoManifest).is_none());
-        assert!(
-            registry_entry_issue(&entry("cached", Some("u")), &ManifestProbe::NoManifest).is_some()
-        );
+        let note = registry_entry_issue(&entry("cached", Some("u")), &ManifestProbe::NoManifest)
+            .expect("a cached uuid without a manifest is flagged");
+        // Reconnecting an unmounted volume comes before re-registering:
+        // re-registering against an empty mount point mints a new
+        // identity for a root that is not the library.
+        let reconnect = note
+            .find("reconnect")
+            .expect("the note says to reconnect the volume");
+        let reregister = note
+            .find("re-register")
+            .expect("the note says when to re-register");
+        assert!(reconnect < reregister, "{note}");
     }
 
     #[test]

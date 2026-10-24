@@ -21,6 +21,7 @@ pub mod daemon;
 pub mod doctor;
 pub mod embed_helpers;
 pub mod fixed;
+pub(crate) mod identity_check;
 pub mod mcp_endpoint;
 pub mod mount;
 pub mod open_runs;

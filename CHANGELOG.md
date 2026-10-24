@@ -103,6 +103,24 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A registered library whose root carries no identity manifest is
+  refused, not served empty.** With a library's root on a volume that
+  was not connected, the mount point was an empty directory that
+  passed the existence check, and the daemon came up serving it as an
+  empty library: searches answered nothing, `status` showed no counts,
+  and an ingest wrote a second catalog, corpus, and vector store into
+  the mount point, where the volume covered them the moment it came
+  back. A registry entry that caches a `uuid` is now served only from
+  a root whose `bookrack-library.toml` records that uuid. A root with
+  no manifest is refused at bring-up and by `libraries mount`, with
+  the hint to reconnect the volume first or re-register the library
+  where it now is; a manifest recording another uuid is refused naming
+  both. Nothing is locked or written to a refused root. An entry with
+  no cached uuid is served as before, and `doctor`'s `registry` row for
+  a cached uuid without a manifest now says to reconnect the volume
+  before re-registering, since re-registering against an empty mount
+  point would mint a new identity for a directory that is not the
+  library.
 - **An unknown library name is refused with the names that would
   resolve as the hint.** `-32010 invalid library` carried the
   registry's names inside the message, `no library named "x"

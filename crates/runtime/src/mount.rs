@@ -6,6 +6,7 @@
 //! Bring-up decides its mount set once, in [`crate::daemon`], and this
 //! module runs the same sequence one library at a time afterwards:
 //! resolve the library's configuration through the registry, refuse a
+//! root that does not carry the identity the entry cached, refuse a
 //! root another mount already claims, refuse a set that would disagree
 //! on the reranker stage, probe the embed backend, take the root's
 //! exclusive lock, open the handle, and put it in the registry.
@@ -182,6 +183,13 @@ impl Mounter {
             data_dir: None,
             library: Some(name.to_string()),
         })?);
+        if let Some(entry) = crate::identity_check::registry_entry(name)? {
+            crate::identity_check::verify_registered_identity(
+                &entry,
+                cfg.data_dir(),
+                crate::identity_check::MountOccasion::Runtime,
+            )?;
+        }
 
         self.claim_root(name, &cfg)?;
         let mounts = [(name.to_string(), Arc::clone(&cfg))];

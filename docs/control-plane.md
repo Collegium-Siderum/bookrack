@@ -519,11 +519,13 @@ the exit-code bucket does not distinguish the two.
   registered library `name` and add it to the served set, without a
   restart. `name` is a registry name, never a path: registering a root
   stays a separate act, with its own failure modes. The mount runs the
-  same checks bring-up runs, in bring-up's order — a root another
-  mounted library already claims, an index profile that disagrees with
-  the served set on the reranker stage, and an embed backend that
-  cannot serve are each refused, so a library that starts cleanly also
-  mounts cleanly. Returns `-32010` when the registry does not carry the
+  same checks bring-up runs, in bring-up's order — a root that does not
+  carry the identity manifest the entry cached a uuid for (an empty
+  mount point, or another library's root), a root another mounted
+  library already claims, an index profile that disagrees with the
+  served set on the reranker stage, and an embed backend that cannot
+  serve are each refused, so a library that starts cleanly also mounts
+  cleanly. Returns `-32010` when the registry does not carry the
   name, `-32602` for a refused consistency check, and `-32017` when
   another process holds the root's lock. Being a write, it takes the
   write mutex — a concurrent write sees `-32001 busy` for the second or

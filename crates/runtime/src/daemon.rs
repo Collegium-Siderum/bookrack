@@ -381,6 +381,17 @@ impl DaemonRuntime {
                     library: Some(name.clone()),
                 })
                 .with_context(|| format!("resolve configuration for library '{name}'"))?;
+                // A root that does not carry the identity the entry
+                // cached is refused before it is locked: an empty
+                // mount point passes the directory check and would
+                // otherwise be served as an empty library.
+                if let Some(entry) = registry_entries.iter().find(|entry| &entry.name == name) {
+                    crate::identity_check::verify_registered_identity(
+                        entry,
+                        lib_cfg.data_dir(),
+                        crate::identity_check::MountOccasion::BringUp,
+                    )?;
+                }
                 mounts.push((name.clone(), Arc::new(lib_cfg)));
             }
         } else {
