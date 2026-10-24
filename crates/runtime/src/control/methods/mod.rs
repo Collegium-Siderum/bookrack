@@ -654,6 +654,48 @@ impl Drop for WriteSession {
     }
 }
 
+/// Whether a write session ends with a `library.changed` broadcast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Announce {
+    /// The session may have changed the library: announce it.
+    Changed,
+    /// The session left every library as it found it: a dry run.
+    Nothing,
+}
+
+/// Run a write command: a write session (see [`run_write_session`])
+/// that announces `library.changed` on success, so every subscriber
+/// refreshes what it believes about `library`.
+pub(crate) async fn run_write<F, Fut>(
+    ctx: &MethodContext,
+    library: &str,
+    op: F,
+) -> Result<Value, RpcError>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<Value, RpcError>>,
+{
+    run_write_session(ctx, library, Announce::Changed, op).await
+}
+
+/// Run a dry-run leg: a write session (see [`run_write_session`]) that
+/// publishes no `library.changed`. The leg takes the write mutex like
+/// the write it previews — the plan it registers is a snapshot nothing
+/// may move under, and `mcp.availability` pauses and resumes around it
+/// as around any holder of the mutex — but it leaves every library as
+/// it found it, so there is nothing for a subscriber to refresh.
+pub(crate) async fn run_dry_run<F, Fut>(
+    ctx: &MethodContext,
+    library: &str,
+    op: F,
+) -> Result<Value, RpcError>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<Value, RpcError>>,
+{
+    run_write_session(ctx, library, Announce::Nothing, op).await
+}
+
 /// Acquire the runtime-wide write mutex, raise the RPC write source
 /// (the daemon reads [`super::events::DaemonState::Writing`] for the
 /// session's duration), broadcast `mcp.availability { paused: true }`,
@@ -679,9 +721,13 @@ impl Drop for WriteSession {
 /// acted on: `library` is set to `library` unless `op` already put a
 /// `library` key there. A reply of any other shape, and every error,
 /// passes through unchanged.
-pub(crate) async fn run_write<F, Fut>(
+///
+/// `announce` decides whether a successful `op` ends with
+/// `library.changed { library }`.
+async fn run_write_session<F, Fut>(
     ctx: &MethodContext,
     library: &str,
+    announce: Announce,
     op: F,
 ) -> Result<Value, RpcError>
 where
@@ -711,7 +757,7 @@ where
             }
             value
         });
-        if result.is_ok() {
+        if result.is_ok() && announce == Announce::Changed {
             event_stream.publish(Event::LibraryChanged {
                 library: library_name,
             });
@@ -842,6 +888,7 @@ pub(crate) fn test_method_context(
 mod tests {
     use super::*;
     use crate::control::events::{DaemonState, DaemonStateFlag};
+    use serde_json::json;
 
     #[tokio::test]
     async fn write_session_drop_resets_state_and_releases_mutex() {
@@ -900,6 +947,62 @@ mod tests {
         let ctx = test_method_context(dir.path(), served);
         let handle = select_library(&ctx, name).expect("the served library resolves");
         run_write(&ctx, handle.name(), move || async move { reply }).await
+    }
+
+    /// Every event a session published, in order, as `channel` plus its
+    /// serialized value, with the daemon state transitions left out.
+    fn session_events(rx: &mut broadcast::Receiver<Event>) -> Vec<String> {
+        let mut seen = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if !matches!(event, Event::DaemonState(_)) {
+                seen.push(format!("{} {}", event.channel(), event.value()));
+            }
+        }
+        seen
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_write_pauses_mcp_and_announces_the_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_method_context(dir.path(), Some("alpha"));
+        let mut rx = ctx.event_stream.subscribe();
+
+        run_write(&ctx, "alpha", move || async move { Ok(json!({})) })
+            .await
+            .unwrap();
+
+        let events = session_events(&mut rx);
+        assert_eq!(
+            events,
+            vec![
+                r#"mcp.availability {"paused":true}"#,
+                r#"library.changed {"library":"alpha"}"#,
+                r#"mcp.availability {"paused":false}"#,
+            ],
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dry_run_pauses_mcp_and_announces_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_method_context(dir.path(), Some("alpha"));
+        let mut rx = ctx.event_stream.subscribe();
+
+        let reply = run_dry_run(&ctx, "alpha", move || async move { Ok(json!({})) })
+            .await
+            .unwrap();
+        assert_eq!(reply["library"], json!("alpha"), "{reply}");
+
+        let events = session_events(&mut rx);
+        assert_eq!(
+            events,
+            vec![
+                r#"mcp.availability {"paused":true}"#,
+                r#"mcp.availability {"paused":false}"#,
+            ],
+            "{events:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

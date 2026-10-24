@@ -11,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{MethodContext, ok_reply, require_yes, run_write};
+use super::{MethodContext, ok_reply, require_yes, run_dry_run, run_write};
 use crate::cmd::{ResetInterrupted, vectors};
 use crate::control::error_map::{handler_err, plan_lookup_err, registry_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
@@ -121,7 +121,7 @@ async fn reembed_dry_run(
     let registry = ctx.plan_registry.clone();
     let book = parsed.book;
     let stale_only = parsed.stale_only;
-    run_write(ctx, handle.name(), move || async move {
+    run_dry_run(ctx, handle.name(), move || async move {
         let plans = vectors::plan_reembed(&cfg, book, stale_only)
             .await
             .map_err(|e| handler_err("vectors.reembed", e))?;

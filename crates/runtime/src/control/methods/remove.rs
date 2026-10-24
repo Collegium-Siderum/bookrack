@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{MethodContext, require_yes, run_write};
+use super::{MethodContext, require_yes, run_dry_run, run_write};
 use crate::cmd::remove::{ExpectedFingerprint, RemoveArgs, execute_remove_from_plan, plan_remove};
 use crate::control::error_map::{handler_err, plan_lookup_err, registry_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
@@ -91,7 +91,7 @@ async fn remove_dry_run(parsed: RemoveParams, ctx: &MethodContext) -> Result<Val
         dry_run: true,
         yes: parsed.yes,
     };
-    run_write(ctx, handle.name(), move || async move {
+    run_dry_run(ctx, handle.name(), move || async move {
         let plan = plan_remove(&cfg, &args)
             .await
             .map_err(|e| handler_err("remove", e))?;

@@ -392,14 +392,12 @@ async fn a_write_method_acts_on_the_library_its_parameter_names() -> Result<()> 
 /// daemon serving several libraries, one that always names the
 /// bring-up-selected library tells every subscriber to refresh the
 /// wrong one — and says nothing about the library that actually
-/// changed.
+/// changed. The write is the execute leg of a `corpus.rebuild` plan
+/// minted against `beta`; the dry run that mints it announces nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_write_announces_the_library_it_changed() -> Result<()> {
     let sandbox = world();
     let runtime_root = tempfile::tempdir()?;
-    let book_dir = tempfile::tempdir()?;
-    let book_path = book_dir.path().join("synthetic-ledger.txt");
-    std::fs::write(&book_path, BOOK_TEXT)?;
     let _ = sandbox.data_root("beta-root");
 
     let mut opts = bookrack_runtime::RuntimeOpts::headless(None, Some("alpha".to_string()));
@@ -434,14 +432,30 @@ async fn a_write_announces_the_library_it_changed() -> Result<()> {
         let req = json!({
             "jsonrpc": "2.0",
             "id": 2,
-            "method": "dryrun",
-            "params": {"path": book_path, "library": "beta"},
+            "method": "corpus.rebuild",
+            "params": {"dry_run": true, "library": "beta"},
         });
         send(&mut wr_w, &req.to_string()).await?;
         let resp = recv(&mut wr_reader).await?;
         assert!(
             resp["error"].is_null(),
-            "dryrun against beta failed: {resp}"
+            "corpus.rebuild dry run against beta failed: {resp}"
+        );
+        let plan_id = resp["result"]["plan_id"]
+            .as_str()
+            .context("the dry run returns a plan id")?
+            .to_string();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "corpus.rebuild",
+            "params": {"plan_id": plan_id, "yes": true, "library": "beta"},
+        });
+        send(&mut wr_w, &req.to_string()).await?;
+        let resp = recv(&mut wr_reader).await?;
+        assert!(
+            resp["error"].is_null(),
+            "corpus.rebuild execute against beta failed: {resp}"
         );
 
         let deadline = tokio::time::sleep(Duration::from_secs(20));

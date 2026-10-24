@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{MethodContext, input_err, run_write};
+use super::{MethodContext, input_err, run_dry_run};
 use crate::audit_helpers::require_known_profile;
 use crate::cmd::dryrun;
 use crate::control::error_map::{handler_err, registry_err};
@@ -55,7 +55,7 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
         .get(parsed.library.as_deref())
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
-    run_write(ctx, handle.name(), move || async move {
+    run_dry_run(ctx, handle.name(), move || async move {
         let outcome = tokio::task::spawn_blocking(move || {
             dryrun::run(
                 &cfg,

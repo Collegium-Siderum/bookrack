@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{MethodContext, require_yes, run_write};
+use super::{MethodContext, require_yes, run_dry_run, run_write};
 use crate::cmd::corpus;
 use crate::control::error_map::{handler_err, plan_lookup_err, registry_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
@@ -68,7 +68,7 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
     require_yes("corpus.rebuild", parsed.yes, parsed.dry_run)?;
 
     if parsed.dry_run {
-        return run_dry_run(parsed, ctx).await;
+        return rebuild_dry_run(parsed, ctx).await;
     }
     match parsed.plan_id.as_deref() {
         Some(id) => run_execute_from_plan(id.to_string(), parsed.library.as_deref(), ctx).await,
@@ -80,7 +80,10 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
     }
 }
 
-async fn run_dry_run(parsed: CorpusRebuildParams, ctx: &MethodContext) -> Result<Value, RpcError> {
+async fn rebuild_dry_run(
+    parsed: CorpusRebuildParams,
+    ctx: &MethodContext,
+) -> Result<Value, RpcError> {
     let handle = ctx
         .registry
         .get(parsed.library.as_deref())
@@ -91,7 +94,7 @@ async fn run_dry_run(parsed: CorpusRebuildParams, ctx: &MethodContext) -> Result
     let include_vectors = parsed.include_vectors;
     let book = parsed.book;
     let stale_only = parsed.stale_only;
-    run_write(ctx, handle.name(), move || async move {
+    run_dry_run(ctx, handle.name(), move || async move {
         let report = corpus::plan_rebuild(&cfg, book, stale_only)
             .map_err(|e| handler_err("corpus.rebuild", e))?;
         let registered = RegisteredRebuildPlan {

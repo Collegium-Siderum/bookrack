@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::vectors::reset_err;
-use super::{MethodContext, ok_reply, require_yes, run_write};
+use super::{MethodContext, ok_reply, require_yes, run_dry_run, run_write};
 use crate::cmd::papers_vectors;
 use crate::control::error_map::{handler_err, plan_lookup_err, registry_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
@@ -123,7 +123,7 @@ async fn reembed_dry_run(
     let registry = ctx.plan_registry.clone();
     let paper = parsed.paper;
     let stale_only = parsed.stale_only;
-    run_write(ctx, handle.name(), move || async move {
+    run_dry_run(ctx, handle.name(), move || async move {
         let plans = papers_vectors::plan_reembed(&cfg, paper, stale_only)
             .await
             .map_err(|e| handler_err("papers.vectors_reembed", e))?;

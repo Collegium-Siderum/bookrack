@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{MethodContext, run_write};
+use super::{MethodContext, run_dry_run};
 use crate::cmd::papers_dryrun;
 use crate::control::error_map::{handler_err, registry_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
@@ -45,7 +45,7 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
         .get(parsed.library.as_deref())
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
-    run_write(ctx, handle.name(), move || async move {
+    run_dry_run(ctx, handle.name(), move || async move {
         let outcome = tokio::task::spawn_blocking(move || {
             papers_dryrun::run(&cfg, &parsed.path, parsed.out.as_deref(), parsed.no_chunk)
         })

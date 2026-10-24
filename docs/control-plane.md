@@ -890,7 +890,13 @@ stream and crash reports, the daemon's listening address and state
 directory — and is the same whichever library is named.
 
 Every write command takes the runtime-wide write mutex on entry; a
-second concurrent write returns `-32001 busy`.
+second concurrent write returns `-32001 busy`. The dry-run legs —
+`dryrun`, `papers.dryrun`, and the `dry_run` legs of `remove`,
+`papers.remove`, `corpus.rebuild`, `papers.corpus_rebuild`,
+`vectors.reembed` and `papers.vectors_reembed` — take the mutex too,
+so the plan they register is a snapshot nothing moves under, and a
+concurrent write sees `-32001 busy` for their duration. They change
+no library and publish no `library.changed`.
 
 Destructive methods that take a `yes` parameter — `corpus.rebuild`,
 `papers.corpus_rebuild`, `vectors.reembed`, `vectors.reset`,
@@ -1155,13 +1161,15 @@ the tool description says which one it ran.
   `library.unmount` naming the library that joined or left the served
   set. The payload does not say *what* happened, because every
   subscriber's response is the same one: refresh what it believes the
-  library set to be.
+  library set to be. A dry-run leg publishes none: it holds the write
+  mutex but leaves every library as it found it, so a subscriber that
+  refreshed would find nothing changed.
 - `mcp.availability` — `{ paused }` published `true` at the start of
-  every control-plane write command and `false` after it returns, so
-  subscribers can advertise the MCP write surface as temporarily
-  paused. The signal is advisory: it reports the state of the runtime
-  write mutex, which the MCP write tools do not take, so a client that
-  ignores it can still issue one mid-session.
+  every control-plane write command, dry-run legs included, and
+  `false` after it returns, so subscribers can advertise the MCP write
+  surface as temporarily paused. The signal is advisory: it reports the
+  state of the runtime write mutex, which the MCP write tools do not
+  take, so a client that ignores it can still issue one mid-session.
 
 ## Phase log
 

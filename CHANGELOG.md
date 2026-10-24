@@ -94,6 +94,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A dry run no longer announces a library change.** `dryrun`,
+  `papers.dryrun`, and the `dry_run` legs of `remove`, `papers.remove`,
+  `corpus.rebuild`, `papers.corpus_rebuild`, `vectors.reembed` and
+  `papers.vectors_reembed` ended with a `library.changed` event, so a
+  subscriber refreshed a library that had not changed. They still take
+  the write mutex for the length of the preview — `daemon.state` reads
+  `writing`, `mcp.availability` pauses and resumes, and a concurrent
+  write sees `-32001 busy` — but the event is published only by the
+  writes themselves.
 - **A session or data-root lock that the filesystem refuses is no
   longer reported as held by another process.** `bookrack run` and the
   daemon's data-root lock read every failure of the non-blocking lock
