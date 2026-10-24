@@ -81,3 +81,6 @@ bookrack-corpus = { path = "../corpus" }
 bookrack-extract = { path = "../extract" }
 bookrack-test-support.workspace = true
 tempfile.workspace = true
+# Install a capturing subscriber around the error classifier, to assert
+# which of its exits leave a record on the daemon side.
+tracing-subscriber.workspace = true

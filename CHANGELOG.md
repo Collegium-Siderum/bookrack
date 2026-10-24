@@ -10,6 +10,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **An error the control plane could not classify is logged on the
+  daemon side.** A handler failure matching no known error type, and
+  an ops error wrapping an untyped report, were answered as `-32603`
+  and recorded nowhere but in the client's reply. The daemon now emits
+  one warning for each — `unclassified handler error` with the method
+  name and the flattened chain, `unclassified ops error` with the chain
+  — so it reaches the rolling log, `bookrack logs`, the `log` event
+  channel and the diagnose bundle. The reply is unchanged, and a
+  failure the classifier judged a fault is not logged.
 - **A failed queue job records why, in parts.** The queue worker runs
   the failure through the classifier the control plane uses for a write
   RPC, and keeps the result on the row as `problem`: summary, detail,

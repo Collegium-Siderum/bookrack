@@ -19,6 +19,15 @@
 //! shape, e.g. [`INVALID_LIBRARY`]). Anything that does not match a
 //! known user-input variant falls through to [`INTERNAL_ERROR`].
 //!
+//! Two of those fall-throughs are exits nothing has judged: the chain
+//! that matched no known type at all, and an `OpsError::Other` whose
+//! report the `match` cannot see into. Each leaves a `warn` event on
+//! the daemon side — `unclassified handler error` with the method and
+//! the flattened chain, `unclassified ops error` with the chain — so a
+//! failure the reply alone would otherwise record reaches the daemon
+//! log. A variant a `from_*` judged a fault is a verdict, and is not
+//! logged.
+//!
 //! The walk recognises two tiers of type. The pipeline wrappers —
 //! [`OpsError`], [`IngestError`], [`GleanError`], [`QueryError`] — are
 //! raised by the layers below `cmd::*` and carry their own caller-input
@@ -91,12 +100,17 @@ use crate::mount::MountRefusal;
 /// An error the walk recognises no type in still leaves through
 /// [`rpc_from_problem`], so `data` is on the envelope unconditionally:
 /// `retryable` alone, since such an error has neither evidence nor a
-/// next step to name.
+/// next step to name. It is also the one exit no classifier has
+/// judged, so it leaves a `warn` event on the daemon side carrying the
+/// method and the flattened chain; the reply alone would otherwise be
+/// the only record of it.
 pub fn handler_err(method: &str, err: Report) -> RpcError {
     classify(&err).unwrap_or_else(|| {
+        let chain = format!("{err:#}");
+        tracing::warn!(method, error = %chain, "unclassified handler error");
         rpc_from_problem(
             INTERNAL_ERROR,
-            Problem::new(format!("{method} failed: {err:#}")),
+            Problem::new(format!("{method} failed: {chain}")),
         )
     })
 }
@@ -324,6 +338,14 @@ fn from_ops(e: &OpsError) -> RpcError {
         Catalog(e) => return from_catalog(e),
         Corpus(e) => return from_corpus(e),
         Vectors(e) => return from_vectors(e),
+        // The report inside is opaque to this `match`, so nothing has
+        // judged what it holds: the fault code is a fallback, not a
+        // verdict, and the daemon side keeps a record of it.
+        Other(_) => {
+            let problem = e.explain();
+            tracing::warn!(error = %problem.summary, "unclassified ops error");
+            return rpc_from_problem(INTERNAL_ERROR, problem);
+        }
         _ => {}
     }
     let code = match e {
@@ -1381,5 +1403,112 @@ mod tests {
             data.detail.is_none() && data.hint.is_none(),
             "an unclassified error has no evidence and no next step to offer"
         );
+    }
+
+    /// Run `f` under a subscriber that captures every event it emits,
+    /// and return the captured events.
+    fn captured(f: impl FnOnce()) -> Vec<bookrack_obs::LogEvent> {
+        use tracing_subscriber::layer::SubscriberExt;
+        let handle = bookrack_obs::LogStreamHandle::new(16, 16);
+        let subscriber = tracing_subscriber::Registry::default()
+            .with(bookrack_obs::BroadcastLayer::new(handle.clone()));
+        tracing::subscriber::with_default(subscriber, f);
+        handle.tail(16)
+    }
+
+    /// An error the walk recognises no type in is a `-32603` nobody has
+    /// judged, so it leaves a record on the daemon side: one warning
+    /// naming the method and the flattened chain. The envelope is the
+    /// same as before.
+    #[test]
+    fn the_residual_tail_warns_on_the_daemon_side() {
+        let mut rpc = None;
+        let events = captured(|| {
+            let err: Report = eyre::eyre!("disk on fire").wrap_err("rebuild step");
+            rpc = Some(handler_err("vectors.rebuild", err));
+        });
+        let rpc = rpc.expect("handler_err ran");
+        assert_eq!(rpc.code, INTERNAL_ERROR);
+        assert_eq!(
+            rpc.message,
+            "vectors.rebuild failed: rebuild step: disk on fire"
+        );
+        let [event] = events.as_slice() else {
+            panic!("one warning, got {events:?}");
+        };
+        assert_eq!(event.level, "WARN");
+        assert_eq!(event.message, "unclassified handler error");
+        assert_eq!(
+            event.fields.get("method").and_then(|v| v.as_str()),
+            Some("vectors.rebuild")
+        );
+        let chain = event
+            .fields
+            .get("error")
+            .and_then(|v| v.as_str())
+            .expect("error field");
+        assert!(
+            chain.contains("rebuild step") && chain.contains("disk on fire"),
+            "{chain}"
+        );
+    }
+
+    /// `OpsError::Other` is the one shape the recursion cannot see
+    /// into, so what it holds has not been judged either; it leaves
+    /// the same kind of record, on the read path the MCP server also
+    /// takes.
+    #[test]
+    fn an_untyped_ops_report_warns_on_the_daemon_side() {
+        let mut rpc = None;
+        let events = captured(|| {
+            rpc = Some(ops_err(OpsError::Other(eyre::eyre!("boom"))));
+        });
+        let rpc = rpc.expect("ops_err ran");
+        assert_eq!(rpc.code, INTERNAL_ERROR);
+        let [event] = events.as_slice() else {
+            panic!("one warning, got {events:?}");
+        };
+        assert_eq!(event.level, "WARN");
+        assert_eq!(event.message, "unclassified ops error");
+        let chain = event
+            .fields
+            .get("error")
+            .and_then(|v| v.as_str())
+            .expect("error field");
+        assert!(chain.contains("boom"), "{chain}");
+    }
+
+    /// A variant a `from_*` judged — as caller input or as a fault — is
+    /// a verdict, not a fall-through, and leaves no record: the warning
+    /// counts only the errors nothing has judged.
+    #[test]
+    fn a_judged_error_leaves_no_warning() {
+        let judged: [(&str, Report); 3] = [
+            (
+                "a fault",
+                EmbedError::UnusableVector {
+                    index: 1,
+                    defect: bookrack_core::VectorDefect::NonFinite,
+                }
+                .into(),
+            ),
+            (
+                "caller input",
+                OpsError::IntakeNotFound { intake_id: 42 }.into(),
+            ),
+            (
+                "a wrapped fault",
+                OpsError::Query(bookrack_query::QueryError::Embed(
+                    EmbedError::MalformedResponse("no vectors".into()),
+                ))
+                .into(),
+            ),
+        ];
+        for (label, err) in judged {
+            let events = captured(|| {
+                handler_err("vectors.rebuild", err);
+            });
+            assert!(events.is_empty(), "{label}: {events:?}");
+        }
     }
 }
