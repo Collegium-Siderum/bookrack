@@ -197,11 +197,8 @@ impl Mounter {
             .map_err(unresolvable)?,
         );
         if let Some(entry) = crate::identity_check::registry_entry(name).map_err(unresolvable)? {
-            crate::identity_check::verify_registered_identity(
-                &entry,
-                cfg.data_dir(),
-                crate::identity_check::MountOccasion::Runtime,
-            )?;
+            crate::identity_check::verify_registered_identity(&entry, cfg.data_dir())
+                .map_err(|fault| fault.refusal(crate::unmounted::MountOccasion::Serving))?;
         }
 
         self.claim_root(name, &cfg)?;

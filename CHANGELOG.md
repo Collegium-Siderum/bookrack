@@ -42,7 +42,9 @@ release workflow extracts the matching section verbatim from this file.
   data-root lock is released, its queued jobs are marked failed with the
   reason, and a call naming it is refused — `-32010` on the control
   socket, invalid params (`-32602`) from the MCP tools — with
-  `bookrack libraries mount <name>` in the hint. Two failures still stop
+  `bookrack libraries mount <name>` in the hint. The reason recorded for
+  it closes its own hint with the same command, word for word as the
+  mount answers while the library is still broken. Two failures still stop
   bring-up: the library the daemon is started under cannot be resolved
   (for example, its data root is missing), or the reranker cannot start.
   When no library comes up and there was only one to try, its error

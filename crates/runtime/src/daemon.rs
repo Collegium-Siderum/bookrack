@@ -71,7 +71,7 @@ use crate::control::socket::{
 };
 use crate::queue;
 use crate::rerank_supervisor::SupervisorState;
-use crate::unmounted::{self, Skips};
+use crate::unmounted::{self, MountOccasion, Skips};
 
 /// Caller-facing bring-up options. Public fields keep construction
 /// declarative; helper constructors capture the two stable entry-point
@@ -409,17 +409,21 @@ impl DaemonRuntime {
                 // A root that does not carry the identity the entry
                 // cached is skipped before it is locked: an empty mount
                 // point passes the directory check and would otherwise
-                // be served as an empty library.
+                // be served as an empty library. The record is worded
+                // for the daemon that goes on serving; the refusal, for
+                // a bring-up left with nothing to serve.
                 if let Some(entry) = entry
-                    && let Err(refusal) = crate::identity_check::verify_registered_identity(
-                        entry,
-                        lib_cfg.data_dir(),
-                        crate::identity_check::MountOccasion::BringUp,
-                    )
+                    && let Err(fault) =
+                        crate::identity_check::verify_registered_identity(entry, lib_cfg.data_dir())
                 {
-                    skips.push(
-                        UnmountedLibrary::new(name, lib_cfg.data_dir(), refusal.problem.clone()),
-                        refusal.into(),
+                    skips.push_worded(
+                        UnmountedLibrary::new(
+                            name,
+                            lib_cfg.data_dir(),
+                            fault.problem(MountOccasion::Serving),
+                        ),
+                        fault.problem(MountOccasion::Refusing),
+                        fault.refusal(MountOccasion::Refusing).into(),
                     );
                     continue;
                 }

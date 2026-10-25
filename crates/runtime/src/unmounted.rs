@@ -77,11 +77,39 @@ impl Explain for NoServableLibrary {
     }
 }
 
-/// One library bring-up skipped: the record the registry keeps, and
-/// the error that caused it, kept whole so a bring-up with nothing
+/// Whether the daemon a reason is worded for is serving, so a hint can
+/// close with the retry that fits: a running daemon mounts the repaired
+/// library through `libraries mount`, and a bring-up that refused is
+/// started again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MountOccasion {
+    /// The daemon is up: a skip it records, or a runtime
+    /// `library.mount`.
+    Serving,
+    /// Bring-up refused, so there is no daemon to mount through.
+    Refusing,
+}
+
+impl MountOccasion {
+    /// The closing clause of a hint: how to try again once the root
+    /// is back.
+    pub(crate) fn retry(self, name: &str) -> String {
+        match self {
+            MountOccasion::Serving => format!("then run `bookrack libraries mount {name}`"),
+            MountOccasion::Refusing => String::from("then start the daemon again"),
+        }
+    }
+}
+
+/// One library bring-up skipped: the record the registry keeps, the
+/// reason a refused bring-up gives for it when that reads differently,
+/// and the error that caused it, kept whole so a bring-up with nothing
 /// else to report can return it as it was.
 pub(crate) struct Skip {
     pub(crate) library: UnmountedLibrary,
+    /// The reason [`NoServableLibrary`] names the library with; `None`
+    /// reuses the record's.
+    pub(crate) refusal: Option<Problem>,
     pub(crate) cause: eyre::Report,
 }
 
@@ -90,8 +118,30 @@ pub(crate) struct Skip {
 pub(crate) struct Skips(Vec<Skip>);
 
 impl Skips {
+    /// Record a skip whose reason reads the same whether the daemon
+    /// goes on serving or refuses.
     pub(crate) fn push(&mut self, library: UnmountedLibrary, cause: eyre::Report) {
-        self.0.push(Skip { library, cause });
+        self.0.push(Skip {
+            library,
+            refusal: None,
+            cause,
+        });
+    }
+
+    /// Record a skip whose reason, should bring-up end up refusing,
+    /// reads as `refusal` rather than as the record a serving daemon
+    /// keeps.
+    pub(crate) fn push_worded(
+        &mut self,
+        library: UnmountedLibrary,
+        refusal: Problem,
+        cause: eyre::Report,
+    ) {
+        self.0.push(Skip {
+            library,
+            refusal: Some(refusal),
+            cause,
+        });
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Skip> {
@@ -107,15 +157,23 @@ impl Skips {
     /// single skip returns its cause unchanged, so a lock conflict or a
     /// preflight refusal is read by the front end exactly as a
     /// one-library daemon always reported it; several skips become a
-    /// [`NoServableLibrary`] naming each, sorted by name as the registry
-    /// lists them rather than in the order the steps found them.
+    /// [`NoServableLibrary`] naming each with its refusal wording,
+    /// sorted by name as the registry lists them rather than in the
+    /// order the steps found them.
     pub(crate) fn into_refusal(self) -> eyre::Report {
         let mut skips = self.0;
         if skips.len() == 1 {
             return skips.remove(0).cause;
         }
-        let mut libraries: Vec<UnmountedLibrary> =
-            skips.into_iter().map(|skip| skip.library).collect();
+        let mut libraries: Vec<UnmountedLibrary> = skips
+            .into_iter()
+            .map(|skip| match skip.refusal {
+                Some(reason) => {
+                    UnmountedLibrary::new(skip.library.name(), skip.library.data_dir(), reason)
+                }
+                None => skip.library,
+            })
+            .collect();
         libraries.sort_by(|a, b| a.name().cmp(b.name()));
         NoServableLibrary { libraries }.into()
     }
@@ -235,6 +293,61 @@ mod tests {
             .expect("several skips refuse as one");
         assert_eq!(refusal.libraries.len(), 2);
         assert_eq!(refusal.libraries[1].name(), "beta");
+    }
+
+    /// A refused bring-up names a skip pushed with its own refusal
+    /// wording by that wording, and one pushed without by its record;
+    /// the records a serving daemon would keep are left as pushed.
+    #[test]
+    fn a_refused_bring_up_reads_each_skips_refusal_wording() {
+        let mut skips = Skips::default();
+        skips.push_worded(
+            skipped(
+                "alpha",
+                "no manifest",
+                Some("Reconnect it, then run `bookrack libraries mount alpha`."),
+                false,
+            ),
+            Problem::new(String::from("no manifest"))
+                .hint(String::from("Reconnect it, then start the daemon again.")),
+            eyre::eyre!("first cause"),
+        );
+        skips.push(
+            skipped("beta", "schema too new", Some("Upgrade bookrack."), false),
+            eyre::eyre!("second cause"),
+        );
+        let records: Vec<Option<String>> = skips
+            .libraries()
+            .map(|library| library.reason().data.hint.clone())
+            .collect();
+        assert_eq!(
+            records,
+            [
+                Some(String::from(
+                    "Reconnect it, then run `bookrack libraries mount alpha`."
+                )),
+                Some(String::from("Upgrade bookrack.")),
+            ]
+        );
+
+        let err = skips.into_refusal();
+        let refusal = err
+            .downcast_ref::<NoServableLibrary>()
+            .expect("several skips refuse as one");
+        let alpha = &refusal.libraries[0];
+        assert_eq!(alpha.name(), "alpha");
+        assert_eq!(
+            alpha.data_dir(),
+            std::path::Path::new("/disk/library/alpha")
+        );
+        assert_eq!(
+            alpha.reason().data.hint.as_deref(),
+            Some("Reconnect it, then start the daemon again.")
+        );
+        assert_eq!(
+            refusal.libraries[1].reason().data.hint.as_deref(),
+            Some("Upgrade bookrack.")
+        );
     }
 
     /// A missing root names the volume and the two registry commands;
