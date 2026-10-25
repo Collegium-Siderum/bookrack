@@ -61,10 +61,11 @@ release workflow extracts the matching section verbatim from this file.
   a row bring-up had failed with the mount step lost that message to a
   registry error with no next step. Such a row is now held, its error
   and problem untouched, and `queue.retry` lists it in a new `held`
-  field, one `{ id, library }` per row. `--job` naming such a row is
-  refused with `-32010`: the message names the job and the library, the
-  detail carries the bring-up reason when there is one, and the hint
-  gives the mount and the retry to run.
+  field, one `{ id, library }` per row; `bookrack queue retry` lists
+  them under their library with the mount and the retry to run.
+  `--job` naming such a row is refused with `-32010`: the message names
+  the job and the library, the detail carries the bring-up reason when
+  there is one, and the hint gives the mount and the retry to run.
 
 ### Fixed
 

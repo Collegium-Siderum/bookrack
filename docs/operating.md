@@ -162,6 +162,11 @@ bookrack queue wait                     # wait on every pending or running job
 bookrack queue wait --job <id>          # or on named jobs, finished ones included
 ```
 
+`queue retry` leaves a job whose library is not mounted as it is, with
+the error it ended on: it lists such jobs under their library with the
+mount to run, and `--job` naming one is refused the same way. Mount the
+library, then retry again.
+
 `queue wait` reads the queue once, when it attaches, and refuses up
 front when a selected job is pending on a paused queue or the daemon has
 no queue worker; `ingest`, `papers ingest` and `intake ocr` make the same

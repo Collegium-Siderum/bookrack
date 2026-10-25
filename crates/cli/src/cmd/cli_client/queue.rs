@@ -23,7 +23,8 @@
 //! `queue retry --job` accept as printed; `--long` prints the full id. `queue retry`
 //! fills in the default selector (`failed`) on the client, so the
 //! params it sends always name one, and renders the ids the daemon
-//! flipped. `queue wait` lives in [`super::queue_wait`]. The pause /
+//! flipped and the rows it held, by library. `queue wait` lives in
+//! [`super::queue_wait`]. The pause /
 //! resume / clear / cancel actions remain thin pass-throughs over the
 //! matching RPC.
 
@@ -88,8 +89,11 @@ pub async fn run(action: QueueAction, runtime_dir: Option<PathBuf>) -> Result<()
 
 /// The human rendering of a `queue.retry` reply. A prefix retry names
 /// the one id it flipped; a state retry counts the rows and lists
-/// their ids beneath, or says there were none. A paused queue gets a
-/// closing line, since the rows will not move until `queue resume`.
+/// their ids beneath, or says there were none. The rows the daemon held
+/// follow, one block per library with the mount and the retry to run;
+/// a retry that held rows does not say there were none. A paused queue
+/// gets a closing line, since the rows will not move until
+/// `queue resume`.
 fn render_retry(response: &Value, state: RetryStateFilter, job: Option<&str>) -> String {
     let mut out = String::new();
     let retried: Vec<&str> = response
@@ -97,19 +101,50 @@ fn render_retry(response: &Value, state: RetryStateFilter, job: Option<&str>) ->
         .and_then(Value::as_array)
         .map(|ids| ids.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
+    let mut held: Vec<(&str, Vec<&str>)> = Vec::new();
+    for row in response
+        .get("held")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let (Some(id), Some(library)) = (
+            row.get("id").and_then(Value::as_str),
+            row.get("library").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        match held.iter_mut().find(|(name, _)| *name == library) {
+            Some((_, ids)) => ids.push(id),
+            None => held.push((library, vec![id])),
+        }
+    }
     match (job, retried.as_slice()) {
         (Some(_), [id]) => {
             let _ = writeln!(out, "retried {id}");
         }
-        (_, []) => {
+        (_, []) if held.is_empty() => {
             let _ = writeln!(out, "no {state} jobs to retry");
         }
+        (_, []) => {}
         (_, ids) => {
             let noun = if ids.len() == 1 { "job" } else { "jobs" };
             let _ = writeln!(out, "retried {} {state} {noun}", ids.len());
             for id in ids {
                 let _ = writeln!(out, "  {id}");
             }
+        }
+    }
+    for (library, ids) in &held {
+        let noun = if ids.len() == 1 { "job" } else { "jobs" };
+        let _ = writeln!(
+            out,
+            "held {} {state} {noun}: library {library:?} is not mounted; \
+             run libraries mount {library}, then queue retry --state {state}",
+            ids.len()
+        );
+        for id in ids {
+            let _ = writeln!(out, "  {id}");
         }
     }
     if response
@@ -718,6 +753,49 @@ mod tests {
         let running = json!({ "ok": true, "retried": ["x"], "paused": false });
         let out = render_retry(&running, RetryStateFilter::Failed, None);
         assert!(!out.contains("queue is paused"), "{out}");
+    }
+
+    /// Held rows follow the retried ones, one block per library in the
+    /// order the library first appears, each naming the mount and the
+    /// retry that would pick them up.
+    #[test]
+    fn held_rows_are_grouped_by_library_with_the_mount_to_run() {
+        let reply = json!({
+            "ok": true,
+            "retried": ["x"],
+            "held": [
+                { "id": "b1", "library": "beta" },
+                { "id": "g1", "library": "gamma" },
+                { "id": "b2", "library": "beta" },
+            ],
+            "paused": false,
+        });
+        assert_eq!(
+            render_retry(&reply, RetryStateFilter::NeedsOcr, None),
+            "retried 1 needs-ocr job\n  x\n\
+             held 2 needs-ocr jobs: library \"beta\" is not mounted; \
+             run libraries mount beta, then queue retry --state needs-ocr\n  b1\n  b2\n\
+             held 1 needs-ocr job: library \"gamma\" is not mounted; \
+             run libraries mount gamma, then queue retry --state needs-ocr\n  g1\n"
+        );
+    }
+
+    /// A retry that held every row it selected did find rows in the
+    /// state, so it does not say there were none.
+    #[test]
+    fn a_retry_that_held_every_row_does_not_say_there_were_none() {
+        let reply = json!({
+            "ok": true,
+            "retried": [],
+            "held": [{ "id": "b1", "library": "beta" }],
+            "paused": false,
+        });
+        let out = render_retry(&reply, RetryStateFilter::Failed, None);
+        assert!(
+            out.starts_with("held 1 failed job: library \"beta\" is not mounted;"),
+            "{out}"
+        );
+        assert!(!out.contains("no failed jobs"), "{out}");
     }
 
     #[test]
