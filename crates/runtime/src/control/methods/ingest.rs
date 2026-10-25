@@ -131,22 +131,18 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             "no supported files found in submitted paths",
         ));
     }
-    let (ids, tick) = super::queue_writes::mutate_jobs_and_persist(
-        &ctx.queue_state,
-        &ctx.queue_state_path,
-        |guard| {
-            Ok(queue::enqueue_files(
-                guard,
-                &expanded,
-                &library,
-                bookrack_core::ItemKind::Book,
-                priority,
-                parsed.force,
-                parsed.hold_for_metadata,
-                parsed.audit_profile.clone(),
-            ))
-        },
-    )?;
+    let (ids, tick) = super::queue_writes::enqueue_against(ctx, &library, |guard| {
+        queue::enqueue_files(
+            guard,
+            &expanded,
+            &library,
+            bookrack_core::ItemKind::Book,
+            priority,
+            parsed.force,
+            parsed.hold_for_metadata,
+            parsed.audit_profile.clone(),
+        )
+    })?;
     ctx.event_stream.publish(Event::QueueTick(tick));
     Ok(json!({ "job_ids": ids }))
 }

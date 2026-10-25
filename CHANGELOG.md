@@ -65,6 +65,16 @@ release workflow extracts the matching section verbatim from this file.
   for a missing root or an unreadable store, the classified code for
   any other failure to open it — so repairing and remounting follow one
   set of instructions.
+- **A submit racing `libraries unmount` no longer queues work against
+  the library being unmounted.** The unmount refuses a library with
+  queued jobs, but it counted them and removed the library in two
+  separate steps, and a submit resolved its library before writing the
+  row; an `ingest`, `glean`, or `intake ocr` landing in between
+  was accepted and its job failed on the next pull. The submit now
+  confirms the library again as it writes the row, and the unmount
+  counts and removes in one step, so one of the two is refused: the
+  submit with `-32010` when the unmount landed first, the unmount for
+  queued work when the row did.
 
 ## [0.13.0] - 2026-10-24
 

@@ -213,18 +213,45 @@ pub async fn mount(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
 /// in-flight read keeps the root held until it finishes.
 pub async fn unmount(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let name = mount_target("library.unmount", params)?;
+    unmount_library(ctx, name, || {}).await
+}
+
+/// The body of [`unmount`]. `before_remove` runs once the queued work
+/// against `name` has been counted and before the library leaves the
+/// registry.
+async fn unmount_library(
+    ctx: &MethodContext,
+    name: String,
+    before_remove: impl FnOnce() + Send + 'static,
+) -> Result<Value, RpcError> {
     let mounter = require_mounter("library.unmount", ctx)?;
     // The in-memory key, so a root selected by path is protected under
     // the name the registry serves it as.
     let primary = Some(ctx.library_name.clone());
-    let queued_jobs = queued_against(ctx, &name)?;
+    let queue_state = std::sync::Arc::clone(&ctx.queue_state);
     let target = name.clone();
     run_write(ctx, &name, move || async move {
-        let facts = crate::mount::UnmountFacts {
-            primary: primary.as_deref(),
-            queued_jobs,
+        // The queued work is counted and the library removed under one
+        // hold of the queue lock. A submit writes its row under the
+        // same lock after confirming its library is mounted, so the row
+        // lands either before the count, which then refuses this
+        // unmount, or after the removal, which refuses the submit.
+        let handle = {
+            let queue = queue_state.lock().map_err(|_| {
+                RpcError::new(
+                    INTERNAL_ERROR,
+                    "library.unmount: the queue state lock is poisoned",
+                )
+            })?;
+            let facts = crate::mount::UnmountFacts {
+                primary: primary.as_deref(),
+                queued_jobs: queued_against(&queue, &target),
+            };
+            before_remove();
+            mounter.unmount(&target, facts).map_err(mount_err)?
         };
-        let handle = mounter.unmount(&target, facts).map_err(mount_err)?;
+        // Outside the queue lock: the last handle going may close the
+        // library's stores.
         drop(handle);
         tracing::info!(library = %target, "library unmounted at runtime");
         Ok(json!({ "ok": true, "name": target }))
@@ -233,14 +260,8 @@ pub async fn unmount(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
 }
 
 /// Count the jobs against `library` the worker has not finished with.
-fn queued_against(ctx: &MethodContext, library: &str) -> Result<usize, RpcError> {
-    let state = ctx.queue_state.lock().map_err(|_| {
-        RpcError::new(
-            crate::control::jsonrpc::INTERNAL_ERROR,
-            "library.unmount: the queue state lock is poisoned",
-        )
-    })?;
-    Ok(state
+fn queued_against(queue: &bookrack_core::queue::QueueState, library: &str) -> usize {
+    queue
         .jobs
         .iter()
         .filter(|job| {
@@ -251,7 +272,7 @@ fn queued_against(ctx: &MethodContext, library: &str) -> Result<usize, RpcError>
                         | bookrack_core::queue::JobState::Running
                 )
         })
-        .count())
+        .count()
 }
 
 fn mount_target(method: &str, params: &Option<Value>) -> Result<String, RpcError> {
@@ -280,3 +301,172 @@ fn require_mounter(
 }
 
 routed_params!(LibraryForkParams);
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use bookrack_core::ItemKind;
+    use bookrack_core::queue::{JobState, QueueState};
+    use bookrack_ops::Caller;
+
+    use super::super::queue_writes::enqueue_against;
+    use super::super::{test_library_handle, test_method_context};
+    use super::*;
+    use crate::control::jsonrpc::INVALID_LIBRARY;
+    use crate::mount::Mounter;
+    use crate::queue::Priority;
+
+    /// How long a racing call is given to land when nothing holds it
+    /// off. Only an implementation without the hold-off depends on it;
+    /// with the queue lock held across both steps the outcome is the
+    /// same however long the window is.
+    const RACE_WINDOW: Duration = Duration::from_millis(200);
+
+    /// `alpha`, the library the daemon came up under, and `beta`, both
+    /// mounted, with a mounter bound to the same registry.
+    fn two_library_context(alpha: &Path, beta: &Path) -> MethodContext {
+        let mut ctx = test_method_context(alpha, Some("alpha"));
+        ctx.registry
+            .mount(test_library_handle(beta, "beta"))
+            .expect("beta mounts beside alpha");
+        ctx.mounter = Some(Arc::new(Mounter::new(
+            Arc::clone(&ctx.registry),
+            None,
+            Caller::cli(),
+        )));
+        ctx
+    }
+
+    fn enqueue_one(guard: &mut QueueState, library: &str) -> Vec<String> {
+        crate::queue::enqueue_files(
+            guard,
+            &[PathBuf::from("book.epub")],
+            library,
+            ItemKind::Book,
+            Priority::Normal,
+            false,
+            false,
+            None,
+        )
+    }
+
+    /// Submit one book job against `library` on its own thread, the way
+    /// the three submit handlers write their rows.
+    fn submit_on_thread(
+        ctx: &MethodContext,
+        library: &'static str,
+    ) -> thread::JoinHandle<Result<(), RpcError>> {
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            enqueue_against(&ctx, library, |guard| enqueue_one(guard, library)).map(|_| ())
+        })
+    }
+
+    /// Rows the worker has yet to finish whose library the registry no
+    /// longer serves: each would fail on its next pull.
+    fn stranded_rows(ctx: &MethodContext) -> Vec<String> {
+        let state = ctx.queue_state.lock().expect("queue lock");
+        state
+            .jobs
+            .iter()
+            .filter(|job| matches!(job.state, JobState::Pending | JobState::Running))
+            .filter(|job| ctx.registry.get(Some(&job.library)).is_err())
+            .map(|job| format!("{} against {:?}", job.id, job.library))
+            .collect()
+    }
+
+    /// A submit resolves its library before it takes the queue lock.
+    /// The library is confirmed again under that lock, so one unmounted
+    /// in between gets no row.
+    #[test]
+    fn a_submit_whose_library_was_unmounted_after_resolution_writes_no_row() {
+        let (alpha, beta) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ctx = two_library_context(alpha.path(), beta.path());
+
+        let held = ctx.queue_state.lock().expect("queue lock");
+        let submit = submit_on_thread(&ctx, "beta");
+        thread::sleep(RACE_WINDOW);
+        ctx.registry.unmount("beta").expect("beta is mounted");
+        drop(held);
+
+        let err = submit.join().expect("submit thread").expect_err(
+            "a submit whose library left the registry before its row was written must be refused",
+        );
+        assert_eq!(err.code, INVALID_LIBRARY, "{err:?}");
+        assert!(
+            ctx.queue_state.lock().unwrap().jobs.is_empty(),
+            "a refused submit leaves no row"
+        );
+    }
+
+    /// An unmount that counted no queued work removes the library
+    /// before a submit arriving in between can write: the submit waits,
+    /// then finds the library gone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_submit_racing_an_unmount_that_counted_first_is_refused() {
+        let (alpha, beta) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ctx = two_library_context(alpha.path(), beta.path());
+
+        let (tx, rx) = mpsc::channel();
+        let racer = ctx.clone();
+        let reply = unmount_library(&ctx, "beta".to_string(), move || {
+            let submit = submit_on_thread(&racer, "beta");
+            thread::sleep(RACE_WINDOW);
+            tx.send(submit).expect("hand the submit back");
+        })
+        .await;
+        let submit = rx
+            .recv()
+            .expect("before_remove ran")
+            .join()
+            .expect("submit thread");
+
+        reply.expect("beta had no queued work when the unmount counted");
+        assert_eq!(
+            stranded_rows(&ctx),
+            Vec::<String>::new(),
+            "a row written between the unmount's count and its removal is left against a library no longer served"
+        );
+        let err = submit.expect_err("the submit behind the unmount is refused");
+        assert_eq!(err.code, INVALID_LIBRARY, "{err:?}");
+    }
+
+    /// A submit that took the queue lock first writes its row; the
+    /// unmount behind it counts that row and refuses.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unmount_racing_a_submit_that_wrote_first_is_refused() {
+        let (alpha, beta) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ctx = two_library_context(alpha.path(), beta.path());
+
+        let (inside_tx, inside_rx) = mpsc::channel();
+        let racer = ctx.clone();
+        let submit = thread::spawn(move || {
+            enqueue_against(&racer, "beta", |guard| {
+                inside_tx.send(()).expect("signal the lock is held");
+                thread::sleep(RACE_WINDOW);
+                enqueue_one(guard, "beta")
+            })
+            .map(|_| ())
+        });
+        inside_rx.recv().expect("the submit holds the queue lock");
+
+        let reply = unmount_library(&ctx, "beta".to_string(), || {}).await;
+        submit
+            .join()
+            .expect("submit thread")
+            .expect("the submit that took the lock first writes its row");
+
+        let err = reply.expect_err("an unmount behind a written row is refused");
+        assert_eq!(err.code, INVALID_PARAMS, "{err:?}");
+        assert!(
+            ctx.registry.get(Some("beta")).is_ok(),
+            "a refused unmount leaves beta mounted"
+        );
+        assert_eq!(ctx.queue_state.lock().unwrap().jobs.len(), 1);
+    }
+}

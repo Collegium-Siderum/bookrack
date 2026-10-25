@@ -97,22 +97,18 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         expected_pages: parsed.expected_pages,
         allow_partial: parsed.allow_partial,
     };
-    let (id, tick) = super::queue_writes::mutate_jobs_and_persist(
-        &ctx.queue_state,
-        &ctx.queue_state_path,
-        |guard| {
-            Ok(queue::enqueue_ocr_intake(
-                guard,
-                parsed.ocr_md,
-                info,
-                &library,
-                priority,
-                parsed.force,
-                parsed.hold_for_metadata,
-                parsed.audit_profile.clone(),
-            ))
-        },
-    )?;
+    let (id, tick) = super::queue_writes::enqueue_against(ctx, &library, |guard| {
+        queue::enqueue_ocr_intake(
+            guard,
+            parsed.ocr_md,
+            info,
+            &library,
+            priority,
+            parsed.force,
+            parsed.hold_for_metadata,
+            parsed.audit_profile.clone(),
+        )
+    })?;
     ctx.event_stream.publish(Event::QueueTick(tick));
     Ok(json!({ "job_id": id }))
 }

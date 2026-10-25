@@ -54,26 +54,22 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
     for path in &parsed.paths {
         queue::check_extension_supported(path).map_err(|msg| RpcError::new(INVALID_PARAMS, msg))?;
     }
-    let (ids, tick) = super::queue_writes::mutate_jobs_and_persist(
-        &ctx.queue_state,
-        &ctx.queue_state_path,
-        |guard| {
-            // The paper pipeline reads its audit profile from the daemon's
-            // `glean_params_template` (paper_audit_profile). The book-side
-            // per-job override on `QueueJob` is not consumed for paper
-            // jobs, so pass `None` here.
-            Ok(queue::enqueue_files(
-                guard,
-                &parsed.paths,
-                &library,
-                bookrack_core::ItemKind::Paper,
-                priority,
-                parsed.force,
-                false,
-                None,
-            ))
-        },
-    )?;
+    let (ids, tick) = super::queue_writes::enqueue_against(ctx, &library, |guard| {
+        // The paper pipeline reads its audit profile from the daemon's
+        // `glean_params_template` (paper_audit_profile). The book-side
+        // per-job override on `QueueJob` is not consumed for paper
+        // jobs, so pass `None` here.
+        queue::enqueue_files(
+            guard,
+            &parsed.paths,
+            &library,
+            bookrack_core::ItemKind::Paper,
+            priority,
+            parsed.force,
+            false,
+            None,
+        )
+    })?;
     ctx.event_stream.publish(Event::QueueTick(tick));
     Ok(json!({ "job_ids": ids }))
 }

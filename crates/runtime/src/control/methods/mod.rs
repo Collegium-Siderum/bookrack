@@ -836,24 +836,9 @@ pub(crate) fn test_method_context(
     dir: &std::path::Path,
     library_name: Option<&str>,
 ) -> MethodContext {
-    use bookrack_ops::registry::LibraryHandle;
-    use bookrack_ops::{Caller, Ops};
-
     use crate::control::events::{DaemonState, DaemonStateFlag};
 
-    let ops = Ops::<OllamaEmbedClient>::catalog_only(
-        dir.join("corpus.db"),
-        dir.join("catalog.db"),
-        &dir.join("lancedb"),
-        dir.join("books"),
-        dir.join("backup"),
-        Caller::cli(),
-    );
-    let cfg = Arc::new(Config::new(
-        dir.to_path_buf(),
-        "http://127.0.0.1:11434".to_string(),
-    ));
-    let handle = LibraryHandle::new(library_name.unwrap_or("default"), Arc::clone(&cfg), ops);
+    let handle = test_library_handle(dir, library_name.unwrap_or("default"));
     let state = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
     let (shutdown_tx, _) = broadcast::channel(8);
     MethodContext {
@@ -886,6 +871,32 @@ pub(crate) fn test_method_context(
         plan_registry: Arc::new(PlanRegistry::new()),
         mounter: None,
     }
+}
+
+/// A catalog-only library handle named `name` and rooted at `dir`, the
+/// shape [`test_method_context`] serves; a test mounts a second one
+/// beside it to put two libraries in the registry.
+#[cfg(test)]
+pub(crate) fn test_library_handle(
+    dir: &std::path::Path,
+    name: &str,
+) -> Arc<bookrack_ops::registry::LibraryHandle<OllamaEmbedClient>> {
+    use bookrack_ops::registry::LibraryHandle;
+    use bookrack_ops::{Caller, Ops};
+
+    let ops = Ops::<OllamaEmbedClient>::catalog_only(
+        dir.join("corpus.db"),
+        dir.join("catalog.db"),
+        &dir.join("lancedb"),
+        dir.join("books"),
+        dir.join("backup"),
+        Caller::cli(),
+    );
+    let cfg = Arc::new(Config::new(
+        dir.to_path_buf(),
+        "http://127.0.0.1:11434".to_string(),
+    ));
+    LibraryHandle::new(name, cfg, ops)
 }
 
 #[cfg(test)]

@@ -244,6 +244,25 @@ pub(super) fn mutate_jobs_and_persist<T>(
     Ok((out, tick))
 }
 
+/// Append rows against `library` through [`mutate_jobs_and_persist`],
+/// confirming under the queue lock that the registry still serves
+/// `library` before `enqueue` runs. `library.unmount` counts queued
+/// work and removes a library under the same lock, so a library
+/// removed after the caller resolved it is `INVALID_LIBRARY` here and
+/// no row is written.
+pub(super) fn enqueue_against<T>(
+    ctx: &MethodContext,
+    library: &str,
+    enqueue: impl FnOnce(&mut QueueState) -> T,
+) -> Result<(T, QueueTick), RpcError> {
+    mutate_jobs_and_persist(&ctx.queue_state, &ctx.queue_state_path, |guard| {
+        ctx.registry
+            .get(Some(library))
+            .map_err(super::super::error_map::registry_err)?;
+        Ok(enqueue(guard))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

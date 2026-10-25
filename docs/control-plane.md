@@ -927,7 +927,13 @@ change up. The queue-submitting methods — `ingest.submit`,
 `glean.submit`, `intake.ocr` — resolve the name the same way before the
 job is written, so the row carries the library it will run under and a
 later move of the pointer does not move a queued job, and an unnamed
-submit the rule refuses writes no row. A name the
+submit the rule refuses writes no row. The resolved library is
+confirmed mounted again in the same step that writes the row, and
+`library.unmount` counts queued work and removes the library in one
+step of its own, so a submit racing an unmount of its library ends one
+of two ways: the unmount lands first, and the submit is refused with
+`-32010` and writes no row; or the row lands first, and the unmount is
+refused for queued work (`-32602`) and the library stays mounted. A name the
 registry does not know is
 refused with `-32010 invalid library` before any store is opened, and
 a plan id minted against one library is not redeemable against
