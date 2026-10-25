@@ -35,8 +35,8 @@ pub const BUSY: i32 = -32001;
 /// bookrack-specific: runtime is not yet ready to serve this method.
 #[allow(dead_code)]
 pub const NOT_READY: i32 = -32002;
-/// bookrack-specific: multi-library handler received a `library`
-/// field that does not exist in the registry.
+/// bookrack-specific: a `library` field the registry does not serve, or
+/// a `queue.retry` naming a row whose library it does not serve.
 #[allow(dead_code)]
 pub const INVALID_LIBRARY: i32 = -32010;
 /// bookrack-specific: `ingest.cancel` or `queue.retry` named a job id,

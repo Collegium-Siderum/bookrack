@@ -6,10 +6,10 @@
 //! The queue document is seeded before the daemon starts, so the rows
 //! carry controlled ids and cover the ended states the verb reports
 //! without producing them through real ingests. The document is paused,
-//! so the pending rows sit still until `queue resume`; the rows name a
-//! library the daemon does not serve, so each run ends in a book-level
-//! failure the test can wait for. The daemon serves a registered
-//! library, so `--library` can be passed with a name that resolves.
+//! so the pending rows sit still until `queue resume`; the rows name the
+//! registered library the daemon serves and a source file that does not
+//! exist, so each run ends in a book-level failure the test can wait
+//! for, and `--library` can be passed with a name that resolves.
 //!
 //! The embedder probe on the daemon's startup path is answered by
 //! [`EmbedStub`], so no Ollama daemon is required.
@@ -45,7 +45,7 @@ fn row(id: &str, state: &str, error: Option<&str>) -> Value {
     let ended = state != "pending";
     json!({
         "id": id,
-        "library": "nowhere",
+        "library": LIBRARY,
         "path": format!("/nonexistent/{id}.epub"),
         "priority": "normal",
         "force": false,

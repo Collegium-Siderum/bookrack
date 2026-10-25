@@ -8,9 +8,9 @@
 //! method accepts or refuses without producing them through real
 //! ingests. The document is paused, so the rows sit still until the
 //! final `queue.resume`, after which the worker is expected to re-run
-//! every row the retries flipped: a row that names a library the
-//! daemon does not serve fails as a book-level outcome, which is a
-//! terminal the test can wait for.
+//! every row the retries flipped: each row names the library the daemon
+//! serves and a source file that does not exist, so the rerun fails as
+//! a book-level outcome, which is a terminal the test can wait for.
 //!
 //! The embedder probe daemon bring-up performs is answered by
 //! `bookrack_test_support::EmbedStub`, so no Ollama daemon is
@@ -40,11 +40,14 @@ const FINISHED_AT: &str = "2026-01-02T03:05:05Z";
 const FAILURE_TEXT: &str =
     "ingest: registry-mediated ingest: reading the source file failed: no such file";
 
+/// The name a root selected by path is served under.
+const SERVED_LIBRARY: &str = "default";
+
 fn row(id: &str, state: &str, error: Option<&str>, merged_into: Option<i64>) -> Value {
     let terminal = state != "pending";
     json!({
         "id": id,
-        "library": "nowhere",
+        "library": SERVED_LIBRARY,
         "path": format!("/nonexistent/{id}.epub"),
         "priority": "normal",
         "force": false,
@@ -169,6 +172,7 @@ async fn retry_flips_terminal_rows_in_place_and_the_worker_reruns_them() -> Resu
             ids(&resp),
             vec![ID_FAILED_A.to_string(), ID_FAILED_B.to_string()]
         );
+        assert_eq!(resp["result"]["held"], json!([]), "{resp}");
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let tick = await_channel(&mut obs_reader, "queue.tick", Duration::from_secs(5))
@@ -267,7 +271,7 @@ async fn retry_flips_terminal_rows_in_place_and_the_worker_reruns_them() -> Resu
         assert!(ids(&resp).is_empty(), "{resp}");
 
         // Resume: the worker re-runs every flipped row as a fresh
-        // submission, and each one fails on its unknown library.
+        // submission, and each one fails on its missing source file.
         let resumed_at = Utc::now();
         send(&mut writer, &call("queue.resume", Value::Null)).await?;
         let resp = recv(&mut reader).await?;

@@ -54,6 +54,17 @@ release workflow extracts the matching section verbatim from this file.
   written before jobs carried a library name is pinned at start to the
   library it would have been routed to, and a row the worker still
   finds unnamed fails instead of being routed.
+- **`queue retry` leaves a job whose library is not mounted as it
+  was.** A retry used to flip every selected row back to pending,
+  including rows against a library bring-up skipped or
+  `libraries unmount` removed; each failed again on its next pull, and
+  a row bring-up had failed with the mount step lost that message to a
+  registry error with no next step. Such a row is now held, its error
+  and problem untouched, and `queue.retry` lists it in a new `held`
+  field, one `{ id, library }` per row. `--job` naming such a row is
+  refused with `-32010`: the message names the job and the library, the
+  detail carries the bring-up reason when there is one, and the hint
+  gives the mount and the retry to run.
 
 ### Fixed
 

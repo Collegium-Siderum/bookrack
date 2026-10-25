@@ -469,4 +469,56 @@ mod tests {
         );
         assert_eq!(ctx.queue_state.lock().unwrap().jobs.len(), 1);
     }
+
+    /// A retry arriving between an unmount's count and its removal
+    /// waits on the queue lock, then finds the library gone and holds
+    /// the row instead of flipping it back to pending.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_retry_racing_an_unmount_that_counted_first_holds_the_row() {
+        let (alpha, beta) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ctx = two_library_context(alpha.path(), beta.path());
+        let id = {
+            let mut state = ctx.queue_state.lock().expect("queue lock");
+            let id = enqueue_one(&mut state, "beta").remove(0);
+            crate::queue::fail_jobs_against(
+                &mut state,
+                "beta",
+                &crate::queue::JobFailure::text("earlier failure"),
+            );
+            id
+        };
+
+        let (tx, rx) = mpsc::channel();
+        let racer = ctx.clone();
+        let reply = unmount_library(&ctx, "beta".to_string(), move || {
+            let retry = thread::spawn(move || {
+                let params = Some(serde_json::json!({ "state": "failed" }));
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .expect("retry runtime")
+                    .block_on(super::super::queue_writes::retry(&params, &racer))
+            });
+            thread::sleep(RACE_WINDOW);
+            tx.send(retry).expect("hand the retry back");
+        })
+        .await;
+        let retried = rx
+            .recv()
+            .expect("before_remove ran")
+            .join()
+            .expect("retry thread")
+            .expect("the retry behind the unmount succeeds");
+
+        reply.expect("beta had only a failed row when the unmount counted");
+        assert_eq!(
+            stranded_rows(&ctx),
+            Vec::<String>::new(),
+            "a row retried between the unmount's count and its removal is left against a library no longer served"
+        );
+        assert_eq!(
+            retried["held"],
+            serde_json::json!([{ "id": id, "library": "beta" }]),
+            "{retried}"
+        );
+    }
 }

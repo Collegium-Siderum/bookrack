@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use eyre::{Context, Result, eyre};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -757,14 +757,36 @@ pub enum RetryRefusal {
     Ambiguous { fragment: String, count: usize },
     #[error("job {id} is {state}, not failed, needs_ocr, or cancelled")]
     NotRetryable { id: String, state: &'static str },
+    #[error("job {id} is against library {library:?}, which is not mounted")]
+    LibraryNotMounted { id: String, library: String },
+}
+
+/// A row a retry selected and left as it was, because the library it
+/// is against is not mounted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HeldJob {
+    pub id: String,
+    pub library: String,
+}
+
+/// What a retry did: the full ids flipped back to `Pending`, and the
+/// rows it selected but held, each in queue order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetryOutcome {
+    pub retried: Vec<String>,
+    pub held: Vec<HeldJob>,
 }
 
 /// Flip the selected terminal rows back to `Pending` in place. The row
 /// keeps its id, position, `queued_at`, and every submit-time flag;
 /// `started_at`, `finished_at`, `error`, and `merged_into` are cleared
-/// so the row reads exactly as a fresh submission. Returns the full
-/// ids of the rows flipped, in queue order. A state selection that
-/// matches no row returns an empty vector, not an error.
+/// so the row reads exactly as a fresh submission. A state selection
+/// that matches no row returns an empty outcome, not an error.
+///
+/// `mounted` says whether a row's library is served. A state selection
+/// leaves a row whose library is not served exactly as it was and
+/// reports it in [`RetryOutcome::held`]; a fragment that lands on such
+/// a row is refused as `LibraryNotMounted`, after the state check.
 ///
 /// A fragment is matched against every row, whatever its state, before
 /// the state check: a fragment that lands on one `done` row is refused
@@ -773,20 +795,26 @@ pub enum RetryRefusal {
 pub fn retry_terminal(
     state: &mut QueueState,
     selector: &RetrySelector,
-) -> std::result::Result<Vec<String>, RetryRefusal> {
+    mut mounted: impl FnMut(&str) -> bool,
+) -> std::result::Result<RetryOutcome, RetryRefusal> {
     match selector {
         RetrySelector::State(wanted) => {
             if !RETRYABLE_STATES.contains(wanted) {
                 return Err(RetryRefusal::StateNotRetryable(*wanted));
             }
-            let mut retried = Vec::new();
-            for job in state.jobs.iter_mut() {
-                if job.state == *wanted {
+            let mut outcome = RetryOutcome::default();
+            for job in state.jobs.iter_mut().filter(|job| job.state == *wanted) {
+                if mounted(&job.library) {
                     reset_for_retry(job);
-                    retried.push(job.id.clone());
+                    outcome.retried.push(job.id.clone());
+                } else {
+                    outcome.held.push(HeldJob {
+                        id: job.id.clone(),
+                        library: job.library.clone(),
+                    });
                 }
             }
-            Ok(retried)
+            Ok(outcome)
         }
         RetrySelector::IdFragment(fragment) => {
             match match_id_fragment(&state.jobs, fragment, |_| true) {
@@ -798,8 +826,17 @@ pub fn retry_terminal(
                             state: job.state.as_wire_str(),
                         });
                     }
+                    if !mounted(&job.library) {
+                        return Err(RetryRefusal::LibraryNotMounted {
+                            id: job.id.clone(),
+                            library: job.library.clone(),
+                        });
+                    }
                     reset_for_retry(job);
-                    Ok(vec![job.id.clone()])
+                    Ok(RetryOutcome {
+                        retried: vec![job.id.clone()],
+                        held: Vec::new(),
+                    })
                 }
                 Err(FragmentMiss::Empty) => Err(RetryRefusal::EmptyFragment),
                 Err(FragmentMiss::NoMatch) => Err(RetryRefusal::NoMatch {
@@ -1580,12 +1617,116 @@ mod tests {
         state
     }
 
+    /// [`retry_terminal`] with every library served: the ids flipped,
+    /// and a failure if anything was held.
+    fn retry_every_mounted(
+        state: &mut QueueState,
+        selector: &RetrySelector,
+    ) -> std::result::Result<Vec<String>, RetryRefusal> {
+        retry_terminal(state, selector, |_| true).map(|outcome| {
+            assert_eq!(
+                outcome.held,
+                Vec::new(),
+                "nothing is held when all is served"
+            );
+            outcome.retried
+        })
+    }
+
+    /// Two failed rows against a served library around one against a
+    /// library that is not.
+    fn split_fixture() -> QueueState {
+        let mut state = QueueState {
+            schema_version: QUEUE_SCHEMA_VERSION,
+            paused: false,
+            jobs: vec![
+                job("served01", Priority::Normal, JobState::Failed),
+                job("absent01", Priority::Normal, JobState::Failed),
+                job("served02", Priority::Normal, JobState::Failed),
+            ],
+        };
+        state.jobs[1].library = "absent".to_string();
+        for row in &mut state.jobs {
+            row.error = Some("extract error: no body blocks".to_string());
+            row.problem = Some(Problem::new("no body blocks"));
+        }
+        state
+    }
+
+    #[test]
+    fn a_state_retry_holds_a_row_whose_library_is_not_mounted() {
+        let mut state = split_fixture();
+        let before = state.jobs.clone();
+
+        let outcome = retry_terminal(
+            &mut state,
+            &RetrySelector::State(JobState::Failed),
+            |library| library != "absent",
+        )
+        .unwrap();
+
+        assert_eq!(outcome.retried, vec!["served01", "served02"]);
+        assert_eq!(
+            outcome.held,
+            vec![HeldJob {
+                id: "absent01".into(),
+                library: "absent".into()
+            }]
+        );
+        assert_eq!(state.jobs[1], before[1], "a held row is left as it was");
+        assert_eq!(state.jobs[0].state, JobState::Pending);
+        assert_eq!(state.jobs[2].state, JobState::Pending);
+    }
+
+    #[test]
+    fn a_fragment_retry_refuses_a_row_whose_library_is_not_mounted() {
+        let mut state = split_fixture();
+        let before = state.jobs.clone();
+
+        let err = retry_terminal(
+            &mut state,
+            &RetrySelector::IdFragment("absent".into()),
+            |library| library != "absent",
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            RetryRefusal::LibraryNotMounted {
+                id: "absent01".into(),
+                library: "absent".into()
+            }
+        );
+        assert_eq!(state.jobs, before, "a refusal changes nothing");
+    }
+
+    /// The state check comes first: a fragment on a `done` row whose
+    /// library is not served is refused for its state.
+    #[test]
+    fn a_fragment_retry_checks_the_state_before_the_library() {
+        let mut state = split_fixture();
+        state.jobs[1].state = JobState::Done;
+
+        let err = retry_terminal(
+            &mut state,
+            &RetrySelector::IdFragment("absent".into()),
+            |_| false,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, RetryRefusal::NotRetryable { state: "done", .. }),
+            "{err}"
+        );
+    }
+
     #[test]
     fn retry_by_state_flips_only_that_state_and_clears_the_run_fields() {
         let mut state = retry_fixture();
         let before = state.jobs.clone();
 
-        let retried = retry_terminal(&mut state, &RetrySelector::State(JobState::Failed)).unwrap();
+        let retried =
+            retry_every_mounted(&mut state, &RetrySelector::State(JobState::Failed)).unwrap();
 
         assert_eq!(retried, vec!["failed01".to_string()]);
         let flipped = &state.jobs[3];
@@ -1607,7 +1748,7 @@ mod tests {
         let mut state = retry_fixture();
 
         let retried =
-            retry_terminal(&mut state, &RetrySelector::State(JobState::NeedsOcr)).unwrap();
+            retry_every_mounted(&mut state, &RetrySelector::State(JobState::NeedsOcr)).unwrap();
 
         assert_eq!(retried, vec!["needsocr".to_string()]);
         assert_eq!(state.jobs[4].state, JobState::Pending);
@@ -1622,9 +1763,10 @@ mod tests {
         let mut state = retry_fixture();
         let before = state.jobs.clone();
 
-        let err = retry_terminal(&mut state, &RetrySelector::State(JobState::Done)).unwrap_err();
+        let err =
+            retry_every_mounted(&mut state, &RetrySelector::State(JobState::Done)).unwrap_err();
         assert_eq!(err, RetryRefusal::StateNotRetryable(JobState::Done));
-        let err = retry_terminal(
+        let err = retry_every_mounted(
             &mut state,
             &RetrySelector::State(JobState::SkippedDuplicate),
         )
@@ -1643,7 +1785,7 @@ mod tests {
         let before = state.jobs.clone();
 
         let retried =
-            retry_terminal(&mut state, &RetrySelector::State(JobState::Cancelled)).unwrap();
+            retry_every_mounted(&mut state, &RetrySelector::State(JobState::Cancelled)).unwrap();
 
         assert!(retried.is_empty());
         assert_eq!(state.jobs, before);
@@ -1662,14 +1804,16 @@ mod tests {
         };
         let before = state.jobs.clone();
 
-        let err = retry_terminal(&mut state, &RetrySelector::IdFragment("zz".into())).unwrap_err();
+        let err =
+            retry_every_mounted(&mut state, &RetrySelector::IdFragment("zz".into())).unwrap_err();
         assert_eq!(
             err,
             RetryRefusal::NoMatch {
                 fragment: "zz".into()
             }
         );
-        let err = retry_terminal(&mut state, &RetrySelector::IdFragment("a".into())).unwrap_err();
+        let err =
+            retry_every_mounted(&mut state, &RetrySelector::IdFragment("a".into())).unwrap_err();
         assert_eq!(
             err,
             RetryRefusal::Ambiguous {
@@ -1677,7 +1821,8 @@ mod tests {
                 count: 3
             }
         );
-        let err = retry_terminal(&mut state, &RetrySelector::IdFragment("ba".into())).unwrap_err();
+        let err =
+            retry_every_mounted(&mut state, &RetrySelector::IdFragment("ba".into())).unwrap_err();
         assert_eq!(
             err,
             RetryRefusal::NotRetryable {
@@ -1687,11 +1832,12 @@ mod tests {
         );
         assert!(format!("{err}").contains("is done"));
         let err =
-            retry_terminal(&mut state, &RetrySelector::IdFragment(String::new())).unwrap_err();
+            retry_every_mounted(&mut state, &RetrySelector::IdFragment(String::new())).unwrap_err();
         assert_eq!(err, RetryRefusal::EmptyFragment);
         assert_eq!(state.jobs, before, "a refusal changes nothing");
 
-        let retried = retry_terminal(&mut state, &RetrySelector::IdFragment("ab".into())).unwrap();
+        let retried =
+            retry_every_mounted(&mut state, &RetrySelector::IdFragment("ab".into())).unwrap();
         assert_eq!(retried, vec!["ab222222".to_string()]);
         assert_eq!(state.jobs[1].state, JobState::Pending);
         assert_eq!(state.jobs[0].state, JobState::Failed);
@@ -1716,15 +1862,15 @@ mod tests {
                 ),
             ],
         };
-        let err =
-            retry_terminal(&mut state, &RetrySelector::IdFragment("019a1b2c".into())).unwrap_err();
+        let err = retry_every_mounted(&mut state, &RetrySelector::IdFragment("019a1b2c".into()))
+            .unwrap_err();
         assert!(
             matches!(err, RetryRefusal::Ambiguous { count: 2, .. }),
             "{err}"
         );
 
         let retried =
-            retry_terminal(&mut state, &RetrySelector::IdFragment("bbbb2222".into())).unwrap();
+            retry_every_mounted(&mut state, &RetrySelector::IdFragment("bbbb2222".into())).unwrap();
         assert_eq!(
             retried,
             vec!["019a1b2c-3d4e-7f00-8a11-0000bbbb2222".to_string()]
@@ -1752,7 +1898,7 @@ mod tests {
         );
 
         let retried =
-            retry_terminal(&mut state, &RetrySelector::IdFragment("first".into())).unwrap();
+            retry_every_mounted(&mut state, &RetrySelector::IdFragment("first".into())).unwrap();
         assert_eq!(retried, vec!["first111".to_string()]);
         assert_eq!(state.jobs.len(), 2, "retry flips in place, never appends");
 

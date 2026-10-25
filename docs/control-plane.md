@@ -118,6 +118,8 @@ systems. bookrack is a local-first system and does not probe for it.
   key — so a client branches on the code alone, without knowing which
   class it called. The message
   names the library it could not resolve and the names it could.
+  `queue.retry` raises it too, for a `job_id` whose row is against a
+  library that is not mounted.
 - `-32011` job not found (bookrack-specific; `ingest.cancel` or
   `queue.retry` named a job id, or a part of one, that matches no row,
   or more than one)
@@ -519,22 +521,35 @@ the exit-code bucket does not distinguish the two.
   not-yet-running job; a running job is untouched. `paused` reports the
   pause flag as it stands after the trim.
 - `queue.retry` — `{ state?, job_id? }` → `{ ok: true, retried,
-  paused }`. Exactly one of the two selects the rows: `state` is one of
+  held, paused }`. Exactly one of the two selects the rows: `state` is one of
   `failed`, `needs_ocr`, `cancelled` and selects every row in that
   state; `job_id` is an id or a part of one, matched anywhere in the
   id as `ingest.cancel` matches it, that must resolve to one row, which
-  must be in one of those three states. Each selected row is flipped back
+  must be in one of those three states. Each selected row whose library
+  is mounted is flipped back
   to `pending` in place — same id, same position, same submit-time
   flags — with `started_at`, `finished_at`, `error`, `problem`, and
   `merged_into` cleared, so the worker's next tick picks it up as a fresh
-  submission. `retried` lists the full ids flipped, in queue order; a
-  `state` that matches no row returns an empty list. `paused` mirrors
+  submission. A selected row whose library is not mounted — skipped at
+  bring-up or unmounted since — is held: left exactly as it was, error
+  and problem included, since a rerun could only fail on the library.
+  `retried` lists the full ids flipped and `held` one `{ id, library }`
+  per row held, each in queue order; a `state` that matches no row
+  returns two empty lists. `paused` mirrors
   the queue flag: a paused queue holds the rows until `queue.resume`.
-  The queue spans libraries, so the reply carries no `library`.
+  The queue spans libraries, so the reply carries no top-level `library`.
+  Which libraries are mounted is read under the queue lock that
+  `library.unmount` counts queued work and removes a library under, so
+  a row flipped here is counted by an unmount that follows.
   Refusals: `-32602` for a selection that is not exactly one of the
   two, a `state` outside the three, or a `job_id` that resolves to a
   row in another state (the message names that state); `-32011` for a
-  `job_id` that matches no row or more than one. Emits one `queue.tick`.
+  `job_id` that matches no row or more than one; `-32010` for a `job_id`
+  that resolves to a retryable row whose library is not mounted, with
+  the job and the library in the message, the bring-up reason in
+  `data.detail` when bring-up skipped the library, and the mount and the
+  retry to run in `data.hint`. The state check comes first. Emits one
+  `queue.tick`.
 - `library.list` — array of `{ name, default, dimension }` entries,
   one per mounted library: the daemon's served set.
 - `library.info` — full status card for one library;

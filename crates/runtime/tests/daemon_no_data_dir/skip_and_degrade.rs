@@ -677,6 +677,95 @@ async fn jobs_against_a_skipped_library_fail_at_bring_up() -> Result<()> {
     stop(runtime).await
 }
 
+/// A retry leaves a row bring-up failed against a skipped library as
+/// bring-up wrote it: a state retry holds it and says so, and a retry
+/// naming it is refused with the mount step, while a row against a
+/// served library is flipped as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retry_keeps_the_bring_up_failure_on_a_skipped_librarys_row() -> Result<()> {
+    let sandbox = world();
+    let alpha = sandbox.data_root("alpha-root");
+    let beta = sandbox.data_root("beta-root");
+    sandbox.write_registry_entries(
+        Some("alpha"),
+        &[("alpha", alpha.as_path()), ("beta", beta.as_path())],
+    );
+    break_catalog(&beta);
+    let beta_pending = "11000000-0000-7000-8000-000000000008";
+    let alpha_failed = "12000000-0000-7000-8000-000000000009";
+    seed_queue(vec![
+        unnamed_row(beta_pending, "beta", "pending"),
+        unnamed_row(alpha_failed, "alpha", "failed"),
+    ])?;
+    let runtime_root = tempfile::tempdir()?;
+
+    let runtime = start("alpha", runtime_root.path(), true).await?;
+    let failed_at_bring_up = {
+        let state = runtime
+            .queue_state
+            .lock()
+            .map_err(|_| eyre!("queue lock poisoned"))?;
+        job(&state, beta_pending).clone()
+    };
+    assert_eq!(failed_at_bring_up.state, JobState::Failed);
+    assert!(
+        failed_at_bring_up.problem.is_some(),
+        "{failed_at_bring_up:?}"
+    );
+    let queue_state = std::sync::Arc::clone(&runtime.queue_state);
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        let resp = call(
+            &mut reader,
+            &mut w,
+            1,
+            "queue.retry",
+            json!({ "state": "failed" }),
+        )
+        .await?;
+        assert_eq!(resp["result"]["retried"], json!([alpha_failed]), "{resp}");
+        assert_eq!(
+            resp["result"]["held"],
+            json!([{ "id": beta_pending, "library": "beta" }]),
+            "{resp}"
+        );
+
+        let resp = call(
+            &mut reader,
+            &mut w,
+            2,
+            "queue.retry",
+            json!({ "job_id": beta_pending }),
+        )
+        .await?;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(INVALID_LIBRARY),
+            "{resp}"
+        );
+        let hint = resp["error"]["data"]["hint"].as_str().unwrap_or_default();
+        assert!(hint.contains("`bookrack libraries mount beta`"), "{resp}");
+
+        {
+            let state = queue_state
+                .lock()
+                .map_err(|_| eyre!("queue lock poisoned"))?;
+            assert_eq!(
+                *job(&state, beta_pending),
+                failed_at_bring_up,
+                "neither retry touches the row bring-up failed"
+            );
+            assert_eq!(job(&state, alpha_failed).state, JobState::Pending);
+        }
+
+        let _ = call(&mut reader, &mut w, 99, "daemon.shutdown", Value::Null).await?;
+        Ok::<(), eyre::Report>(())
+    });
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
 /// A named call to a skipped library is refused with the reason and the
 /// mount command, and mounting the repaired library clears the record.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

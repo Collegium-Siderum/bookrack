@@ -18,15 +18,21 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use bookrack_core::Problem;
 use bookrack_core::queue::{JobState, QueueState};
+use bookrack_ops::registry::RegistryError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::MethodContext;
+use crate::control::error_map::{registry_err, rpc_from_problem};
 use crate::control::events::{DegradedCause, Event, EventStreamHandle, QueueTick};
-use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, JOB_NOT_FOUND, RpcError};
+use crate::control::jsonrpc::{
+    INTERNAL_ERROR, INVALID_LIBRARY, INVALID_PARAMS, JOB_NOT_FOUND, RpcError,
+};
 use crate::queue::{
-    RetryRefusal, RetrySelector, cancel_all_pending, derive_tick, retry_terminal, save_atomic,
+    HeldJob, RetryRefusal, RetrySelector, cancel_all_pending, derive_tick, retry_terminal,
+    save_atomic,
 };
 
 /// Reply to `queue.pause` / `queue.resume`. `ok` is the write-method
@@ -97,13 +103,15 @@ pub struct QueueRetryParams {
     job_id: Option<String>,
 }
 
-/// Reply to `queue.retry`: the full ids flipped back to `pending`, in
-/// queue order, and the pause flag that decides whether the worker
-/// picks them up now or after `queue.resume`.
+/// Reply to `queue.retry`: the full ids flipped back to `pending`, the
+/// selected rows left in place because their library is not mounted,
+/// each in queue order, and the pause flag that decides whether the
+/// worker picks the flipped rows up now or after `queue.resume`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RetryResponse {
     pub ok: bool,
     pub retried: Vec<String>,
+    pub held: Vec<HeldJob>,
     pub paused: bool,
 }
 
@@ -113,6 +121,11 @@ pub struct RetryResponse {
 /// is not exactly one of `state` / `job_id`, a state outside the
 /// retryable set, or a fragment landing on a row in another state is
 /// `INVALID_PARAMS`.
+///
+/// Each selected row's library is looked up in the registry under the
+/// queue lock, the lock `library.unmount` counts and removes under. A
+/// state selection holds the rows whose library is not mounted; a
+/// fragment landing on such a row is `INVALID_LIBRARY`.
 pub async fn retry(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: QueueRetryParams = match params {
         Some(v) if !v.is_null() => serde_json::from_value(v.clone()).map_err(|e| {
@@ -130,10 +143,37 @@ pub async fn retry(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
             ));
         }
     };
-    let (retried, tick) =
+    let (outcome, tick) =
         mutate_jobs_and_persist(&ctx.queue_state, &ctx.queue_state_path, |guard| {
-            retry_terminal(guard, &selector).map_err(|refusal| {
-                let code = match refusal {
+            let mut not_mounted = None;
+            let mut fault = None;
+            let outcome = retry_terminal(guard, &selector, |library| {
+                match ctx.registry.get(Some(library)) {
+                    Ok(_) => true,
+                    Err(
+                        e @ (RegistryError::LibraryUnknown { .. }
+                        | RegistryError::LibraryUnmounted { .. }),
+                    ) => {
+                        not_mounted = Some(e);
+                        false
+                    }
+                    Err(e) => {
+                        fault.get_or_insert(e);
+                        false
+                    }
+                }
+            });
+            if let Some(e) = fault {
+                return Err(registry_err(e));
+            }
+            outcome.map_err(|refusal| {
+                let code = match &refusal {
+                    RetryRefusal::LibraryNotMounted { id, library } => {
+                        return rpc_from_problem(
+                            INVALID_LIBRARY,
+                            unmounted_retry(id, library, not_mounted.as_ref()),
+                        );
+                    }
                     RetryRefusal::NoMatch { .. } | RetryRefusal::Ambiguous { .. } => JOB_NOT_FOUND,
                     RetryRefusal::StateNotRetryable(_)
                     | RetryRefusal::EmptyFragment
@@ -146,7 +186,8 @@ pub async fn retry(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
     let paused = ctx.queue_paused.load(Ordering::Acquire);
     serde_json::to_value(RetryResponse {
         ok: true,
-        retried,
+        retried: outcome.retried,
+        held: outcome.held,
         paused,
     })
     .map_err(|e| {
@@ -155,6 +196,44 @@ pub async fn retry(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
             format!("serialise queue.retry response: {e}"),
         )
     })
+}
+
+/// The refusal of a retry naming job `id`, whose row is against
+/// `library`, which `cause` says the registry does not serve. The
+/// summary names the job and the library; the detail is the bring-up
+/// reason for a library bring-up skipped, and the mounted names for one
+/// the registry does not carry; the hint ends with the mount and the
+/// retry to run.
+fn unmounted_retry(id: &str, library: &str, cause: Option<&RegistryError>) -> Problem {
+    let next =
+        format!("`bookrack libraries mount {library}`, then `bookrack queue retry --job {id}`.");
+    let problem = Problem::new(format!(
+        "cannot retry job {id:?}: library {library:?} is not mounted"
+    ));
+    match cause {
+        Some(RegistryError::LibraryUnmounted { reason, .. }) => {
+            let detail = match &reason.data.detail {
+                Some(detail) => format!("Bring-up skipped it: {}. {detail}", reason.summary),
+                None => format!("Bring-up skipped it: {}.", reason.summary),
+            };
+            let hint = match &reason.data.hint {
+                Some(hint) => format!("{hint} Then run {next}"),
+                None => format!("Run {next}"),
+            };
+            problem.detail(detail).hint(hint)
+        }
+        Some(RegistryError::LibraryUnknown { available, .. }) => {
+            let mounted = if available.is_empty() {
+                "none".to_owned()
+            } else {
+                available.join(", ")
+            };
+            problem
+                .detail(format!("Mounted libraries: {mounted}."))
+                .hint(format!("Run {next}"))
+        }
+        _ => problem.hint(format!("Run {next}")),
+    }
 }
 
 fn set_paused(ctx: &MethodContext, paused: bool) -> Result<Value, RpcError> {
@@ -256,9 +335,7 @@ pub(super) fn enqueue_against<T>(
     enqueue: impl FnOnce(&mut QueueState) -> T,
 ) -> Result<(T, QueueTick), RpcError> {
     mutate_jobs_and_persist(&ctx.queue_state, &ctx.queue_state_path, |guard| {
-        ctx.registry
-            .get(Some(library))
-            .map_err(super::super::error_map::registry_err)?;
+        ctx.registry.get(Some(library)).map_err(registry_err)?;
         Ok(enqueue(guard))
     })
 }
@@ -431,6 +508,155 @@ mod tests {
         assert!(
             !path.exists(),
             "a failed mutation must not persist the queue document"
+        );
+    }
+
+    /// Append one pending book row against `library` and return its id.
+    fn queue_one(state: &mut QueueState, library: &str) -> String {
+        crate::queue::enqueue_files(
+            state,
+            &[std::path::PathBuf::from(format!("{library}.epub"))],
+            library,
+            bookrack_core::ItemKind::Book,
+            crate::queue::Priority::Normal,
+            false,
+            false,
+            None,
+        )
+        .remove(0)
+    }
+
+    /// A context serving `alpha`, with `beta` recorded as skipped at
+    /// bring-up and `gamma` mounted and then unmounted at runtime, and
+    /// one failed row against each, in that order. `beta`'s row is
+    /// failed the way bring-up fails it, with the mount step in its
+    /// message and the skip reason as its problem.
+    fn mixed_queue() -> (MethodContext, [String; 3], [tempfile::TempDir; 2]) {
+        use bookrack_ops::registry::UnmountedLibrary;
+
+        use super::super::{test_library_handle, test_method_context};
+        use crate::queue::{JobFailure, fail_jobs_against};
+
+        let dirs = [
+            tempfile::tempdir().expect("tempdir"),
+            tempfile::tempdir().expect("tempdir"),
+        ];
+        let ctx = test_method_context(dirs[0].path(), Some("alpha"));
+        let beta = UnmountedLibrary::new(
+            "beta",
+            "/disk/beta",
+            Problem::new("the catalog schema is newer than this build").hint("Upgrade bookrack."),
+        );
+        ctx.registry
+            .record_unmounted(beta.clone())
+            .expect("record beta as skipped");
+        ctx.registry
+            .mount(test_library_handle(dirs[1].path(), "gamma"))
+            .expect("gamma mounts");
+        ctx.registry.unmount("gamma").expect("gamma unmounts");
+
+        let ids = {
+            let mut state = ctx.queue_state.lock().expect("queue lock");
+            let ids = ["alpha", "beta", "gamma"].map(|library| queue_one(&mut state, library));
+            let earlier = JobFailure::text("earlier failure");
+            fail_jobs_against(&mut state, "alpha", &earlier);
+            fail_jobs_against(
+                &mut state,
+                "beta",
+                &JobFailure {
+                    message: crate::unmounted::queue_failure_message(&beta),
+                    problem: Some(beta.reason().clone()),
+                },
+            );
+            fail_jobs_against(&mut state, "gamma", &earlier);
+            ids
+        };
+        (ctx, ids, dirs)
+    }
+
+    /// A state retry flips the rows whose library is served and leaves
+    /// every other selected row exactly as it was, a library skipped at
+    /// bring-up and one unmounted at runtime alike, naming them in
+    /// `held` in queue order.
+    #[tokio::test]
+    async fn a_state_retry_holds_rows_against_a_library_that_is_not_mounted() {
+        let (ctx, [alpha, beta, gamma], _dirs) = mixed_queue();
+        let before = ctx.queue_state.lock().unwrap().jobs.clone();
+
+        let reply = retry(&Some(serde_json::json!({ "state": "failed" })), &ctx)
+            .await
+            .expect("a state retry succeeds");
+
+        assert_eq!(reply["retried"], serde_json::json!([alpha]), "{reply}");
+        assert_eq!(
+            reply["held"],
+            serde_json::json!([
+                { "id": beta, "library": "beta" },
+                { "id": gamma, "library": "gamma" },
+            ]),
+            "{reply}"
+        );
+        let jobs = ctx.queue_state.lock().unwrap().jobs.clone();
+        assert_eq!(jobs[0].state, JobState::Pending);
+        assert_eq!(
+            jobs[1..],
+            before[1..],
+            "a held row keeps its state, its error, and its problem"
+        );
+    }
+
+    /// A `job_id` retry of a row whose library is not mounted is refused
+    /// with `INVALID_LIBRARY` and changes nothing. The refusal names the
+    /// job and the library rather than calling the library unknown,
+    /// carries the bring-up reason when there is one, and its hint ends
+    /// with the mount and the retry to run.
+    #[tokio::test]
+    async fn a_job_retry_against_a_library_that_is_not_mounted_is_refused() {
+        use crate::control::jsonrpc::INVALID_LIBRARY;
+
+        let (ctx, [_, beta, gamma], _dirs) = mixed_queue();
+        let before = ctx.queue_state.lock().unwrap().jobs.clone();
+
+        let mut refusals = Vec::new();
+        for (id, library) in [(&beta, "beta"), (&gamma, "gamma")] {
+            let err = retry(&Some(serde_json::json!({ "job_id": id })), &ctx)
+                .await
+                .expect_err("a row against an unmounted library is not retried");
+            assert_eq!(err.code, INVALID_LIBRARY, "{err:?}");
+            assert!(err.message.contains(id.as_str()), "{err:?}");
+            assert!(
+                err.message
+                    .contains(&format!("library {library:?} is not mounted")),
+                "{err:?}"
+            );
+            let data = err.data.clone().unwrap_or_default();
+            let hint = data["hint"].as_str().unwrap_or_default().to_owned();
+            assert!(
+                hint.ends_with(&format!(
+                    "`bookrack libraries mount {library}`, then `bookrack queue retry --job {id}`."
+                )),
+                "{err:?}"
+            );
+            refusals.push((data, hint));
+        }
+        let (beta_data, beta_hint) = &refusals[0];
+        assert!(
+            beta_data["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("the catalog schema is newer than this build"),
+            "{beta_data}"
+        );
+        assert!(beta_hint.starts_with("Upgrade bookrack. "), "{beta_hint}");
+        let (gamma_data, _) = &refusals[1];
+        assert!(
+            !gamma_data.to_string().contains("no library named"),
+            "{gamma_data}"
+        );
+        assert_eq!(
+            ctx.queue_state.lock().unwrap().jobs,
+            before,
+            "a refused retry changes nothing"
         );
     }
 }

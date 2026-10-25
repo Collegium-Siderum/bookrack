@@ -8,8 +8,9 @@
 //! neighbours — and cover every terminal the verb accepts or refuses
 //! without producing them through real ingests. The document is
 //! paused, so the rows sit still until the final `queue resume`; the
-//! rows name a library the daemon does not serve, so each re-run ends
-//! in a book-level failure the test can wait for.
+//! rows name the library the daemon serves and a source file that does
+//! not exist, so each re-run ends in a book-level failure the test can
+//! wait for.
 //!
 //! The embedder probe on the daemon's startup path is answered by
 //! [`EmbedStub`], so no Ollama daemon is required.
@@ -37,11 +38,14 @@ const FINISHED_AT: &str = "2026-01-02T03:05:05Z";
 const FAILURE_TEXT: &str =
     "ingest: registry-mediated ingest: reading the source file failed: no such file";
 
+/// The name the root `BOOKRACK_DATA_DIR` selects is served under.
+const SERVED_LIBRARY: &str = "default";
+
 fn row(id: &str, state: &str, error: Option<&str>, merged_into: Option<i64>) -> Value {
     let terminal = state != "pending";
     json!({
         "id": id,
-        "library": "nowhere",
+        "library": SERVED_LIBRARY,
         "path": format!("/nonexistent/{id}.epub"),
         "priority": "normal",
         "force": false,
@@ -239,8 +243,8 @@ async fn retry_reruns_terminal_rows_through_the_command_entry() {
         );
     }
 
-    // Resume: every flipped row runs again and fails on its unknown
-    // library; the done row is untouched.
+    // Resume: every flipped row runs again and fails on its missing
+    // source file; the done row is untouched.
     let (code, _, stderr) = client(&sandbox, &["queue", "resume"]).await;
     assert_eq!(code, Some(0), "{stderr}");
     let deadline = Instant::now() + Duration::from_secs(30);
