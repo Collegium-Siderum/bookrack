@@ -258,7 +258,14 @@ pub(crate) fn mount_err(e: MountRefusal) -> RpcError {
                 ConfigError::DataDirNotFound(_) => STATE_UNUSABLE,
                 _ => INTERNAL_ERROR,
             };
-            rpc_from_problem(code, crate::unmounted::resolve_problem(&library, &source))
+            rpc_from_problem(
+                code,
+                crate::unmounted::resolve_problem(
+                    &library,
+                    &source,
+                    crate::unmounted::MountOccasion::Serving,
+                ),
+            )
         }
         MountRefusal::Registry(e) => from_registry(&e),
         MountRefusal::Refused { problem, .. } => rpc_from_problem(INVALID_PARAMS, problem),

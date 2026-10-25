@@ -49,10 +49,12 @@ release workflow extracts the matching section verbatim from this file.
   (for example, its data root is missing), or the reranker cannot start.
   When no library comes up and there was only one to try, its error
   reads as before; when there were several, the daemon refuses (exit 2)
-  and names each one. Index profiles that disagree on the reranker now
-  skip the libraries that disagree with the reference — the registry
-  default, or the first library to pass the earlier checks when the
-  default does not — instead of refusing the whole set. A queue row
+  and names each one, with hints that end in starting the daemon again
+  rather than in a mount no daemon is left to take. Index profiles that
+  disagree on the reranker now skip the libraries that disagree with
+  the reference — the registry default, or the first library to pass
+  the earlier checks when the default does not — instead of refusing
+  the whole set. A queue row
   written before jobs carried a library name is pinned at start to the
   library it would have been routed to, and a row the worker still
   finds unnamed fails instead of being routed.

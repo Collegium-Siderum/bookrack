@@ -397,9 +397,13 @@ impl DaemonRuntime {
                 }) {
                     Ok(lib_cfg) => lib_cfg,
                     Err(err) => {
-                        let problem = unmounted::resolve_problem(name, &err);
-                        skips.push(
-                            UnmountedLibrary::new(name, data_dir, problem),
+                        skips.push_worded(
+                            UnmountedLibrary::new(
+                                name,
+                                data_dir,
+                                unmounted::resolve_problem(name, &err, MountOccasion::Serving),
+                            ),
+                            unmounted::resolve_problem(name, &err, MountOccasion::Refusing),
                             eyre::Report::new(err)
                                 .wrap_err(format!("resolve configuration for library '{name}'")),
                         );

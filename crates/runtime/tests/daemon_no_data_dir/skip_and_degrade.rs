@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 use bookrack_catalog::{Catalog, SCHEMA_VERSION};
 use bookrack_config::{LibraryKind, ManifestIdentitySeed, set_manifest_index_profile};
+use bookrack_core::Explain;
 use bookrack_core::queue::{JobState, QueueState};
 use bookrack_ops::registry::RegistryError;
 use bookrack_runtime::unmounted::NoServableLibrary;
@@ -626,6 +627,55 @@ async fn no_library_coming_up_refuses_naming_each() -> Result<()> {
     assert_eq!(names, ["alpha", "beta"]);
     // Nothing of this process holds either root now.
     drop(hold_root(&alpha));
+    Ok(())
+}
+
+/// A refused bring-up tells a library whose root is missing to start
+/// the daemon again once the volume is back: no daemon is left to take
+/// a `libraries mount`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_missing_root_in_a_refused_bring_up_says_to_start_again() -> Result<()> {
+    let sandbox = world();
+    let alpha = sandbox.data_root("alpha-root");
+    let beta = sandbox.path().join("roots").join("beta-missing");
+    sandbox.write_registry_entries(
+        Some("alpha"),
+        &[("alpha", alpha.as_path()), ("beta", beta.as_path())],
+    );
+    let _held = hold_root(&alpha);
+    let runtime_root = tempfile::tempdir()?;
+
+    let err = match start("alpha", runtime_root.path(), false).await {
+        Ok(runtime) => {
+            stop(runtime).await?;
+            panic!("bring-up with no servable library must refuse");
+        }
+        Err(err) => err,
+    };
+    let refusal = err
+        .downcast_ref::<NoServableLibrary>()
+        .unwrap_or_else(|| panic!("two skips must refuse as NoServableLibrary: {err:#}"));
+    let beta_reason = refusal
+        .libraries
+        .iter()
+        .find(|library| library.name() == "beta")
+        .map(|library| library.reason().clone())
+        .unwrap_or_else(|| panic!("the refusal names beta: {err:#}"));
+    assert!(
+        beta_reason.summary.contains("not an existing directory"),
+        "{beta_reason:?}"
+    );
+    let hint = beta_reason.data.hint.as_deref().unwrap_or_default();
+    assert!(hint.starts_with("Reconnect the volume"), "{hint}");
+    assert!(
+        hint.ends_with("then start the daemon again."),
+        "beta's reason in a refused bring-up must say to start again: {hint}"
+    );
+    let merged = refusal.explain().data.hint.unwrap_or_default();
+    assert!(
+        !merged.contains("libraries mount beta"),
+        "a refused bring-up has no daemon to mount through: {merged}"
+    );
     Ok(())
 }
 

@@ -181,9 +181,9 @@ impl Skips {
 
 /// The reason a library whose registry entry does not resolve is not
 /// served. A missing data root — the usual case, a volume that is not
-/// connected — gets the two ways back; anything else carries the
-/// resolution error's own chain.
-pub(crate) fn resolve_problem(name: &str, err: &ConfigError) -> Problem {
+/// connected — gets the two ways back, closed with the retry `occasion`
+/// calls for; anything else carries the resolution error's own chain.
+pub(crate) fn resolve_problem(name: &str, err: &ConfigError, occasion: MountOccasion) -> Problem {
     match err {
         ConfigError::DataDirNotFound(root) => Problem::new(format!(
             "cannot serve library {name:?}: its data root is not an existing directory"
@@ -194,8 +194,8 @@ pub(crate) fn resolve_problem(name: &str, err: &ConfigError) -> Problem {
         ))
         .hint(format!(
             "Reconnect the volume that holds it, or register the library at its new \
-             location with `bookrack libraries add {name} <path>`, then run `bookrack \
-             libraries mount {name}`."
+             location with `bookrack libraries add {name} <path>`, {}.",
+            occasion.retry(name)
         )),
         other => Problem::from_error_chain(other),
     }
@@ -354,10 +354,8 @@ mod tests {
     /// the mount command names the library.
     #[test]
     fn a_missing_root_hints_at_reconnecting_and_mounting() {
-        let problem = resolve_problem(
-            "beta",
-            &ConfigError::DataDirNotFound(std::path::PathBuf::from("/disk/external/beta")),
-        );
+        let err = ConfigError::DataDirNotFound(std::path::PathBuf::from("/disk/external/beta"));
+        let problem = resolve_problem("beta", &err, MountOccasion::Serving);
         assert!(problem.summary.contains("\"beta\""), "{}", problem.summary);
         assert!(
             problem
@@ -372,7 +370,16 @@ mod tests {
             hint.contains("bookrack libraries add beta <path>"),
             "{hint}"
         );
-        assert!(hint.contains("bookrack libraries mount beta"), "{hint}");
+        assert!(
+            hint.ends_with("then run `bookrack libraries mount beta`."),
+            "{hint}"
+        );
+
+        let refusing = resolve_problem("beta", &err, MountOccasion::Refusing);
+        assert_eq!(refusing.summary, problem.summary);
+        let hint = refusing.data.hint.expect("hint");
+        assert!(hint.ends_with("then start the daemon again."), "{hint}");
+        assert!(!hint.contains("libraries mount"), "{hint}");
     }
 
     #[test]
