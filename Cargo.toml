@@ -163,7 +163,7 @@ bookrack-distill = { path = "crates/distill" }
 bookrack-test-support = { path = "crates/test-support" }
 # Builds throwaway EPUB archives from unzipped fixtures in `extract`
 # tests, so the fixtures stay reviewable as plain files in the repo.
-zip = "8"
+zip = "9"
 # TAR archive writer for the `diagnose` crate. The diagnose tarball
 # packages crash reports, audit-table excerpts, and metadata snapshots
 # into one byte-stable bundle; this crate writes the archive entries.
