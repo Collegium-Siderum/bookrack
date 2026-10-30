@@ -11,7 +11,7 @@ use std::time::Duration;
 use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
 
-use crate::common::{DaemonProcess, wait_for_lock};
+use crate::common::DaemonProcess;
 
 #[tokio::test]
 async fn library_info_round_trips_through_running_daemon() {
@@ -24,12 +24,11 @@ async fn library_info_round_trips_through_running_daemon() {
             .build(),
     );
     daemon_cmd.arg("run");
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-
-    assert!(
-        wait_for_lock(&lock_path, Duration::from_secs(20)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&lock_path, Duration::from_secs(20))
+        .await
+        .expect("bookrack run did not become ready");
 
     let output = Command::from(bookrack_cmd!(&sandbox).build())
         .arg("rpc")
@@ -93,12 +92,11 @@ async fn an_unknown_audit_profile_exits_two_from_the_cli() {
             .build(),
     );
     daemon_cmd.arg("run");
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-
-    assert!(
-        wait_for_lock(&lock_path, Duration::from_secs(20)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&lock_path, Duration::from_secs(20))
+        .await
+        .expect("bookrack run did not become ready");
 
     let output = Command::from(bookrack_cmd!(&sandbox).build())
         .arg("--audit-profile")
@@ -142,12 +140,11 @@ async fn a_remove_of_an_unknown_book_exits_two_from_the_cli() {
             .build(),
     );
     daemon_cmd.arg("run");
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-
-    assert!(
-        wait_for_lock(&lock_path, Duration::from_secs(20)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&lock_path, Duration::from_secs(20))
+        .await
+        .expect("bookrack run did not become ready");
 
     let output = Command::from(bookrack_cmd!(&sandbox).build())
         .arg("remove")

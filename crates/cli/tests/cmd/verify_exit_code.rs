@@ -26,7 +26,7 @@ use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
 use serde_json::Value;
 use tokio::process::Command;
 
-use crate::common::{DaemonProcess, wait_for_lock};
+use crate::common::DaemonProcess;
 
 const STORED_PATH: &str = "aa/bb/source.txt";
 
@@ -87,12 +87,11 @@ async fn spawn_daemon(sandbox: &Sandbox, primary: &str) -> DaemonProcess {
             .build(),
     );
     daemon_cmd.args(["--library", primary, "run"]);
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-    assert!(
-        wait_for_lock(&sandbox.tty_lock_path(), Duration::from_secs(20)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
-    daemon
+    DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&sandbox.tty_lock_path(), Duration::from_secs(20))
+        .await
+        .expect("bookrack run did not become ready")
 }
 
 async fn stop_daemon(daemon: DaemonProcess) {

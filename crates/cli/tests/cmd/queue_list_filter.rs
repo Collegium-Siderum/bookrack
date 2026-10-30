@@ -23,7 +23,7 @@ use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
 use serde_json::Value;
 use tokio::process::Command;
 
-use crate::common::{DaemonProcess, wait_for_lock};
+use crate::common::DaemonProcess;
 
 /// Run one client command and return its exit success, stdout and
 /// stderr.
@@ -59,11 +59,11 @@ async fn state_filter_selects_on_the_client_and_keeps_the_summary_whole() {
             .build(),
     );
     daemon_cmd.arg("run");
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-    assert!(
-        wait_for_lock(&lock_path, Duration::from_secs(30)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&lock_path, Duration::from_secs(30))
+        .await
+        .expect("bookrack run did not become ready");
 
     // The session lock lands before the daemon serves, so the pause
     // doubles as the wait. Pausing first keeps the row cancelled below

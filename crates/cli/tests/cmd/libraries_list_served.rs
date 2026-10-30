@@ -26,7 +26,7 @@ use std::time::Duration;
 use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
 
-use crate::common::{DaemonProcess, wait_for_lock};
+use crate::common::DaemonProcess;
 
 /// A registry naming two libraries, `alpha` the default.
 fn two_library_world() -> Sandbox {
@@ -73,11 +73,11 @@ async fn every_entry_is_served_when_the_daemon_came_up_through_the_registry() {
             .build(),
     );
     daemon_cmd.args(["--library", "alpha", "run"]);
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-    assert!(
-        wait_for_lock(&sandbox.tty_lock_path(), Duration::from_secs(20)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&sandbox.tty_lock_path(), Duration::from_secs(20))
+        .await
+        .expect("bookrack run did not become ready");
 
     let stdout = listing(&sandbox).await;
     assert_eq!(
@@ -100,11 +100,11 @@ async fn no_entry_is_served_when_the_daemon_holds_a_root_the_registry_does_not_n
             .build(),
     );
     daemon_cmd.args(["--data-dir", &stranger.display().to_string(), "run"]);
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-    assert!(
-        wait_for_lock(&sandbox.tty_lock_path(), Duration::from_secs(20)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&sandbox.tty_lock_path(), Duration::from_secs(20))
+        .await
+        .expect("bookrack run did not become ready");
 
     let stdout = listing(&sandbox).await;
     // The registry is the same file as in the test above; only the
@@ -153,11 +153,11 @@ async fn a_skipped_entry_is_marked_with_its_reason() {
             .build(),
     );
     daemon_cmd.args(["--library", "alpha", "run"]);
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-    assert!(
-        wait_for_lock(&sandbox.tty_lock_path(), Duration::from_secs(20)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&sandbox.tty_lock_path(), Duration::from_secs(20))
+        .await
+        .expect("bookrack run did not become ready");
 
     let stdout = listing(&sandbox).await;
     let rows: serde_json::Value =

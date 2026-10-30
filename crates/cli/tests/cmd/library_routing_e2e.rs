@@ -33,7 +33,7 @@ use std::time::Duration;
 use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
 
-use crate::common::{DaemonProcess, wait_for_lock};
+use crate::common::DaemonProcess;
 
 /// A registry naming two libraries, with `alpha` as the default and
 /// the library the daemon is started under.
@@ -60,11 +60,11 @@ async fn a_library_the_daemon_serves_answers_for_itself() {
             .build(),
     );
     daemon_cmd.args(["--library", "alpha", "run"]);
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-    assert!(
-        wait_for_lock(&lock_path, Duration::from_secs(20)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&lock_path, Duration::from_secs(20))
+        .await
+        .expect("bookrack run did not become ready");
 
     // `library.info` names the library it answered for, which is what
     // makes this test discriminate: two empty roots report identical
@@ -132,11 +132,11 @@ async fn a_path_selection_reaches_the_library_that_owns_the_root() {
             .build(),
     );
     daemon_cmd.args(["--library", "alpha", "run"]);
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-    assert!(
-        wait_for_lock(&lock_path, Duration::from_secs(20)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&lock_path, Duration::from_secs(20))
+        .await
+        .expect("bookrack run did not become ready");
 
     let by_flag = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
         .args(["--data-dir", &beta_root.display().to_string()])

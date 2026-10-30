@@ -32,7 +32,7 @@ use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
 use serde_json::Value;
 use tokio::process::Command;
 
-use crate::common::{DaemonProcess, wait_for_lock};
+use crate::common::DaemonProcess;
 
 /// Register one book and one paper in a root, named after it.
 ///
@@ -84,11 +84,11 @@ async fn a_listing_names_the_library_its_rows_came_from() {
             .build(),
     );
     daemon_cmd.args(["--library", "beta", "run"]);
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-    assert!(
-        wait_for_lock(&lock_path, Duration::from_secs(20)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&lock_path, Duration::from_secs(20))
+        .await
+        .expect("bookrack run did not become ready");
 
     // An unnamed invocation reaches the registry default, and says so.
     let unnamed = run_list(&sandbox, &[]).await;

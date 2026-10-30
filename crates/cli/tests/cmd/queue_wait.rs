@@ -23,7 +23,7 @@ use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
 use serde_json::{Value, json};
 use tokio::process::Command;
 
-use crate::common::{DaemonProcess, wait_for_lock};
+use crate::common::DaemonProcess;
 
 const LIBRARY: &str = "main";
 
@@ -144,11 +144,11 @@ async fn wait_reports_ended_and_awaited_jobs_through_the_command_entry() {
             .build(),
     );
     daemon_cmd.args(["--library", LIBRARY, "run"]);
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-    assert!(
-        wait_for_lock(&sandbox.tty_lock_path(), Duration::from_secs(30)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&sandbox.tty_lock_path(), Duration::from_secs(30))
+        .await
+        .expect("bookrack run did not become ready");
 
     // The session lock lands before the daemon serves; the first
     // answered listing is the wait.

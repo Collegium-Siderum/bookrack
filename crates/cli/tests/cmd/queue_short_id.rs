@@ -22,7 +22,7 @@ use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
 use serde_json::{Value, json};
 use tokio::process::Command;
 
-use crate::common::{DaemonProcess, wait_for_lock};
+use crate::common::DaemonProcess;
 
 /// Run one client command and return its exit code, stdout and stderr.
 async fn client(sandbox: &Sandbox, args: &[&str]) -> (Option<i32>, String, String) {
@@ -73,11 +73,11 @@ async fn the_listed_id_locates_its_job() {
             .build(),
     );
     daemon_cmd.arg("run");
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-    assert!(
-        wait_for_lock(&lock_path, Duration::from_secs(30)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&lock_path, Duration::from_secs(30))
+        .await
+        .expect("bookrack run did not become ready");
 
     // The session lock lands before the daemon serves, so the pause
     // doubles as the wait.

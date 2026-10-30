@@ -54,23 +54,6 @@ const READY_PREFIX: &str = "bookrack daemon running: ";
 /// How often [`DaemonProcess::wait_ready`] looks at the child's stdout.
 const READY_POLL: Duration = Duration::from_millis(20);
 
-/// Wait until the daemon's TTY session lock contains the MCP address,
-/// the marker that startup has finished and the control socket is
-/// listening. Returns `true` on success, `false` on timeout.
-pub async fn wait_for_lock(path: &Path, timeout: Duration) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < deadline {
-        if path.exists() {
-            let text = std::fs::read_to_string(path).unwrap_or_default();
-            if text.contains("mcp=") {
-                return true;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    false
-}
-
 /// A child that exited on its own, with both streams drained to EOF.
 pub struct Exit {
     pub status: ExitStatus,

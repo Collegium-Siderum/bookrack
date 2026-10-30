@@ -17,7 +17,7 @@ use std::time::Duration;
 use bookrack_test_support::{EmbedFailure, EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
 
-use crate::common::{DaemonProcess, wait_for_lock};
+use crate::common::DaemonProcess;
 
 /// Bring a daemon up on a scratch data root and run `args` through it,
 /// returning the client invocation's exit status and stderr.
@@ -31,12 +31,11 @@ async fn client_stderr_against_daemon(args: &[&str]) -> (Option<i32>, String) {
             .build(),
     );
     daemon_cmd.arg("run");
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-
-    assert!(
-        wait_for_lock(&lock_path, Duration::from_secs(30)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&lock_path, Duration::from_secs(30))
+        .await
+        .expect("bookrack run did not become ready");
 
     let output = Command::from(bookrack_cmd!(&sandbox).build())
         .args(args)
@@ -99,12 +98,11 @@ async fn reembed_against_a_failing_backend(failure: EmbedFailure) -> (Option<i32
 
     let mut daemon_cmd = Command::from(bookrack_cmd!(&sandbox).ollama_url(stub.url()).build());
     daemon_cmd.arg("run");
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-
-    assert!(
-        wait_for_lock(&lock_path, Duration::from_secs(30)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&lock_path, Duration::from_secs(30))
+        .await
+        .expect("bookrack run did not become ready");
 
     let book_path = sandbox.path().join("synthetic-ledger.txt");
     std::fs::write(&book_path, BOOK_TEXT).expect("write the synthetic book");

@@ -14,7 +14,7 @@ use std::time::Duration;
 use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
 
-use crate::common::{DaemonProcess, wait_for_lock};
+use crate::common::DaemonProcess;
 
 #[tokio::test]
 async fn quit_terminates_the_daemon_process() {
@@ -27,12 +27,11 @@ async fn quit_terminates_the_daemon_process() {
             .build(),
     );
     daemon_cmd.arg("run");
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-
-    assert!(
-        wait_for_lock(&lock_path, Duration::from_secs(20)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&lock_path, Duration::from_secs(20))
+        .await
+        .expect("bookrack run did not become ready");
 
     let output = Command::from(bookrack_cmd!(&sandbox).build())
         .arg("quit")

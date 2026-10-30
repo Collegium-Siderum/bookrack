@@ -23,7 +23,7 @@ use std::time::Duration;
 use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
 
-use crate::common::{DaemonProcess, wait_for_lock};
+use crate::common::DaemonProcess;
 
 /// A registry naming two libraries, `alpha` the default.
 fn two_library_world() -> Sandbox {
@@ -81,11 +81,11 @@ async fn the_daemon_follows_a_default_moved_from_the_cli() {
             .build(),
     );
     daemon_cmd.args(["--library", "alpha", "run"]);
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-    assert!(
-        wait_for_lock(&sandbox.tty_lock_path(), Duration::from_secs(20)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&sandbox.tty_lock_path(), Duration::from_secs(20))
+        .await
+        .expect("bookrack run did not become ready");
 
     let moved = run(&sandbox, &["libraries", "default", "beta"]).await;
     assert!(

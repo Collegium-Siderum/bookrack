@@ -18,7 +18,7 @@ use bookrack_config::{LibraryKind, new_manifest, write_manifest};
 use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
 
-use crate::common::{DaemonProcess, wait_for_lock};
+use crate::common::DaemonProcess;
 
 /// `bookrack --json status` against the given sandbox, parsed.
 async fn status_card(sandbox: &Sandbox) -> serde_json::Value {
@@ -59,11 +59,11 @@ async fn the_card_names_the_root_bring_up_registered() {
             .build(),
     );
     daemon_cmd.args(["--data-dir", &gamma.display().to_string(), "run"]);
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-    assert!(
-        wait_for_lock(&sandbox.tty_lock_path(), Duration::from_secs(20)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&sandbox.tty_lock_path(), Duration::from_secs(20))
+        .await
+        .expect("bookrack run did not become ready");
 
     let card = status_card(&sandbox).await;
     assert_eq!(
@@ -93,11 +93,11 @@ async fn the_card_has_no_such_row_when_bring_up_registered_nothing() {
             .build(),
     );
     daemon_cmd.args(["--library", "alpha", "run"]);
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-    assert!(
-        wait_for_lock(&sandbox.tty_lock_path(), Duration::from_secs(20)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&sandbox.tty_lock_path(), Duration::from_secs(20))
+        .await
+        .expect("bookrack run did not become ready");
 
     let card = status_card(&sandbox).await;
     assert!(

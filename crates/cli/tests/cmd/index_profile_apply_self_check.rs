@@ -20,7 +20,7 @@ use bookrack_corpus::Corpus;
 use bookrack_test_support::{EmbedStub, Sandbox, Spawn, bookrack_cmd};
 use tokio::process::Command;
 
-use crate::common::{DaemonProcess, wait_for_lock};
+use crate::common::DaemonProcess;
 
 const LIBRARY: &str = "main";
 const PROFILE: &str = "scan-default-model";
@@ -101,11 +101,11 @@ async fn a_dimension_left_divergent_is_reported_with_both_values() {
             .build(),
     );
     daemon_cmd.args(["--library", LIBRARY, "run"]);
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-    assert!(
-        wait_for_lock(&sandbox.tty_lock_path(), Duration::from_secs(30)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&sandbox.tty_lock_path(), Duration::from_secs(30))
+        .await
+        .expect("bookrack run did not become ready");
 
     let book = sandbox.path().join("synthetic-chart.txt");
     std::fs::write(&book, BOOK_TEXT).expect("write the synthetic book");

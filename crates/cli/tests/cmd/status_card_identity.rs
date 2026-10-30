@@ -26,7 +26,7 @@ use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
 use serde_json::Value;
 use tokio::process::Command;
 
-use crate::common::{DaemonProcess, wait_for_lock};
+use crate::common::DaemonProcess;
 
 #[tokio::test]
 async fn the_card_counts_the_library_it_names() {
@@ -55,11 +55,11 @@ async fn the_card_counts_the_library_it_names() {
             .build(),
     );
     daemon_cmd.args(["--library", "beta", "run"]);
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-    assert!(
-        wait_for_lock(&lock_path, Duration::from_secs(20)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&lock_path, Duration::from_secs(20))
+        .await
+        .expect("bookrack run did not become ready");
 
     let output = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
         .args(["--json", "status"])

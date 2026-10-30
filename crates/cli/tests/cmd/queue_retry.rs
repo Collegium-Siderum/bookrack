@@ -24,7 +24,7 @@ use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
 use serde_json::{Value, json};
 use tokio::process::Command;
 
-use crate::common::{DaemonProcess, wait_for_lock};
+use crate::common::DaemonProcess;
 
 const ID_FAILED_A: &str = "0a000000-0000-7000-8000-000000000001";
 const ID_FAILED_B: &str = "0b000000-0000-7000-8000-000000000002";
@@ -122,11 +122,11 @@ async fn retry_reruns_terminal_rows_through_the_command_entry() {
             .build(),
     );
     daemon_cmd.arg("run");
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-    assert!(
-        wait_for_lock(&lock_path, Duration::from_secs(30)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&lock_path, Duration::from_secs(30))
+        .await
+        .expect("bookrack run did not become ready");
 
     // The session lock lands before the daemon serves; the first
     // answered listing is the wait.

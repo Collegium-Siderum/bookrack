@@ -22,7 +22,7 @@ use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
 use serde_json::Value;
 use tokio::process::Command;
 
-use crate::common::{DaemonProcess, wait_for_lock};
+use crate::common::DaemonProcess;
 
 /// Run the client with `args` and return its exit code and both streams.
 async fn client(cmd: Command, args: &[&str]) -> (Option<i32>, String, String) {
@@ -62,11 +62,11 @@ async fn a_path_selected_root_is_reached_by_path_beside_a_mounted_library() {
             .build(),
     );
     daemon_cmd.arg("run");
-    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
-    assert!(
-        wait_for_lock(&lock_path, Duration::from_secs(20)).await,
-        "session lock did not appear; bookrack run may have failed to start",
-    );
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&lock_path, Duration::from_secs(20))
+        .await
+        .expect("bookrack run did not become ready");
 
     let (code, stdout, stderr) = client(
         Command::from(bookrack_cmd!(&sandbox).without_data_dir().build()),
