@@ -22,6 +22,22 @@ newest concrete API version (`pdfium_latest` aliases it); pinning the
 concrete feature rather than `pdfium_latest` keeps the build
 reproducible when a later crate release moves `pdfium_latest` forward.
 
+## Known issues
+
+Advisories open against the pinned build. Treat each row as reachable
+from any PDF source; the operator-facing consequence is the note on
+trusted sources under *Ingesting* in `docs/operating.md`.
+
+| Advisory | Severity | Component | Build carrying the fix |
+| --- | --- | --- | --- |
+| CVE-2026-9957 | High | page tree, use-after-free | `chromium/7881` |
+| CVE-2026-9958 | High | name tree, use-after-free | `chromium/7881` |
+| CVE-2026-17875 | Medium | name tree | `chromium/8100`, newer than the `pdfium_7881` API that `pdfium-render` 0.9.4 binds at most |
+
+CVE-2026-10002 (`cjs_field`, High) is not in the table: the field code
+belongs to the JavaScript layer, which the non-V8 archives do not
+compile.
+
 ## Binary archives
 
 The non-V8 archives are used (no JavaScript engine is needed). Upstream
