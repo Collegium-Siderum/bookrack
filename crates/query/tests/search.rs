@@ -7,12 +7,13 @@
 use std::future::Future;
 use std::path::Path;
 
-use bookrack_catalog::Catalog;
-use bookrack_core::{NodeType, PartitionIdx};
+use bookrack_catalog::{Catalog, IntakeStatus, NewIntake};
+use bookrack_core::{ItemKind, NodeType, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, Result as EmbedResult};
 use bookrack_extract::{
-    Biblio, Block, BlockKind, Extraction, Provenance, TextLayerQuality, Toc, TocEntry,
+    Biblio, Block, BlockKind, EXTRACTOR_VERSION, Extraction, Provenance, TextLayerQuality, Toc,
+    TocEntry,
 };
 use bookrack_ingest::{StructureParams, current_index_stamps, ingest_structure};
 use bookrack_query::{Library, SearchOptions};
@@ -456,6 +457,58 @@ async fn an_empty_index_is_served_without_stamps() {
     assert_eq!(library.dimension(), DIM);
     let hits = library.search("anything", None).await.expect("search");
     assert!(hits.is_empty());
+}
+
+#[tokio::test]
+async fn an_intake_stamped_by_an_older_extractor_is_still_served() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let corpus_db = dir.path().join("corpus.db");
+    let catalog_db = dir.path().join("catalog.db");
+    let lancedb_dir = dir.path().join("lancedb");
+
+    // Intake 1 is embedded but stamped one extractor version behind this
+    // binary, so the catalog lists its partition as stale.
+    {
+        let mut catalog = Catalog::open(&catalog_db).expect("open catalog");
+        let intake_id = catalog
+            .register_intake(ItemKind::Book, &NewIntake::new("ab".repeat(32)))
+            .expect("register intake")
+            .intake()
+            .intake_id;
+        assert_eq!(intake_id, 1, "the fixture book lives in partition 1");
+        catalog
+            .set_extraction(ItemKind::Book, intake_id, "test", EXTRACTOR_VERSION - 1)
+            .expect("stamp extraction");
+        catalog
+            .set_intake_status(ItemKind::Book, intake_id, IntakeStatus::Embedded)
+            .expect("set status");
+        assert_eq!(
+            catalog.stale_partitions(EXTRACTOR_VERSION).expect("stale"),
+            vec![1]
+        );
+    }
+    build_stamped_index(&corpus_db, &lancedb_dir).await;
+
+    // The serve gate checks only the index stamps; the stale extractor
+    // stamp neither refuses the open nor hides the book from search.
+    let library = Library::open(
+        corpus_db,
+        catalog_db,
+        &lancedb_dir,
+        Fixed,
+        MODEL.to_string(),
+        5,
+        bookrack_ingest::CHUNK_VERSION,
+    )
+    .await
+    .expect("open library with a stale extractor stamp");
+    let hits = library.search("anything", None).await.expect("search");
+    assert_eq!(partitions_of(&hits), vec![PartitionIdx::new(1)]);
+    let hits = library
+        .search_in_book(1, "anything", None)
+        .await
+        .expect("search in book");
+    assert_eq!(hits.len(), 1);
 }
 
 /// Walk `root` and remove the first regular file under any `*.lance/data/`

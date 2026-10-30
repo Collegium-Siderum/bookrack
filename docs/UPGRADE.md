@@ -45,9 +45,14 @@ Each on-disk store records the build parameters of the data it holds:
 chunks table is gated by those same stamps at serve time. Every store
 also carries a `min_reader_version` value the writer last stamped;
 opening a store whose stamp exceeds this binary's `READER_VERSION`
-fails with `ReaderTooOld`. A binary that bumps a behaviour-sensitive
-dependency or a stamp const reads the old stamps as stale and refuses
-to serve until the affected derived layer is rebuilt.
+fails with `ReaderTooOld`. A binary whose `index_meta` stamps differ
+from the stored ones — after a chunking or normalization bump, or when
+configured with another embedding model or vector width — refuses to
+serve until the affected derived layer is rebuilt. `extractor_version`
+does not gate serving: a book extracted by an older extractor stays
+searchable with the content it already has, the `--stale-only` listings
+name it, and re-ingesting its source refreshes it, so a library can be
+brought up to date a few sources at a time.
 
 ## Bump-to-refresh matrix
 
