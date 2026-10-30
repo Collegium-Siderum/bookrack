@@ -19,6 +19,13 @@
 //! that failed part way, is a [`Failure`] carrying the partial output,
 //! never a truncated `Ok` an absence assertion could pass on.
 //!
+//! [`DaemonProcess::wait_ready`] reads the same stdout buffer for the
+//! daemon's ready line, then checks that the session lock is the
+//! child's own and that its control socket answers. A daemon that died
+//! during bring-up, a live one that has not finished it, and a lock an
+//! earlier daemon left behind are each a [`Failure`] at the wait,
+//! carrying the child's output.
+//!
 //! Isolation is not this module's job: the caller builds the command
 //! through `bookrack_test_support::bookrack_cmd!`, which is the only
 //! owner of the child's environment.
@@ -26,10 +33,13 @@
 #![allow(dead_code)]
 
 use std::fmt;
+use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use bookrack_control_client::{ControlSocket, connect};
+use serde_json::Value;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
@@ -38,10 +48,16 @@ use tokio::task::JoinHandle;
 /// and how long a killed child may take to be reaped.
 const SETTLE_DEADLINE: Duration = Duration::from_secs(5);
 
+/// Start of the line `bookrack run` prints once bring-up has returned.
+const READY_PREFIX: &str = "bookrack daemon running: ";
+
+/// How often [`DaemonProcess::wait_ready`] looks at the child's stdout.
+const READY_POLL: Duration = Duration::from_millis(20);
+
 /// Wait until the daemon's TTY session lock contains the MCP address,
 /// the marker that startup has finished and the control socket is
 /// listening. Returns `true` on success, `false` on timeout.
-pub async fn wait_for_lock(path: &std::path::Path, timeout: Duration) -> bool {
+pub async fn wait_for_lock(path: &Path, timeout: Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
         if path.exists() {
@@ -131,6 +147,11 @@ impl Capture {
         Self { state, task }
     }
 
+    /// Everything read so far.
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.state.lock().unwrap().bytes).into_owned()
+    }
+
     /// Give the drainer `within` to reach EOF, then stop it either
     /// way. Returns what was read and, unless EOF was reached without
     /// a read error, the reason it was not.
@@ -187,6 +208,117 @@ impl DaemonProcess {
         self.child.id()
     }
 
+    /// Wait up to `within` for the daemon to be ready, and hand it
+    /// back. Ready is three facts, checked in order:
+    ///
+    /// 1. the child printed its ready line on stdout, which
+    ///    `bookrack run` does only once bring-up has returned;
+    /// 2. the session lock at `lock_path` names the child's pid, so a
+    ///    client that discovers the daemon through it reaches this
+    ///    child and not a lock an earlier daemon left behind;
+    /// 3. the control socket that lock names answers `daemon.version`
+    ///    inside what is left of `within`.
+    ///
+    /// A child that exits first, a budget that runs out first, or a
+    /// check that does not hold is a [`Failure`] carrying what the
+    /// child printed. The child is killed on every failure path.
+    pub async fn wait_ready(mut self, lock_path: &Path, within: Duration) -> Result<Self, Failure> {
+        let deadline = Instant::now() + within;
+        loop {
+            if self
+                .stdout
+                .text()
+                .lines()
+                .any(|line| line.starts_with(READY_PREFIX))
+            {
+                break;
+            }
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    let (stdout, stderr, problems) = self.drain().await;
+                    let mut why = format!("the child exited with {status} before it was ready");
+                    for problem in problems {
+                        why.push_str("; ");
+                        why.push_str(&problem);
+                    }
+                    return Err(Failure {
+                        why,
+                        stdout,
+                        stderr,
+                    });
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    return Err(self.kill(format!("polling the child failed: {err}")).await);
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(self
+                    .kill(format!("the child printed no ready line within {within:?}"))
+                    .await);
+            }
+            tokio::time::sleep(READY_POLL).await;
+        }
+
+        let pid = self.id();
+        let info = match bookrack_session::peek_lock(lock_path) {
+            Ok(Some(info)) if Some(info.pid) == pid => info,
+            Ok(Some(info)) => {
+                return Err(self
+                    .kill(format!(
+                        "the session lock at {} names pid {}, not the child's {pid:?}",
+                        lock_path.display(),
+                        info.pid,
+                    ))
+                    .await);
+            }
+            Ok(None) => {
+                return Err(self
+                    .kill(format!(
+                        "there is no session lock at {} after the ready line",
+                        lock_path.display(),
+                    ))
+                    .await);
+            }
+            Err(err) => {
+                return Err(self
+                    .kill(format!("reading the session lock failed: {err:#}"))
+                    .await);
+            }
+        };
+        let Some(sock) = info.control_sock else {
+            return Err(self
+                .kill(format!(
+                    "the session lock at {} names no control socket",
+                    lock_path.display(),
+                ))
+                .await);
+        };
+
+        let socket = ControlSocket::from_path(&sock);
+        let answer =
+            tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), async {
+                let client = connect(&socket).await?;
+                client.call_raw("daemon.version", Value::Null).await
+            })
+            .await;
+        match answer {
+            Ok(Ok(_)) => Ok(self),
+            Ok(Err(err)) => Err(self
+                .kill(format!(
+                    "the control socket {} did not answer daemon.version: {err}",
+                    sock.display(),
+                ))
+                .await),
+            Err(_) => Err(self
+                .kill(format!(
+                    "the control socket {} did not answer daemon.version within {within:?}",
+                    sock.display(),
+                ))
+                .await),
+        }
+    }
+
     /// Wait up to `within` for the child to exit on its own. A child
     /// still running at the deadline is killed and reported as a
     /// [`Failure`]; one that exited is `Ok` only once both streams
@@ -206,9 +338,7 @@ impl DaemonProcess {
                     .await);
             }
         };
-        let (stdout, out_problem) = self.stdout.finish("stdout", SETTLE_DEADLINE).await;
-        let (stderr, err_problem) = self.stderr.finish("stderr", SETTLE_DEADLINE).await;
-        let problems: Vec<String> = [out_problem, err_problem].into_iter().flatten().collect();
+        let (stdout, stderr, problems) = self.drain().await;
         if problems.is_empty() {
             Ok(Exit {
                 status,
@@ -251,9 +381,8 @@ impl DaemonProcess {
                 "; the killed child was not reaped within {SETTLE_DEADLINE:?}"
             )),
         }
-        let (stdout, out_problem) = self.stdout.finish("stdout", SETTLE_DEADLINE).await;
-        let (stderr, err_problem) = self.stderr.finish("stderr", SETTLE_DEADLINE).await;
-        for problem in [out_problem, err_problem].into_iter().flatten() {
+        let (stdout, stderr, problems) = self.drain().await;
+        for problem in problems {
             why.push_str("; ");
             why.push_str(&problem);
         }
@@ -262,5 +391,15 @@ impl DaemonProcess {
             stdout,
             stderr,
         }
+    }
+
+    /// Stop both captures of a child that is gone, giving each
+    /// [`SETTLE_DEADLINE`] to reach EOF. Returns what each stream read
+    /// and, for each that did not end cleanly, the reason.
+    async fn drain(self) -> (String, String, Vec<String>) {
+        let (stdout, out_problem) = self.stdout.finish("stdout", SETTLE_DEADLINE).await;
+        let (stderr, err_problem) = self.stderr.finish("stderr", SETTLE_DEADLINE).await;
+        let problems = [out_problem, err_problem].into_iter().flatten().collect();
+        (stdout, stderr, problems)
     }
 }
