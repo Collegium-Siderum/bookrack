@@ -16,3 +16,7 @@ tempfile.workspace = true
 # `process`/`io-util` drive a child and drain its streams; `time` the
 # readiness polls and deadlines; `rt` the drainer tasks.
 tokio = { workspace = true, features = ["io-util", "process", "rt", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+# Process groups, `waitid`, and signals for reclaiming a child's tree.
+rustix.workspace = true

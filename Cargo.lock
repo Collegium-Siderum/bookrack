@@ -1143,6 +1143,7 @@ dependencies = [
  "bookrack-control-client",
  "bookrack-core",
  "bookrack-session",
+ "rustix",
  "serde_json",
  "tempfile",
  "tokio",
