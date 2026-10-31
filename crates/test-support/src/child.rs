@@ -19,6 +19,15 @@
 //! partial output, never a truncated `Ok` an absence assertion could
 //! pass on.
 //!
+//! [`CaptureMode::Memory`] keeps every byte, which is what an assertion
+//! on a short run wants. [`CaptureMode::Stream`] hands each stream to a
+//! [`Sink`] as it is read and keeps only a bounded tail in memory, so a
+//! long run costs a fixed amount however much it prints. Each sink is
+//! written by a thread of its own, fed through a bounded queue, so a
+//! sink that stops accepting output never stalls the drainer, and the
+//! child never blocks on a full pipe. A streamed run is `Ok` only once
+//! every byte read was written and flushed.
+//!
 //! Every way a run ends sends `SIGKILL` to the child's whole process
 //! group, so whatever the child started goes with it. The leader is
 //! watched with `waitid(WNOWAIT)` and reaped only as the last step:
@@ -49,8 +58,9 @@
 //! through `bookrack_test_support::bookrack_cmd!`, which is the only
 //! owner of the child's environment.
 
+use std::collections::VecDeque;
 use std::fmt;
-use std::io;
+use std::io::{self, Write};
 #[cfg(unix)]
 use std::path::Component;
 use std::path::{Path, PathBuf};
@@ -66,6 +76,8 @@ use tokio::io::AsyncReadExt;
 #[cfg(unix)]
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
+use tokio::sync::mpsc::error::SendTimeoutError;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 /// How long a stream may take to reach EOF once the child has exited,
@@ -80,6 +92,25 @@ const READY_PREFIX: &str = "bookrack daemon running: ";
 /// whether the leader has exited.
 // setting: internal -- the harness's readiness poll interval, not a value to tune
 const READY_POLL: Duration = Duration::from_millis(20);
+
+/// The most a streamed capture keeps in memory of one stream: its last
+/// bytes.
+// setting: internal -- bounds a streamed capture's memory, not a value to tune
+const TAIL_CAP: usize = 64 * 1024;
+
+/// The longest line a streamed capture still checks for the ready
+/// prefix.
+// setting: internal -- bounds the ready-line scan of a streamed capture, not a value to tune
+const READY_LINE_CAP: usize = 4 * 1024;
+
+/// How many read chunks may wait for a sink's writer.
+// setting: internal -- bounds what a slow sink can hold in memory, not a value to tune
+const SINK_QUEUE: usize = 64;
+
+/// How long a read chunk may wait for room in a sink's queue, and how
+/// long a teardown waits for a sink's writer to report.
+// setting: internal -- how long the harness waits on a sink, not a value to tune
+const SINK_DEADLINE: Duration = Duration::from_secs(2);
 
 /// File name of the control socket the daemon binds in its runtime
 /// directory, beside the session lock.
@@ -136,10 +167,14 @@ pub enum Stage {
 }
 
 /// A child that exited on its own, with both streams drained to EOF.
+///
+/// `stdout` and `stderr` are the kept bytes as lossy text: all of them
+/// in memory mode, the tail in stream mode.
 pub struct Exit {
     pub status: ExitStatus,
     pub stdout: String,
     pub stderr: String,
+    pub output: Output,
 }
 
 /// A run that did not end cleanly: the child outlived its deadline,
@@ -158,6 +193,7 @@ pub struct Failure {
     pub why: String,
     pub stdout: String,
     pub stderr: String,
+    pub output: Output,
 }
 
 impl fmt::Display for Failure {
@@ -221,86 +257,401 @@ impl ReadyFailure {
     }
 }
 
-/// Everything a drainer task has read so far, plus the read error
-/// that ended it early, if any.
-#[derive(Default)]
-struct Captured {
-    bytes: Vec<u8>,
-    error: Option<io::Error>,
+/// How [`DaemonProcess::spawn_with`] starts the child.
+pub struct SpawnOpts {
+    pub stdin: Stdio,
+    pub capture: CaptureMode,
 }
 
-/// One stream of the child: a background task reading it in chunks
-/// into a buffer the owner can read at any time.
+/// Standard input closed, both streams kept in memory: what
+/// [`DaemonProcess::spawn`] uses.
+impl Default for SpawnOpts {
+    fn default() -> Self {
+        Self {
+            stdin: Stdio::null(),
+            capture: CaptureMode::Memory,
+        }
+    }
+}
+
+/// How the child's two output streams are kept.
+pub enum CaptureMode {
+    /// Every byte in memory, without bound.
+    Memory,
+    /// Each stream written to its sink as it is read, with only its last
+    /// 64 KiB kept in memory.
+    Stream { stdout: Sink, stderr: Sink },
+}
+
+/// Where a streamed capture writes one stream.
+pub enum Sink {
+    File(std::fs::File),
+    /// This process's own standard output.
+    Stdout,
+    /// This process's own standard error.
+    Stderr,
+    Writer(Box<dyn Write + Send>),
+}
+
+impl Sink {
+    fn into_writer(self) -> Box<dyn Write + Send> {
+        match self {
+            Sink::File(file) => Box::new(file),
+            Sink::Stdout => Box::new(io::stdout()),
+            Sink::Stderr => Box::new(io::stderr()),
+            Sink::Writer(writer) => writer,
+        }
+    }
+}
+
+/// What a run kept of the child's two streams.
+#[derive(Debug)]
+pub enum Output {
+    /// Every byte each stream carried, as read.
+    Memory { stdout: Vec<u8>, stderr: Vec<u8> },
+    /// What each stream passed through on its way to its sink.
+    Streamed {
+        stdout: StreamStats,
+        stderr: StreamStats,
+    },
+}
+
+/// What one streamed capture carried and held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamStats {
+    /// Bytes read from the pipe; on a clean run, also the bytes the sink
+    /// wrote.
+    pub len: u64,
+    /// The most the tail buffer held at once: the tail plus at most one
+    /// read chunk.
+    pub retained_peak: usize,
+}
+
+/// What a drainer task has kept so far.
+struct Captured {
+    kept: Kept,
+    /// Bytes read from the pipe.
+    len: u64,
+    /// The read error that ended the drainer early, if any.
+    error: Option<io::Error>,
+    /// Whether the drainer is waiting to hand a chunk to the sink.
+    sending: bool,
+    /// Why the drainer stopped handing chunks to the sink, if it did.
+    sink_trouble: Option<SinkTrouble>,
+}
+
+/// The bytes a capture keeps.
+enum Kept {
+    /// Memory mode: every byte.
+    All(Vec<u8>),
+    /// Stream mode: the last [`TAIL_CAP`] bytes, the most ever held at
+    /// once, and the scan for the ready line.
+    Tail {
+        bytes: VecDeque<u8>,
+        peak: usize,
+        scan: LineScan,
+    },
+}
+
+/// Why a drainer stopped handing chunks to its sink.
+#[derive(Clone, Copy)]
+enum SinkTrouble {
+    /// A chunk waited [`SINK_DEADLINE`] for room in the queue.
+    Stalled,
+    /// The writer had already stopped, on a failed write.
+    Closed,
+}
+
+impl Captured {
+    fn new(streamed: bool) -> Self {
+        let kept = if streamed {
+            Kept::Tail {
+                bytes: VecDeque::new(),
+                peak: 0,
+                scan: LineScan::default(),
+            }
+        } else {
+            Kept::All(Vec::new())
+        };
+        Self {
+            kept,
+            len: 0,
+            error: None,
+            sending: false,
+            sink_trouble: None,
+        }
+    }
+
+    fn keep(&mut self, chunk: &[u8]) {
+        self.len += chunk.len() as u64;
+        match &mut self.kept {
+            Kept::All(bytes) => bytes.extend_from_slice(chunk),
+            Kept::Tail { bytes, peak, scan } => {
+                bytes.extend(chunk);
+                *peak = (*peak).max(bytes.len());
+                let excess = bytes.len().saturating_sub(TAIL_CAP);
+                bytes.drain(..excess);
+                scan.feed(chunk);
+            }
+        }
+    }
+
+    /// The first complete line starting with [`READY_PREFIX`], without
+    /// its newline. A line still missing its newline does not count: a
+    /// read can end part way through one.
+    fn ready_line(&self) -> Option<String> {
+        match &self.kept {
+            Kept::All(bytes) => bytes
+                .split_inclusive(|byte| *byte == b'\n')
+                .filter_map(|line| line.strip_suffix(b"\n"))
+                .find(|line| line.starts_with(READY_PREFIX.as_bytes()))
+                .map(|line| String::from_utf8_lossy(line).into_owned()),
+            Kept::Tail { scan, .. } => scan.ready.clone(),
+        }
+    }
+}
+
+/// Finds the ready line in a stream that is not kept whole, as it is
+/// read.
+#[derive(Default)]
+struct LineScan {
+    /// The line read so far, up to [`READY_LINE_CAP`] bytes.
+    current: Vec<u8>,
+    /// Whether the current line ran past [`READY_LINE_CAP`]; such a line
+    /// is not checked.
+    overlong: bool,
+    /// The first complete ready line read.
+    ready: Option<String>,
+}
+
+impl LineScan {
+    fn feed(&mut self, chunk: &[u8]) {
+        if self.ready.is_some() {
+            return;
+        }
+        for piece in chunk.split_inclusive(|byte| *byte == b'\n') {
+            let (body, complete) = match piece.strip_suffix(b"\n") {
+                Some(body) => (body, true),
+                None => (piece, false),
+            };
+            if !self.overlong {
+                if self.current.len() + body.len() > READY_LINE_CAP {
+                    self.overlong = true;
+                    self.current.clear();
+                } else {
+                    self.current.extend_from_slice(body);
+                }
+            }
+            if complete {
+                if !self.overlong && self.current.starts_with(READY_PREFIX.as_bytes()) {
+                    self.ready = Some(String::from_utf8_lossy(&self.current).into_owned());
+                    return;
+                }
+                self.current.clear();
+                self.overlong = false;
+            }
+        }
+    }
+}
+
+/// What a finished capture hands its owner.
+struct Finished {
+    /// The kept bytes, as lossy text.
+    text: String,
+    part: Part,
+    problems: Vec<Problem>,
+}
+
+/// One stream's half of an [`Output`].
+enum Part {
+    Bytes(Vec<u8>),
+    Stats(StreamStats),
+}
+
+/// One stream of the child: a background task reading it in chunks,
+/// keeping them as its mode says and, in stream mode, queueing them for
+/// the thread that writes the sink.
 struct Capture {
     state: Arc<Mutex<Captured>>,
     /// `None` once [`Capture::finish`] has run.
     task: Option<JoinHandle<()>>,
+    /// Stream mode: the writer's one report, the bytes it wrote or its
+    /// first error.
+    report: Option<oneshot::Receiver<io::Result<u64>>>,
 }
 
 impl Capture {
-    fn start<R>(mut reader: R) -> Self
+    fn start<R>(mut reader: R, sink: Option<Sink>) -> Self
     where
         R: AsyncReadExt + Unpin + Send + 'static,
     {
-        let state = Arc::new(Mutex::new(Captured::default()));
-        let sink = Arc::clone(&state);
+        let state = Arc::new(Mutex::new(Captured::new(sink.is_some())));
+        let (mut queue, report) = match sink {
+            Some(sink) => {
+                let (queue, report) = spawn_writer(sink);
+                (Some(queue), Some(report))
+            }
+            None => (None, None),
+        };
+        let shared = Arc::clone(&state);
         let task = tokio::spawn(async move {
             let mut chunk = [0u8; 8192];
             loop {
-                match reader.read(&mut chunk).await {
+                let read = match reader.read(&mut chunk).await {
                     Ok(0) => break,
-                    Ok(n) => sink.lock().unwrap().bytes.extend_from_slice(&chunk[..n]),
+                    Ok(read) => read,
                     Err(err) => {
-                        sink.lock().unwrap().error = Some(err);
+                        shared.lock().unwrap().error = Some(err);
                         break;
                     }
-                }
+                };
+                shared.lock().unwrap().keep(&chunk[..read]);
+                let Some(sender) = &queue else {
+                    continue;
+                };
+                shared.lock().unwrap().sending = true;
+                let sent = sender
+                    .send_timeout(chunk[..read].to_vec(), SINK_DEADLINE)
+                    .await;
+                let mut state = shared.lock().unwrap();
+                state.sending = false;
+                let trouble = match sent {
+                    Ok(()) => continue,
+                    Err(SendTimeoutError::Timeout(_)) => SinkTrouble::Stalled,
+                    Err(SendTimeoutError::Closed(_)) => SinkTrouble::Closed,
+                };
+                state.sink_trouble = Some(trouble);
+                queue = None;
             }
         });
         Self {
             state,
             task: Some(task),
+            report,
         }
     }
 
-    /// The first complete line read so far that starts with `prefix`,
-    /// without its newline. A line still missing its newline does not
-    /// count: a read can end part way through one.
-    fn line_starting_with(&self, prefix: &str) -> Option<String> {
-        let state = self.state.lock().unwrap();
-        state
-            .bytes
-            .split_inclusive(|byte| *byte == b'\n')
-            .filter_map(|line| line.strip_suffix(b"\n"))
-            .find(|line| line.starts_with(prefix.as_bytes()))
-            .map(|line| String::from_utf8_lossy(line).into_owned())
+    /// The ready line, once the stream holds it whole.
+    fn ready_line(&self) -> Option<String> {
+        self.state.lock().unwrap().ready_line()
     }
 
-    /// Give the drainer `within` to reach EOF, then stop it either
-    /// way. Returns what was read and, unless EOF was reached without
-    /// a read error, the reason it was not.
-    async fn finish(&mut self, name: &str, within: Duration) -> (String, Option<String>) {
-        let problem = match self.task.take() {
-            None => None,
-            Some(mut task) => match tokio::time::timeout(within, &mut task).await {
-                Ok(Ok(())) => None,
-                Ok(Err(err)) => Some(format!("the {name} drainer panicked: {err}")),
+    /// End the capture in two timed steps. First the pipe: give the
+    /// drainer `within` to reach EOF, then stop it either way and wait
+    /// until it is gone, so its end of the queue is closed. Then, in
+    /// stream mode, the sink: give the writer [`SINK_DEADLINE`] to report
+    /// that it wrote and flushed every byte read. Returns what is kept
+    /// and every problem in the order met.
+    async fn finish(&mut self, name: &str, within: Duration) -> Finished {
+        let mut problems = Vec::new();
+        if let Some(mut task) = self.task.take() {
+            match tokio::time::timeout(within, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => problems.push(Problem::Drain(format!(
+                    "the {name} drainer panicked: {err}"
+                ))),
                 Err(_) => {
+                    problems.push(if self.state.lock().unwrap().sending {
+                        Problem::Capture(format!(
+                            "the {name} sink was not keeping up {within:?} after the child exited"
+                        ))
+                    } else {
+                        Problem::Drain(format!(
+                            "{name} was still open {within:?} after the child exited"
+                        ))
+                    });
                     task.abort();
-                    Some(format!(
-                        "{name} was still open {within:?} after the child exited"
-                    ))
+                    let _ = task.await;
                 }
-            },
+            }
+        }
+        let (len, trouble) = {
+            let mut state = self.state.lock().unwrap();
+            if let Some(err) = state.error.take() {
+                problems.push(Problem::Drain(format!("reading {name} failed: {err}")));
+            }
+            (state.len, state.sink_trouble)
         };
+        if let Some(report) = self.report.take() {
+            let problem = match trouble {
+                Some(SinkTrouble::Stalled) => Some(format!(
+                    "the {name} sink stopped accepting output for {SINK_DEADLINE:?}"
+                )),
+                Some(SinkTrouble::Closed) | None => {
+                    match tokio::time::timeout(SINK_DEADLINE, report).await {
+                        Ok(Ok(Ok(written))) if written == len => None,
+                        Ok(Ok(Ok(written))) => Some(format!(
+                            "the {name} sink wrote {written} of the {len} bytes read"
+                        )),
+                        Ok(Ok(Err(err))) => {
+                            Some(format!("writing {name} to its sink failed: {err}"))
+                        }
+                        Ok(Err(_)) => {
+                            Some(format!("the {name} sink's writer ended without a report"))
+                        }
+                        Err(_) => Some(format!(
+                            "the {name} sink did not finish within {SINK_DEADLINE:?}"
+                        )),
+                    }
+                }
+            };
+            problems.extend(problem.map(Problem::Capture));
+        }
         let mut state = self.state.lock().unwrap();
-        let text = String::from_utf8_lossy(&state.bytes).into_owned();
-        let problem = match state.error.take() {
-            Some(err) => Some(format!("reading {name} failed: {err}")),
-            None => problem,
+        let len = state.len;
+        let (text, part) = match &mut state.kept {
+            Kept::All(bytes) => {
+                let bytes = std::mem::take(bytes);
+                (
+                    String::from_utf8_lossy(&bytes).into_owned(),
+                    Part::Bytes(bytes),
+                )
+            }
+            Kept::Tail { bytes, peak, .. } => {
+                let tail: Vec<u8> = bytes.iter().copied().collect();
+                let stats = StreamStats {
+                    len,
+                    retained_peak: *peak,
+                };
+                (
+                    String::from_utf8_lossy(&tail).into_owned(),
+                    Part::Stats(stats),
+                )
+            }
         };
-        (text, problem)
+        Finished {
+            text,
+            part,
+            problems,
+        }
     }
+}
+
+/// Start the thread that writes one stream to `sink`, fed through a
+/// queue of [`SINK_QUEUE`] chunks. Once the queue closes it flushes the
+/// sink and reports the bytes it wrote; a failed write or flush ends it
+/// early with that error as the report.
+fn spawn_writer(sink: Sink) -> (mpsc::Sender<Vec<u8>>, oneshot::Receiver<io::Result<u64>>) {
+    let (queue, mut chunks) = mpsc::channel::<Vec<u8>>(SINK_QUEUE);
+    let (report, reported) = oneshot::channel();
+    let mut writer = sink.into_writer();
+    std::thread::spawn(move || {
+        let mut written = 0u64;
+        let result = loop {
+            match chunks.blocking_recv() {
+                Some(chunk) => {
+                    if let Err(err) = writer.write_all(&chunk) {
+                        break Err(err);
+                    }
+                    written += chunk.len() as u64;
+                }
+                None => break writer.flush().map(|()| written),
+            }
+        };
+        drop(chunks);
+        let _ = report.send(result);
+    });
+    (queue, reported)
 }
 
 /// The three calls a teardown makes on the child's group, held as
@@ -359,6 +710,8 @@ enum Problem {
     Observe(String),
     /// A stream did not reach EOF, or a read from it failed.
     Drain(String),
+    /// A stream's bytes did not all reach its sink.
+    Capture(String),
     /// Killing the group or reaping the leader failed.
     Reclaim(String),
 }
@@ -366,7 +719,10 @@ enum Problem {
 impl Problem {
     fn text(&self) -> &str {
         match self {
-            Problem::Observe(text) | Problem::Drain(text) | Problem::Reclaim(text) => text,
+            Problem::Observe(text)
+            | Problem::Drain(text)
+            | Problem::Capture(text)
+            | Problem::Reclaim(text) => text,
         }
     }
 
@@ -375,6 +731,7 @@ impl Problem {
         match self {
             Problem::Observe(_) => (FailureKind::WaitFailed, Stage::Run),
             Problem::Drain(_) => (FailureKind::CaptureFailed, Stage::Drain),
+            Problem::Capture(_) => (FailureKind::CaptureFailed, Stage::Capture),
             Problem::Reclaim(_) => (FailureKind::ReclaimFailed, Stage::Run),
         }
     }
@@ -390,6 +747,7 @@ struct Teardown {
     exit: Option<ExitStatus>,
     stdout: String,
     stderr: String,
+    output: Output,
     problems: Vec<Problem>,
 }
 
@@ -414,18 +772,24 @@ impl Teardown {
             why,
             stdout: self.stdout,
             stderr: self.stderr,
+            output: self.output,
         }
     }
 
     /// The run of a leader that exited on its own: an [`Exit`] when the
     /// teardown went cleanly, otherwise a [`Failure`] its first problem
     /// classifies.
+    // `Failure` travels by value through the public API, as the result of
+    // a whole run; boxing it here alone would only add an allocation at a
+    // run's end.
+    #[allow(clippy::result_large_err)]
     fn judged(self) -> Result<Exit, Failure> {
         match (self.exit, self.problems.first()) {
             (Some(status), None) => Ok(Exit {
                 status,
                 stdout: self.stdout,
                 stderr: self.stderr,
+                output: self.output,
             }),
             (_, Some(first)) => {
                 let (kind, stage) = first.class();
@@ -459,15 +823,15 @@ impl DaemonProcess {
     /// start draining both streams at once so the child's pipes never
     /// fill while the test is busy elsewhere.
     pub fn spawn(cmd: Command) -> io::Result<Self> {
-        Self::spawn_with_stdin(cmd, Stdio::null())
+        Self::spawn_with(cmd, SpawnOpts::default())
     }
 
-    /// [`spawn`](Self::spawn) with `stdin` as the child's standard
-    /// input.
-    pub fn spawn_with_stdin(cmd: Command, stdin: Stdio) -> io::Result<Self> {
+    /// [`spawn`](Self::spawn) with the child's standard input and the
+    /// way its output is kept taken from `opts`.
+    pub fn spawn_with(cmd: Command, opts: SpawnOpts) -> io::Result<Self> {
         Self::spawn_inner(
             cmd,
-            stdin,
+            opts,
             #[cfg(unix)]
             Syscalls::real(),
         )
@@ -475,10 +839,10 @@ impl DaemonProcess {
 
     fn spawn_inner(
         mut cmd: Command,
-        stdin: Stdio,
+        opts: SpawnOpts,
         #[cfg(unix)] syscalls: Syscalls,
     ) -> io::Result<Self> {
-        cmd.stdin(stdin)
+        cmd.stdin(opts.stdin)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -495,6 +859,10 @@ impl DaemonProcess {
             .ok_or_else(|| io::Error::other(format!("the child's pid {pid} is not a valid pid")))?;
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr = child.stderr.take().expect("stderr is piped");
+        let (stdout_sink, stderr_sink) = match opts.capture {
+            CaptureMode::Memory => (None, None),
+            CaptureMode::Stream { stdout, stderr } => (Some(stdout), Some(stderr)),
+        };
         Ok(Self {
             guard: GroupGuard {
                 #[cfg(unix)]
@@ -505,8 +873,8 @@ impl DaemonProcess {
             },
             child,
             pid,
-            stdout: Capture::start(stdout),
-            stderr: Capture::start(stderr),
+            stdout: Capture::start(stdout, stdout_sink),
+            stderr: Capture::start(stderr, stderr_sink),
             #[cfg(unix)]
             syscalls,
         })
@@ -519,7 +887,7 @@ impl DaemonProcess {
     /// The daemon's ready line, once stdout holds it whole, without its
     /// newline.
     pub fn ready_line(&self) -> Option<String> {
-        self.stdout.line_starting_with(READY_PREFIX)
+        self.stdout.ready_line()
     }
 
     /// Wait up to `within` for the daemon to be ready, and hand it
@@ -759,7 +1127,7 @@ impl DaemonProcess {
                 false
             }
         };
-        let (stdout, stderr) = if exited {
+        let (stdout, stderr, output) = if exited {
             let drained = self.drain(&mut problems).await;
             self.kill_group(&mut problems);
             drained
@@ -773,6 +1141,7 @@ impl DaemonProcess {
             exit: status.filter(|_| exited),
             stdout,
             stderr,
+            output,
             problems,
         }
     }
@@ -856,21 +1225,29 @@ impl DaemonProcess {
         }
     }
 
-    /// Stop both captures at once, giving each [`SETTLE_DEADLINE`] to
-    /// reach EOF. Returns what each stream read, and records a problem,
-    /// stdout first, for each that did not end cleanly.
-    async fn drain(&mut self, problems: &mut Vec<Problem>) -> (String, String) {
-        let ((stdout, out_problem), (stderr, err_problem)) = tokio::join!(
+    /// Finish both captures at once, giving each [`SETTLE_DEADLINE`] to
+    /// reach EOF and, in stream mode, [`SINK_DEADLINE`] more for its
+    /// sink. Returns what each stream kept, and records each problem,
+    /// stdout's first.
+    async fn drain(&mut self, problems: &mut Vec<Problem>) -> (String, String, Output) {
+        let (stdout, stderr) = tokio::join!(
             self.stdout.finish("stdout", SETTLE_DEADLINE),
             self.stderr.finish("stderr", SETTLE_DEADLINE),
         );
-        problems.extend(
-            [out_problem, err_problem]
-                .into_iter()
-                .flatten()
-                .map(Problem::Drain),
-        );
-        (stdout, stderr)
+        problems.extend(stdout.problems);
+        problems.extend(stderr.problems);
+        let output = match (stdout.part, stderr.part) {
+            (Part::Bytes(out), Part::Bytes(err)) => Output::Memory {
+                stdout: out,
+                stderr: err,
+            },
+            (Part::Stats(out), Part::Stats(err)) => Output::Streamed {
+                stdout: out,
+                stderr: err,
+            },
+            _ => unreachable!("both streams of a child share one capture mode"),
+        };
+        (stdout.text, stderr.text, output)
     }
 }
 
@@ -1068,7 +1445,11 @@ mod tests {
     fn sh(script: &str, stdin: Stdio, syscalls: Syscalls) -> DaemonProcess {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(script);
-        DaemonProcess::spawn_inner(cmd, stdin, syscalls).expect("spawn sh")
+        let opts = SpawnOpts {
+            stdin,
+            ..SpawnOpts::default()
+        };
+        DaemonProcess::spawn_inner(cmd, opts, syscalls).expect("spawn sh")
     }
 
     /// Whether `rx` reaches EOF within `within`.
@@ -1235,7 +1616,7 @@ mod tests {
                 .arg(&foreign)
                 .arg(lock_pid);
             let mut child =
-                DaemonProcess::spawn_inner(cmd, Stdio::null(), syscalls).expect("spawn sh");
+                DaemonProcess::spawn_inner(cmd, SpawnOpts::default(), syscalls).expect("spawn sh");
             let deadline = Instant::now() + Duration::from_secs(5);
             while child.ready_line().is_none() {
                 assert!(
@@ -1263,6 +1644,435 @@ mod tests {
                 2,
                 "pid {lock_pid:?}: one look before the ready line, one recheck",
             );
+        }
+    }
+
+    /// A sink that discards everything, for the stream a test is not
+    /// about.
+    fn discard() -> Sink {
+        Sink::Writer(Box::new(io::sink()))
+    }
+
+    /// `sh -c script` with `args` as `$1`, `$2`, ..., both streams
+    /// streamed.
+    fn sh_streamed(
+        script: &str,
+        args: &[&std::ffi::OsStr],
+        stdout: Sink,
+        stderr: Sink,
+    ) -> DaemonProcess {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(script).arg("sh").args(args);
+        let opts = SpawnOpts {
+            capture: CaptureMode::Stream { stdout, stderr },
+            ..SpawnOpts::default()
+        };
+        DaemonProcess::spawn_with(cmd, opts).expect("spawn sh")
+    }
+
+    /// Hands every write to the test as it happens.
+    struct Notify(std::sync::mpsc::Sender<Vec<u8>>);
+
+    impl Write for Notify {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let _ = self.0.send(buf.to_vec());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Blocks in its first write until the test releases it, by sending
+    /// or by dropping the sender, which a failing test does on its way
+    /// out, so no writer thread is left stuck.
+    struct Stuck {
+        release: std::sync::mpsc::Receiver<()>,
+        released: bool,
+    }
+
+    impl Write for Stuck {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if !self.released {
+                let _ = self.release.recv();
+                self.released = true;
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn stuck() -> (Sink, std::sync::mpsc::Sender<()>) {
+        let (release, wait) = std::sync::mpsc::channel();
+        let sink = Stuck {
+            release: wait,
+            released: false,
+        };
+        (Sink::Writer(Box::new(sink)), release)
+    }
+
+    /// Fails the writes `fails` picks, and its flush when `flush_fails`.
+    struct Faulty {
+        fails: fn(&[u8]) -> bool,
+        flush_fails: bool,
+    }
+
+    impl Write for Faulty {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if (self.fails)(buf) {
+                return Err(io::Error::other("injected sink failure"));
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if self.flush_fails {
+                return Err(io::Error::other("injected flush failure"));
+            }
+            Ok(())
+        }
+    }
+
+    fn faulty(fails: fn(&[u8]) -> bool, flush_fails: bool) -> Sink {
+        Sink::Writer(Box::new(Faulty { fails, flush_fails }))
+    }
+
+    fn expect_capture_failure(result: Result<Exit, Failure>, what: &str) -> Failure {
+        let failure = match result {
+            Err(failure) => failure,
+            Ok(exit) => panic!("{what} was a clean exit: {:?}", exit.status),
+        };
+        assert_eq!(
+            (failure.kind, failure.stage),
+            (FailureKind::CaptureFailed, Stage::Capture),
+            "{what}: {failure}"
+        );
+        assert_eq!(
+            failure.exit.and_then(|s| s.code()),
+            Some(0),
+            "{what}: {failure}"
+        );
+        failure
+    }
+
+    /// A streamed capture writes every byte to its sink and keeps only a
+    /// tail: the file is whole, byte for byte, while what stays in
+    /// memory is exactly the last `TAIL_CAP` bytes and never more than
+    /// one read chunk past it.
+    #[tokio::test]
+    async fn a_streamed_capture_keeps_only_its_tail() {
+        const BODY: u64 = 64 * 1024 * 1024;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("stdout");
+        let file = std::fs::File::create(&path).expect("create the sink file");
+        let child = sh_streamed(
+            &format!("printf '\\377\\376'; head -c {BODY} /dev/zero; printf 'tail-end\\n'"),
+            &[],
+            Sink::File(file),
+            discard(),
+        );
+
+        let exit = child
+            .exit_within(Duration::from_secs(60))
+            .await
+            .expect("a streamed run that wrote every byte is Ok");
+        let total = 2 + BODY + 9;
+        let mut written = std::fs::File::open(&path).expect("open the sink file");
+        assert_eq!(
+            written.metadata().expect("stat").len(),
+            total,
+            "the file is whole"
+        );
+        let mut head = [0u8; 2];
+        io::Read::read_exact(&mut written, &mut head).expect("read the head");
+        assert_eq!(head, [0o377, 0o376], "the file starts with the first bytes");
+        let mut left = BODY;
+        let mut chunk = vec![0u8; 1 << 20];
+        while left > 0 {
+            let take = left.min(chunk.len() as u64) as usize;
+            io::Read::read_exact(&mut written, &mut chunk[..take]).expect("read the body");
+            assert!(
+                chunk[..take].iter().all(|byte| *byte == 0),
+                "the body is zeros"
+            );
+            left -= take as u64;
+        }
+        let mut end = Vec::new();
+        io::Read::read_to_end(&mut written, &mut end).expect("read the end");
+        assert_eq!(end, b"tail-end\n", "the file ends with the last bytes");
+
+        assert!(
+            exit.stdout.ends_with("tail-end\n"),
+            "the kept text is the tail"
+        );
+        assert_eq!(exit.stdout.len(), TAIL_CAP, "the tail is exactly TAIL_CAP");
+        match exit.output {
+            Output::Streamed { stdout, .. } => {
+                assert_eq!(stdout.len, total);
+                assert!(
+                    stdout.retained_peak <= TAIL_CAP + 8192,
+                    "the tail held {} bytes at its peak",
+                    stdout.retained_peak
+                );
+            }
+            Output::Memory { .. } => panic!("a streamed run reported memory output"),
+        }
+    }
+
+    /// The ready line is found in a streamed capture as it is read, past
+    /// a line too long to be one.
+    #[tokio::test]
+    async fn a_ready_line_is_seen_while_streaming() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("stdout");
+        let file = std::fs::File::create(&path).expect("create the sink file");
+        let child = sh_streamed(
+            "head -c 1048576 /dev/zero | tr '\\0' x; echo; \
+             echo 'bookrack daemon running: streamed'; exec sleep 30",
+            &[],
+            Sink::File(file),
+            discard(),
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let line = loop {
+            if let Some(line) = child.ready_line() {
+                break line;
+            }
+            assert!(Instant::now() < deadline, "no ready line was seen");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(line, "bookrack daemon running: streamed");
+        child
+            .stop(Duration::from_secs(5))
+            .await
+            .expect("a streamed child stops");
+        let written = std::fs::read(&path).expect("read the sink file");
+        assert!(
+            written.ends_with(b"\nbookrack daemon running: streamed\n"),
+            "the sink got the line too"
+        );
+    }
+
+    /// A streamed sink gets the child's output while the child runs, not
+    /// only once it has exited.
+    #[tokio::test]
+    async fn a_streamed_sink_receives_bytes_before_the_child_exits() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let go = dir.path().join("go");
+        let (seen, writes) = std::sync::mpsc::channel();
+        let child = sh_streamed(
+            "echo first; while [ ! -e \"$1\" ]; do sleep 0.01; done",
+            &[go.as_os_str()],
+            Sink::Writer(Box::new(Notify(seen))),
+            discard(),
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut got = Vec::new();
+        while !got.ends_with(b"first\n") {
+            match writes.try_recv() {
+                Ok(bytes) => got.extend(bytes),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the sink has not seen the line while the child runs"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(err) => panic!("the sink's channel closed: {err}"),
+            }
+        }
+        std::fs::write(&go, b"").expect("create the go file");
+        child
+            .exit_within(Duration::from_secs(5))
+            .await
+            .expect("the child exits once released");
+    }
+
+    /// A sink whose write fails is a capture failure that carries the
+    /// sink's own error. The drainer keeps reading after the writer is
+    /// gone, so the child never blocks on a full pipe and the run ends at
+    /// once.
+    #[tokio::test]
+    async fn a_failing_sink_is_a_capture_failure() {
+        let child = sh_streamed(
+            "head -c 1048576 /dev/zero",
+            &[],
+            faulty(|_| true, false),
+            discard(),
+        );
+
+        let started = Instant::now();
+        let result = child.exit_within(Duration::from_secs(10)).await;
+        let elapsed = started.elapsed();
+        let failure = expect_capture_failure(result, "a run whose sink failed");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the run must not wait on the failed sink, took {elapsed:?}: {failure}"
+        );
+        assert!(
+            failure.why.contains("injected sink failure"),
+            "the sink's own error must be carried: {failure}"
+        );
+    }
+
+    /// A sink that stops accepting output is a capture failure inside the
+    /// two deadlines, not a hang: the drainer gives up on the sink and
+    /// goes on reading the pipe.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sink_that_stops_reading_is_a_capture_failure() {
+        let (sink, release) = stuck();
+        let child = sh_streamed("head -c 1048576 /dev/zero", &[], sink, discard());
+
+        let started = Instant::now();
+        let budget = SINK_DEADLINE + SETTLE_DEADLINE + Duration::from_secs(1);
+        let result = tokio::time::timeout(budget, child.exit_within(Duration::from_secs(10)))
+            .await
+            .expect("the run must end inside the sink and settle deadlines");
+        let elapsed = started.elapsed();
+        let failure = expect_capture_failure(result, "a run whose sink stopped");
+        assert!(elapsed < budget, "took {elapsed:?}: {failure}");
+        let _ = release.send(());
+    }
+
+    /// An output far smaller than the queue never makes the drainer wait,
+    /// so only the wait for the writer's report sees a stuck sink.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_small_output_into_a_stuck_sink_is_a_capture_failure() {
+        let (sink, release) = stuck();
+        let child = sh_streamed("echo one", &[], sink, discard());
+
+        let started = Instant::now();
+        let budget = SINK_DEADLINE + Duration::from_secs(1);
+        let result = tokio::time::timeout(budget, child.exit_within(Duration::from_secs(10)))
+            .await
+            .expect("the run must end inside the sink deadline");
+        let elapsed = started.elapsed();
+        let failure = expect_capture_failure(result, "a run whose sink never wrote");
+        assert!(elapsed < budget, "took {elapsed:?}: {failure}");
+        let _ = release.send(());
+    }
+
+    /// A write that fails after every chunk was queued is still a
+    /// capture failure: the queue taking a chunk is not the sink writing
+    /// it.
+    #[tokio::test]
+    async fn a_failing_last_write_is_a_capture_failure() {
+        let child = sh_streamed(
+            "echo one; sleep 0.2; echo two; sleep 0.2; echo last",
+            &[],
+            faulty(|buf| buf.ends_with(b"last\n"), false),
+            discard(),
+        );
+
+        let result = child.exit_within(Duration::from_secs(10)).await;
+        let failure = expect_capture_failure(result, "a run whose last write failed");
+        assert!(failure.why.contains("injected sink failure"), "{failure}");
+    }
+
+    /// A sink that takes every write but cannot flush them is a capture
+    /// failure.
+    #[tokio::test]
+    async fn a_failing_flush_is_a_capture_failure() {
+        let child = sh_streamed("echo one", &[], faulty(|_| false, true), discard());
+
+        let result = child.exit_within(Duration::from_secs(10)).await;
+        let failure = expect_capture_failure(result, "a run whose flush failed");
+        assert!(failure.why.contains("injected flush failure"), "{failure}");
+    }
+
+    /// Kills the pid a script wrote to a file, for a descendant outside
+    /// the child's group that the harness cannot reach.
+    struct KillRecorded(std::path::PathBuf);
+
+    impl Drop for KillRecorded {
+        fn drop(&mut self) {
+            let pid = std::fs::read_to_string(&self.0)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+                .and_then(Pid::from_raw);
+            if let Some(pid) = pid {
+                let _ = rustix::process::kill_process(pid, Signal::KILL);
+            }
+        }
+    }
+
+    /// The cause that ended the wait decides the kind; a problem met
+    /// later is appended to the reason only. A descendant in a group of
+    /// its own keeps stdout open past the group kill, so the timeout is
+    /// followed by an unfinished drain.
+    #[tokio::test]
+    async fn the_first_cause_decides_the_kind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("descendant.pid");
+        let _cleanup = KillRecorded(pidfile.clone());
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("perl -e 'setpgrp(0, 0); exec @ARGV' sleep 30 & echo $! > \"$1\"; exec sleep 30")
+            .arg("sh")
+            .arg(&pidfile);
+        let child = DaemonProcess::spawn(cmd).expect("spawn sh");
+
+        let failure = match child.exit_within(Duration::from_secs(1)).await {
+            Err(failure) => failure,
+            Ok(exit) => panic!("a child past its deadline was Ok: {:?}", exit.status),
+        };
+        assert_eq!(
+            (failure.kind, failure.stage),
+            (FailureKind::Timeout, Stage::Run),
+            "{failure}"
+        );
+        assert!(
+            failure.why.contains("stdout was still open"),
+            "premise: the drain met the descendant's stream: {failure}"
+        );
+    }
+
+    /// Memory mode keeps the raw bytes, invalid UTF-8 included, on a
+    /// clean exit and on a failure alike; the text fields are their lossy
+    /// form.
+    #[tokio::test]
+    async fn the_memory_mode_keeps_raw_bytes() {
+        let writes = "printf '\\377a\\n'; printf '\\376b\\n' >&2";
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!("{writes}; exit 3"));
+        let exit = DaemonProcess::spawn(cmd)
+            .expect("spawn sh")
+            .exit_within(Duration::from_secs(5))
+            .await
+            .expect("a child that exits with both streams closed is Ok");
+        assert_eq!(exit.status.code(), Some(3));
+        match &exit.output {
+            Output::Memory { stdout, stderr } => {
+                assert_eq!(stdout, b"\xffa\n");
+                assert_eq!(stderr, b"\xfeb\n");
+            }
+            Output::Streamed { .. } => panic!("a memory run reported streamed output"),
+        }
+        assert_eq!(exit.stdout, String::from_utf8_lossy(b"\xffa\n"));
+        assert_eq!(exit.stderr, String::from_utf8_lossy(b"\xfeb\n"));
+
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!("{writes}; exec sleep 30"));
+        let failure = match DaemonProcess::spawn(cmd)
+            .expect("spawn sh")
+            .exit_within(Duration::from_secs(1))
+            .await
+        {
+            Err(failure) => failure,
+            Ok(exit) => panic!("a child past its deadline was Ok: {:?}", exit.status),
+        };
+        match &failure.output {
+            Output::Memory { stdout, stderr } => {
+                assert_eq!(stdout, b"\xffa\n");
+                assert_eq!(stderr, b"\xfeb\n");
+            }
+            Output::Streamed { .. } => panic!("a memory run reported streamed output"),
         }
     }
 }

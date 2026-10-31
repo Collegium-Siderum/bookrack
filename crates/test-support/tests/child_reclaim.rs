@@ -13,7 +13,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use bookrack_test_support::{DaemonProcess, FailureKind, Stage};
+use bookrack_test_support::{DaemonProcess, FailureKind, SpawnOpts, Stage};
 use tokio::process::Command;
 
 use common::Probe;
@@ -28,7 +28,14 @@ fn spawn_tree(script: &str) -> (DaemonProcess, Probe) {
     let (probe, stdin) = Probe::new();
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(script).arg("sh").arg(probe.pidfile());
-    let child = DaemonProcess::spawn_with_stdin(cmd, stdin).expect("spawn sh");
+    let child = DaemonProcess::spawn_with(
+        cmd,
+        SpawnOpts {
+            stdin,
+            ..SpawnOpts::default()
+        },
+    )
+    .expect("spawn sh");
     (child, probe)
 }
 

@@ -51,7 +51,10 @@ pub mod test_group;
 
 #[cfg(unix)]
 pub use child::endpoint_matches;
-pub use child::{DaemonProcess, Exit, Failure, FailureKind, Ready, ReadyFailure, Stage};
+pub use child::{
+    CaptureMode, DaemonProcess, Exit, Failure, FailureKind, Output, Ready, ReadyFailure, Sink,
+    SpawnOpts, Stage, StreamStats,
+};
 pub use embed_stub::{EmbedFailure, EmbedStub};
 pub use process::{ProcessEnv, process_env};
 pub use sandbox::Sandbox;

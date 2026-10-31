@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use bookrack_test_support::{DaemonProcess, FailureKind, ReadyFailure, Stage};
+use bookrack_test_support::{DaemonProcess, FailureKind, ReadyFailure, SpawnOpts, Stage};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -61,7 +61,14 @@ fn runtime() -> Runtime {
 fn sh(script: &str, args: &[&OsStr], stdin: Stdio) -> DaemonProcess {
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(script).arg("sh").args(args);
-    DaemonProcess::spawn_with_stdin(cmd, stdin).expect("spawn sh")
+    DaemonProcess::spawn_with(
+        cmd,
+        SpawnOpts {
+            stdin,
+            ..SpawnOpts::default()
+        },
+    )
+    .expect("spawn sh")
 }
 
 /// A script that writes its own lock naming `sock`, prints its ready
