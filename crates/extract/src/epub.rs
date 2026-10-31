@@ -162,7 +162,7 @@ fn build_toc(
 /// — depth information is hidden there — and records
 /// [`fallback_kinds::EPUB_NAV_DEPTH_SATURATE`] once per document.
 ///
-/// Under the pinned rbook (0.7.6), `flatten()` on the nav root yields
+/// Under the pinned rbook (0.7.12), `flatten()` on the nav root yields
 /// descendants only, at depth >= 1, so the saturate arm is unreachable
 /// through `build_toc`; it guards the mapping against a future rbook
 /// revision changing that convention (rbook is a behaviour-sensitive

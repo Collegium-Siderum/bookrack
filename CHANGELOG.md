@@ -70,6 +70,36 @@ release workflow extracts the matching section verbatim from this file.
   `--job` naming such a row is refused with `-32010`: the message names
   the job and the library, the detail carries the bring-up reason when
   there is one, and the hint gives the mount and the retry to run.
+- **`extractor_version` moves from 6 to 7.** The PDF, EPUB, and text
+  adapters move to PDFium `chromium/7881` with `pdfium-render` 0.9.4,
+  `rbook` 0.7.12, and `encoding_rs` 0.8.44 (see Security). Books
+  extracted at version 6 stay searchable with the content they already
+  have; re-ingesting a book's original file refreshes it, so a library
+  can be brought up to date a few sources at a time. Run with
+  `--stale-only --dry-run`, `bookrack corpus rebuild` and
+  `bookrack vectors reembed` each list the version-6 intakes within
+  their own target set, as *Re-ingesting a source file* in
+  `docs/UPGRADE.md` describes.
+- **EPUB files are opened more strictly.** A package document holding a
+  byte that is not valid UTF-8, even inside an XML comment, is now
+  rejected as a corrupt file, and an archive entry larger than the
+  uncompressed size its headers declare is rejected as a malformed
+  package. Both used to be read as they were.
+- **A PDFium library of the previous build no longer loads.** The
+  binaries bind the `chromium/7881` API. The release archives ship the
+  matching library beside the executables, which is searched first. A
+  managed copy installed for an earlier release is replaced by
+  `bookrack doctor --install-pdfium`, and a `BOOKRACK_PDFIUM_LIB`
+  directory holding the previous build has to point at the new one; the
+  daemon then needs a restart. *A moved PDFium build* in
+  `docs/UPGRADE.md` covers each case.
+- **The extractor's version stamp covers every parser under it.**
+  `extractor_version` was tied to `rbook`, `scraper`, `encoding_rs`,
+  and `pdfium-render`. It now also moves with the crates under them
+  that parse or decode (`quick-xml`, `zip`, `percent-encoding`,
+  `html5ever`, `markup5ever`, `tendril`, `web_atoms`, `selectors`,
+  `cssparser`) and with the PDFium binary, by release tag and archive
+  digest.
 
 ### Fixed
 
@@ -91,6 +121,25 @@ release workflow extracts the matching section verbatim from this file.
   counts and removes in one step, so one of the two is refused: the
   submit with `-32010` when the unmount landed first, the unmount for
   queued work when the row did.
+
+### Security
+
+- **PDFium moves from `chromium/7763` to `chromium/7881`, fixing
+  CVE-2026-9957 and CVE-2026-9958 (High, use-after-free in the page
+  tree and the name tree).** PDFium parses every PDF source, book or
+  paper, inside the ingesting process, so any PDF could reach both. The
+  fix applies to every PDF parsed after the upgrade, without
+  re-ingesting. CVE-2026-10002 (`cjs_field`) belongs to the JavaScript
+  layer, which the non-V8 archives do not compile. CVE-2026-17875
+  (Medium, use-after-free in the name tree) stays open: its fix is in a
+  build newer than the newest API `pdfium-render` binds, so ingest PDF
+  files only from sources you trust while it does.
+- **deps: `rbook` 0.7.12 brings `quick-xml` 0.42, clearing
+  RUSTSEC-2026-0194.** rbook iterates start-tag attributes, so a crafted
+  EPUB could slow its own ingest. The same move clears
+  RUSTSEC-2026-0195, in the `NsReader` that rbook never constructs, and
+  `zip` 9 clears RUSTSEC-2026-0367, -0368, and -0369, in archive
+  extraction APIs that rbook never calls.
 
 ## [0.13.0] - 2026-10-24
 

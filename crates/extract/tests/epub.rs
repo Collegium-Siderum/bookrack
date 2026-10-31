@@ -6,7 +6,7 @@
 mod common;
 
 use bookrack_extract::{BlockKind, ContributorRole, ExtractError, extract};
-use common::{extracted, pack_epub};
+use common::{extracted, pack_epub, pack_epub_dir};
 
 #[test]
 fn omnibus_keeps_toc_hierarchy_and_anchors_every_entry() {
@@ -150,4 +150,145 @@ fn a_zip_missing_the_ocf_container_xml_is_a_corrupt_file() {
         matches!(err, ExtractError::CorruptFile { .. }),
         "got {err:?}"
     );
+}
+
+#[test]
+fn an_opf_comment_with_a_non_utf8_byte_is_a_corrupt_file() {
+    let tree = common::copy_epub_fixture("flat");
+    // The unmodified copy packs and extracts through the same path, so
+    // the failure below comes from the one byte changed.
+    extracted(&pack_epub_dir(tree.path()).path);
+
+    let opf = tree.path().join("OEBPS/content.opf");
+    let original = std::fs::read(&opf).expect("read OPF");
+    let start_tag: &[u8] = b"<manifest>";
+    let at: Vec<usize> = original
+        .windows(start_tag.len())
+        .enumerate()
+        .filter(|(_, w)| *w == start_tag)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(at.len(), 1, "one <manifest> start tag in the fixture OPF");
+    let mut patched = original[..at[0]].to_vec();
+    // 0xE9 is Latin-1 for a small e with acute; on its own it is not
+    // valid UTF-8.
+    patched.extend_from_slice(b"<!-- caf\xe9 -->");
+    patched.extend_from_slice(&original[at[0]..]);
+    std::fs::write(&opf, patched).expect("write OPF");
+
+    let err = extract(
+        &pack_epub_dir(tree.path()).path,
+        &common::default_audit_profile(),
+        &common::default_heading_patterns(),
+    )
+    .expect_err("an OPF holding a non-UTF-8 byte must not open");
+    match err {
+        ExtractError::CorruptFile { detail } => assert!(
+            detail.contains("cannot decode input using UTF-8"),
+            "the detail must name the UTF-8 decode failure, got {detail}"
+        ),
+        other => panic!("expected CorruptFile, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_spine_document_larger_than_its_declared_size_is_a_malformed_package() {
+    let tree = common::copy_epub_fixture("flat");
+    let member = "OEBPS/c1.xhtml";
+    let actual = u32::try_from(
+        std::fs::metadata(tree.path().join(member))
+            .expect("spine document")
+            .len(),
+    )
+    .expect("fixture fits a 32-bit size field");
+    let packed = pack_epub_dir(tree.path());
+    // The archive as packed extracts, so the failure below comes from
+    // the size fields alone.
+    extracted(&packed.path);
+
+    let mut bytes = std::fs::read(&packed.path).expect("read archive");
+    shrink_declared_size(&mut bytes, member, actual, 20);
+    std::fs::write(&packed.path, &bytes).expect("write archive");
+
+    let err = extract(
+        &packed.path,
+        &common::default_audit_profile(),
+        &common::default_heading_patterns(),
+    )
+    .expect_err("a spine document larger than its declared size must not be read");
+    match err {
+        ExtractError::MalformedPackage { detail } => assert!(
+            detail.contains("larger than its declared uncompressed size"),
+            "the detail must name the size mismatch, got {detail}"
+        ),
+        other => panic!("expected MalformedPackage, got {other:?}"),
+    }
+}
+
+/// Rewrite the declared uncompressed size of `member` in the ZIP
+/// archive `bytes` from `actual` to `actual - by`, in both its central
+/// directory record and its local file header.
+///
+/// Panics unless the central directory holds exactly one record named
+/// `member`, that record points at a local header carrying the same
+/// name, the sizes are recorded in the headers rather than in a
+/// trailing data descriptor, and both headers declare `actual`.
+fn shrink_declared_size(bytes: &mut [u8], member: &str, actual: u32, by: u32) {
+    fn u16_at(b: &[u8], at: usize) -> usize {
+        usize::from(u16::from_le_bytes([b[at], b[at + 1]]))
+    }
+    fn u32_at(b: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes(b[at..at + 4].try_into().expect("four bytes"))
+    }
+
+    let eocd = bytes
+        .windows(4)
+        .rposition(|w| w == b"PK\x05\x06")
+        .expect("end of central directory record");
+    let records = u16_at(bytes, eocd + 10);
+    let mut at = u32_at(bytes, eocd + 16) as usize;
+    let mut named = Vec::new();
+    for _ in 0..records {
+        assert_eq!(
+            &bytes[at..at + 4],
+            b"PK\x01\x02",
+            "central directory record at {at}"
+        );
+        let name_len = u16_at(bytes, at + 28);
+        let extra_len = u16_at(bytes, at + 30);
+        let comment_len = u16_at(bytes, at + 32);
+        if &bytes[at + 46..at + 46 + name_len] == member.as_bytes() {
+            named.push(at);
+        }
+        at += 46 + name_len + extra_len + comment_len;
+    }
+    assert_eq!(named.len(), 1, "{member} has one central directory record");
+    let central = named[0];
+
+    let local = u32_at(bytes, central + 42) as usize;
+    assert_eq!(
+        &bytes[local..local + 4],
+        b"PK\x03\x04",
+        "local file header of {member}"
+    );
+    let local_name_len = u16_at(bytes, local + 26);
+    assert_eq!(
+        &bytes[local + 30..local + 30 + local_name_len],
+        member.as_bytes(),
+        "the central record points at {member}'s own local header",
+    );
+    assert_eq!(
+        u16_at(bytes, local + 6) & 0x0008,
+        0,
+        "{member} records its sizes in the headers, not a data descriptor",
+    );
+
+    for size_at in [central + 24, local + 22] {
+        assert_eq!(
+            u32_at(bytes, size_at),
+            actual,
+            "declared uncompressed size of {member} at offset {size_at}",
+        );
+        bytes[size_at..size_at + 4].copy_from_slice(&(actual - by).to_le_bytes());
+    }
 }

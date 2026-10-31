@@ -65,11 +65,13 @@ bookrack_core::fixed_settings! {
 /// partition stale.
 ///
 /// Bumped whenever the shape or interpretation of [`Extraction`]
-/// changes, or whenever a behaviour-sensitive dependency is upgraded.
-/// The companion test `tests/dep_hash.rs` fails until
-/// [`FROZEN_DEPS_HASH`] is refreshed, forcing a deliberate bump.
+/// changes, whenever a behaviour-sensitive dependency is upgraded, or
+/// whenever the pinned PDFium binary changes. The companion test
+/// `tests/dep_hash.rs` fails until [`FROZEN_DEPS_HASH`] is refreshed,
+/// and a test in [`pdfium_pin`] fails until the pin is restated beside
+/// this value, forcing a deliberate bump.
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
-pub const EXTRACTOR_VERSION: u32 = 6;
+pub const EXTRACTOR_VERSION: u32 = 7;
 
 /// Monotonic version of the OCR adapter's output. Stored on the OCR
 /// intake's `intake.extractor_version`, decoupled from
@@ -85,11 +87,12 @@ pub const EXTRACTOR_VERSION: u32 = 6;
 pub const OCR_INTAKE_VERSION: u32 = 1;
 
 /// SHA-256 of the sorted `name@version` lines of the behaviour-
-/// sensitive crates the extractor depends on. Refreshed in lockstep
-/// with [`EXTRACTOR_VERSION`]. See `tests/dep_hash.rs` for the input
-/// list and computation.
+/// sensitive crates the extractor depends on, thirteen in all: the
+/// crates the adapters call and the parsers and decoders under them.
+/// Refreshed in lockstep with [`EXTRACTOR_VERSION`]. See `tests/dep_hash.rs` for the
+/// input list and computation.
 pub const FROZEN_DEPS_HASH: &str =
-    "3df0e5610b3180e2c305469e48473395040a332e69925187f1069f95072474a4";
+    "fb262cbda0087d803736b5a638d5b2f1a28cfb59db0d40ba57d2f8351e0cb469";
 
 /// Extract one source file into an [`ExtractOutcome`].
 ///

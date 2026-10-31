@@ -36,6 +36,26 @@ directory, and an MCP client holds a URL — so none of them move.
    data, and `bookrack libraries register <new path>` records the new
    one under the name in its manifest.
 
+### A moved PDFium build
+
+A release that moves the pinned PDFium build cannot load a library of
+the previous build. What to do depends on where the binary finds the
+library; `bookrack doctor` reports the one it found.
+
+- **Beside the executable.** The release archive ships the matching
+  library there, and it is searched before the per-user copy, so
+  nothing needs to change.
+- **The per-user managed copy.** `bookrack doctor --install-pdfium`
+  replaces it with the pinned build.
+- **`BOOKRACK_PDFIUM_LIB`.** When set, it is the only directory
+  searched: point it at a directory holding the pinned build. Unsetting
+  it sends the search to the executable's directory and then to the
+  managed copy, so make sure one of those holds the pinned build first,
+  running `doctor --install-pdfium` if neither does.
+
+Restart the daemon afterwards. Once a load has failed, a running daemon
+does not try again.
+
 ## Compatibility model in one paragraph
 
 Each on-disk store records the build parameters of the data it holds:
@@ -63,10 +83,11 @@ earlier ones already happened.
 
 | Dependency or constant bumped | Stamp it advances | Layers that go stale | Refresh command |
 |---|---|---|---|
-| `rbook`, `scraper`, `encoding_rs`, `pdfium-render` | `extractor_version` | extract → structure → chunks → vectors | re-ingest the affected sources |
+| `rbook`, `scraper`, `encoding_rs`, `pdfium-render`, and the crates under them that parse or decode (`quick-xml`, `zip`, `percent-encoding`, `html5ever`, `markup5ever`, `tendril`, `web_atoms`, `selectors`, `cssparser`); the PDFium binary (`PDFIUM_RELEASE_TAG` and its archive digests) | `extractor_version` | extract → structure → chunks → vectors | re-ingest the affected sources |
 | `bookrack_extract::EXTRACTOR_VERSION` (manual bump) | `extractor_version` | same as above | re-ingest the affected sources: `bookrack ingest` (books), `bookrack papers ingest` (papers) — see *Re-ingesting a source file* below |
 | Externalised extract-side knobs (HTML block / skip tags, PDF quality thresholds, language codes / ratios) — bumped 3 → 4 | `extractor_version` | same as above | re-ingest the affected sources |
 | `Block` carries per-paragraph `BlockStyle` geometry on the PDF path (font-size median / p90, bold-majority flag, line count, first-line left, normalized above-gap) — bumped 5 → 6 | `extractor_version` | same as above | re-ingest the affected PDF sources (book-side TXT / EPUB / OCR partitions read fine without a refresh, as their `style` is `None` on both old and new envelopes) |
+| PDFium `chromium/7763` → `chromium/7881` with `pdfium-render` 0.9.4, `rbook` 0.7.12 (bringing `quick-xml` 0.42 and `zip` 9), `encoding_rs` 0.8.44, `tendril` 0.5.1, `web_atoms` 0.2.6 — bumped 6 → 7 | `extractor_version` | same as above | re-ingest the affected sources; books extracted at version 6 keep serving meanwhile, so the refresh can run a few sources at a time. The PDFium fixes apply to every PDF parsed after the upgrade, without a refresh. A library of the previous PDFium build no longer loads — see *A moved PDFium build* above |
 | `bookrack_extract::OCR_INTAKE_VERSION` (manual bump) | `extractor_version` on OCR rows only | OCR extract → structure → chunks → vectors | re-run `bookrack intake ocr` against each affected OCR product |
 | `text-splitter`, `icu_*`, `bookrack_ingest::CHUNK_VERSION` | `chunk_version` | chunks → vectors | `bookrack vectors reembed` (books); `bookrack papers vectors reembed` (papers) |
 | `text-splitter`, `icu_*`, `bookrack_glean::CHUNK_VERSION` | `chunk_version` on the papers store | papers chunks → papers vectors | `bookrack papers vectors reset` |

@@ -9,7 +9,7 @@
 //! expose; all three places bump together.
 
 /// Upstream release tag the archives are published under.
-pub const PDFIUM_RELEASE_TAG: &str = "chromium/7763";
+pub const PDFIUM_RELEASE_TAG: &str = "chromium/7881";
 
 /// One platform's pinned archive: the asset name under the release
 /// tag, the SHA-256 of the archive, and where the dynamic library
@@ -31,7 +31,7 @@ const PINNED_BINARIES: &[(&str, &str, PdfiumBinaryPin)] = &[
         "x86_64",
         PdfiumBinaryPin {
             asset: "pdfium-win-x64.tgz",
-            sha256: "45c4cc5d052ef8ec6380b946b548a76100f4675e38362000a4c732e16d5e8eda",
+            sha256: "73cc0de638ac2095e7445bf56a38200a5b7c7ca0e9f4ba144598f2457377ac08",
             path_in_archive: "bin/pdfium.dll",
         },
     ),
@@ -40,7 +40,7 @@ const PINNED_BINARIES: &[(&str, &str, PdfiumBinaryPin)] = &[
         "x86_64",
         PdfiumBinaryPin {
             asset: "pdfium-linux-x64.tgz",
-            sha256: "e3f0c66b2daad710cb6c8edd4a8c45c8902995e359dc0775917fc16e2e56349d",
+            sha256: "1470e21b8b4a3b4ad7f85684e2da11d94f3b69a86d81dee11b9b6709d927ac1d",
             path_in_archive: "lib/libpdfium.so",
         },
     ),
@@ -49,7 +49,7 @@ const PINNED_BINARIES: &[(&str, &str, PdfiumBinaryPin)] = &[
         "aarch64",
         PdfiumBinaryPin {
             asset: "pdfium-mac-arm64.tgz",
-            sha256: "9acf49e46c68992cd40810e88264b1ad171805d02fd41c4cca336aad6653b333",
+            sha256: "52e94ca5aa8847934330daf3f8150c190682c5ca93831468794f8b90d4392e40",
             path_in_archive: "lib/libpdfium.dylib",
         },
     ),
@@ -58,7 +58,7 @@ const PINNED_BINARIES: &[(&str, &str, PdfiumBinaryPin)] = &[
         "x86_64",
         PdfiumBinaryPin {
             asset: "pdfium-mac-x64.tgz",
-            sha256: "f455e0868ef7e5174a315de8789ee2b7a5544638d0ac7a3312ea7b68ebbc99cb",
+            sha256: "6dedf83990e0e3d6b7c93c9e7589c5a126b0ae14b7464d76120cff7a26afb18b",
             path_in_archive: "lib/libpdfium.dylib",
         },
     ),
@@ -117,7 +117,7 @@ mod tests {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
     }
 
-    /// The build number the release tag pins, e.g. `7763`.
+    /// The build number the release tag pins, e.g. `7881`.
     fn pinned_build() -> &'static str {
         PDFIUM_RELEASE_TAG
             .rsplit('/')
@@ -251,6 +251,46 @@ mod tests {
     }
 
     #[test]
+    fn extractor_version_is_pinned_with_the_pdfium_binary() {
+        // A different binary extracts differently, so the release tag
+        // and every archive digest move only together with
+        // `EXTRACTOR_VERSION`. Restating all of them here makes a
+        // re-cut asset under an unchanged tag as visible as a new tag.
+        let mut assets: Vec<(&str, &str)> = PINNED_BINARIES
+            .iter()
+            .map(|(_, _, pin)| (pin.asset, pin.sha256))
+            .collect();
+        assets.sort_unstable();
+        assert_eq!(
+            (crate::EXTRACTOR_VERSION, PDFIUM_RELEASE_TAG, assets),
+            (
+                7,
+                "chromium/7881",
+                vec![
+                    (
+                        "pdfium-linux-x64.tgz",
+                        "1470e21b8b4a3b4ad7f85684e2da11d94f3b69a86d81dee11b9b6709d927ac1d",
+                    ),
+                    (
+                        "pdfium-mac-arm64.tgz",
+                        "52e94ca5aa8847934330daf3f8150c190682c5ca93831468794f8b90d4392e40",
+                    ),
+                    (
+                        "pdfium-mac-x64.tgz",
+                        "6dedf83990e0e3d6b7c93c9e7589c5a126b0ae14b7464d76120cff7a26afb18b",
+                    ),
+                    (
+                        "pdfium-win-x64.tgz",
+                        "73cc0de638ac2095e7445bf56a38200a5b7c7ca0e9f4ba144598f2457377ac08",
+                    ),
+                ],
+            ),
+            "the PDFium pin and EXTRACTOR_VERSION move together; bump the version and restate \
+             the tag and digests here",
+        );
+    }
+
+    #[test]
     fn download_url_encodes_the_release_tag() {
         let pin = PdfiumBinaryPin {
             asset: "pdfium-test.tgz",
@@ -258,7 +298,7 @@ mod tests {
             path_in_archive: "lib/libpdfium.so",
         };
         let url = pdfium_download_url(&pin);
-        assert!(url.contains("chromium%2F7763/pdfium-test.tgz"), "{url}");
-        assert!(!url.contains("chromium/7763"), "{url}");
+        assert!(url.contains("chromium%2F7881/pdfium-test.tgz"), "{url}");
+        assert!(!url.contains("chromium/7881"), "{url}");
     }
 }

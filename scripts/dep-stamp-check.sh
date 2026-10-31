@@ -109,7 +109,7 @@ check_list() {
 
 [ -f "$lock" ] || { echo "dep-stamp-check: no lockfile at $lock"; exit 1; }
 
-check_hash extract '^(encoding_rs|pdfium-render|rbook|scraper)$' \
+check_hash extract '^(cssparser|encoding_rs|html5ever|markup5ever|pdfium-render|percent-encoding|quick-xml|rbook|scraper|selectors|tendril|web_atoms|zip)$' \
   crates/extract/src/lib.rs FROZEN_DEPS_HASH bookrack_extract::EXTRACTOR_VERSION
 check_hash normalize '^unicode-normalization$' \
   crates/normalize/src/lib.rs FROZEN_DEPS_HASH bookrack_normalize::NORMALIZE_VERSION

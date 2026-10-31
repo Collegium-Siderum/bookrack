@@ -5,14 +5,33 @@
 //! `Cargo.lock` flips this test red until both
 //! `EXTRACTOR_VERSION` and `FROZEN_DEPS_HASH` are refreshed in
 //! lockstep. The list is the extractor's row of the bump-to-refresh
-//! matrix in `docs/UPGRADE.md`.
+//! matrix in `docs/UPGRADE.md`: the crates the adapters call, and the
+//! parsers and decoders under them.
+//!
+//! The PDFium binary is not in the lockfile. `src/pdfium_pin.rs` pins
+//! its release tag and archive digests to `EXTRACTOR_VERSION` the same
+//! way, so swapping the binary alone also forces a bump.
 
 use std::path::PathBuf;
 
 use bookrack_extract::{EXTRACTOR_VERSION, FROZEN_DEPS_HASH};
 use sha2::{Digest, Sha256};
 
-const BEHAVIOR_SENSITIVE_CRATES: &[&str] = &["encoding_rs", "pdfium-render", "rbook", "scraper"];
+const BEHAVIOR_SENSITIVE_CRATES: &[&str] = &[
+    "cssparser",
+    "encoding_rs",
+    "html5ever",
+    "markup5ever",
+    "pdfium-render",
+    "percent-encoding",
+    "quick-xml",
+    "rbook",
+    "scraper",
+    "selectors",
+    "tendril",
+    "web_atoms",
+    "zip",
+];
 
 #[test]
 fn extractor_version_and_frozen_deps_hash_are_pinned_as_a_pair() {
@@ -23,8 +42,8 @@ fn extractor_version_and_frozen_deps_hash_are_pinned_as_a_pair() {
     assert_eq!(
         (EXTRACTOR_VERSION, FROZEN_DEPS_HASH),
         (
-            6,
-            "3df0e5610b3180e2c305469e48473395040a332e69925187f1069f95072474a4"
+            7,
+            "fb262cbda0087d803736b5a638d5b2f1a28cfb59db0d40ba57d2f8351e0cb469"
         ),
         "EXTRACTOR_VERSION and FROZEN_DEPS_HASH bump together; restate the pair here"
     );

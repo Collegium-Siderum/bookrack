@@ -107,11 +107,11 @@ drives it past the gate with `bookrack metadata advance` (or
 `approve`) once the record is corrected.
 
 PDFium parses every PDF source, book or paper, inside the process that
-ingests it, with no sandbox around it. The pinned build has open
-memory-safety advisories, listed under *Known issues* in
+ingests it, with no sandbox around it. The pinned build has at least
+one open memory-safety advisory, listed under *Known issues* in
 [crates/extract/PDFIUM_VERSION.md](../crates/extract/PDFIUM_VERSION.md),
-so a crafted PDF can corrupt that process's memory. While any of them
-stays open, ingest PDF files only from sources you trust.
+so a crafted PDF can corrupt that process's memory. While any stays
+open, ingest PDF files only from sources you trust.
 
 ### Long ingestions
 

@@ -11,13 +11,13 @@ for that pinned pair.
 
 | What | Value |
 | --- | --- |
-| `pdfium-render` crate | `0.9` (resolves to 0.9.1) |
-| Cargo feature | `pdfium_7763` |
-| Native binary release | `chromium/7763` (PDFium 148.0.7763.0) |
+| `pdfium-render` crate | `0.9` (resolves to 0.9.4) |
+| Cargo feature | `pdfium_7881` |
+| Native binary release | `chromium/7881` (PDFium 151.0.7881.0) |
 | Binary source | <https://github.com/bblanchon/pdfium-binaries> |
 
-The feature build number and the release build number are both `7763`
-— they must stay equal. In `pdfium-render` 0.9.1, `pdfium_7763` is the
+The feature build number and the release build number are both `7881`
+— they must stay equal. In `pdfium-render` 0.9.4, `pdfium_7881` is the
 newest concrete API version (`pdfium_latest` aliases it); pinning the
 concrete feature rather than `pdfium_latest` keeps the build
 reproducible when a later crate release moves `pdfium_latest` forward.
@@ -30,9 +30,7 @@ trusted sources under *Ingesting* in `docs/operating.md`.
 
 | Advisory | Severity | Component | Build carrying the fix |
 | --- | --- | --- | --- |
-| CVE-2026-9957 | High | page tree, use-after-free | `chromium/7881` |
-| CVE-2026-9958 | High | name tree, use-after-free | `chromium/7881` |
-| CVE-2026-17875 | Medium | name tree | `chromium/8100`, newer than the `pdfium_7881` API that `pdfium-render` 0.9.4 binds at most |
+| CVE-2026-17875 | Medium | name tree, use-after-free | `chromium/8100`, newer than the `pdfium_7881` API that `pdfium-render` 0.9.4 binds at most |
 
 CVE-2026-10002 (`cjs_field`, High) is not in the table: the field code
 belongs to the JavaScript layer, which the non-V8 archives do not
@@ -40,23 +38,22 @@ compile.
 
 ## Binary archives
 
-The non-V8 archives are used (no JavaScript engine is needed). Upstream
-publishes no checksums, so these SHA-256 values were computed locally
-when the version was pinned and the CI download step verifies against
-them — a corrupted download or a silently re-cut upstream asset then
-fails loudly.
+The non-V8 archives are used (no JavaScript engine is needed). These
+SHA-256 values are the digests GitHub records for each release asset,
+and the CI download step verifies against them — a corrupted download
+or a silently re-cut upstream asset then fails loudly.
 
 | Asset | SHA-256 |
 | --- | --- |
-| `pdfium-win-x64.tgz` | `45c4cc5d052ef8ec6380b946b548a76100f4675e38362000a4c732e16d5e8eda` |
-| `pdfium-linux-x64.tgz` | `e3f0c66b2daad710cb6c8edd4a8c45c8902995e359dc0775917fc16e2e56349d` |
-| `pdfium-mac-arm64.tgz` | `9acf49e46c68992cd40810e88264b1ad171805d02fd41c4cca336aad6653b333` |
-| `pdfium-mac-x64.tgz` | `f455e0868ef7e5174a315de8789ee2b7a5544638d0ac7a3312ea7b68ebbc99cb` |
+| `pdfium-win-x64.tgz` | `73cc0de638ac2095e7445bf56a38200a5b7c7ca0e9f4ba144598f2457377ac08` |
+| `pdfium-linux-x64.tgz` | `1470e21b8b4a3b4ad7f85684e2da11d94f3b69a86d81dee11b9b6709d927ac1d` |
+| `pdfium-mac-arm64.tgz` | `52e94ca5aa8847934330daf3f8150c190682c5ca93831468794f8b90d4392e40` |
+| `pdfium-mac-x64.tgz` | `6dedf83990e0e3d6b7c93c9e7589c5a126b0ae14b7464d76120cff7a26afb18b` |
 
 Download URL template:
 
 ```
-https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7763/pdfium-<platform>.tgz
+https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7881/pdfium-<platform>.tgz
 ```
 
 The Windows archive holds the library at `bin/pdfium.dll`; the Linux
@@ -85,14 +82,19 @@ PDFium binary can extract text differently, which downstream must
 re-extract on. Update, in lockstep:
 
 - the `pdfium-render` cargo feature in the workspace `Cargo.toml`,
-- the tag, URL, and SHA-256 in the CI `Fetch pinned PDFium` step,
+- the tag, URL, SHA-256, and cache key in the CI workflow's two
+  PDFium fetch steps and the release workflow's build matrix,
 - the release tag, asset names, and SHA-256 values in
   `src/pdfium_pin.rs` (the installer's copy of the pin),
 - the values in the tables above.
 
-Bumping the `pdfium-render` crate version itself also flips the
-behaviour-sensitive deps hash that `crates/extract/tests/dep_hash.rs`
-anchors, forcing `bookrack_extract::EXTRACTOR_VERSION` to bump.
+Bumping any of these values means re-extracting, so it bumps
+`bookrack_extract::EXTRACTOR_VERSION`: the test
+`extractor_version_is_pinned_with_the_pdfium_binary` in
+`src/pdfium_pin.rs` restates the release tag and every archive digest
+beside that version, and fails until both sides move. Bumping the
+`pdfium-render` crate version itself also flips the behaviour-sensitive
+deps hash that `crates/extract/tests/dep_hash.rs` anchors.
 
 Parity across the copies is held mechanically: the inline tests in
 `src/pdfium_pin.rs` compare this file, the workspace manifest's

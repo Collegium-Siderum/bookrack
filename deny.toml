@@ -22,14 +22,9 @@ yanked = "deny"
 # advisory stands; an entry goes once a release that clears it is in
 # the lockfile.
 ignore = [
-    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.39 through rbook's EPUB parser, which iterates start-tag attributes, so a crafted EPUB slows its own ingest. quick-xml 0.41 needs rbook 0.7.10 or later, and an rbook move bumps EXTRACTOR_VERSION." },
-    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.39 through rbook, which parses with Reader and never constructs the affected NsReader. quick-xml 0.41 needs rbook 0.7.10 or later, and an rbook move bumps EXTRACTOR_VERSION." },
-    { id = "RUSTSEC-2026-0367", reason = "zip 8 through rbook, which reads archive entries in memory and never calls the extract APIs. zip 9 needs rbook 0.7.12, and an rbook move bumps EXTRACTOR_VERSION." },
-    { id = "RUSTSEC-2026-0368", reason = "zip 8 through rbook, which reads archive entries in memory and never calls the extract APIs. zip 9 needs rbook 0.7.12, and an rbook move bumps EXTRACTOR_VERSION." },
-    { id = "RUSTSEC-2026-0369", reason = "zip 8 through rbook, which reads archive entries in memory and never calls the extract APIs. zip 9 needs rbook 0.7.12, and an rbook move bumps EXTRACTOR_VERSION." },
-    { id = "RUSTSEC-2026-0391", reason = "zstd 0.13 through arrow-ipc and lance-encoding under lancedb, and through zip under rbook; none of the three constructs a raw encoder or decoder with `with_context`. zstd 0.14 needs arrow-ipc 60, lance-encoding 14 and zip 9 in the lockfile together." },
-    { id = "RUSTSEC-2026-0398", reason = "zstd-safe 7 through zstd 0.13, on the same three paths, without the `seekable` feature, so the affected seekable API is not compiled. zstd-safe 8.2 arrives only with zstd 0.14." },
-    { id = "RUSTSEC-2026-0403", reason = "zstd-safe 7 through zstd 0.13, on the same three paths; the callers decompress through the bulk API and read-side decoders, which the advisory leaves unaffected, and none uses `write::Decoder`. zstd-safe 8.2 arrives only with zstd 0.14." },
+    { id = "RUSTSEC-2026-0391", reason = "zstd 0.13 through arrow-ipc and lance-encoding under lancedb; neither constructs a raw encoder or decoder with `with_context`. zstd 0.14 needs arrow-ipc 60 and lance-encoding 14 in the lockfile together." },
+    { id = "RUSTSEC-2026-0398", reason = "zstd-safe 7 through zstd 0.13, on the same two paths, without the `seekable` feature, so the affected seekable API is not compiled. zstd-safe 8.2 arrives only with zstd 0.14." },
+    { id = "RUSTSEC-2026-0403", reason = "zstd-safe 7 through zstd 0.13, on the same two paths; the callers decompress through the bulk API and read-side decoders, which the advisory leaves unaffected, and none uses `write::Decoder`. zstd-safe 8.2 arrives only with zstd 0.14." },
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained; a proc-macro reached through datafusion under lancedb, with no direct use in the workspace." },
     { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained; it reads tokenizer configuration in lindera under lancedb's full-text search, which bookrack does not build." },
 ]

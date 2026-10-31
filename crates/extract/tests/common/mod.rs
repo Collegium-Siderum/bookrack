@@ -76,16 +76,42 @@ pub struct PackedEpub {
     pub path: PathBuf,
 }
 
+/// Path to the unzipped EPUB fixture `tests/fixtures/epub/<name>`.
+fn epub_fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/epub")
+        .join(name)
+}
+
 /// Pack the unzipped EPUB fixture `tests/fixtures/epub/<name>` into a
 /// throwaway `.epub`.
+pub fn pack_epub(name: &str) -> PackedEpub {
+    pack_epub_dir(&epub_fixture(name))
+}
+
+/// Copy the unzipped EPUB fixture `tests/fixtures/epub/<name>` into a
+/// temporary directory, so a test can change its bytes before packing
+/// it with [`pack_epub_dir`].
+pub fn copy_epub_fixture(name: &str) -> tempfile::TempDir {
+    let src = epub_fixture(name);
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let mut files = Vec::new();
+    collect_files(&src, &src, &mut files);
+    for rel in files {
+        let to = dir.path().join(&rel);
+        fs::create_dir_all(to.parent().expect("file under the copy")).expect("create dir");
+        fs::copy(src.join(&rel), &to).expect("copy fixture file");
+    }
+    dir
+}
+
+/// Pack the unzipped EPUB tree at `src` into a throwaway `.epub`.
 ///
 /// The `mimetype` entry is written first and stored uncompressed, as
 /// the EPUB OCF container spec requires; the fixture directories omit
-/// it and the canonical value is supplied here.
-pub fn pack_epub(name: &str) -> PackedEpub {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/epub")
-        .join(name);
+/// it and the canonical value is supplied here. Every other file is
+/// deflated.
+pub fn pack_epub_dir(src: &Path) -> PackedEpub {
     let dir = tempfile::tempdir().expect("create temp dir");
     let path = dir.path().join("book.epub");
 
@@ -97,7 +123,7 @@ pub fn pack_epub(name: &str) -> PackedEpub {
 
     let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     let mut files = Vec::new();
-    collect_files(&src, &src, &mut files);
+    collect_files(src, src, &mut files);
     // A stable order keeps the packed archive itself deterministic.
     files.sort();
     for rel in files {
