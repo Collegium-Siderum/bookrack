@@ -201,6 +201,55 @@ mod tests {
         assert_eq!(bundled, 3, "release targets bundling a pinned PDFium");
     }
 
+    /// The `key:` value of every PDFium cache step in `workflow`, in
+    /// file order. A step is the run of lines from one YAML list item
+    /// (`- ...`) to the next; a PDFium cache step is one whose `name:`
+    /// mentions PDFium and which uses `actions/cache`.
+    fn pdfium_cache_keys(workflow: &str) -> Vec<String> {
+        let mut steps: Vec<Vec<&str>> = Vec::new();
+        for line in workflow.lines().map(str::trim) {
+            if line.starts_with("- ") || steps.is_empty() {
+                steps.push(Vec::new());
+            }
+            steps.last_mut().expect("a step is open").push(line);
+        }
+        steps
+            .iter()
+            .filter(|step| {
+                step.iter()
+                    .any(|l| l.starts_with("- name:") && l.contains("PDFium"))
+                    && step.iter().any(|l| l.starts_with("uses: actions/cache@"))
+            })
+            .filter_map(|step| {
+                step.iter()
+                    .find_map(|l| l.strip_prefix("key:"))
+                    .map(|key| key.trim().to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_pdfium_cache_step_keys_on_the_pinned_build() {
+        let prefix = format!("pdfium-chromium-{}-", pinned_build());
+        // Both CI jobs and the release build cache the archive; adding
+        // or dropping a cache step is a deliberate change that restates
+        // these counts.
+        for (rel, steps) in [
+            ("../../.github/workflows/ci.yml", 2),
+            ("../../.github/workflows/release.yml", 1),
+        ] {
+            let keys = pdfium_cache_keys(&repo_file(rel));
+            assert_eq!(keys.len(), steps, "PDFium cache steps in {rel}: {keys:?}");
+            for key in &keys {
+                assert!(
+                    key.starts_with(&prefix),
+                    "{rel}: cache key {key:?} does not start with {prefix:?}, \
+                     so a hit could restore an archive of another build",
+                );
+            }
+        }
+    }
+
     #[test]
     fn download_url_encodes_the_release_tag() {
         let pin = PdfiumBinaryPin {
