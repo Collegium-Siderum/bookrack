@@ -17,10 +17,7 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use bookrack_config::{
-    DAEMON_STATE_DIR_ENV, DATA_DIR_ENV, MCP_ADDR_ENV, NO_DOTENV_ENV, OLLAMA_URL_ENV, REGISTRY_ENV,
-};
-use bookrack_session::RUNTIME_DIR_ENV;
+use bookrack_config::{DATA_DIR_ENV, MCP_ADDR_ENV, NO_DOTENV_ENV, OLLAMA_URL_ENV, REGISTRY_ENV};
 
 use crate::embed_stub::EmbedStub;
 use crate::sandbox::Sandbox;
@@ -114,16 +111,11 @@ pub fn process_env(spec: ProcessEnv) -> &'static Sandbox {
     sandbox
 }
 
-/// Install `spec` into this process's environment.
-fn apply(spec: &ProcessEnv, sandbox: &Sandbox) {
-    let mut vars: Vec<(&str, PathBuf)> = vec![
-        ("HOME", sandbox.home()),
-        ("XDG_CONFIG_HOME", sandbox.config_home()),
-        ("XDG_DATA_HOME", sandbox.data_home()),
-        ("XDG_CACHE_HOME", sandbox.cache_home()),
-        (RUNTIME_DIR_ENV, sandbox.runtime_dir()),
-        (DAEMON_STATE_DIR_ENV, sandbox.daemon_state_dir()),
-    ];
+/// The location variables `spec` sets, each pointing into `sandbox`:
+/// the one list [`Sandbox::host_vars`] holds, plus the data root and
+/// the registry the spec asks for.
+fn planned(spec: &ProcessEnv, sandbox: &Sandbox) -> Vec<(&'static str, PathBuf)> {
+    let mut vars = sandbox.host_vars();
     if spec.data_dir {
         vars.push((DATA_DIR_ENV, sandbox.data_dir()));
     }
@@ -131,7 +123,12 @@ fn apply(spec: &ProcessEnv, sandbox: &Sandbox) {
         RegistrySpec::Sandbox => vars.push((REGISTRY_ENV, sandbox.registry_path())),
         RegistrySpec::Absent(name) => vars.push((REGISTRY_ENV, sandbox.path().join(name))),
     }
+    vars
+}
 
+/// Install `spec` into this process's environment.
+fn apply(spec: &ProcessEnv, sandbox: &Sandbox) {
+    let vars = planned(spec, sandbox);
     let mut installed: Vec<&str> = vars.iter().map(|(name, _)| *name).collect();
     installed.push(NO_DOTENV_ENV);
     installed.push(MCP_ADDR_ENV);
@@ -182,7 +179,55 @@ fn apply(spec: &ProcessEnv, sandbox: &Sandbox) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::ffi::OsString;
+
+    use bookrack_config::DAEMON_STATE_DIR_ENV;
+    use bookrack_session::RUNTIME_DIR_ENV;
+
     use super::*;
+    use crate::spawn::Spawn;
+
+    /// The process side and the child side name the same seven
+    /// locations, each pointing into the same sandbox. The seven are
+    /// written out here rather than read off `host_vars`: both sides
+    /// read that list, so comparing them along it would stay green with
+    /// an entry dropped from the list or a line added beside it.
+    #[test]
+    fn the_process_env_and_the_spawn_name_the_same_locations() {
+        let sandbox = Sandbox::new();
+        let expected: BTreeMap<OsString, OsString> = [
+            ("HOME", sandbox.home()),
+            ("XDG_CONFIG_HOME", sandbox.config_home()),
+            ("XDG_DATA_HOME", sandbox.data_home()),
+            ("XDG_CACHE_HOME", sandbox.cache_home()),
+            ("XDG_RUNTIME_DIR", sandbox.xdg_runtime_dir()),
+            (RUNTIME_DIR_ENV, sandbox.runtime_dir()),
+            (DAEMON_STATE_DIR_ENV, sandbox.daemon_state_dir()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (OsString::from(k), v.into_os_string()))
+        .collect();
+
+        let process_side: BTreeMap<OsString, OsString> =
+            planned(&ProcessEnv::isolated().without_data_dir(), &sandbox)
+                .into_iter()
+                .filter(|(k, _)| *k != REGISTRY_ENV)
+                .map(|(k, v)| (OsString::from(k), v.into_os_string()))
+                .collect();
+        assert_eq!(process_side, expected, "the process side's locations");
+
+        let child_side: BTreeMap<OsString, OsString> =
+            Spawn::__with_bin("/nonexistent/bookrack", &sandbox)
+                .without_data_dir()
+                .without_registry()
+                .plan(std::iter::empty())
+                .set
+                .into_iter()
+                .filter(|(k, _)| k != MCP_ADDR_ENV)
+                .collect();
+        assert_eq!(child_side, expected, "the child side's locations");
+    }
 
     /// The presets differ in exactly one bit, and the deviations are
     /// distinguishable — the equality the `OnceLock` guard compares has

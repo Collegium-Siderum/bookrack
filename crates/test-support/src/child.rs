@@ -1271,6 +1271,27 @@ impl DaemonProcess {
 pub fn endpoint_matches(lock_path: &Path, control_sock: &Path) -> Result<(), String> {
     use std::os::unix::fs::FileTypeExt;
 
+    endpoint_path_matches(lock_path, control_sock)?;
+    let shown = control_sock.display();
+    let meta = std::fs::symlink_metadata(control_sock)
+        .map_err(|err| format!("the control socket {shown} cannot be inspected: {err}"))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("the control socket {shown} is a symbolic link"));
+    }
+    if !meta.file_type().is_socket() {
+        return Err(format!("the control socket {shown} is not a socket"));
+    }
+    Ok(())
+}
+
+/// The first three of [`endpoint_matches`]'s four checks: the ones
+/// about the path alone, which hold for a socket that is no longer
+/// there. A lock a cleanly stopped daemon left behind still names its
+/// socket, and a client discovering through that lock would dial the
+/// path, so the path has to be the sandbox's own even when nothing
+/// listens on it.
+#[cfg(unix)]
+pub fn endpoint_path_matches(lock_path: &Path, control_sock: &Path) -> Result<(), String> {
     let shown = control_sock.display();
     if !control_sock.is_absolute()
         || control_sock
@@ -1300,14 +1321,6 @@ pub fn endpoint_matches(lock_path: &Path, control_sock: &Path) -> Result<(), Str
             "the control socket {shown} is not in the directory of the session lock at {}",
             lock_path.display(),
         ));
-    }
-    let meta = std::fs::symlink_metadata(control_sock)
-        .map_err(|err| format!("the control socket {shown} cannot be inspected: {err}"))?;
-    if meta.file_type().is_symlink() {
-        return Err(format!("the control socket {shown} is a symbolic link"));
-    }
-    if !meta.file_type().is_socket() {
-        return Err(format!("the control socket {shown} is not a socket"));
     }
     Ok(())
 }
@@ -1464,6 +1477,44 @@ mod tests {
                 Ok(Err(err)) => panic!("reading the probe failed: {err}"),
                 Err(_) => return false,
             }
+        }
+    }
+
+    /// The path checks hold for a socket that is not there, and the
+    /// full check adds exactly the look at the socket itself.
+    #[test]
+    fn the_path_checks_pass_a_socket_that_is_gone_and_the_full_check_does_not() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock = dir.path().join("bookrack.tty.lock");
+        std::fs::write(&lock, "pid=1\n").expect("write lock");
+        let sock = dir.path().join("control.sock");
+        endpoint_path_matches(&lock, &sock).expect("the path alone matches");
+        let err = endpoint_matches(&lock, &sock).expect_err("no socket is there");
+        assert!(
+            err.contains("cannot be inspected"),
+            "the full check must fail on the missing socket: {err}"
+        );
+    }
+
+    /// The path checks refuse the same shapes the full check refuses
+    /// before it looks at the socket.
+    #[test]
+    fn the_path_checks_refuse_a_foreign_shape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock = dir.path().join("bookrack.tty.lock");
+        std::fs::write(&lock, "pid=1\n").expect("write lock");
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        for (sock, mentions) in [
+            (PathBuf::from("relative/control.sock"), "absolute"),
+            (dir.path().join("other.sock"), "named control.sock"),
+            (
+                elsewhere.path().join("control.sock"),
+                "directory of the session lock",
+            ),
+            (dir.path().join("../control.sock"), "absolute"),
+        ] {
+            let err = endpoint_path_matches(&lock, &sock).expect_err("refused");
+            assert!(err.contains(mentions), "{}: {err}", sock.display());
         }
     }
 

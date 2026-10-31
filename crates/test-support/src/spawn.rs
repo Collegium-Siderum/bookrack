@@ -8,14 +8,12 @@
 //! weakening of the isolation is a named method, so `git grep` over the
 //! method names lists every place a test departs from the default.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use bookrack_config::{
-    DAEMON_STATE_DIR_ENV, DATA_DIR_ENV, MCP_ADDR_ENV, OLLAMA_URL_ENV, REGISTRY_ENV,
-};
+use bookrack_config::{DATA_DIR_ENV, MCP_ADDR_ENV, OLLAMA_URL_ENV, REGISTRY_ENV};
 use bookrack_session::RUNTIME_DIR_ENV;
 
 use crate::sandbox::Sandbox;
@@ -59,15 +57,12 @@ macro_rules! bookrack_cmd {
 /// [`DaemonProcess`](crate::DaemonProcess).
 pub struct Spawn {
     bin: PathBuf,
-    home: PathBuf,
-    config_home: PathBuf,
-    data_home: PathBuf,
-    cache_home: PathBuf,
+    /// The host-visible locations, from [`Sandbox::host_vars`], with a
+    /// named override replacing the entry of the same name.
+    locations: Vec<(&'static str, PathBuf)>,
     cwd: PathBuf,
     data_dir: Option<PathBuf>,
     registry: Option<PathBuf>,
-    runtime_dir: PathBuf,
-    daemon_state_dir: PathBuf,
     ollama_url: Option<String>,
     extra: Vec<(OsString, OsString)>,
     removed: Vec<OsString>,
@@ -82,20 +77,22 @@ impl Spawn {
     pub fn __with_bin(bin: impl AsRef<Path>, sandbox: &Sandbox) -> Spawn {
         Spawn {
             bin: bin.as_ref().to_path_buf(),
-            home: sandbox.home(),
-            config_home: sandbox.config_home(),
-            data_home: sandbox.data_home(),
-            cache_home: sandbox.cache_home(),
+            locations: sandbox.host_vars(),
             cwd: sandbox.cwd(),
             data_dir: Some(sandbox.data_dir()),
             registry: Some(sandbox.registry_path()),
-            runtime_dir: sandbox.runtime_dir(),
-            daemon_state_dir: sandbox.daemon_state_dir(),
             ollama_url: None,
             extra: Vec::new(),
             removed: Vec::new(),
             stdin_pipe: false,
         }
+    }
+
+    /// The sandbox tool's preset: the same isolation as a test's, routed
+    /// through the registry rather than a data root, so a sandbox can
+    /// serve several libraries.
+    pub(crate) fn for_tool(bin: &Path, sandbox: &Sandbox) -> Spawn {
+        Spawn::__with_bin(bin, sandbox).without_data_dir()
     }
 
     /// Leave the data root unset, so the child resolves one through the
@@ -128,8 +125,14 @@ impl Spawn {
     /// Point the session runtime directory somewhere other than the
     /// sandbox default.
     pub fn runtime_dir(mut self, path: impl AsRef<Path>) -> Spawn {
-        self.runtime_dir = path.as_ref().to_path_buf();
-        self
+        let path = path.as_ref().to_path_buf();
+        for (key, location) in &mut self.locations {
+            if *key == RUNTIME_DIR_ENV {
+                *location = path;
+                return self;
+            }
+        }
+        unreachable!("host_vars always names the runtime directory");
     }
 
     /// Point the child's embedder at `url`, normally the shared
@@ -198,54 +201,126 @@ impl Spawn {
     /// process's variables, so the sweep can be tested against a host
     /// shape without mutating this process's environment.
     fn build_from(self, host: impl Iterator<Item = (OsString, OsString)>) -> Command {
-        let mut vars: Vec<(OsString, OsString)> = vec![
-            ("HOME".into(), self.home.into()),
-            ("XDG_CONFIG_HOME".into(), self.config_home.into()),
-            ("XDG_DATA_HOME".into(), self.data_home.into()),
-            ("XDG_CACHE_HOME".into(), self.cache_home.into()),
-            (RUNTIME_DIR_ENV.into(), self.runtime_dir.into()),
-            (DAEMON_STATE_DIR_ENV.into(), self.daemon_state_dir.into()),
-            // A child that serves MCP takes a kernel-assigned port.
-            // The built-in default is one fixed port on the host, and
-            // the daemon binds it during bring-up: two suites running
-            // at once, or an operator's own daemon, would otherwise
-            // decide whether a test that has nothing to do with MCP
-            // starts at all. A test about the address passes
-            // `--mcp-addr`, which outranks this.
-            (MCP_ADDR_ENV.into(), "127.0.0.1:0".into()),
-        ];
+        let bin = self.bin.clone();
+        let plan = self.plan(host);
+        let mut cmd = Command::new(bin);
+        plan.apply(&mut cmd);
+        cmd
+    }
+
+    /// What [`Spawn::build`] would do to a command, as data: the one
+    /// place the isolation is worked out, which the sandbox tool's
+    /// tripwires read back.
+    ///
+    /// `set` is assembled by key, later entries overriding earlier
+    /// ones: the locations, then the MCP address, then the data root,
+    /// registry and embedder, then [`Spawn::extra_env`]. A key named by
+    /// [`Spawn::without_env`] is taken out of `set` and put in `remove`,
+    /// and so is every `BOOKRACK_*` variable `host` carries that `set`
+    /// does not name and [`PASSTHROUGH_ENV`] does not pass.
+    pub fn plan(self, host: impl Iterator<Item = (OsString, OsString)>) -> EnvPlan {
+        let mut set: BTreeMap<OsString, OsString> = BTreeMap::new();
+        let mut order: Vec<OsString> = Vec::new();
+        let mut assign = |key: OsString, value: OsString| {
+            if set.insert(key.clone(), value).is_none() {
+                order.push(key);
+            }
+        };
+        for (key, path) in self.locations {
+            assign(key.into(), path.into());
+        }
+        // A child that serves MCP takes a kernel-assigned port. The
+        // built-in default is one fixed port on the host, and the
+        // daemon binds it during bring-up: two suites running at once,
+        // or an operator's own daemon, would otherwise decide whether
+        // a test that has nothing to do with MCP starts at all. A test
+        // about the address passes `--mcp-addr`, which outranks this.
+        assign(MCP_ADDR_ENV.into(), "127.0.0.1:0".into());
         if let Some(path) = self.data_dir {
-            vars.push((DATA_DIR_ENV.into(), path.into()));
+            assign(DATA_DIR_ENV.into(), path.into());
         }
         if let Some(path) = self.registry {
-            vars.push((REGISTRY_ENV.into(), path.into()));
+            assign(REGISTRY_ENV.into(), path.into());
         }
         if let Some(url) = self.ollama_url {
-            vars.push((OLLAMA_URL_ENV.into(), url.into()));
+            assign(OLLAMA_URL_ENV.into(), url.into());
         }
-        vars.extend(self.extra);
+        for (key, value) in self.extra {
+            assign(key, value);
+        }
 
-        let assigned: HashSet<OsString> = vars.iter().map(|(key, _)| key.clone()).collect();
-        let mut cmd = Command::new(&self.bin);
+        let mut remove: Vec<OsString> = Vec::new();
+        let mut removed_keys: HashSet<OsString> = HashSet::new();
+        for key in self.removed {
+            set.remove(&key);
+            if removed_keys.insert(key.clone()) {
+                remove.push(key);
+            }
+        }
         for (key, _) in host {
             let swept = key
                 .to_str()
                 .is_some_and(|k| k.starts_with(BOOKRACK_PREFIX) && !PASSTHROUGH_ENV.contains(&k));
-            if swept && !assigned.contains(&key) {
-                cmd.env_remove(&key);
+            if swept && !set.contains_key(&key) && removed_keys.insert(key.clone()) {
+                remove.push(key);
             }
         }
-        for (key, value) in vars {
-            cmd.env(key, value);
+        let set = order
+            .into_iter()
+            .filter_map(|key| set.remove_entry(&key))
+            .collect();
+        EnvPlan {
+            set,
+            remove,
+            cwd: self.cwd,
+            stdin_pipe: self.stdin_pipe,
         }
-        for key in self.removed {
+    }
+}
+
+/// The environment a [`Spawn`] gives its child, as data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvPlan {
+    /// Variables set on the child, each key once, in assembly order.
+    pub set: Vec<(OsString, OsString)>,
+    /// Variables removed from the child, each key once: the named
+    /// removals and the swept `BOOKRACK_*` names.
+    pub remove: Vec<OsString>,
+    /// The child's working directory.
+    pub cwd: PathBuf,
+    /// Whether the child gets a piped stdin.
+    pub stdin_pipe: bool,
+}
+
+impl EnvPlan {
+    /// Apply the plan to `cmd`: set, then remove, so a key in both is
+    /// left unset.
+    pub fn apply(&self, cmd: &mut Command) {
+        cmd.envs(self.set.iter().map(|(k, v)| (k.as_os_str(), v.as_os_str())));
+        for key in &self.remove {
             cmd.env_remove(key);
         }
-        cmd.current_dir(self.cwd);
+        cmd.current_dir(&self.cwd);
         if self.stdin_pipe {
             cmd.stdin(Stdio::piped());
         }
-        cmd
+    }
+
+    /// The environment the child ends up seeing when its parent carries
+    /// `host`: the parent's variables, overridden by `set`, less
+    /// `remove`. Sorted by name, each name once.
+    pub fn composed(
+        &self,
+        host: impl Iterator<Item = (OsString, OsString)>,
+    ) -> Vec<(OsString, OsString)> {
+        let mut env: BTreeMap<OsString, OsString> = host.collect();
+        for (key, value) in &self.set {
+            env.insert(key.clone(), value.clone());
+        }
+        for key in &self.remove {
+            env.remove(key);
+        }
+        env.into_iter().collect()
     }
 }
 
@@ -253,6 +328,8 @@ impl Spawn {
 mod tests {
     use std::collections::BTreeMap;
     use std::ffi::OsString;
+
+    use bookrack_config::DAEMON_STATE_DIR_ENV;
 
     use super::*;
 
@@ -279,6 +356,7 @@ mod tests {
     fn hostile_host() -> impl Iterator<Item = (OsString, OsString)> {
         [
             ("HOME", "/host/home"),
+            ("XDG_RUNTIME_DIR", "/run/user/501"),
             ("PATH", "/usr/bin"),
             (DATA_DIR_ENV, "/host/library"),
             (REGISTRY_ENV, "/host/registry.toml"),
@@ -295,8 +373,8 @@ mod tests {
     }
 
     /// Every location the builder knows about points inside the
-    /// sandbox. Deleting one of the assignments in `build_from` drops
-    /// that variable to the host's value.
+    /// sandbox. Deleting one of the assignments drops that variable to
+    /// the host's value.
     #[test]
     fn the_builder_overrides_every_hostile_variable_it_knows() {
         let sandbox = Sandbox::new();
@@ -310,6 +388,7 @@ mod tests {
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
             "XDG_CACHE_HOME",
+            "XDG_RUNTIME_DIR",
             DATA_DIR_ENV,
             REGISTRY_ENV,
             RUNTIME_DIR_ENV,
@@ -494,6 +573,74 @@ mod tests {
         assert_eq!(
             envs.get("BOOKRACK_CONFIRM_TIMEOUT_SECS"),
             Some(&Some("3".to_string())),
+        );
+    }
+
+    /// A runtime directory override replaces the location rather than
+    /// adding a second value for the same name.
+    #[test]
+    fn a_runtime_dir_override_replaces_the_location() {
+        let sandbox = Sandbox::new();
+        let elsewhere = sandbox.path().join("short");
+        let plan = spawn(&sandbox).runtime_dir(&elsewhere).plan(hostile_host());
+        let values: Vec<&OsString> = plan
+            .set
+            .iter()
+            .filter(|(k, _)| k == RUNTIME_DIR_ENV)
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(values, [&OsString::from(elsewhere.as_os_str())]);
+    }
+
+    /// The plan is the command: applying it yields exactly what
+    /// `build_from` yields, so the tool's environment and a test
+    /// child's come out of one piece of code.
+    #[test]
+    fn the_plan_is_what_the_command_carries() {
+        let sandbox = Sandbox::new();
+        let built = spawn(&sandbox)
+            .ollama_url("http://127.0.0.1:1")
+            .without_env("CI")
+            .extra_env("BOOKRACK_LOG", "info")
+            .build_from(hostile_host());
+        let plan = spawn(&sandbox)
+            .ollama_url("http://127.0.0.1:1")
+            .without_env("CI")
+            .extra_env("BOOKRACK_LOG", "info")
+            .plan(hostile_host());
+        let mut applied = Command::new("/nonexistent/bookrack");
+        plan.apply(&mut applied);
+        assert_eq!(envs(&applied), envs(&built));
+        assert_eq!(applied.get_current_dir(), built.get_current_dir());
+    }
+
+    /// The composed environment has one value per name: the sandbox's
+    /// `HOME` and not the host's, and no trace of a key that was both
+    /// set and removed.
+    #[test]
+    fn the_composed_environment_has_one_value_per_name() {
+        let sandbox = Sandbox::new();
+        let composed = spawn(&sandbox)
+            .without_env(REGISTRY_ENV)
+            .plan(hostile_host())
+            .composed(hostile_host());
+        let homes: Vec<&OsString> = composed
+            .iter()
+            .filter(|(k, _)| k == "HOME")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(homes, [&OsString::from(sandbox.home().as_os_str())]);
+        assert!(
+            !composed.iter().any(|(k, _)| k == REGISTRY_ENV),
+            "a key set by the builder and named for removal must be absent",
+        );
+        let mut names: Vec<&OsString> = composed.iter().map(|(k, _)| k).collect();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(names.len(), before, "every name appears once");
+        assert!(
+            composed.iter().any(|(k, v)| k == "PATH" && v == "/usr/bin"),
+            "a variable the plan does not touch is inherited",
         );
     }
 }

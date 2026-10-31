@@ -48,14 +48,16 @@ mod process;
 mod sandbox;
 mod spawn;
 pub mod test_group;
-
 #[cfg(unix)]
-pub use child::endpoint_matches;
+pub mod tool;
+
 pub use child::{
     CaptureMode, DaemonProcess, Exit, Failure, FailureKind, Output, Ready, ReadyFailure, Sink,
     SpawnOpts, Stage, StreamStats,
 };
+#[cfg(unix)]
+pub use child::{endpoint_matches, endpoint_path_matches};
 pub use embed_stub::{EmbedFailure, EmbedStub, StubSpec, StubSpecError, Vectors};
 pub use process::{ProcessEnv, process_env};
 pub use sandbox::Sandbox;
-pub use spawn::{PASSTHROUGH_ENV, Spawn};
+pub use spawn::{EnvPlan, PASSTHROUGH_ENV, Spawn};
