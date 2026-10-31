@@ -55,7 +55,7 @@ pub use child::{
     CaptureMode, DaemonProcess, Exit, Failure, FailureKind, Output, Ready, ReadyFailure, Sink,
     SpawnOpts, Stage, StreamStats,
 };
-pub use embed_stub::{EmbedFailure, EmbedStub};
+pub use embed_stub::{EmbedFailure, EmbedStub, StubSpec, StubSpecError, Vectors};
 pub use process::{ProcessEnv, process_env};
 pub use sandbox::Sandbox;
 pub use spawn::{PASSTHROUGH_ENV, Spawn};
