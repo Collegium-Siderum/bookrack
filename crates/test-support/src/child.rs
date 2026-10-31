@@ -33,12 +33,17 @@
 //! A descendant that moved to a group or session of its own is outside
 //! this reach.
 //!
-//! [`DaemonProcess::wait_ready`] reads the same stdout buffer for the
+//! [`DaemonProcess::probe_ready`] reads the same stdout buffer for the
 //! daemon's ready line, then checks that the session lock is the
-//! child's own and that its control socket answers. A daemon that died
-//! during bring-up, a live one that has not finished it, and a lock an
-//! earlier daemon left behind are each a [`Failure`] at the wait,
-//! carrying the child's output.
+//! child's own, that the control socket it names is the one beside the
+//! lock, and that the socket answers `daemon.version` on a connection
+//! the probe opens and closes itself. It never kills and never consumes
+//! the harness, so a caller may cancel it and decide what comes next;
+//! [`DaemonProcess::give_up`] ends a run that is not ready by what the
+//! leader is doing at that moment, and [`DaemonProcess::wait_ready`] is
+//! the two together. Every [`Failure`] names its [`FailureKind`] and
+//! the [`Stage`] it happened at, decided by the cause that ended the
+//! wait; whatever else the teardown ran into is appended to its reason.
 //!
 //! Isolation is not this module's job: the caller builds the command
 //! through `bookrack_test_support::bookrack_cmd!`, which is the only
@@ -46,16 +51,20 @@
 
 use std::fmt;
 use std::io;
-use std::path::Path;
+#[cfg(unix)]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use bookrack_control_client::{ControlSocket, connect};
 #[cfg(unix)]
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions};
+#[cfg(unix)]
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
+#[cfg(unix)]
+use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 
@@ -72,6 +81,60 @@ const READY_PREFIX: &str = "bookrack daemon running: ";
 // setting: internal -- the harness's readiness poll interval, not a value to tune
 const READY_POLL: Duration = Duration::from_millis(20);
 
+/// File name of the control socket the daemon binds in its runtime
+/// directory, beside the session lock.
+#[cfg(unix)]
+const CONTROL_SOCKET_NAME: &str = "control.sock";
+
+/// The most the readiness probe buffers of one control-plane frame
+/// before it has seen the frame's newline.
+#[cfg(unix)]
+// setting: internal -- bounds what a misbehaving daemon can make the probe buffer, not a value to tune
+const PROBE_LINE_CAP: usize = 64 * 1024;
+
+/// The one request the readiness probe sends.
+#[cfg(unix)]
+const VERSION_REQUEST: &[u8] =
+    b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"daemon.version\",\"params\":null}\n";
+
+/// What kind of failure ended a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    /// A deadline or budget ran out with the leader still running.
+    Timeout,
+    /// The child is not a daemon that is ready: it exited first, or a
+    /// readiness check did not hold.
+    NotReady,
+    /// The leader exited, but a stream did not end cleanly.
+    CaptureFailed,
+    /// Looking at whether the leader had exited failed.
+    WaitFailed,
+    /// The streams ended cleanly, but killing the group or reaping the
+    /// leader failed.
+    ReclaimFailed,
+}
+
+/// Where a run was when it failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// Waiting for the leader, or the leader itself.
+    Run,
+    /// Handing a stream's bytes to where they are kept.
+    Capture,
+    /// Waiting for a stream to reach EOF after the leader exited.
+    Drain,
+    /// Waiting for the ready line.
+    ReadyLine,
+    /// Reading the session lock.
+    DaemonLock,
+    /// Checking the control socket the lock names.
+    Endpoint,
+    /// Calling the control socket.
+    ControlPlane,
+    /// Waiting for a leader asked to shut down.
+    Stop,
+}
+
 /// A child that exited on its own, with both streams drained to EOF.
 pub struct Exit {
     pub status: ExitStatus,
@@ -80,10 +143,18 @@ pub struct Exit {
 }
 
 /// A run that did not end cleanly: the child outlived its deadline,
-/// could not be waited on, a stream did not reach EOF without a read
-/// error, or the child's group could not be reclaimed. `stdout` and
-/// `stderr` hold whatever was read before the run was given up on.
+/// was not ready, could not be waited on, a stream did not reach EOF
+/// without a read error, or the child's group could not be reclaimed.
+/// `stdout` and `stderr` hold whatever was read before the run was
+/// given up on.
 pub struct Failure {
+    pub kind: FailureKind,
+    pub stage: Stage,
+    /// The leader's own status when it exited by itself; `None` when it
+    /// was killed or could not be reaped.
+    pub exit: Option<ExitStatus>,
+    /// The cause that ended the run, then every later problem, joined
+    /// by `"; "`.
     pub why: String,
     pub stdout: String,
     pub stderr: String,
@@ -109,6 +180,46 @@ impl fmt::Debug for Failure {
 }
 
 impl std::error::Error for Failure {}
+
+/// A daemon that passed every readiness check.
+#[derive(Debug, Clone)]
+pub struct Ready {
+    pub pid: u32,
+    /// The ready line, without its newline.
+    pub ready_line: String,
+    /// The control socket that answered.
+    pub control_sock: PathBuf,
+}
+
+/// Why [`DaemonProcess::probe_ready`] did not find the daemon ready.
+///
+/// The fields are public so a caller that cancelled the probe, and so
+/// has no value from it, can build one to hand
+/// [`DaemonProcess::give_up`].
+#[derive(Debug, Clone)]
+pub struct ReadyFailure {
+    pub kind: FailureKind,
+    pub stage: Stage,
+    /// This step's own error. Empty when the failure is the leader's
+    /// exit itself.
+    pub why: String,
+}
+
+impl ReadyFailure {
+    fn new(kind: FailureKind, stage: Stage, why: String) -> Self {
+        Self { kind, stage, why }
+    }
+
+    /// The leader exited; `why` is the step error that led to the look,
+    /// if any.
+    fn exited(why: String) -> Self {
+        Self::new(FailureKind::NotReady, Stage::Run, why)
+    }
+
+    fn not_ready(stage: Stage, why: String) -> Self {
+        Self::new(FailureKind::NotReady, stage, why)
+    }
+}
 
 /// Everything a drainer task has read so far, plus the read error
 /// that ended it early, if any.
@@ -152,9 +263,17 @@ impl Capture {
         }
     }
 
-    /// Everything read so far.
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.state.lock().unwrap().bytes).into_owned()
+    /// The first complete line read so far that starts with `prefix`,
+    /// without its newline. A line still missing its newline does not
+    /// count: a read can end part way through one.
+    fn line_starting_with(&self, prefix: &str) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        state
+            .bytes
+            .split_inclusive(|byte| *byte == b'\n')
+            .filter_map(|line| line.strip_suffix(b"\n"))
+            .find(|line| line.starts_with(prefix.as_bytes()))
+            .map(|line| String::from_utf8_lossy(line).into_owned())
     }
 
     /// Give the drainer `within` to reach EOF, then stop it either
@@ -250,10 +369,22 @@ impl Problem {
             Problem::Observe(text) | Problem::Drain(text) | Problem::Reclaim(text) => text,
         }
     }
+
+    /// The kind and stage of a run whose first problem this is.
+    fn class(&self) -> (FailureKind, Stage) {
+        match self {
+            Problem::Observe(_) => (FailureKind::WaitFailed, Stage::Run),
+            Problem::Drain(_) => (FailureKind::CaptureFailed, Stage::Drain),
+            Problem::Reclaim(_) => (FailureKind::ReclaimFailed, Stage::Run),
+        }
+    }
 }
 
 /// What a teardown found and left.
 struct Teardown {
+    /// What the teardown's own look at the leader found; a failed look
+    /// counts as not exited.
+    exited: bool,
     /// The leader's own status when it exited by itself and was reaped;
     /// `None` when it was killed or could not be reaped.
     exit: Option<ExitStatus>,
@@ -263,9 +394,9 @@ struct Teardown {
 }
 
 impl Teardown {
-    /// A [`Failure`] whose reason starts with `cause` and goes on with
-    /// every problem the teardown ran into.
-    fn failure(self, cause: String) -> Failure {
+    /// A [`Failure`] of `kind` at `stage`, whose reason starts with
+    /// `cause` and goes on with every problem the teardown ran into.
+    fn failure(self, kind: FailureKind, stage: Stage, cause: String) -> Failure {
         let mut why = cause;
         for problem in &self.problems {
             if !why.is_empty() {
@@ -274,12 +405,37 @@ impl Teardown {
             why.push_str(problem.text());
         }
         if why.is_empty() {
-            why.push_str("the child was killed before it was seen to exit");
+            why.push_str("the run was given up on");
         }
         Failure {
+            kind,
+            stage,
+            exit: self.exit,
             why,
             stdout: self.stdout,
             stderr: self.stderr,
+        }
+    }
+
+    /// The run of a leader that exited on its own: an [`Exit`] when the
+    /// teardown went cleanly, otherwise a [`Failure`] its first problem
+    /// classifies.
+    fn judged(self) -> Result<Exit, Failure> {
+        match (self.exit, self.problems.first()) {
+            (Some(status), None) => Ok(Exit {
+                status,
+                stdout: self.stdout,
+                stderr: self.stderr,
+            }),
+            (_, Some(first)) => {
+                let (kind, stage) = first.class();
+                Err(self.failure(kind, stage, String::new()))
+            }
+            (None, None) => Err(self.failure(
+                FailureKind::ReclaimFailed,
+                Stage::Run,
+                "the child was killed before it was seen to exit".to_string(),
+            )),
         }
     }
 }
@@ -291,6 +447,7 @@ pub struct DaemonProcess {
     /// group is killed before `kill_on_drop` acts on the leader alone.
     guard: GroupGuard,
     child: Child,
+    pid: u32,
     stdout: Capture,
     stderr: Capture,
     #[cfg(unix)]
@@ -328,11 +485,14 @@ impl DaemonProcess {
         #[cfg(unix)]
         cmd.process_group(0);
         let mut child = cmd.spawn()?;
-        #[cfg(unix)]
-        let pgid = child
+        let pid = child
             .id()
-            .and_then(|id| Pid::from_raw(i32::try_from(id).ok()?))
             .ok_or_else(|| io::Error::other("the spawned child has no pid"))?;
+        #[cfg(unix)]
+        let pgid = i32::try_from(pid)
+            .ok()
+            .and_then(Pid::from_raw)
+            .ok_or_else(|| io::Error::other(format!("the child's pid {pid} is not a valid pid")))?;
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr = child.stderr.take().expect("stderr is piped");
         Ok(Self {
@@ -344,6 +504,7 @@ impl DaemonProcess {
                 reaped: false,
             },
             child,
+            pid,
             stdout: Capture::start(stdout),
             stderr: Capture::start(stderr),
             #[cfg(unix)]
@@ -355,114 +516,108 @@ impl DaemonProcess {
         self.child.id()
     }
 
+    /// The daemon's ready line, once stdout holds it whole, without its
+    /// newline.
+    pub fn ready_line(&self) -> Option<String> {
+        self.stdout.line_starting_with(READY_PREFIX)
+    }
+
     /// Wait up to `within` for the daemon to be ready, and hand it
-    /// back. Ready is three facts, checked in order:
-    ///
-    /// 1. the child printed its ready line on stdout, which
-    ///    `bookrack run` does only once bring-up has returned;
-    /// 2. the session lock at `lock_path` names the child's pid, so a
-    ///    client that discovers the daemon through it reaches this
-    ///    child and not a lock an earlier daemon left behind;
-    /// 3. the control socket that lock names answers `daemon.version`
-    ///    inside what is left of `within`.
-    ///
-    /// A child that exits first, a budget that runs out first, or a
-    /// check that does not hold is a [`Failure`] carrying what the
-    /// child printed. The child's group is killed on every failure
-    /// path.
+    /// back: [`probe_ready`](Self::probe_ready), then
+    /// [`give_up`](Self::give_up) if it fails. The child's group is
+    /// killed on every failure path.
     pub async fn wait_ready(mut self, lock_path: &Path, within: Duration) -> Result<Self, Failure> {
+        match self.probe_ready(lock_path, within).await {
+            Ok(_) => Ok(self),
+            Err(failure) => Err(self.give_up(failure).await),
+        }
+    }
+
+    /// Judge, within `within`, whether the child is a daemon that is
+    /// ready. Each round checks, in order:
+    ///
+    /// 1. the leader has not exited — checked before the ready line, so
+    ///    a child that prints the line and exits in one round is not
+    ///    passed;
+    /// 2. stdout holds a complete ready line, which `bookrack run`
+    ///    prints only once bring-up has returned; without one the round
+    ///    sleeps and repeats until `within` runs out;
+    /// 3. the session lock at `lock_path` names the child's pid and a
+    ///    control socket, so a client discovering the daemon through it
+    ///    reaches this child and not a lock an earlier daemon left;
+    /// 4. that socket is the one beside the lock
+    ///    ([`endpoint_matches`]); one that is not is never dialed;
+    /// 5. the socket answers `daemon.version` inside what is left of
+    ///    `within`, on a connection the probe opens and closes itself;
+    /// 6. the leader has still not exited after the answer.
+    ///
+    /// A failure at step 3, 4, or 5 is followed by one more look at the
+    /// leader: if it has exited, that is the failure, and the step's
+    /// error is kept as its reason.
+    ///
+    /// The probe never kills and never consumes the harness. Dropped
+    /// part way, it leaves the child running and closes its connection
+    /// with it; the caller decides whether to probe again,
+    /// [`give_up`](Self::give_up), or [`stop`](Self::stop).
+    pub async fn probe_ready(
+        &mut self,
+        lock_path: &Path,
+        within: Duration,
+    ) -> Result<Ready, ReadyFailure> {
         let deadline = Instant::now() + within;
-        loop {
-            if self
-                .stdout
-                .text()
-                .lines()
-                .any(|line| line.starts_with(READY_PREFIX))
-            {
-                break;
-            }
-            match self.leader_exited() {
-                Ok(true) => {
-                    let end = self.teardown().await;
-                    let cause = match end.exit {
-                        Some(status) => {
-                            format!("the child exited with {status} before it was ready")
-                        }
-                        None => "the child exited before it was ready".to_string(),
-                    };
-                    return Err(end.failure(cause));
-                }
-                Ok(false) => {}
-                Err(err) => {
-                    return Err(self
-                        .terminate(format!("polling the child failed: {err}"))
-                        .await);
-                }
+        let ready_line = loop {
+            self.still_running()?;
+            if let Some(line) = self.ready_line() {
+                break line;
             }
             if Instant::now() >= deadline {
-                return Err(self
-                    .terminate(format!("the child printed no ready line within {within:?}"))
-                    .await);
+                return Err(ReadyFailure::new(
+                    FailureKind::Timeout,
+                    Stage::ReadyLine,
+                    format!("the child printed no ready line within {within:?}"),
+                ));
             }
             tokio::time::sleep(READY_POLL).await;
-        }
-
-        let pid = self.id();
-        let info = match bookrack_session::peek_lock(lock_path) {
-            Ok(Some(info)) if Some(info.pid) == pid => info,
-            Ok(Some(info)) => {
-                return Err(self
-                    .terminate(format!(
-                        "the session lock at {} names pid {}, not the child's {pid:?}",
-                        lock_path.display(),
-                        info.pid,
-                    ))
-                    .await);
-            }
-            Ok(None) => {
-                return Err(self
-                    .terminate(format!(
-                        "there is no session lock at {} after the ready line",
-                        lock_path.display(),
-                    ))
-                    .await);
-            }
-            Err(err) => {
-                return Err(self
-                    .terminate(format!("reading the session lock failed: {err:#}"))
-                    .await);
+        };
+        let control_sock = match self.check_and_dial(lock_path, within, deadline).await {
+            Ok(control_sock) => control_sock,
+            Err(failure) => {
+                return Err(match self.leader_exited() {
+                    Ok(true) => ReadyFailure::exited(failure.why),
+                    _ => failure,
+                });
             }
         };
-        let Some(sock) = info.control_sock else {
-            return Err(self
-                .terminate(format!(
-                    "the session lock at {} names no control socket",
-                    lock_path.display(),
-                ))
-                .await);
-        };
+        self.still_running()?;
+        Ok(Ready {
+            pid: self.pid,
+            ready_line,
+            control_sock,
+        })
+    }
 
-        let socket = ControlSocket::from_path(&sock);
-        let answer =
-            tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), async {
-                let client = connect(&socket).await?;
-                client.call_raw("daemon.version", Value::Null).await
-            })
-            .await;
-        match answer {
-            Ok(Ok(_)) => Ok(self),
-            Ok(Err(err)) => Err(self
-                .terminate(format!(
-                    "the control socket {} did not answer daemon.version: {err}",
-                    sock.display(),
-                ))
-                .await),
-            Err(_) => Err(self
-                .terminate(format!(
-                    "the control socket {} did not answer daemon.version within {within:?}",
-                    sock.display(),
-                ))
-                .await),
+    /// End a run that is not ready, by what the leader is doing now
+    /// rather than when `failure` was found.
+    ///
+    /// A leader that has exited is the failure: `NotReady` at `Run`,
+    /// with its own status, its streams drained before its group is
+    /// killed, and a reason that starts with how it exited and keeps
+    /// `failure`'s reason as a lead. A leader still running has its
+    /// group killed before the drain, and the failure is `failure`'s.
+    pub async fn give_up(mut self, failure: ReadyFailure) -> Failure {
+        let end = self.teardown().await;
+        if end.exited {
+            let mut why = match end.exit {
+                Some(status) => format!("the child exited with {status} before it was ready"),
+                None => "the child exited before it was ready".to_string(),
+            };
+            if !failure.why.is_empty() {
+                why.push_str("; ");
+                why.push_str(&failure.why);
+            }
+            end.failure(FailureKind::NotReady, Stage::Run, why)
+        } else {
+            end.failure(failure.kind, failure.stage, failure.why)
         }
     }
 
@@ -478,32 +633,42 @@ impl DaemonProcess {
             match self.leader_exited() {
                 Ok(true) => break None,
                 Ok(false) if Instant::now() >= deadline => {
-                    break Some(format!("the child did not exit within {within:?}"));
+                    break Some((
+                        FailureKind::Timeout,
+                        format!("the child did not exit within {within:?}"),
+                    ));
                 }
                 Ok(false) => {}
-                Err(err) => break Some(format!("waiting for the child failed: {err}")),
+                Err(err) => {
+                    break Some((
+                        FailureKind::WaitFailed,
+                        format!("waiting for the child failed: {err}"),
+                    ));
+                }
             }
             tokio::time::sleep(READY_POLL.min(deadline.saturating_duration_since(Instant::now())))
                 .await;
         };
         let end = self.teardown().await;
-        match (cause, end.exit) {
-            (None, Some(status)) if end.problems.is_empty() => Ok(Exit {
-                status,
-                stdout: end.stdout,
-                stderr: end.stderr,
-            }),
-            (cause, _) => Err(end.failure(cause.unwrap_or_default())),
+        match cause {
+            Some((kind, why)) => Err(end.failure(kind, Stage::Run, why)),
+            None => end.judged(),
         }
     }
 
-    /// Send `SIGTERM` and then [`exit_within`](Self::exit_within).
+    /// Send `SIGTERM` and then [`exit_within`](Self::exit_within), with
+    /// a failure at [`Stage::Run`] reported at [`Stage::Stop`].
     /// `Child::kill` is `SIGKILL`, which skips the daemon's graceful
     /// path, so the signal is sent to the leader directly.
     pub async fn stop(self, within: Duration) -> Result<Exit, Failure> {
         let mut this = self;
         this.send_term();
-        this.exit_within(within).await
+        this.exit_within(within).await.map_err(|mut failure| {
+            if failure.stage == Stage::Run {
+                failure.stage = Stage::Stop;
+            }
+            failure
+        })
     }
 
     /// Ask the leader to shut down gracefully. Sent to the leader alone:
@@ -518,9 +683,60 @@ impl DaemonProcess {
         let _ = self.child.start_kill();
     }
 
-    /// Tear the run down with `cause` as the reason it failed.
-    async fn terminate(&mut self, cause: String) -> Failure {
-        self.teardown().await.failure(cause)
+    /// Steps 1 and 6 of [`probe_ready`](Self::probe_ready): a leader
+    /// that has exited is the failure itself.
+    fn still_running(&mut self) -> Result<(), ReadyFailure> {
+        match self.leader_exited() {
+            Ok(false) => Ok(()),
+            Ok(true) => Err(ReadyFailure::exited(String::new())),
+            Err(err) => Err(ReadyFailure::new(
+                FailureKind::WaitFailed,
+                Stage::Run,
+                format!("polling the child failed: {err}"),
+            )),
+        }
+    }
+
+    /// Steps 3 to 5 of [`probe_ready`](Self::probe_ready). Returns the
+    /// control socket that answered.
+    async fn check_and_dial(
+        &self,
+        lock_path: &Path,
+        within: Duration,
+        deadline: Instant,
+    ) -> Result<PathBuf, ReadyFailure> {
+        let lock_failure = |why| ReadyFailure::not_ready(Stage::DaemonLock, why);
+        let sock = match bookrack_session::peek_lock(lock_path) {
+            Ok(Some(info)) if info.pid == self.pid => match info.control_sock {
+                Some(sock) => sock,
+                None => {
+                    return Err(lock_failure(format!(
+                        "the session lock at {} names no control socket",
+                        lock_path.display(),
+                    )));
+                }
+            },
+            Ok(Some(info)) => {
+                return Err(lock_failure(format!(
+                    "the session lock at {} names pid {}, not the child's {}",
+                    lock_path.display(),
+                    info.pid,
+                    self.pid,
+                )));
+            }
+            Ok(None) => {
+                return Err(lock_failure(format!(
+                    "there is no session lock at {} after the ready line",
+                    lock_path.display(),
+                )));
+            }
+            Err(err) => {
+                return Err(lock_failure(format!(
+                    "reading the session lock failed: {err:#}"
+                )));
+            }
+        };
+        dial(lock_path, sock, within, deadline).await
     }
 
     /// End the run: look afresh at whether the leader has exited, kill
@@ -553,6 +769,7 @@ impl DaemonProcess {
         };
         let status = self.reap(&mut problems).await;
         Teardown {
+            exited,
             exit: status.filter(|_| exited),
             stdout,
             stderr,
@@ -588,6 +805,16 @@ impl DaemonProcess {
         }
     }
 
+    #[cfg(not(unix))]
+    fn kill_group(&mut self, problems: &mut Vec<Problem>) {
+        if matches!(self.child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        if let Err(err) = self.child.start_kill() {
+            problems.push(Problem::Reclaim(format!("killing it failed: {err}")));
+        }
+    }
+
     /// Whether a failed group signal only means that no live member was
     /// left. `ESRCH` says so everywhere. XNU skips zombies when it
     /// signals a group and answers `EPERM` when every member it found
@@ -601,16 +828,6 @@ impl DaemonProcess {
             || (cfg!(target_vendor = "apple")
                 && errno == Some(Errno::PERM.raw_os_error())
                 && matches!(self.leader_exited(), Ok(true)))
-    }
-
-    #[cfg(not(unix))]
-    fn kill_group(&mut self, problems: &mut Vec<Problem>) {
-        if matches!(self.child.try_wait(), Ok(Some(_))) {
-            return;
-        }
-        if let Err(err) = self.child.start_kill() {
-            problems.push(Problem::Reclaim(format!("killing it failed: {err}")));
-        }
     }
 
     /// Reap the leader within [`SETTLE_DEADLINE`], disarming the guard
@@ -654,6 +871,187 @@ impl DaemonProcess {
                 .map(Problem::Drain),
         );
         (stdout, stderr)
+    }
+}
+
+/// Whether `control_sock`, as a session lock at `lock_path` names it,
+/// is the control socket a daemon owning that lock binds: all four of
+///
+/// 1. an absolute path whose components are the root and plain names,
+///    with no `..` (`Path::components` already folds an interior `.`
+///    away);
+/// 2. named `control.sock`;
+/// 3. in the lock's own directory, both sides canonicalized, so a
+///    directory reached through an alias still matches;
+/// 4. an existing socket that is not itself a symbolic link.
+///
+/// The daemon binds `control.sock` in its runtime directory, writes the
+/// lock in the same directory, and records the path as it was given, so
+/// a lock naming anything else routes a client somewhere this lock's
+/// daemon is not. The check and a later connection are not atomic: it
+/// rules out a link already in the tree, not one swapped in alongside.
+#[cfg(unix)]
+pub fn endpoint_matches(lock_path: &Path, control_sock: &Path) -> Result<(), String> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let shown = control_sock.display();
+    if !control_sock.is_absolute()
+        || control_sock
+            .components()
+            .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(format!(
+            "the control socket {shown} is not an absolute path free of `.` and `..`"
+        ));
+    }
+    if control_sock.file_name() != Some(std::ffi::OsStr::new(CONTROL_SOCKET_NAME)) {
+        return Err(format!(
+            "the control socket {shown} is not named {CONTROL_SOCKET_NAME}"
+        ));
+    }
+    let lock_dir = match lock_path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let sock_dir = control_sock.parent().unwrap_or(Path::new("/"));
+    let resolve = |dir: &Path| {
+        dir.canonicalize()
+            .map_err(|err| format!("resolving {} failed: {err}", dir.display()))
+    };
+    if resolve(sock_dir)? != resolve(lock_dir)? {
+        return Err(format!(
+            "the control socket {shown} is not in the directory of the session lock at {}",
+            lock_path.display(),
+        ));
+    }
+    let meta = std::fs::symlink_metadata(control_sock)
+        .map_err(|err| format!("the control socket {shown} cannot be inspected: {err}"))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("the control socket {shown} is a symbolic link"));
+    }
+    if !meta.file_type().is_socket() {
+        return Err(format!("the control socket {shown} is not a socket"));
+    }
+    Ok(())
+}
+
+/// Steps 4 and 5 of [`DaemonProcess::probe_ready`]: check the endpoint,
+/// then call it inside what is left of the budget.
+#[cfg(unix)]
+async fn dial(
+    lock_path: &Path,
+    sock: PathBuf,
+    within: Duration,
+    deadline: Instant,
+) -> Result<PathBuf, ReadyFailure> {
+    endpoint_matches(lock_path, &sock)
+        .map_err(|why| ReadyFailure::not_ready(Stage::Endpoint, why))?;
+    let left = deadline.saturating_duration_since(Instant::now());
+    match tokio::time::timeout(left, call_daemon_version(&sock)).await {
+        Ok(Ok(())) => Ok(sock),
+        Ok(Err(reason)) => Err(ReadyFailure::not_ready(
+            Stage::ControlPlane,
+            format!(
+                "the control socket {} did not answer daemon.version: {reason}",
+                sock.display(),
+            ),
+        )),
+        Err(_) => Err(ReadyFailure::new(
+            FailureKind::Timeout,
+            Stage::ControlPlane,
+            format!(
+                "the control socket {} did not answer daemon.version within {within:?}",
+                sock.display(),
+            ),
+        )),
+    }
+}
+
+/// Not supported off unix: the probe fails rather than pass a daemon it
+/// could not check.
+#[cfg(not(unix))]
+async fn dial(
+    _lock_path: &Path,
+    _sock: PathBuf,
+    _within: Duration,
+    _deadline: Instant,
+) -> Result<PathBuf, ReadyFailure> {
+    Err(ReadyFailure::not_ready(
+        Stage::Endpoint,
+        "checking the control socket is not supported on this platform".to_string(),
+    ))
+}
+
+/// Send `daemon.version` on a connection of its own and read frames
+/// until the answer. The connection lives in this future, so it closes
+/// with it on every path, cancellation included.
+#[cfg(unix)]
+async fn call_daemon_version(sock: &Path) -> Result<(), String> {
+    let mut stream = tokio::net::UnixStream::connect(sock)
+        .await
+        .map_err(|err| format!("connecting failed: {err}"))?;
+    stream
+        .write_all(VERSION_REQUEST)
+        .await
+        .map_err(|err| format!("sending the request failed: {err}"))?;
+    let mut pending = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
+            let frame: Vec<u8> = pending.drain(..=end).collect();
+            if read_frame(&frame[..end])? == Frame::Answer {
+                return Ok(());
+            }
+        }
+        if pending.len() > PROBE_LINE_CAP {
+            return Err(format!(
+                "a frame ran past {PROBE_LINE_CAP} bytes without a newline"
+            ));
+        }
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|err| format!("reading the answer failed: {err}"))?;
+        if read == 0 {
+            return Err("the connection closed before the answer".to_string());
+        }
+        pending.extend_from_slice(&chunk[..read]);
+    }
+}
+
+/// A frame the probe accepts.
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum Frame {
+    /// A server-initiated event, which carries no `id`.
+    Event,
+    /// The success answer to the probe's one request.
+    Answer,
+}
+
+/// Classify one frame, newline stripped. Anything but an event or the
+/// success answer to request `1` is a violation: the connection carries
+/// no other request.
+#[cfg(unix)]
+fn read_frame(bytes: &[u8]) -> Result<Frame, String> {
+    let value: Value =
+        serde_json::from_slice(bytes).map_err(|err| format!("a frame is not JSON: {err}"))?;
+    let Some(object) = value.as_object() else {
+        return Err(format!("a frame is not a JSON object: {value}"));
+    };
+    match object.get("id") {
+        None if object.get("method").and_then(Value::as_str) == Some("event") => Ok(Frame::Event),
+        None => Err(format!(
+            "a frame is neither an answer nor an event: {value}"
+        )),
+        Some(id) if id.as_u64() != Some(1) => {
+            Err(format!("a frame answers id {id}, which was never sent"))
+        }
+        Some(_) if object.contains_key("result") => Ok(Frame::Answer),
+        Some(_) => match object.get("error") {
+            Some(error) => Err(format!("the answer is an error: {error}")),
+            None => Err(format!("the answer has neither result nor error: {value}")),
+        },
     }
 }
 
@@ -730,6 +1128,12 @@ mod tests {
             failure.why.contains("injected observation failure"),
             "the failure must carry the observation error: {failure}",
         );
+        assert_eq!(
+            (failure.kind, failure.stage),
+            (FailureKind::WaitFailed, Stage::Run),
+            "{failure}"
+        );
+        assert!(failure.exit.is_none(), "a killed leader has no own status");
     }
 
     /// A clean exit whose group could not be killed is not a clean exit:
@@ -751,6 +1155,11 @@ mod tests {
                 .why
                 .contains("killing the group failed: injected group kill failure"),
             "the failure must name the group kill: {failure}",
+        );
+        assert_eq!(
+            (failure.kind, failure.stage),
+            (FailureKind::ReclaimFailed, Stage::Run),
+            "{failure}"
         );
     }
 
@@ -785,9 +1194,75 @@ mod tests {
             "the failure must carry the reap error: {failure}",
         );
         assert_eq!(
+            (failure.kind, failure.stage),
+            (FailureKind::ReclaimFailed, Stage::Run),
+            "{failure}"
+        );
+        assert!(failure.exit.is_none(), "an unreaped leader has no status");
+        assert_eq!(
             kills.load(Ordering::SeqCst),
             2,
             "the teardown and then the still-armed guard each signal the group",
         );
+    }
+
+    /// A failed lock or endpoint check is followed by one more look at
+    /// the leader, and a leader seen to have exited there is the
+    /// failure, with the check's own error kept as its reason.
+    #[tokio::test]
+    async fn a_lock_or_endpoint_failure_rechecks_the_leader() {
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        let foreign = elsewhere.path().join("control.sock");
+        for (lock_pid, expected) in [
+            ("1", "names pid 1"),
+            ("", "is not in the directory of the session lock"),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let lock = dir.path().join("session.lock");
+            let looks = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&looks);
+            let syscalls = Syscalls {
+                observe: Arc::new(move |_| Ok(counted.fetch_add(1, Ordering::SeqCst) > 0)),
+                ..Syscalls::real()
+            };
+            let script = "printf 'pid=%s\\nmcp=127.0.0.1:1\\ncontrol_sock=%s\\n' \"${3:-$$}\" \"$2\" \
+                 > \"$1\"; echo 'bookrack daemon running: ready'; exec sleep 30";
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c")
+                .arg(script)
+                .arg("sh")
+                .arg(&lock)
+                .arg(&foreign)
+                .arg(lock_pid);
+            let mut child =
+                DaemonProcess::spawn_inner(cmd, Stdio::null(), syscalls).expect("spawn sh");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while child.ready_line().is_none() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the script printed no ready line"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            let failure = match child.probe_ready(&lock, Duration::from_secs(5)).await {
+                Err(failure) => failure,
+                Ok(ready) => panic!("a failed check was read as ready: {ready:?}"),
+            };
+            assert_eq!(
+                (failure.kind, failure.stage),
+                (FailureKind::NotReady, Stage::Run),
+                "pid {lock_pid:?}: a leader seen to have exited at the recheck is the failure: {failure:?}",
+            );
+            assert!(
+                failure.why.contains(expected),
+                "pid {lock_pid:?}: the check's own error must be kept: {failure:?}",
+            );
+            assert_eq!(
+                looks.load(Ordering::SeqCst),
+                2,
+                "pid {lock_pid:?}: one look before the ready line, one recheck",
+            );
+        }
     }
 }

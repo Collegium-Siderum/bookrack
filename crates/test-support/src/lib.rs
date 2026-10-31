@@ -49,7 +49,9 @@ mod sandbox;
 mod spawn;
 pub mod test_group;
 
-pub use child::{DaemonProcess, Exit, Failure};
+#[cfg(unix)]
+pub use child::endpoint_matches;
+pub use child::{DaemonProcess, Exit, Failure, FailureKind, Ready, ReadyFailure, Stage};
 pub use embed_stub::{EmbedFailure, EmbedStub};
 pub use process::{ProcessEnv, process_env};
 pub use sandbox::Sandbox;

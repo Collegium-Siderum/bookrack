@@ -1140,7 +1140,6 @@ name = "bookrack-test-support"
 version = "0.14.0-dev"
 dependencies = [
  "bookrack-config",
- "bookrack-control-client",
  "bookrack-core",
  "bookrack-session",
  "rustix",

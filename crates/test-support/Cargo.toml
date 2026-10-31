@@ -9,8 +9,6 @@ repository.workspace = true
 bookrack-core = { path = "../core" }
 bookrack-config = { path = "../config" }
 bookrack-session = { path = "../session" }
-# Dials a child daemon's control socket for the readiness check.
-bookrack-control-client = { path = "../control-client" }
 serde_json.workspace = true
 tempfile.workspace = true
 # `process`/`io-util` drive a child and drain its streams; `time` the
