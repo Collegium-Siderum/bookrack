@@ -22,11 +22,9 @@ use bookrack_catalog::{Catalog, NewIntake};
 use bookrack_core::ItemKind;
 use bookrack_corpus::Corpus;
 use bookrack_refs::Refs;
-use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
+use bookrack_test_support::{DaemonProcess, EmbedStub, Sandbox, bookrack_cmd};
 use serde_json::Value;
 use tokio::process::Command;
-
-use crate::common::DaemonProcess;
 
 const STORED_PATH: &str = "aa/bb/source.txt";
 

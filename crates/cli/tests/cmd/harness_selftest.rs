@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pins the promises of the process plumbing in `common`. `sh` stands
-//! in for the child wherever the promise is about the plumbing itself;
-//! a real `bookrack run` is the child where it is about how the
+//! Pins the promises of `bookrack_test_support::DaemonProcess`. `sh`
+//! stands in for the child wherever the promise is about the plumbing
+//! itself; a real `bookrack run` is the child where it is about how the
 //! daemon's readiness looks from outside.
 
 #![cfg(unix)]
@@ -11,10 +11,8 @@ use std::ffi::OsStr;
 use std::os::unix::net::UnixListener;
 use std::time::{Duration, Instant};
 
-use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
+use bookrack_test_support::{DaemonProcess, EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
-
-use crate::common::DaemonProcess;
 
 fn sh(script: &str) -> DaemonProcess {
     let mut cmd = Command::new("sh");

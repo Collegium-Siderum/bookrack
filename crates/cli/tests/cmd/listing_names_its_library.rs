@@ -28,11 +28,9 @@ use std::time::Duration;
 
 use bookrack_catalog::{Catalog, NewIntake};
 use bookrack_core::ItemKind;
-use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
+use bookrack_test_support::{DaemonProcess, EmbedStub, Sandbox, bookrack_cmd};
 use serde_json::Value;
 use tokio::process::Command;
-
-use crate::common::DaemonProcess;
 
 /// Register one book and one paper in a root, named after it.
 ///

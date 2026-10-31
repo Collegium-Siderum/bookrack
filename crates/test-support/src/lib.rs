@@ -32,17 +32,24 @@
 //! process and a client as a child points them at the same tree by
 //! construction rather than by two matching sets of assignments.
 //!
+//! A test that drives the child itself, rather than only its exit,
+//! hands the built command to [`DaemonProcess`], which drains both
+//! output streams while the child runs and judges its readiness and
+//! exit.
+//!
 //! What this crate does **not** do is start from an empty environment:
 //! it isolates relative to the parent process, keeping `PATH`, `CI`,
 //! and the PDFium pointer that turn a missing native library into a
 //! loud failure. Starting from nothing is `scripts/test-clean.sh`.
 
+mod child;
 mod embed_stub;
 mod process;
 mod sandbox;
 mod spawn;
 pub mod test_group;
 
+pub use child::{DaemonProcess, Exit, Failure};
 pub use embed_stub::{EmbedFailure, EmbedStub};
 pub use process::{ProcessEnv, process_env};
 pub use sandbox::Sandbox;

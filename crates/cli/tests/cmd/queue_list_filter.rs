@@ -19,11 +19,9 @@
 
 use std::time::Duration;
 
-use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
+use bookrack_test_support::{DaemonProcess, EmbedStub, Sandbox, bookrack_cmd};
 use serde_json::Value;
 use tokio::process::Command;
-
-use crate::common::DaemonProcess;
 
 /// Run one client command and return its exit success, stdout and
 /// stderr.

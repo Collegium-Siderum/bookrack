@@ -30,10 +30,8 @@
 
 use std::time::Duration;
 
-use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
+use bookrack_test_support::{DaemonProcess, EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
-
-use crate::common::DaemonProcess;
 
 /// A registry naming two libraries, with `alpha` as the default and
 /// the library the daemon is started under.

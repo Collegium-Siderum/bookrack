@@ -53,9 +53,10 @@ macro_rules! bookrack_cmd {
 /// into a sandbox.
 ///
 /// Build it with [`bookrack_cmd!`], weaken it with the named methods,
-/// then call [`Spawn::build`] for a [`std::process::Command`]. Async
-/// call sites convert with `tokio::process::Command::from`, which keeps
-/// this crate free of a tokio dependency.
+/// then call [`Spawn::build`] for a [`std::process::Command`]. `Spawn`
+/// itself is synchronous: async call sites convert with
+/// `tokio::process::Command::from` and hand the result to
+/// [`DaemonProcess`](crate::DaemonProcess).
 pub struct Spawn {
     bin: PathBuf,
     home: PathBuf,

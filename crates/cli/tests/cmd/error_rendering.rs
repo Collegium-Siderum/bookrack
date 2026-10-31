@@ -14,10 +14,8 @@
 
 use std::time::Duration;
 
-use bookrack_test_support::{EmbedFailure, EmbedStub, Sandbox, bookrack_cmd};
+use bookrack_test_support::{DaemonProcess, EmbedFailure, EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
-
-use crate::common::DaemonProcess;
 
 /// Bring a daemon up on a scratch data root and run `args` through it,
 /// returning the client invocation's exit status and stderr.

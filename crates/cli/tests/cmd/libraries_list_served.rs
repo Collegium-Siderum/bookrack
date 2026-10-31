@@ -23,10 +23,8 @@
 
 use std::time::Duration;
 
-use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
+use bookrack_test_support::{DaemonProcess, EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
-
-use crate::common::DaemonProcess;
 
 /// A registry naming two libraries, `alpha` the default.
 fn two_library_world() -> Sandbox {

@@ -5,9 +5,6 @@
 //! One binary installs one process environment; this one installs none,
 //! and the guard below refuses a module that would.
 
-#[path = "../common/mod.rs"]
-mod common;
-
 bookrack_test_support::test_group!("cmd", spec = None);
 
 mod config_effective;

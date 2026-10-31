@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Process plumbing for the `bookrack run` end-to-end tests.
+//! Process plumbing for tests that drive a `bookrack` child.
 //!
 //! Spawning the daemon as a child with piped stdout/stderr and then
 //! blocking on `wait()` deadlocks the moment either pipe's ~64 KiB
@@ -30,8 +30,6 @@
 //! through `bookrack_test_support::bookrack_cmd!`, which is the only
 //! owner of the child's environment.
 
-#![allow(dead_code)]
-
 use std::fmt;
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
@@ -46,12 +44,14 @@ use tokio::task::JoinHandle;
 
 /// How long a stream may take to reach EOF once the child has exited,
 /// and how long a killed child may take to be reaped.
+// setting: internal -- how long the harness waits on a child's streams and reap, not a value to tune
 const SETTLE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Start of the line `bookrack run` prints once bring-up has returned.
 const READY_PREFIX: &str = "bookrack daemon running: ";
 
 /// How often [`DaemonProcess::wait_ready`] looks at the child's stdout.
+// setting: internal -- the harness's readiness poll interval, not a value to tune
 const READY_POLL: Duration = Duration::from_millis(20);
 
 /// A child that exited on its own, with both streams drained to EOF.

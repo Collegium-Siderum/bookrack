@@ -38,10 +38,8 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use bookrack_test_support::{EmbedStub, Sandbox, Spawn, bookrack_cmd};
+use bookrack_test_support::{DaemonProcess, EmbedStub, Sandbox, Spawn, bookrack_cmd};
 use tokio::process::Command;
-
-use crate::common::DaemonProcess;
 
 const LIBRARY: &str = "main";
 const PROFILE: &str = "scan-alternate-model";

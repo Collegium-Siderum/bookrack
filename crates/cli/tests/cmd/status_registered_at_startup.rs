@@ -15,10 +15,8 @@
 use std::time::Duration;
 
 use bookrack_config::{LibraryKind, new_manifest, write_manifest};
-use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
+use bookrack_test_support::{DaemonProcess, EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
-
-use crate::common::DaemonProcess;
 
 /// `bookrack --json status` against the given sandbox, parsed.
 async fn status_card(sandbox: &Sandbox) -> serde_json::Value {

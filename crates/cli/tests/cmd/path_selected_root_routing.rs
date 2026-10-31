@@ -18,11 +18,9 @@
 use std::time::Duration;
 
 use bookrack_catalog::Catalog;
-use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
+use bookrack_test_support::{DaemonProcess, EmbedStub, Sandbox, bookrack_cmd};
 use serde_json::Value;
 use tokio::process::Command;
-
-use crate::common::DaemonProcess;
 
 /// Run the client with `args` and return its exit code and both streams.
 async fn client(cmd: Command, args: &[&str]) -> (Option<i32>, String, String) {

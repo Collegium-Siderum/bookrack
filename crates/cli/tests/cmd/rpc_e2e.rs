@@ -8,10 +8,8 @@
 
 use std::time::Duration;
 
-use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
+use bookrack_test_support::{DaemonProcess, EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
-
-use crate::common::DaemonProcess;
 
 #[tokio::test]
 async fn library_info_round_trips_through_running_daemon() {
