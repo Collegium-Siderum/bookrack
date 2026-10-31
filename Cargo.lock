@@ -1142,8 +1142,11 @@ dependencies = [
  "bookrack-config",
  "bookrack-core",
  "bookrack-session",
+ "clap",
  "rustix",
+ "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
 ]

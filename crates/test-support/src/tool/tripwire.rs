@@ -200,6 +200,14 @@ pub fn resolve(value: &Path, cwd: &Path) -> PathBuf {
 /// order. T7 is [`run_binary_view`], which a caller runs only when this
 /// returns nothing.
 pub fn check(input: &Input<'_>) -> Vec<Finding> {
+    let mut findings = check_before_dotenv(input);
+    findings.extend(check_dotenv(&input.host.cwd(), input.dotenv));
+    findings
+}
+
+/// [`check`] without T4: the rules a command runs before it places a
+/// `.env`, so T3 walks the tree before anything is written into it.
+pub fn check_before_dotenv(input: &Input<'_>) -> Vec<Finding> {
     let mut findings = Vec::new();
     findings.extend(check_environment(input));
     findings.extend(check_registry(
@@ -207,7 +215,6 @@ pub fn check(input: &Input<'_>) -> Vec<Finding> {
         input.host.path(),
     ));
     findings.extend(check_tree(input.dir, &mut |_| {}));
-    findings.extend(check_dotenv(&input.host.cwd(), input.dotenv));
     findings.extend(check_portable_layer(input.dir));
     findings.extend(check_socket_path(input.host));
     findings.extend(argv::check(
@@ -414,7 +421,7 @@ pub fn check_tree(root: &Path, before_stat: &mut dyn FnMut(&Path)) -> Vec<Findin
 
 /// T4: no `.env` on the way up from `cwd` to the root, except, in a
 /// dotenv run, the one this run placed in `cwd` itself, byte for byte.
-fn check_dotenv(cwd: &Path, placed: Option<&PlacedDotenv>) -> Vec<Finding> {
+pub fn check_dotenv(cwd: &Path, placed: Option<&PlacedDotenv>) -> Vec<Finding> {
     let mut findings = Vec::new();
     for dir in cwd.ancestors() {
         let candidate = dir.join(".env");

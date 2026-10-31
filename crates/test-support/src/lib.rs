@@ -15,15 +15,18 @@
 //! someone writes the next test. This crate is built so that **not
 //! isolating cannot be expressed**:
 //!
-//! - [`bookrack_cmd!`] is the only way to name the `bookrack` binary,
-//!   and it returns a builder whose environment is already redirected.
-//!   There is no raw constructor and no `isolate: bool`; every
-//!   weakening is a named method, so the departures are greppable.
+//! - [`bookrack_cmd!`] and [`bookrack_bin!`] are the two ways to name the
+//!   `bookrack` binary. The first returns a builder whose environment is
+//!   already redirected; there is no raw constructor and no
+//!   `isolate: bool`, every weakening is a named method, so the
+//!   departures are greppable. The second returns a handle that only the
+//!   sandbox tool ([`tool::Session`]) can run, inside a sandbox it built.
 //! - [`process_env`] is the only way to redirect the test binary's own
 //!   environment, and it installs one spec per process.
 //! - `scripts/leak-check.sh` refuses a test file that names
-//!   `CARGO_BIN_EXE_bookrack`, mutates the process environment by hand,
-//!   or sets a `BOOKRACK_*` variable on a child.
+//!   `CARGO_BIN_EXE_bookrack` outside those two macros, mutates the
+//!   process environment by hand, or sets a `BOOKRACK_*` variable on a
+//!   child.
 //! - [`test_group!`] guards a grouped integration test binary: every
 //!   sibling file is declared in its `main.rs`, and every file installs
 //!   the one spec the group is built around.

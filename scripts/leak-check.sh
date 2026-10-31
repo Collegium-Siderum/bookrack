@@ -56,11 +56,14 @@ else
   echo "note: $denylist absent, rule 3 skipped"
 fi
 
-# 4. Test binaries must not name the bookrack executable. The only way
-#    to reach it is `bookrack_test_support::bookrack_cmd!`, which
-#    returns a builder whose environment is already redirected.
-if git grep -nE 'CARGO_BIN_EXE_bookrack' -- 'crates/*/tests/*'; then
-  echo "LEAK: a test names the bookrack binary directly; use bookrack_cmd!"
+# 4. Test binaries must not name the bookrack executable. The two ways
+#    to reach it are `bookrack_test_support::bookrack_cmd!`, which
+#    returns a builder whose environment is already redirected, and
+#    `bookrack_bin!`, which returns a handle only the sandbox tool can
+#    run. The match is exact: `CARGO_BIN_EXE_bookrack-sandbox` is the
+#    tool's own binary, which its tests name directly.
+if git grep -nE 'CARGO_BIN_EXE_bookrack([^-_[:alnum:]]|$)' -- 'crates/*/tests/*'; then
+  echo "LEAK: a test names the bookrack binary directly; use bookrack_cmd! or bookrack_bin!"
   fail=1
 fi
 

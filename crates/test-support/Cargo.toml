@@ -5,11 +5,21 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "bookrack-sandbox"
+path = "src/bin/bookrack-sandbox.rs"
+
 [dependencies]
 bookrack-core = { path = "../core" }
 bookrack-config = { path = "../config" }
 bookrack-session = { path = "../session" }
+# The sandbox tool's command line.
+clap.workspace = true
+# State files, call records, and the binary record the sandbox tool keeps.
+serde.workspace = true
 serde_json.workspace = true
+# The copied binary's digest and the tree signature.
+sha2.workspace = true
 tempfile.workspace = true
 # `process`/`io-util` drive a child and drain its streams; `time` the
 # readiness polls and deadlines; `rt` the drainer tasks; `sync` the
