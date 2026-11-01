@@ -435,11 +435,15 @@ pub fn config(name: String, sets: Vec<(String, String)>, unset: Vec<String>) -> 
                 message: format!("no library named '{name}' in the registry"),
             })
         })?;
-    let data_dir = entry.data_dir;
+    let data_dir = entry.data_dir.clone();
 
     if sets.is_empty() && unset.is_empty() {
         return print_root_config(&name, &data_dir);
     }
+
+    // Every edit writes into the root, and a missing root would be
+    // created by the first one: judge the root's identity before any.
+    refuse_offline_write_to(&entry).map_err(root_identity_refused)?;
 
     // An `index_profile` reference must resolve and pass static
     // validation before it is written; stamp consistency is not checked

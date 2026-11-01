@@ -270,3 +270,65 @@ fn purge_still_deletes_a_root_that_carries_its_identity() {
         "alpha leaves the registry: {registry}"
     );
 }
+
+const EDIT_ALPHA: &[&str] = &["libraries", "config", "alpha", "search.top_k=8"];
+
+#[test]
+fn config_edit_refuses_an_empty_mount_point() {
+    let world = World::new();
+    world.empty_alpha();
+    let before = world.snapshot();
+    let out = world.run(EDIT_ALPHA);
+    world.assert_refused(&before, &out, "alpha", Fault::NoManifest);
+}
+
+#[test]
+fn config_edit_does_not_create_a_missing_root() {
+    let world = World::new();
+    world.missing_alpha();
+    let before = world.snapshot();
+    let out = world.run(EDIT_ALPHA);
+    world.assert_refused(&before, &out, "alpha", Fault::NoManifest);
+}
+
+#[test]
+fn config_edit_refuses_another_librarys_root() {
+    let world = World::new();
+    world.foreign_alpha();
+    let before = world.snapshot();
+    let out = world.run(EDIT_ALPHA);
+    world.assert_refused(&before, &out, "alpha", Fault::AnotherUuid);
+}
+
+#[test]
+fn config_index_profile_does_not_mint_on_an_empty_mount_point() {
+    let world = World::new();
+    world.empty_alpha();
+    let before = world.snapshot();
+    let out = world.run(&[
+        "libraries",
+        "config",
+        "alpha",
+        "index_profile=qwen3-0.6b-default",
+    ]);
+    world.assert_refused(&before, &out, "alpha", Fault::NoManifest);
+}
+
+#[test]
+fn config_print_still_reads_an_empty_mount_point() {
+    let world = World::new();
+    world.empty_alpha();
+    let before = world.snapshot();
+    let out = world.run(&["libraries", "config", "alpha"]);
+    assert_success(&out, "print alpha's config");
+    assert_eq!(world.snapshot(), before, "printing writes nothing");
+}
+
+#[test]
+fn config_edit_still_writes_a_root_that_carries_its_identity() {
+    let world = World::new();
+    let out = world.run(EDIT_ALPHA);
+    assert_success(&out, "edit alpha's config");
+    let written = fs::read_to_string(world.alpha.join("config.toml")).expect("read config.toml");
+    assert!(written.contains("top_k = 8"), "{written}");
+}
