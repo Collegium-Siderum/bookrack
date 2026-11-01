@@ -121,6 +121,22 @@ release workflow extracts the matching section verbatim from this file.
   counts and removes in one step, so one of the two is refused: the
   submit with `-32010` when the unmount landed first, the unmount for
   queued work when the row did.
+- **Commands that write to a library without a daemon refuse a root that
+  does not carry its identity.** The daemon already refused to serve a
+  registered library whose root holds no identity manifest, or one
+  recording another uuid; the commands that write from the CLI process
+  did not check. With the volume disconnected they wrote into the empty
+  mount point, and with another library's volume mounted there they
+  changed that library under this one's name. `distill build`,
+  `index-profile apply`, `libraries config` with an edit, the three
+  `doctor` repairs, and `libraries remove --purge` now refuse such a root
+  before they read or write anything in it, dry runs included (exit 2),
+  whether the library is selected by name or its root by path, with the
+  hint the daemon gives, ending in running the command again.
+  `libraries remove --purge` no longer deletes another library's data
+  root, `libraries config` no longer creates a missing one, and setting
+  an index profile no longer mints a new identity for a library the
+  registry already knows.
 
 ### Security
 

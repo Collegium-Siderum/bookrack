@@ -123,6 +123,13 @@ refused root is left as it was found. An entry with no cached uuid (a
 read-only root registered without a manifest) is served as before, and
 `doctor` reports the gap.
 
+The commands that write to a library without a daemon — `distill
+build`, `index-profile apply`, `libraries config` with an edit, the
+`doctor` repairs, and `libraries remove --purge` — refuse the same roots
+the same way, before they read or write anything there, with a hint
+that ends in running the command again. A root given by path is
+checked against the entry registered at that path.
+
 Every registry verb resolves locally with no running daemon, so it
 works during a fresh install or a recovery:
 
