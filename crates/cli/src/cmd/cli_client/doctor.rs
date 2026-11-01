@@ -105,6 +105,15 @@ pub async fn run(
     if close_abandoned_runs {
         refuse_repair_under_a_daemon(runtime_dir.as_deref(), "--close-abandoned-runs").await?;
     }
+    // Every repair writes into the data root, so the root's identity is
+    // judged here too, before any install. A root that does not resolve
+    // is left to the repair's own resolution, which reports it with the
+    // repair's context.
+    if (rename_envelopes || backfill_ocr_derivation || close_abandoned_runs)
+        && let Ok(cfg) = bookrack_config::Config::resolve(selection)
+    {
+        bookrack_runtime::identity_check::refuse_offline_write(&cfg)?;
+    }
     // The installs are host-level actions: they land in the per-user
     // managed directories regardless of whether a daemon is running,
     // so they happen before the report path forks. A running daemon

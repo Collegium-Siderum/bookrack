@@ -47,6 +47,7 @@ use bookrack_cli_grammar::{
 use bookrack_config::Config;
 use bookrack_distill::{BookToml, Coverage, EntryDraft, StageReport, load_pipeline};
 use bookrack_refs::{IndexKind, IndexSpec, NewBook, NewEntry, Refs};
+use bookrack_runtime::identity_check::refuse_offline_write;
 use bookrack_runtime::pipeline_run_helpers::{RunHandle, close_run, open_run};
 use eyre::{Context as _, Result, bail, eyre};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
@@ -55,20 +56,18 @@ use crate::render::ctx;
 use crate::render::progress::{Surface, SurfaceKind};
 use crate::render::table::RowTable;
 
-/// One-shot resolver for the data root paths the distill commands
-/// share.
+/// The data root paths the distill commands share.
 struct DistillPaths {
     refs_path: PathBuf,
     catalog_path: PathBuf,
 }
 
 impl DistillPaths {
-    fn resolve(selection: &bookrack_config::LibrarySelection) -> Result<Self> {
-        let cfg = Config::resolve(selection).context("resolve configuration")?;
-        Ok(Self {
+    fn of(cfg: &Config) -> Self {
+        Self {
             refs_path: cfg.reference_db(),
             catalog_path: cfg.catalog_db(),
-        })
+        }
     }
 }
 
@@ -77,7 +76,13 @@ pub async fn run(
     selection: &bookrack_config::LibrarySelection,
     action: DistillAction,
 ) -> Result<()> {
-    let paths = DistillPaths::resolve(selection)?;
+    let cfg = Config::resolve(selection).context("resolve configuration")?;
+    // A build writes the catalog and `reference.db`, a dry run the
+    // catalog's audit rows: both judge the root's identity first.
+    if matches!(action, DistillAction::Build(_)) {
+        refuse_offline_write(&cfg)?;
+    }
+    let paths = DistillPaths::of(&cfg);
     match action {
         DistillAction::Build(args) => build(&paths, args),
         DistillAction::Verify(args) => verify(&paths, args).map(|_| ()),

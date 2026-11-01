@@ -332,3 +332,148 @@ fn config_edit_still_writes_a_root_that_carries_its_identity() {
     let written = fs::read_to_string(world.alpha.join("config.toml")).expect("read config.toml");
     assert!(written.contains("top_k = 8"), "{written}");
 }
+
+impl World {
+    /// `distill build` of the tiny book, with `selection` in front.
+    fn distill(&self, selection: &[&str], extra: &[&str]) -> Output {
+        let book = self.tiny_book();
+        let mut args: Vec<&str> = selection.to_vec();
+        args.extend(["distill", "build", path(&book)]);
+        args.extend(extra);
+        self.run(&args)
+    }
+
+    /// `doctor` with one repair flag, alpha selected by name.
+    fn repair(&self, flag: &str) -> Output {
+        self.run(&["--library", "alpha", "doctor", flag])
+    }
+}
+
+#[test]
+fn distill_build_refuses_an_empty_mount_point() {
+    let world = World::new();
+    world.empty_alpha();
+    let before = world.snapshot();
+    let out = world.distill(&["--library", "alpha"], &[]);
+    world.assert_refused(&before, &out, "alpha", Fault::NoManifest);
+}
+
+#[test]
+fn distill_build_refuses_another_librarys_root() {
+    let world = World::new();
+    world.foreign_alpha();
+    let before = world.snapshot();
+    let out = world.distill(&["--library", "alpha"], &[]);
+    world.assert_refused(&before, &out, "alpha", Fault::AnotherUuid);
+}
+
+#[test]
+fn distill_dry_run_refuses_another_librarys_root() {
+    let world = World::new();
+    world.foreign_alpha();
+    let before = world.snapshot();
+    let out = world.distill(&["--library", "alpha"], &["--dry-run"]);
+    world.assert_refused(&before, &out, "alpha", Fault::AnotherUuid);
+}
+
+#[test]
+fn distill_build_refuses_a_path_selected_empty_mount_point() {
+    let world = World::new();
+    world.empty_alpha();
+    let before = world.snapshot();
+    let out = world.distill(&["--data-dir", path(&world.alpha)], &[]);
+    world.assert_refused(&before, &out, "alpha", Fault::NoManifest);
+}
+
+/// The manifest at alpha's root names beta, which the registry records
+/// at beta's own root, so resolving the path names no library: the
+/// gate finds alpha's entry by the path instead.
+#[test]
+fn distill_build_refuses_a_path_selected_root_holding_another_librarys_manifest() {
+    let world = World::new();
+    world.foreign_alpha();
+    let before = world.snapshot();
+    let out = world.distill(&["--data-dir", path(&world.alpha)], &[]);
+    world.assert_refused(&before, &out, "alpha", Fault::AnotherUuid);
+}
+
+#[test]
+fn distill_build_still_writes_an_unregistered_path_root() {
+    let world = World::new();
+    let anon = world.sandbox.data_root("anon");
+    let out = world.distill(&["--data-dir", path(&anon)], &[]);
+    assert_success(&out, "distill build into an unregistered root");
+    assert!(anon.join("reference.db").exists(), "the build writes there");
+}
+
+#[test]
+fn distill_build_still_writes_a_root_that_carries_its_identity() {
+    let world = World::new();
+    let out = world.distill(&["--library", "alpha"], &[]);
+    assert_success(&out, "distill build into alpha");
+    assert!(world.alpha.join("reference.db").exists());
+}
+
+#[test]
+fn backfill_refuses_an_empty_mount_point() {
+    let world = World::new();
+    world.empty_alpha();
+    let before = world.snapshot();
+    let out = world.repair("--backfill-ocr-derivation");
+    world.assert_refused(&before, &out, "alpha", Fault::NoManifest);
+}
+
+#[test]
+fn close_abandoned_runs_refuses_another_librarys_root() {
+    let world = World::new();
+    world.foreign_alpha();
+    let before = world.snapshot();
+    let out = world.repair("--close-abandoned-runs");
+    world.assert_refused(&before, &out, "alpha", Fault::AnotherUuid);
+}
+
+#[test]
+fn close_abandoned_runs_refuses_a_path_selected_root_holding_another_librarys_manifest() {
+    let world = World::new();
+    world.foreign_alpha();
+    let before = world.snapshot();
+    let out = world.run(&[
+        "--data-dir",
+        path(&world.alpha),
+        "doctor",
+        "--close-abandoned-runs",
+    ]);
+    world.assert_refused(&before, &out, "alpha", Fault::AnotherUuid);
+}
+
+#[test]
+fn rename_envelopes_refuses_another_librarys_root() {
+    let world = World::new();
+    world.foreign_alpha();
+    let before = world.snapshot();
+    let out = world.repair("--rename-envelopes");
+    world.assert_refused(&before, &out, "alpha", Fault::AnotherUuid);
+}
+
+/// A root that does not resolve at all is not the gate's to report:
+/// the repair's own resolution says so, with its own context.
+#[test]
+fn backfill_on_a_missing_root_still_reports_the_resolution() {
+    let world = World::new();
+    world.missing_alpha();
+    let out = world.repair("--backfill-ocr-derivation");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("resolve config for OCR derivation backfill"),
+        "{stderr}"
+    );
+    assert!(!world.alpha.exists(), "nothing creates the root");
+}
+
+#[test]
+fn backfill_still_runs_on_a_root_that_carries_its_identity() {
+    let world = World::new();
+    let out = world.repair("--backfill-ocr-derivation");
+    assert_success(&out, "backfill alpha");
+}
