@@ -42,9 +42,7 @@ use bookrack_ingest::IngestParams;
 use bookrack_obs::WorkerGuard;
 use bookrack_obs::stream::LogStreamHandle;
 use bookrack_ops::reads::info::LibraryInfoContext;
-use bookrack_ops::registry::{
-    JobTemplates, LibraryHandle, LibraryRegistry, MountGuard, UnmountedLibrary,
-};
+use bookrack_ops::registry::{JobTemplates, LibraryHandle, LibraryRegistry, MountGuard};
 use bookrack_ops::{Caller, Ops, PapersPaths};
 use bookrack_query::Library;
 use bookrack_session::{
@@ -397,13 +395,10 @@ impl DaemonRuntime {
                 }) {
                     Ok(lib_cfg) => lib_cfg,
                     Err(err) => {
-                        skips.push_worded(
-                            UnmountedLibrary::new(
-                                name,
-                                data_dir,
-                                unmounted::resolve_problem(name, &err, MountOccasion::Serving),
-                            ),
-                            unmounted::resolve_problem(name, &err, MountOccasion::Refusing),
+                        skips.push(
+                            name,
+                            data_dir,
+                            unmounted::resolve_problem(name, &err),
                             eyre::Report::new(err)
                                 .wrap_err(format!("resolve configuration for library '{name}'")),
                         );
@@ -413,21 +408,23 @@ impl DaemonRuntime {
                 // A root that does not carry the identity the entry
                 // cached is skipped before it is locked: an empty mount
                 // point passes the directory check and would otherwise
-                // be served as an empty library. The record is worded
-                // for the daemon that goes on serving; the refusal, for
-                // a bring-up left with nothing to serve.
+                // be served as an empty library. The cause, which a
+                // bring-up with this library alone returns, is worded
+                // for a bring-up left with nothing to serve.
                 if let Some(entry) = entry
                     && let Err(fault) =
                         crate::identity_check::verify_registered_identity(entry, lib_cfg.data_dir())
                 {
-                    skips.push_worded(
-                        UnmountedLibrary::new(
-                            name,
-                            lib_cfg.data_dir(),
-                            fault.problem(MountOccasion::Serving),
-                        ),
-                        fault.problem(MountOccasion::Refusing),
-                        fault.refusal(MountOccasion::Refusing).into(),
+                    let reason = fault.problem();
+                    skips.push(
+                        name,
+                        lib_cfg.data_dir(),
+                        reason.clone(),
+                        crate::backend_probe::PreflightRefusal {
+                            library: name.clone(),
+                            problem: MountOccasion::Refusing.close(name, reason),
+                        }
+                        .into(),
                     );
                     continue;
                 }
@@ -458,11 +455,9 @@ impl DaemonRuntime {
             {
                 let root = candidate.cfg.data_dir();
                 skips.push(
-                    UnmountedLibrary::new(
-                        &candidate.name,
-                        root,
-                        crate::mount::duplicate_root_problem(&previous, root),
-                    ),
+                    &candidate.name,
+                    root,
+                    crate::mount::duplicate_root_problem(&previous, root),
                     eyre::eyre!(
                         "registry entries '{previous}' and '{}' point at the same data root {}; \
                          fix the registry before starting the daemon",
@@ -497,7 +492,9 @@ impl DaemonRuntime {
                 Err(err) if is_root_lock_conflict(&err) => {
                     let problem = crate::mount::root_locked_problem(&err);
                     skips.push(
-                        UnmountedLibrary::new(&candidate.name, candidate.cfg.data_dir(), problem),
+                        &candidate.name,
+                        candidate.cfg.data_dir(),
+                        problem,
                         err.wrap_err(format!(
                             "lock the data root of library '{}'",
                             candidate.name
@@ -599,11 +596,9 @@ impl DaemonRuntime {
                         candidate.name
                     ));
                     skips.push(
-                        UnmountedLibrary::new(
-                            &candidate.name,
-                            candidate.cfg.data_dir(),
-                            crate::control::error_map::report_problem(&err),
-                        ),
+                        &candidate.name,
+                        candidate.cfg.data_dir(),
+                        crate::control::error_map::report_problem(&err),
                         err,
                     );
                 }
@@ -622,11 +617,9 @@ impl DaemonRuntime {
             {
                 None => candidates.push(candidate),
                 Some((_, problem)) => skips.push(
-                    UnmountedLibrary::new(
-                        &candidate.name,
-                        candidate.cfg.data_dir(),
-                        problem.clone(),
-                    ),
+                    &candidate.name,
+                    candidate.cfg.data_dir(),
+                    problem.clone(),
                     crate::backend_probe::PreflightRefusal {
                         library: candidate.name.clone(),
                         problem: problem.clone(),
@@ -693,11 +686,9 @@ impl DaemonRuntime {
                         &spec,
                     );
                     skips.push(
-                        UnmountedLibrary::new(
-                            &candidate.name,
-                            candidate.cfg.data_dir(),
-                            problem.clone(),
-                        ),
+                        &candidate.name,
+                        candidate.cfg.data_dir(),
+                        problem.clone(),
                         crate::backend_probe::PreflightRefusal {
                             library: candidate.name.clone(),
                             problem,
@@ -711,11 +702,9 @@ impl DaemonRuntime {
                         candidate.name
                     ));
                     skips.push(
-                        UnmountedLibrary::new(
-                            &candidate.name,
-                            candidate.cfg.data_dir(),
-                            crate::control::error_map::report_problem(&err),
-                        ),
+                        &candidate.name,
+                        candidate.cfg.data_dir(),
+                        crate::control::error_map::report_problem(&err),
                         err,
                     );
                 }
@@ -761,11 +750,9 @@ impl DaemonRuntime {
                 Err(err) => {
                     let err = err.wrap_err(format!("bring up library '{name}'"));
                     skips.push(
-                        UnmountedLibrary::new(
-                            &name,
-                            lib_cfg.data_dir(),
-                            crate::control::error_map::report_problem(&err),
-                        ),
+                        &name,
+                        lib_cfg.data_dir(),
+                        crate::control::error_map::report_problem(&err),
                         err,
                     );
                 }
@@ -844,7 +831,7 @@ impl DaemonRuntime {
         for library in skips.libraries() {
             let failure = queue::JobFailure {
                 message: unmounted::queue_failure_message(library),
-                problem: Some(library.reason().clone()),
+                problem: Some(unmounted::queue_failure_problem(library)),
             };
             adjusted +=
                 queue::fail_jobs_against(&mut initial_queue_state, library.name(), &failure);

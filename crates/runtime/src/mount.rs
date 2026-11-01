@@ -172,7 +172,10 @@ impl Mounter {
     ///
     /// Runs bring-up's checks in bring-up's order, so a library that
     /// starts cleanly also mounts cleanly and the two paths refuse the
-    /// same inputs with the same wording. `name` must already be in the
+    /// same inputs with the same wording. A refusal's reason names the
+    /// repair and no retry, as bring-up's does before it records a
+    /// skip; the control plane closes it with the mount command when it
+    /// maps the refusal. `name` must already be in the
     /// on-disk registry: resolution goes through
     /// [`Config::resolve`]'s named-selection branch, which outranks
     /// `BOOKRACK_DATA_DIR`, so the root is the one the registry
@@ -198,7 +201,7 @@ impl Mounter {
         );
         if let Some(entry) = crate::identity_check::registry_entry(name).map_err(unresolvable)? {
             crate::identity_check::verify_registered_identity(&entry, cfg.data_dir())
-                .map_err(|fault| fault.refusal(crate::unmounted::MountOccasion::Serving))?;
+                .map_err(|fault| fault.refusal())?;
         }
 
         self.claim_root(name, &cfg)?;
@@ -411,7 +414,7 @@ pub(crate) fn root_locked_problem(err: &eyre::Report) -> Problem {
         .detail(format!("{err:#}"))
         .hint(
             "Another process holds the root. Stop whatever is using it — a second daemon, \
-             or an offline destructive command — then mount the library again.",
+             or an offline destructive command.",
         )
 }
 

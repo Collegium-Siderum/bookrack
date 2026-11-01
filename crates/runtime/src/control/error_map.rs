@@ -86,6 +86,7 @@ use super::jsonrpc::{
 use super::plan_registry::PlanLookupError;
 use crate::cmd::input_error::CmdInputError;
 use crate::mount::MountRefusal;
+use crate::unmounted::MountOccasion;
 
 /// Map a handler's `eyre::Report` onto a JSON-RPC error envelope.
 ///
@@ -238,7 +239,27 @@ pub(crate) fn config_err(e: ConfigError) -> RpcError {
     from_config(&e)
 }
 
-/// Map a change to the mounted set onto the corresponding wire code.
+/// Map a refused runtime mount of `name` onto the corresponding wire
+/// code.
+///
+/// Every reason a mount refuses with names the repair and no retry, as
+/// the reason bring-up skips a library for does; this closes each hint
+/// with the mount command, as bring-up closes the record it keeps, so a
+/// mount after a skip reads the skip's hint word for word. A reason
+/// without a hint — an unclassified fault, a name the registry does not
+/// carry — names no repair for the mount to follow and stays as it is.
+pub(crate) fn mount_err(name: &str, e: MountRefusal) -> RpcError {
+    refusal_rpc(e, |problem| MountOccasion::Serving.close(name, problem))
+}
+
+/// Map a refused unmount onto the corresponding wire code, each reason
+/// as it is: none of them is repaired by a mount.
+pub(crate) fn unmount_err(e: MountRefusal) -> RpcError {
+    refusal_rpc(e, |problem| problem)
+}
+
+/// The envelope a change to the mounted set is refused with, `close`
+/// applied to every reason the mounter worded.
 ///
 /// The `match` is exhaustive: each variant already knows whether it is
 /// caller input, a refusal the caller can repair, or a fault, so the
@@ -246,9 +267,10 @@ pub(crate) fn config_err(e: ConfigError) -> RpcError {
 /// decision should not have a silent default. The refusals carry their
 /// own three-part [`Problem`]; an entry that does not resolve and a
 /// library that fails to open are worded as bring-up words the same
-/// failure when it skips the library, so a mount after a skip reads
-/// the same hint.
-pub(crate) fn mount_err(e: MountRefusal) -> RpcError {
+/// failure when it skips the library. The registry's own refusals —
+/// already mounted, not mounted — are worded by the registry and left
+/// as they are.
+fn refusal_rpc(e: MountRefusal, close: impl Fn(Problem) -> Problem) -> RpcError {
     match e {
         MountRefusal::Unresolvable { library, source } => {
             let code = match source.as_ref() {
@@ -260,22 +282,18 @@ pub(crate) fn mount_err(e: MountRefusal) -> RpcError {
             };
             rpc_from_problem(
                 code,
-                crate::unmounted::resolve_problem(
-                    &library,
-                    &source,
-                    crate::unmounted::MountOccasion::Serving,
-                ),
+                close(crate::unmounted::resolve_problem(&library, &source)),
             )
         }
         MountRefusal::Registry(e) => from_registry(&e),
-        MountRefusal::Refused { problem, .. } => rpc_from_problem(INVALID_PARAMS, problem),
-        MountRefusal::RootLocked { problem, .. } => rpc_from_problem(BACKEND_UNAVAILABLE, problem),
-        MountRefusal::BringUp(err) => classify(&err).unwrap_or_else(|| {
-            rpc_from_problem(
-                INTERNAL_ERROR,
-                Problem::from_error_chain(err.as_ref() as &dyn std::error::Error),
-            )
-        }),
+        MountRefusal::Refused { problem, .. } => rpc_from_problem(INVALID_PARAMS, close(problem)),
+        MountRefusal::RootLocked { problem, .. } => {
+            rpc_from_problem(BACKEND_UNAVAILABLE, close(problem))
+        }
+        MountRefusal::BringUp(err) => {
+            let code = classify(&err).map_or(INTERNAL_ERROR, |rpc| rpc.code);
+            rpc_from_problem(code, close(report_problem(&err)))
+        }
     }
 }
 
@@ -790,12 +808,16 @@ mod tests {
     }
 
     /// A library bring-up skipped is caller input to fix: the library
-    /// code, with the skip's reason and the mount command in the data.
+    /// code, with the skip's reason in the data and its hint, which
+    /// already closes with the mount command, as it is.
     #[test]
     fn registry_library_unmounted_is_invalid_library_with_the_mount_hint() {
         let err: Report = RegistryError::LibraryUnmounted {
             name: "beta".into(),
-            reason: Box::new(Problem::new("cannot read the catalog").hint("Upgrade bookrack.")),
+            reason: Box::new(
+                Problem::new("cannot read the catalog")
+                    .hint("Upgrade bookrack. Then run `bookrack libraries mount beta`."),
+            ),
         }
         .into();
         let rpc = handler_err("library.stats", err);
@@ -805,8 +827,10 @@ mod tests {
         let detail = data.detail.expect("the skip's reason is the evidence");
         assert!(detail.contains("cannot read the catalog"), "{detail}");
         let hint = data.hint.expect("the mount command is the next step");
-        assert!(hint.contains("Upgrade bookrack."), "{hint}");
-        assert!(hint.contains("bookrack libraries mount beta"), "{hint}");
+        assert_eq!(
+            hint,
+            "Upgrade bookrack. Then run `bookrack libraries mount beta`."
+        );
     }
 
     /// `report_problem` is `rpc_from_problem`'s inverse on a classified

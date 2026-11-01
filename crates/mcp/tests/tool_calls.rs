@@ -464,9 +464,9 @@ async fn an_unknown_library_selector_is_invalid_params() {
 }
 
 /// A library bring-up skipped is refused by name with the reason it
-/// was skipped for and the command that mounts it, as invalid params:
-/// the agent's input names a library that is registered but not
-/// served.
+/// was skipped for, whose hint already closes with the command that
+/// mounts it, as invalid params: the agent's input names a library
+/// that is registered but not served.
 #[tokio::test]
 async fn a_library_bring_up_skipped_is_invalid_params_with_the_mount_hint() {
     let fx = Fixture::start().await;
@@ -474,7 +474,8 @@ async fn a_library_bring_up_skipped_is_invalid_params_with_the_mount_hint() {
         .record_unmounted(bookrack_ops::registry::UnmountedLibrary::new(
             "beta",
             "/disk/library/beta",
-            bookrack_core::Problem::new("cannot read the catalog").hint("Upgrade bookrack."),
+            bookrack_core::Problem::new("cannot read the catalog")
+                .hint("Upgrade bookrack. Then run `bookrack libraries mount beta`."),
         ))
         .expect("record the skipped library");
     let client = fx.connect().await;
@@ -496,13 +497,9 @@ async fn a_library_bring_up_skipped_is_invalid_params_with_the_mount_hint() {
     let problem: bookrack_core::ProblemData =
         serde_json::from_value(data.data.expect("data slot filled")).expect("ProblemData");
     let hint = problem.hint.expect("a skipped library has a next step");
-    assert!(
-        hint.contains("Upgrade bookrack."),
-        "the skip's own hint travels: {hint}"
-    );
-    assert!(
-        hint.contains("bookrack libraries mount beta"),
-        "the mount command ends the hint: {hint}"
+    assert_eq!(
+        hint, "Upgrade bookrack. Then run `bookrack libraries mount beta`.",
+        "the skip's own hint travels as it is, the mount command said once"
     );
 
     let _ = client.cancel().await;

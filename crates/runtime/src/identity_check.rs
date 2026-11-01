@@ -23,9 +23,11 @@
 //! and refusing on it would block a whole bring-up on one damaged
 //! file of a root that is otherwise present.
 //!
-//! The check returns an [`IdentityFault`], not a finished message: the
-//! same fault is worded once for a daemon that goes on serving and
-//! once for a bring-up that refuses, and only the caller knows which.
+//! The check returns an [`IdentityFault`], not a finished message. Its
+//! reason names the repair and no retry: the same fault is closed once
+//! for a daemon that goes on serving and once for a bring-up that
+//! refuses, and only the caller knows which
+//! ([`crate::unmounted::MountOccasion`]).
 
 use std::path::{Path, PathBuf};
 
@@ -33,7 +35,6 @@ use bookrack_config::{ConfigError, LibraryEntry, MANIFEST_FILENAME, load_manifes
 use bookrack_core::Problem;
 
 use crate::backend_probe::PreflightRefusal;
-use crate::unmounted::MountOccasion;
 
 /// A registered library whose data root does not carry the identity
 /// the registry cached for it.
@@ -55,12 +56,11 @@ enum FaultKind {
 }
 
 impl IdentityFault {
-    /// The three-part reason, its hint closing with the retry
-    /// `occasion` calls for.
-    pub(crate) fn problem(&self, occasion: MountOccasion) -> Problem {
+    /// The three-part reason, its hint naming the repair and no retry.
+    pub(crate) fn problem(&self) -> Problem {
         match &self.kind {
             FaultKind::MissingManifest => {
-                missing_manifest_problem(&self.library, &self.root, &self.cached, occasion)
+                missing_manifest_problem(&self.library, &self.root, &self.cached)
             }
             FaultKind::Mismatch { found, found_name } => identity_mismatch_problem(
                 &self.library,
@@ -68,17 +68,16 @@ impl IdentityFault {
                 &self.cached,
                 found,
                 found_name,
-                occasion,
             ),
         }
     }
 
-    /// The fault as the preflight refusal a mount or a bring-up
-    /// returns, worded for `occasion`.
-    pub(crate) fn refusal(&self, occasion: MountOccasion) -> PreflightRefusal {
+    /// The fault as the preflight refusal a runtime mount returns, its
+    /// reason as [`IdentityFault::problem`] words it.
+    pub(crate) fn refusal(&self) -> PreflightRefusal {
         PreflightRefusal {
             library: self.library.clone(),
-            problem: self.problem(occasion),
+            problem: self.problem(),
         }
     }
 }
@@ -125,12 +124,7 @@ pub(crate) fn registry_entry(name: &str) -> Result<Option<LibraryEntry>, ConfigE
 /// there and what the directory looks like instead, the hint the two
 /// ways out — the volume comes back, or the library is registered
 /// where it now is.
-fn missing_manifest_problem(
-    name: &str,
-    root: &Path,
-    cached: &str,
-    occasion: MountOccasion,
-) -> Problem {
+fn missing_manifest_problem(name: &str, root: &Path, cached: &str) -> Problem {
     Problem::new(format!(
         "cannot serve library '{name}': its data root carries no identity manifest"
     ))
@@ -141,8 +135,7 @@ fn missing_manifest_problem(
     ))
     .hint(format!(
         "Reconnect the volume that holds it, or register the library at its new location with \
-         `bookrack libraries add {name} <path>`, {}.",
-        occasion.retry(name)
+         `bookrack libraries add {name} <path>`."
     ))
 }
 
@@ -156,7 +149,6 @@ fn identity_mismatch_problem(
     cached: &str,
     found: &str,
     found_name: &str,
-    occasion: MountOccasion,
 ) -> Problem {
     Problem::new(format!(
         "cannot serve library '{name}': the identity manifest at its data root records another \
@@ -170,9 +162,8 @@ fn identity_mismatch_problem(
     .hint(format!(
         "If this root is '{name}', refresh the registry's cached identity with `bookrack \
          libraries add {name} {root}`; if another library's volume is mounted here, reconnect \
-         the one that holds '{name}'; {retry}.",
+         the one that holds '{name}'.",
         root = root.display(),
-        retry = occasion.retry(name)
     ))
 }
 
@@ -224,7 +215,7 @@ mod tests {
         );
         let fault = verify_registered_identity(&e, root.path())
             .expect_err("a cached uuid with no manifest is refused");
-        let refusal = fault.refusal(MountOccasion::Refusing);
+        let refusal = fault.refusal();
         assert_eq!(refusal.library, "alpha");
         assert!(
             refusal.problem.summary.contains("no identity manifest"),
@@ -232,20 +223,23 @@ mod tests {
         );
         let hint = hint(&refusal.problem);
         assert!(hint.starts_with("Reconnect the volume"), "{hint}");
-        assert!(hint.ends_with("then start the daemon again."), "{hint}");
+        assert!(
+            hint.ends_with("`bookrack libraries add alpha <path>`."),
+            "{hint}"
+        );
     }
 
+    /// The reason names the repair and stops there: the retry depends
+    /// on whether a daemon is serving, which only the caller knows.
     #[test]
-    fn a_serving_daemon_names_the_mount_verb_for_a_bare_root() {
+    fn a_bare_roots_hint_names_no_retry() {
         let root = tempfile::tempdir().expect("tempdir");
         let e = entry("beta", root.path(), Some("u"));
         let fault = verify_registered_identity(&e, root.path())
             .expect_err("a cached uuid with no manifest is refused");
-        let problem = fault.problem(MountOccasion::Serving);
-        assert!(
-            hint(&problem).ends_with("then run `bookrack libraries mount beta`."),
-            "{problem:?}"
-        );
+        let problem = fault.problem();
+        assert!(!hint(&problem).contains("libraries mount"), "{problem:?}");
+        assert!(!hint(&problem).contains("start the daemon"), "{problem:?}");
     }
 
     #[test]
@@ -257,7 +251,7 @@ mod tests {
         let e = entry("alpha", root.path(), Some(cached));
         let fault =
             verify_registered_identity(&e, root.path()).expect_err("a different uuid is refused");
-        let problem = fault.problem(MountOccasion::Refusing);
+        let problem = fault.problem();
         assert!(problem.summary.contains("another uuid"), "{problem:?}");
         let detail = problem.data.detail.as_deref().expect("detail");
         assert!(detail.contains(cached), "{detail}");
@@ -266,22 +260,19 @@ mod tests {
     }
 
     #[test]
-    fn a_mismatch_closes_with_the_retry_each_occasion_calls_for() {
+    fn a_mismatchs_hint_names_both_readings_and_no_retry() {
         let root = tempfile::tempdir().expect("tempdir");
         write_manifest(root.path(), &new_manifest("other", LibraryKind::Test, None))
             .expect("write manifest");
         let e = entry("alpha", root.path(), Some("u"));
         let fault =
             verify_registered_identity(&e, root.path()).expect_err("a different uuid is refused");
-        let serving = fault.problem(MountOccasion::Serving);
+        let problem = fault.problem();
+        let hint = hint(&problem);
+        assert!(hint.starts_with("If this root is 'alpha'"), "{hint}");
         assert!(
-            hint(&serving).ends_with("; then run `bookrack libraries mount alpha`."),
-            "{serving:?}"
-        );
-        let refusing = fault.problem(MountOccasion::Refusing);
-        assert!(
-            hint(&refusing).ends_with("; then start the daemon again."),
-            "{refusing:?}"
+            hint.ends_with("reconnect the one that holds 'alpha'."),
+            "{hint}"
         );
     }
 

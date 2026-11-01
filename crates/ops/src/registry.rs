@@ -129,22 +129,21 @@ impl Explain for RegistryError {
             // The summary states the fact; which libraries are mounted
             // and why none of them is the route are the evidence, and
             // naming one is the next step.
-            // The record's own detail and hint travel with it; the hint
-            // ends with the step that clears the record.
+            // The record's own detail and hint travel with it. The
+            // record already closes its hint with the step that clears
+            // it; one without a hint gets that step alone.
             Self::LibraryUnmounted { name, reason } => {
-                let mut problem = Problem::new(format!(
-                    "library {name:?} is registered but not mounted"
-                ))
-                .detail(match &reason.data.detail {
-                    Some(detail) => format!("Bring-up skipped it: {}. {detail}", reason.summary),
-                    None => format!("Bring-up skipped it: {}.", reason.summary),
-                });
-                let mount = format!("Then run `bookrack libraries mount {name}`.");
-                problem = problem.hint(match &reason.data.hint {
-                    Some(hint) => format!("{hint} {mount}"),
-                    None => mount,
-                });
-                problem
+                Problem::new(format!("library {name:?} is registered but not mounted"))
+                    .detail(match &reason.data.detail {
+                        Some(detail) => {
+                            format!("Bring-up skipped it: {}. {detail}", reason.summary)
+                        }
+                        None => format!("Bring-up skipped it: {}.", reason.summary),
+                    })
+                    .hint(match &reason.data.hint {
+                        Some(hint) => hint.clone(),
+                        None => format!("Run `bookrack libraries mount {name}`."),
+                    })
             }
             Self::UnnamedAmbiguous { mounted, default } => {
                 let pointer = match default {
@@ -585,6 +584,10 @@ pub struct LibrarySummary {
 /// of the reason through [`redact_source_paths`]: the reason reaches
 /// status cards and queue rows as plain text, so it is cleaned where
 /// it is made rather than at each surface that shows it.
+///
+/// The host closes the reason's hint, when it has one, with the step
+/// that serves the library again before it records the reason; a call
+/// naming the library carries that hint as it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnmountedLibrary {
     name: String,
@@ -1551,6 +1554,35 @@ mod tests {
             "mounting clears the record"
         );
         assert_eq!(reg.get(Some("b")).unwrap().name(), "b");
+    }
+
+    /// A call naming a library bring-up skipped carries the record's
+    /// hint as it is, since the record already closes it with the mount;
+    /// a record without a hint gets the mount alone.
+    #[test]
+    fn an_unmounted_librarys_hint_is_the_records_own() {
+        use bookrack_core::Explain;
+        let closed = "Reconnect it. Then run `bookrack libraries mount b`.";
+        let err = RegistryError::LibraryUnmounted {
+            name: "b".into(),
+            reason: Box::new(bookrack_core::Problem::new("cannot serve library 'b'").hint(closed)),
+        };
+        let hint = err.explain().data.hint.expect("hint");
+        assert_eq!(hint, closed, "the record's hint travels unchanged");
+        assert_eq!(
+            hint.matches("`bookrack libraries mount b`").count(),
+            1,
+            "{hint}"
+        );
+
+        let bare = RegistryError::LibraryUnmounted {
+            name: "b".into(),
+            reason: Box::new(bookrack_core::Problem::new("b failed: disk on fire")),
+        };
+        assert_eq!(
+            bare.explain().data.hint.as_deref(),
+            Some("Run `bookrack libraries mount b`.")
+        );
     }
 
     #[test]

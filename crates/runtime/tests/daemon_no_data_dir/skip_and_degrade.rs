@@ -584,12 +584,13 @@ async fn unnamed_jobs_pinned_to_a_skipped_primary_fail_rather_than_move() -> Res
         );
         assert_eq!(row.state, JobState::Failed);
         assert!(
-            row.error
-                .as_deref()
+            row.problem
+                .as_ref()
+                .and_then(|problem| problem.data.hint.as_deref())
                 .unwrap_or("")
-                .contains("libraries mount beta"),
+                .contains("`bookrack libraries mount beta`"),
             "{:?}",
-            row.error
+            row.problem
         );
         assert!(
             state.jobs.iter().all(|j| j.library != "alpha"),
@@ -599,7 +600,8 @@ async fn unnamed_jobs_pinned_to_a_skipped_primary_fail_rather_than_move() -> Res
     stop(runtime).await
 }
 
-/// Both libraries fail: the refusal names each.
+/// Both libraries fail: the refusal names each, and each reason closes
+/// with starting the daemon again rather than with a mount.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn no_library_coming_up_refuses_naming_each() -> Result<()> {
     let sandbox = world();
@@ -625,6 +627,22 @@ async fn no_library_coming_up_refuses_naming_each() -> Result<()> {
         .unwrap_or_else(|| panic!("two skips must refuse as NoServableLibrary: {err:#}"));
     let names: Vec<&str> = refusal.libraries.iter().map(|l| l.name()).collect();
     assert_eq!(names, ["alpha", "beta"]);
+    // A store this build cannot serve and a root another process holds
+    // each close with starting the daemon again: no daemon is left to
+    // take a mount.
+    for library in &refusal.libraries {
+        let hint = library.reason().data.hint.as_deref().unwrap_or_default();
+        assert!(
+            hint.ends_with("start the daemon again."),
+            "{}'s reason in a refused bring-up must say to start again: {hint}",
+            library.name()
+        );
+    }
+    let merged = refusal.explain().data.hint.unwrap_or_default();
+    assert!(
+        !merged.contains("mount"),
+        "a refused bring-up has no daemon to mount through: {merged}"
+    );
     // Nothing of this process holds either root now.
     drop(hold_root(&alpha));
     Ok(())
@@ -668,7 +686,7 @@ async fn a_missing_root_in_a_refused_bring_up_says_to_start_again() -> Result<()
     let hint = beta_reason.data.hint.as_deref().unwrap_or_default();
     assert!(hint.starts_with("Reconnect the volume"), "{hint}");
     assert!(
-        hint.ends_with("then start the daemon again."),
+        hint.ends_with(" Then start the daemon again."),
         "beta's reason in a refused bring-up must say to start again: {hint}"
     );
     let merged = refusal.explain().data.hint.unwrap_or_default();
@@ -680,7 +698,8 @@ async fn a_missing_root_in_a_refused_bring_up_says_to_start_again() -> Result<()
 }
 
 /// Queued work against a skipped library is failed at bring-up with the
-/// reason; another library's rows are untouched; the file agrees.
+/// reason, the mount and the retry in its problem's hint and not in its
+/// error; another library's rows are untouched; the file agrees.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jobs_against_a_skipped_library_fail_at_bring_up() -> Result<()> {
     let sandbox = world();
@@ -710,13 +729,28 @@ async fn jobs_against_a_skipped_library_fail_at_bring_up() -> Result<()> {
         for id in [beta_pending, beta_running] {
             let row = job(&state, id);
             assert_eq!(row.state, JobState::Failed, "{id}");
+            // The error states the fact and groups the row; the repair
+            // is the problem's hint alone, so a failure listing that
+            // prints both says the mount once.
+            let error = row.error.as_deref().unwrap_or("");
             assert!(
-                row.error
-                    .as_deref()
-                    .unwrap_or("")
-                    .contains("libraries mount beta"),
-                "{id}: {:?}",
-                row.error
+                error.contains("\"beta\" was not mounted at bring-up"),
+                "{id}: {error}"
+            );
+            assert!(!error.contains("libraries mount"), "{id}: {error}");
+            let hint = row
+                .problem
+                .as_ref()
+                .and_then(|problem| problem.data.hint.as_deref())
+                .unwrap_or("");
+            assert_eq!(
+                hint.matches("`bookrack libraries mount beta`").count(),
+                1,
+                "{id}: {hint}"
+            );
+            assert!(
+                hint.ends_with("Once it is mounted, run `bookrack queue retry`."),
+                "{id}: {hint}"
             );
         }
         assert_eq!(job(&state, alpha_pending).state, JobState::Pending);
@@ -924,8 +958,10 @@ async fn a_failing_default_moves_the_reranker_reference() -> Result<()> {
 
 /// A runtime mount of a library that is still broken refuses with the
 /// same reason and hint bring-up skipped it for: a store this build
-/// cannot serve is `-32018`, and a root that is not there is `-32018`
-/// with the volume and the mount command in the hint.
+/// cannot serve is `-32018` with the store's own hint closed by the
+/// mount command, and a root that is not there is `-32018` with the
+/// volume and the mount command in the hint. Either way the command is
+/// named once, and a read naming the library carries the same hint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_runtime_mount_of_a_still_broken_library_refuses_with_the_skips_wording() -> Result<()> {
     let sandbox = world();
@@ -944,7 +980,18 @@ async fn a_runtime_mount_of_a_still_broken_library_refuses_with_the_skips_wordin
     let runtime_root = tempfile::tempdir()?;
 
     let runtime = start("alpha", runtime_root.path(), false).await?;
+    let beta_skip = skip_record(&runtime, "beta")?;
     let gamma_skip = skip_record(&runtime, "gamma")?;
+    let beta_hint = beta_skip.reason().data.hint.clone().unwrap_or_default();
+    assert!(
+        beta_hint.ends_with(" Then run `bookrack libraries mount beta`."),
+        "the record closes the store's own hint with the mount: {beta_hint}"
+    );
+    assert_eq!(
+        beta_hint.matches("libraries mount").count(),
+        1,
+        "{beta_hint}"
+    );
     let sock = runtime.control_sock.path.clone();
     let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
     let driver = tokio::spawn(async move {
@@ -963,11 +1010,28 @@ async fn a_runtime_mount_of_a_still_broken_library_refuses_with_the_skips_wordin
             Some(-32018),
             "a store this build cannot serve is state-unusable: {resp}"
         );
-        assert!(
-            resp["error"]["data"]["hint"]
-                .as_str()
-                .is_some_and(|h| !h.is_empty()),
-            "the refusal carries the store's hint: {resp}"
+        assert_eq!(
+            resp["error"]["data"]["hint"].as_str(),
+            Some(beta_hint.as_str()),
+            "the mount's hint is the skip's hint, word for word: {resp}"
+        );
+        let resp = call(
+            &mut reader,
+            &mut w,
+            3,
+            "library.info",
+            json!({ "name": "beta" }),
+        )
+        .await?;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(INVALID_LIBRARY),
+            "{resp}"
+        );
+        assert_eq!(
+            resp["error"]["data"]["hint"].as_str(),
+            Some(beta_hint.as_str()),
+            "a call naming the library carries the skip's hint as it is: {resp}"
         );
 
         let resp = call(
@@ -990,10 +1054,87 @@ async fn a_runtime_mount_of_a_still_broken_library_refuses_with_the_skips_wordin
             "the mount's hint is the skip's hint, word for word: {resp}"
         );
         assert!(hint.contains("Reconnect the volume"), "{resp}");
-        assert!(hint.contains("bookrack libraries mount gamma"), "{resp}");
+        assert_eq!(
+            hint.matches("bookrack libraries mount gamma").count(),
+            1,
+            "{resp}"
+        );
 
         let _ = call(&mut reader, &mut w, 99, "daemon.shutdown", Value::Null).await?;
         Ok::<(), eyre::Report>(())
     });
     join_with_deadline(runtime, repl_handle, driver).await
+}
+
+/// A root another process still holds is skipped with a hint that
+/// closes with the mount command once; a runtime mount while it is
+/// still held refuses as `-32017` with that hint word for word, and a
+/// read naming the library carries it as it is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_root_says_mount_once_on_the_record_the_mount_and_a_read() -> Result<()> {
+    let sandbox = world();
+    let alpha = sandbox.data_root("alpha-root");
+    let beta = sandbox.data_root("beta-root");
+    sandbox.write_registry_entries(
+        Some("alpha"),
+        &[("alpha", alpha.as_path()), ("beta", beta.as_path())],
+    );
+    let held = hold_root(&beta);
+    let runtime_root = tempfile::tempdir()?;
+
+    let runtime = start("alpha", runtime_root.path(), false).await?;
+    let record = skip_record(&runtime, "beta")?;
+    let hint = record.reason().data.hint.clone().unwrap_or_default();
+    assert_eq!(
+        hint.matches("`bookrack libraries mount beta`").count(),
+        1,
+        "the record names the mount command once: {hint}"
+    );
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        let resp = call(
+            &mut reader,
+            &mut w,
+            1,
+            "library.mount",
+            json!({ "name": "beta" }),
+        )
+        .await?;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(-32017),
+            "a held root is backend-unavailable: {resp}"
+        );
+        assert_eq!(
+            resp["error"]["data"]["hint"].as_str(),
+            Some(hint.as_str()),
+            "the mount's hint is the skip's hint, word for word: {resp}"
+        );
+        let resp = call(
+            &mut reader,
+            &mut w,
+            2,
+            "library.info",
+            json!({ "name": "beta" }),
+        )
+        .await?;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(INVALID_LIBRARY),
+            "{resp}"
+        );
+        assert_eq!(
+            resp["error"]["data"]["hint"].as_str(),
+            Some(hint.as_str()),
+            "a call naming the library carries the skip's hint as it is: {resp}"
+        );
+
+        let _ = call(&mut reader, &mut w, 99, "daemon.shutdown", Value::Null).await?;
+        Ok::<(), eyre::Report>(())
+    });
+    join_with_deadline(runtime, repl_handle, driver).await?;
+    drop(held);
+    Ok(())
 }

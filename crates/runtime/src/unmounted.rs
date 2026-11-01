@@ -11,6 +11,7 @@
 //! nothing in this file flattens an error chain into a bare string.
 
 use std::fmt;
+use std::path::PathBuf;
 
 use bookrack_config::ConfigError;
 use bookrack_core::{Explain, Problem};
@@ -81,6 +82,11 @@ impl Explain for NoServableLibrary {
 /// close with the retry that fits: a running daemon mounts the repaired
 /// library through `libraries mount`, and a bring-up that refused is
 /// started again.
+///
+/// The reasons themselves name the repair and no retry; the retry is
+/// added once, by [`MountOccasion::close`], where the occasion is known:
+/// [`Skips::push`] for bring-up, and the control plane's mapping of a
+/// runtime mount refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MountOccasion {
     /// The daemon is up: a skip it records, or a runtime
@@ -91,25 +97,29 @@ pub(crate) enum MountOccasion {
 }
 
 impl MountOccasion {
-    /// The closing clause of a hint: how to try again once the root
-    /// is back.
-    pub(crate) fn retry(self, name: &str) -> String {
-        match self {
-            MountOccasion::Serving => format!("then run `bookrack libraries mount {name}`"),
-            MountOccasion::Refusing => String::from("then start the daemon again"),
+    /// `reason` with the retry this occasion calls for as the last
+    /// sentence of its hint. A reason without a hint is returned as it
+    /// was: it names no repair for a retry to follow.
+    pub(crate) fn close(self, name: &str, mut reason: Problem) -> Problem {
+        if let Some(hint) = reason.data.hint.take() {
+            let retry = match self {
+                MountOccasion::Serving => format!("Then run `bookrack libraries mount {name}`."),
+                MountOccasion::Refusing => String::from("Then start the daemon again."),
+            };
+            reason.data.hint = Some(format!("{hint} {retry}"));
         }
+        reason
     }
 }
 
 /// One library bring-up skipped: the record the registry keeps, the
-/// reason a refused bring-up gives for it when that reads differently,
-/// and the error that caused it, kept whole so a bring-up with nothing
-/// else to report can return it as it was.
+/// reason a refused bring-up gives for it, and the error that caused
+/// it, kept whole so a bring-up with nothing else to report can return
+/// it as it was.
 pub(crate) struct Skip {
     pub(crate) library: UnmountedLibrary,
-    /// The reason [`NoServableLibrary`] names the library with; `None`
-    /// reuses the record's.
-    pub(crate) refusal: Option<Problem>,
+    /// The reason [`NoServableLibrary`] names the library with.
+    pub(crate) refusal: Problem,
     pub(crate) cause: eyre::Report,
 }
 
@@ -118,28 +128,25 @@ pub(crate) struct Skip {
 pub(crate) struct Skips(Vec<Skip>);
 
 impl Skips {
-    /// Record a skip whose reason reads the same whether the daemon
-    /// goes on serving or refuses.
-    pub(crate) fn push(&mut self, library: UnmountedLibrary, cause: eyre::Report) {
-        self.0.push(Skip {
-            library,
-            refusal: None,
-            cause,
-        });
-    }
-
-    /// Record a skip whose reason, should bring-up end up refusing,
-    /// reads as `refusal` rather than as the record a serving daemon
-    /// keeps.
-    pub(crate) fn push_worded(
+    /// Record that bring-up skipped `name`, registered at `data_dir`,
+    /// for `reason`, whose hint names the repair and no retry. The
+    /// record a serving daemon keeps closes the hint with the mount;
+    /// the reason a refused bring-up gives closes it with starting the
+    /// daemon again.
+    pub(crate) fn push(
         &mut self,
-        library: UnmountedLibrary,
-        refusal: Problem,
+        name: &str,
+        data_dir: impl Into<PathBuf>,
+        reason: Problem,
         cause: eyre::Report,
     ) {
         self.0.push(Skip {
-            library,
-            refusal: Some(refusal),
+            library: UnmountedLibrary::new(
+                name,
+                data_dir,
+                MountOccasion::Serving.close(name, reason.clone()),
+            ),
+            refusal: MountOccasion::Refusing.close(name, reason),
             cause,
         });
     }
@@ -167,11 +174,8 @@ impl Skips {
         }
         let mut libraries: Vec<UnmountedLibrary> = skips
             .into_iter()
-            .map(|skip| match skip.refusal {
-                Some(reason) => {
-                    UnmountedLibrary::new(skip.library.name(), skip.library.data_dir(), reason)
-                }
-                None => skip.library,
+            .map(|skip| {
+                UnmountedLibrary::new(skip.library.name(), skip.library.data_dir(), skip.refusal)
             })
             .collect();
         libraries.sort_by(|a, b| a.name().cmp(b.name()));
@@ -181,9 +185,9 @@ impl Skips {
 
 /// The reason a library whose registry entry does not resolve is not
 /// served. A missing data root — the usual case, a volume that is not
-/// connected — gets the two ways back, closed with the retry `occasion`
-/// calls for; anything else carries the resolution error's own chain.
-pub(crate) fn resolve_problem(name: &str, err: &ConfigError, occasion: MountOccasion) -> Problem {
+/// connected — gets the two ways back; anything else carries the
+/// resolution error's own chain.
+pub(crate) fn resolve_problem(name: &str, err: &ConfigError) -> Problem {
     match err {
         ConfigError::DataDirNotFound(root) => Problem::new(format!(
             "cannot serve library {name:?}: its data root is not an existing directory"
@@ -194,23 +198,36 @@ pub(crate) fn resolve_problem(name: &str, err: &ConfigError, occasion: MountOcca
         ))
         .hint(format!(
             "Reconnect the volume that holds it, or register the library at its new \
-             location with `bookrack libraries add {name} <path>`, {}.",
-            occasion.retry(name)
+             location with `bookrack libraries add {name} <path>`."
         )),
         other => Problem::from_error_chain(other),
     }
 }
 
-/// The failure written onto a queued job whose library was not served
-/// at bring-up.
+/// The error written onto a queued job whose library was not served at
+/// bring-up: the fact alone, which a failure listing groups rows by.
+/// The repair is [`queue_failure_problem`]'s hint.
 pub(crate) fn queue_failure_message(library: &UnmountedLibrary) -> String {
     format!(
-        "library {:?} was not mounted at bring-up: {}; fix it, run `bookrack libraries mount \
-         {}`, then `bookrack queue retry`",
+        "library {:?} was not mounted at bring-up: {}",
         library.name(),
-        library.reason().summary,
-        library.name()
+        library.reason().summary
     )
+}
+
+/// The problem written onto such a job: the skip's record, its hint
+/// followed by the retry to run once the library is mounted. A record
+/// without a hint gets the mount and the retry as the whole hint.
+pub(crate) fn queue_failure_problem(library: &UnmountedLibrary) -> Problem {
+    let mut problem = library.reason().clone();
+    problem.data.hint = Some(match problem.data.hint.take() {
+        Some(hint) => format!("{hint} Once it is mounted, run `bookrack queue retry`."),
+        None => format!(
+            "Run `bookrack libraries mount {}`, then `bookrack queue retry`.",
+            library.name()
+        ),
+    });
+    problem
 }
 
 #[cfg(test)]
@@ -271,7 +288,9 @@ mod tests {
     fn a_single_skip_keeps_its_cause_and_several_become_a_refusal() {
         let mut one = Skips::default();
         one.push(
-            skipped("alpha", "root locked", None, true),
+            "alpha",
+            "/disk/library/alpha",
+            Problem::new("root locked"),
             eyre::eyre!("lock the data root of library 'alpha'"),
         );
         let err = one.into_refusal();
@@ -280,11 +299,15 @@ mod tests {
 
         let mut two = Skips::default();
         two.push(
-            skipped("alpha", "root locked", None, true),
+            "alpha",
+            "/disk/library/alpha",
+            Problem::new("root locked"),
             eyre::eyre!("first cause"),
         );
         two.push(
-            skipped("beta", "schema too new", None, false),
+            "beta",
+            "/disk/library/beta",
+            Problem::new("schema too new"),
             eyre::eyre!("second cause"),
         );
         let err = two.into_refusal();
@@ -295,25 +318,23 @@ mod tests {
         assert_eq!(refusal.libraries[1].name(), "beta");
     }
 
-    /// A refused bring-up names a skip pushed with its own refusal
-    /// wording by that wording, and one pushed without by its record;
-    /// the records a serving daemon would keep are left as pushed.
+    /// A skip's record closes its hint with the mount a serving daemon
+    /// takes, and a refused bring-up names the library by the same
+    /// reason closed with starting the daemon again. A reason without a
+    /// hint is left without one on both sides.
     #[test]
-    fn a_refused_bring_up_reads_each_skips_refusal_wording() {
+    fn a_skip_is_closed_once_for_the_record_and_once_for_the_refusal() {
         let mut skips = Skips::default();
-        skips.push_worded(
-            skipped(
-                "alpha",
-                "no manifest",
-                Some("Reconnect it, then run `bookrack libraries mount alpha`."),
-                false,
-            ),
-            Problem::new(String::from("no manifest"))
-                .hint(String::from("Reconnect it, then start the daemon again.")),
+        skips.push(
+            "alpha",
+            "/disk/library/alpha",
+            Problem::new("no manifest").hint("Reconnect it."),
             eyre::eyre!("first cause"),
         );
         skips.push(
-            skipped("beta", "schema too new", Some("Upgrade bookrack."), false),
+            "beta",
+            "/disk/library/beta",
+            Problem::new("beta failed: disk on fire"),
             eyre::eyre!("second cause"),
         );
         let records: Vec<Option<String>> = skips
@@ -324,9 +345,9 @@ mod tests {
             records,
             [
                 Some(String::from(
-                    "Reconnect it, then run `bookrack libraries mount alpha`."
+                    "Reconnect it. Then run `bookrack libraries mount alpha`."
                 )),
-                Some(String::from("Upgrade bookrack.")),
+                None,
             ]
         );
 
@@ -342,20 +363,47 @@ mod tests {
         );
         assert_eq!(
             alpha.reason().data.hint.as_deref(),
-            Some("Reconnect it, then start the daemon again.")
+            Some("Reconnect it. Then start the daemon again.")
         );
-        assert_eq!(
-            refusal.libraries[1].reason().data.hint.as_deref(),
-            Some("Upgrade bookrack.")
-        );
+        assert_eq!(refusal.libraries[1].reason().data.hint, None);
+        let merged = refusal.explain().data.hint.unwrap_or_default();
+        assert!(!merged.contains("mount"), "{merged}");
     }
 
-    /// A missing root names the volume and the two registry commands;
-    /// the mount command names the library.
+    /// The retry is the hint's last sentence, worded for the occasion;
+    /// the rest of the reason is left as it was.
     #[test]
-    fn a_missing_root_hints_at_reconnecting_and_mounting() {
+    fn closing_appends_the_occasions_retry_to_a_hint_and_leaves_none_alone() {
+        let reason = Problem::new("cannot lock the root")
+            .detail("Held by pid 7.")
+            .hint("Stop the other daemon.")
+            .retryable(true);
+        let serving = MountOccasion::Serving.close("beta", reason.clone());
+        assert_eq!(serving.summary, reason.summary);
+        assert_eq!(serving.data.detail, reason.data.detail);
+        assert!(serving.data.retryable);
+        assert_eq!(
+            serving.data.hint.as_deref(),
+            Some("Stop the other daemon. Then run `bookrack libraries mount beta`.")
+        );
+        let refusing = MountOccasion::Refusing.close("beta", reason);
+        assert_eq!(
+            refusing.data.hint.as_deref(),
+            Some("Stop the other daemon. Then start the daemon again.")
+        );
+
+        let bare = Problem::new("beta failed: disk on fire");
+        for occasion in [MountOccasion::Serving, MountOccasion::Refusing] {
+            assert_eq!(occasion.close("beta", bare.clone()), bare);
+        }
+    }
+
+    /// A missing root names the volume and the two registry commands,
+    /// and leaves the retry to the occasion.
+    #[test]
+    fn a_missing_root_hints_at_reconnecting_and_registering() {
         let err = ConfigError::DataDirNotFound(std::path::PathBuf::from("/disk/external/beta"));
-        let problem = resolve_problem("beta", &err, MountOccasion::Serving);
+        let problem = resolve_problem("beta", &err);
         assert!(problem.summary.contains("\"beta\""), "{}", problem.summary);
         assert!(
             problem
@@ -367,32 +415,41 @@ mod tests {
         let hint = problem.data.hint.expect("hint");
         assert!(hint.contains("Reconnect the volume"), "{hint}");
         assert!(
-            hint.contains("bookrack libraries add beta <path>"),
+            hint.ends_with("`bookrack libraries add beta <path>`."),
             "{hint}"
         );
-        assert!(
-            hint.ends_with("then run `bookrack libraries mount beta`."),
-            "{hint}"
-        );
-
-        let refusing = resolve_problem("beta", &err, MountOccasion::Refusing);
-        assert_eq!(refusing.summary, problem.summary);
-        let hint = refusing.data.hint.expect("hint");
-        assert!(hint.ends_with("then start the daemon again."), "{hint}");
         assert!(!hint.contains("libraries mount"), "{hint}");
     }
 
+    /// The error a failed row groups by states the fact; the mount and
+    /// the retry are the problem's hint, the mount said once.
     #[test]
-    fn the_queue_message_names_the_library_the_reason_and_the_two_commands() {
-        let message = queue_failure_message(&skipped("beta", "schema too new", None, false));
-        assert!(
-            message.contains("\"beta\" was not mounted at bring-up: schema too new"),
-            "{message}"
+    fn a_queued_jobs_failure_states_the_fact_and_hints_the_two_commands() {
+        let record = skipped(
+            "beta",
+            "schema too new",
+            Some("Upgrade bookrack. Then run `bookrack libraries mount beta`."),
+            false,
         );
-        assert!(
-            message.contains("`bookrack libraries mount beta`"),
-            "{message}"
+        let message = queue_failure_message(&record);
+        assert_eq!(
+            message,
+            "library \"beta\" was not mounted at bring-up: schema too new"
         );
-        assert!(message.contains("`bookrack queue retry`"), "{message}");
+        let problem = queue_failure_problem(&record);
+        assert_eq!(problem.summary, "schema too new");
+        assert_eq!(
+            problem.data.hint.as_deref(),
+            Some(
+                "Upgrade bookrack. Then run `bookrack libraries mount beta`. Once it is \
+                 mounted, run `bookrack queue retry`."
+            )
+        );
+
+        let bare = skipped("beta", "beta failed: disk on fire", None, false);
+        assert_eq!(
+            queue_failure_problem(&bare).data.hint.as_deref(),
+            Some("Run `bookrack libraries mount beta`, then `bookrack queue retry`.")
+        );
     }
 }

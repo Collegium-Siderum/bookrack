@@ -202,8 +202,9 @@ pub async fn retry(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
 /// `library`, which `cause` says the registry does not serve. The
 /// summary names the job and the library; the detail is the bring-up
 /// reason for a library bring-up skipped, and the mounted names for one
-/// the registry does not carry; the hint ends with the mount and the
-/// retry to run.
+/// the registry does not carry. The hint names the mount and the retry
+/// once each: a skip's own hint already closes with the mount, so only
+/// the retry follows it.
 fn unmounted_retry(id: &str, library: &str, cause: Option<&RegistryError>) -> Problem {
     let next =
         format!("`bookrack libraries mount {library}`, then `bookrack queue retry --job {id}`.");
@@ -217,7 +218,9 @@ fn unmounted_retry(id: &str, library: &str, cause: Option<&RegistryError>) -> Pr
                 None => format!("Bring-up skipped it: {}.", reason.summary),
             };
             let hint = match &reason.data.hint {
-                Some(hint) => format!("{hint} Then run {next}"),
+                Some(hint) => {
+                    format!("{hint} Once it is mounted, run `bookrack queue retry --job {id}`.")
+                }
                 None => format!("Run {next}"),
             };
             problem.detail(detail).hint(hint)
@@ -545,7 +548,8 @@ mod tests {
         let beta = UnmountedLibrary::new(
             "beta",
             "/disk/beta",
-            Problem::new("the catalog schema is newer than this build").hint("Upgrade bookrack."),
+            Problem::new("the catalog schema is newer than this build")
+                .hint("Upgrade bookrack. Then run `bookrack libraries mount beta`."),
         );
         ctx.registry
             .record_unmounted(beta.clone())
@@ -608,8 +612,9 @@ mod tests {
     /// A `job_id` retry of a row whose library is not mounted is refused
     /// with `INVALID_LIBRARY` and changes nothing. The refusal names the
     /// job and the library rather than calling the library unknown,
-    /// carries the bring-up reason when there is one, and its hint ends
-    /// with the mount and the retry to run.
+    /// carries the bring-up reason when there is one, and its hint names
+    /// the mount once and the retry once: after the record's own hint,
+    /// which already closes with the mount, only the retry is added.
     #[tokio::test]
     async fn a_job_retry_against_a_library_that_is_not_mounted_is_refused() {
         use crate::control::jsonrpc::INVALID_LIBRARY;
@@ -631,10 +636,16 @@ mod tests {
             );
             let data = err.data.clone().unwrap_or_default();
             let hint = data["hint"].as_str().unwrap_or_default().to_owned();
-            assert!(
-                hint.ends_with(&format!(
-                    "`bookrack libraries mount {library}`, then `bookrack queue retry --job {id}`."
-                )),
+            assert_eq!(
+                hint.matches(&format!("`bookrack libraries mount {library}`"))
+                    .count(),
+                1,
+                "{err:?}"
+            );
+            assert_eq!(
+                hint.matches(&format!("`bookrack queue retry --job {id}`"))
+                    .count(),
+                1,
                 "{err:?}"
             );
             refusals.push((data, hint));
@@ -647,7 +658,21 @@ mod tests {
                 .contains("the catalog schema is newer than this build"),
             "{beta_data}"
         );
-        assert!(beta_hint.starts_with("Upgrade bookrack. "), "{beta_hint}");
+        assert_eq!(
+            beta_hint,
+            &format!(
+                "Upgrade bookrack. Then run `bookrack libraries mount beta`. Once it is \
+                 mounted, run `bookrack queue retry --job {beta}`."
+            ),
+            "the record's own hint, closed with the mount, gains the retry alone"
+        );
+        let (_, gamma_hint) = &refusals[1];
+        assert_eq!(
+            gamma_hint,
+            &format!(
+                "Run `bookrack libraries mount gamma`, then `bookrack queue retry --job {gamma}`."
+            ),
+        );
         let (gamma_data, _) = &refusals[1];
         assert!(
             !gamma_data.to_string().contains("no library named"),

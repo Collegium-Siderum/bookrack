@@ -16,7 +16,7 @@ use bookrack_config::{registry_target_path, set_default_library};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::super::error_map::{config_err, handler_err, mount_err, registry_err};
+use super::super::error_map::{config_err, handler_err, mount_err, registry_err, unmount_err};
 use super::super::events::Event;
 use super::super::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, NOT_READY, RpcError};
 use super::MethodContext;
@@ -151,7 +151,10 @@ pub async fn set_default(params: &Option<Value>, ctx: &MethodContext) -> Result<
     // unnamed calls to.
     if ctx.registry.get(Some(&parsed.name)).is_err() {
         let mounter = require_mounter("library.set_default", ctx)?;
-        mounter.mount(&parsed.name).await.map_err(mount_err)?;
+        mounter
+            .mount(&parsed.name)
+            .await
+            .map_err(|e| mount_err(&parsed.name, e))?;
     }
 
     // Persist to the registry, then refresh the in-memory cache.
@@ -194,7 +197,10 @@ pub async fn mount(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
     let mounter = require_mounter("library.mount", ctx)?;
     let target = name.clone();
     run_write(ctx, &name, move || async move {
-        mounter.mount(&target).await.map_err(mount_err)?;
+        mounter
+            .mount(&target)
+            .await
+            .map_err(|e| mount_err(&target, e))?;
         tracing::info!(library = %target, "library mounted at runtime");
         Ok(json!({ "ok": true, "name": target }))
     })
@@ -248,7 +254,7 @@ async fn unmount_library(
                 queued_jobs: queued_against(&queue, &target),
             };
             before_remove();
-            mounter.unmount(&target, facts).map_err(mount_err)?
+            mounter.unmount(&target, facts).map_err(unmount_err)?
         };
         // Outside the queue lock: the last handle going may close the
         // library's stores.

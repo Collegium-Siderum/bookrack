@@ -256,8 +256,9 @@ onto.
   (`-32010`): `RegistryError::LibraryUnmounted`, raised by any handler
   that resolves that parameter. The message names the library and the
   fact; `error.data.detail` carries the reason it was skipped and
-  `error.data.hint` that reason's next step followed by
-  `bookrack libraries mount <name>`.
+  `error.data.hint` the hint bring-up recorded for it, unchanged: that
+  reason's next step, closed with `bookrack libraries mount <name>`.
+  A reason recorded without a hint gets the mount command alone.
 - **A call naming no library that the registry cannot route**
   (`-32010`): `RegistryError::UnnamedAmbiguous`, raised by the same
   handlers when the parameter is absent and the rule under *Unnamed
@@ -548,8 +549,9 @@ the exit-code bucket does not distinguish the two.
   that resolves to a retryable row whose library is not mounted, with
   the job and the library in the message, the bring-up reason in
   `data.detail` when bring-up skipped the library, and the mount and the
-  retry to run in `data.hint`. The state check comes first. Emits one
-  `queue.tick`.
+  retry to run in `data.hint`, each named once: after the skip's own
+  hint, which already closes with the mount, only the retry follows.
+  The state check comes first. Emits one `queue.tick`.
 - `library.list` — array of `{ name, default, dimension }` entries,
   one per mounted library: the daemon's served set.
 - `library.info` — full status card for one library;
@@ -586,7 +588,9 @@ the exit-code bucket does not distinguish the two.
   data root is not there or the library's stores cannot be served by
   this build; a failure opening the library takes the code the error
   mapping assigns its cause. Each of these carries the reason and hint
-  bring-up records when it skips the same library, word for word. A
+  bring-up records when it skips the same library, word for word: the
+  hint names the repair and closes with `bookrack libraries mount
+  <name>`, said once. A
   library bring-up skipped is mounted the same way once repaired, and a
   success clears its record, so a call naming it resolves from then on.
   Being a write, it takes the

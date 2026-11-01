@@ -127,8 +127,9 @@ fn skip_record(runtime: &DaemonRuntime, name: &str) -> Result<UnmountedLibrary> 
 
 /// Ask the running daemon to mount `name` and require the refusal to be
 /// the skip `record` word for word — summary, detail, hint, and
-/// `retryable` — under invalid params, naming the mount command, with
-/// `root` still holding exactly `left`. Shuts the daemon down.
+/// `retryable` — under invalid params, naming the mount command once;
+/// then require a read naming `name` to carry the record's hint as it
+/// is, with `root` still holding exactly `left`. Shuts the daemon down.
 async fn mount_answers_with_the_skip(
     runtime: DaemonRuntime,
     name: &'static str,
@@ -158,11 +159,26 @@ async fn mount_answers_with_the_skip(
             "the mount's detail, hint, and retryable are the skip's, word for word: {resp}"
         );
         let mount = format!("`bookrack libraries mount {name}`");
-        assert!(
+        assert_eq!(
             resp["error"]["data"]["hint"]
                 .as_str()
-                .is_some_and(|hint| hint.contains(&mount)),
-            "the hint must name {mount}: {resp}"
+                .map(|hint| hint.matches(&mount).count()),
+            Some(1),
+            "the hint must name {mount} exactly once: {resp}"
+        );
+
+        // A read naming the library is refused with the record's hint
+        // as it is: the record already ends with the mount.
+        let req = json!({
+            "jsonrpc": "2.0", "id": 2, "method": "library.info", "params": { "name": name },
+        });
+        send(&mut w, &req.to_string()).await?;
+        let resp = recv(&mut reader).await?;
+        assert_eq!(resp["error"]["code"], -32010, "{resp}");
+        assert_eq!(
+            resp["error"]["data"]["hint"].as_str(),
+            record.reason().data.hint.as_deref(),
+            "a call naming the skipped library carries the skip's hint, mount said once: {resp}"
         );
         assert_eq!(
             contents(&root),
@@ -211,7 +227,7 @@ async fn a_registered_root_without_its_manifest_refuses_bring_up() -> Result<()>
         "the hint must say to reconnect the volume first: {problem:?}"
     );
     assert!(
-        hint.ends_with("then start the daemon again."),
+        hint.ends_with(" Then start the daemon again."),
         "a bring-up that refused must say to start the daemon again: {problem:?}"
     );
     assert_eq!(
@@ -334,7 +350,7 @@ async fn two_bare_roots_refuse_bring_up_saying_to_start_again() -> Result<()> {
     for library in &refusal.libraries {
         let hint = library.reason().data.hint.as_deref().unwrap_or_default();
         assert!(
-            hint.ends_with("then start the daemon again."),
+            hint.ends_with(" Then start the daemon again."),
             "{}'s reason in a refused bring-up must say to start again: {hint}",
             library.name()
         );
