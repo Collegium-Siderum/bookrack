@@ -477,3 +477,91 @@ fn backfill_still_runs_on_a_root_that_carries_its_identity() {
     let out = world.repair("--backfill-ocr-derivation");
     assert_success(&out, "backfill alpha");
 }
+
+impl World {
+    /// `index-profile apply` of the built-in profile, with `selection`
+    /// in front.
+    fn apply(&self, selection: &[&str], extra: &[&str]) -> Output {
+        let mut args: Vec<&str> = selection.to_vec();
+        args.extend(["index-profile", "apply", "qwen3-0.6b-default"]);
+        args.extend(extra);
+        self.run(&args)
+    }
+}
+
+/// An empty root has no index, so the plan is empty and the command
+/// goes straight to declaring the profile in the manifest.
+#[test]
+fn apply_refuses_to_mint_on_an_empty_mount_point() {
+    let world = World::new();
+    world.empty_alpha();
+    let before = world.snapshot();
+    let out = world.apply(&["--library", "alpha"], &["--yes"]);
+    world.assert_refused(&before, &out, "alpha", Fault::NoManifest);
+}
+
+#[test]
+fn apply_refuses_another_librarys_root() {
+    let world = World::new();
+    world.foreign_alpha();
+    let before = world.snapshot();
+    let out = world.apply(&["--library", "alpha"], &["--yes"]);
+    world.assert_refused(&before, &out, "alpha", Fault::AnotherUuid);
+}
+
+#[test]
+fn apply_dry_run_refuses_another_librarys_root() {
+    let world = World::new();
+    world.foreign_alpha();
+    let before = world.snapshot();
+    let out = world.apply(&["--library", "alpha"], &["--dry-run"]);
+    world.assert_refused(&before, &out, "alpha", Fault::AnotherUuid);
+}
+
+/// Resolved by path, the root names no library, so the declaration
+/// would carry no registered uuid either: only the gate stands between
+/// the command and beta's manifest.
+#[test]
+fn apply_refuses_a_path_selected_root_holding_another_librarys_manifest() {
+    let world = World::new();
+    world.foreign_alpha();
+    let before = world.snapshot();
+    let out = world.apply(&["--data-dir", path(&world.alpha)], &["--yes"]);
+    world.assert_refused(&before, &out, "alpha", Fault::AnotherUuid);
+}
+
+/// The stamped corpus makes the plan non-empty, which would otherwise
+/// go on to look for a daemon to execute it.
+#[test]
+fn apply_refuses_a_root_whose_manifest_is_gone() {
+    let world = World::new();
+    world.unidentified_alpha();
+    let before = world.snapshot();
+    let out = world.apply(&["--library", "alpha"], &["--yes"]);
+    world.assert_refused(&before, &out, "alpha", Fault::NoManifest);
+}
+
+#[test]
+fn apply_still_declares_on_an_unregistered_root() {
+    let world = World::new();
+    let anon = world.sandbox.data_root("anon");
+    let out = world.apply(&["--data-dir", path(&anon)], &["--yes"]);
+    assert_success(&out, "apply on an unregistered root");
+    assert!(
+        anon.join(MANIFEST_FILENAME).exists(),
+        "the declaration mints a manifest for a root no entry claims"
+    );
+}
+
+#[test]
+fn apply_still_declares_on_a_root_that_carries_its_identity() {
+    let world = World::new();
+    let out = world.apply(&["--library", "alpha"], &["--yes"]);
+    assert_success(&out, "apply on alpha");
+    let manifest =
+        fs::read_to_string(world.alpha.join(MANIFEST_FILENAME)).expect("read alpha's manifest");
+    assert!(
+        manifest.contains("qwen3-0.6b-default"),
+        "the profile is declared: {manifest}"
+    );
+}

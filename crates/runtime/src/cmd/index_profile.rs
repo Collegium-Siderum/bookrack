@@ -825,13 +825,19 @@ impl ApplyPlan {
 /// `selection` resolves to. Offline and read-only: registry,
 /// `config.toml`, profile files, corpus stamps, and the vector-store
 /// meta — no daemon involved. Refusals that are the operator's to fix
-/// surface as [`ApplyRefusal`].
+/// surface as [`ApplyRefusal`]; a root that does not carry the
+/// identity its registry entry caches is refused first, as
+/// [`crate::identity_check::OfflineWriteRefusal`].
 pub async fn plan_apply(
     name: &str,
     selection: &LibrarySelection,
     filter: PipelineFilter,
 ) -> Result<ApplyPlan> {
     let target = resolve_target(selection)?;
+    // Deriving the plan reads the root and executing it declares the
+    // profile in the root's manifest: the root's identity is judged
+    // before either, dry run included.
+    crate::identity_check::refuse_offline_write(target.config())?;
 
     if let Some(refusal) = crate::profile::refuse_bad_profile_reference(name) {
         return Err(ApplyRefusal(refusal).into());
