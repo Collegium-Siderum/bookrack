@@ -8,7 +8,10 @@
 //! manifests: a lost registry can be rebuilt by scanning roots for their
 //! manifests, so a library's identity and data contract live with its
 //! data, not only in the registry. A root without a manifest stays valid
-//! — the file is confirming evidence, never a gate on use.
+//! — the file is confirming evidence, never a gate on use. The one
+//! exception is a write: setting a profile on a root the registry has
+//! already cached a uuid for mints no identity there, and leaves a
+//! manifest recording another uuid as it is.
 //!
 //! The manifest carries identity and the data contract — what this
 //! library *is* and what its vectors *are* — and nothing else. Runtime
@@ -232,9 +235,10 @@ pub fn render_manifest_toml(m: &LibraryManifest) -> String {
 }
 
 /// Identity to stamp onto a manifest that has to be created on the
-/// spot. Callers editing a library they resolved through the registry
-/// pass its entry's identity, so a manifest minted for a pre-manifest
-/// root agrees with the name the operator already knows it by.
+/// spot, and the identity the registry already holds for the root.
+/// Callers editing a library they resolved through the registry pass
+/// its entry's identity, so a manifest minted for a pre-manifest root
+/// agrees with the name the operator already knows it by.
 #[derive(Debug, Clone, Copy)]
 pub struct ManifestIdentitySeed<'a> {
     /// Registry name to record as the library's birth name.
@@ -243,6 +247,83 @@ pub struct ManifestIdentitySeed<'a> {
     pub kind: LibraryKind,
     /// Free-form description; `None` leaves the field absent.
     pub description: Option<&'a str>,
+    /// The uuid the registry entry caches for this root, when it caches
+    /// one. A root that is to carry it must already: with no manifest
+    /// nothing is minted, and a manifest recording another uuid is left
+    /// as it is.
+    pub registered_uuid: Option<&'a str>,
+}
+
+/// Why setting a manifest's `index_profile` did not happen.
+#[derive(Debug)]
+pub struct ManifestWriteError(WriteFault);
+
+#[derive(Debug)]
+enum WriteFault {
+    /// Loading or writing the manifest failed.
+    Manifest(ManifestError),
+    /// The registry caches a uuid for the root, and the root carries no
+    /// manifest (`found` is `None`) or one recording another uuid.
+    Unidentified {
+        path: PathBuf,
+        registered: String,
+        found: Option<String>,
+    },
+}
+
+impl ManifestWriteError {
+    /// The manifest failure underneath, when that is what it was.
+    pub fn manifest_error(&self) -> Option<&ManifestError> {
+        match &self.0 {
+            WriteFault::Manifest(err) => Some(err),
+            WriteFault::Unidentified { .. } => None,
+        }
+    }
+}
+
+impl From<ManifestError> for ManifestWriteError {
+    fn from(err: ManifestError) -> Self {
+        ManifestWriteError(WriteFault::Manifest(err))
+    }
+}
+
+impl std::fmt::Display for ManifestWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            WriteFault::Manifest(err) => std::fmt::Display::fmt(err, f),
+            WriteFault::Unidentified {
+                path,
+                registered,
+                found: None,
+            } => write!(
+                f,
+                "refusing to write {}: the registry records uuid {registered} for this root, and \
+                 it carries no manifest",
+                path.display()
+            ),
+            WriteFault::Unidentified {
+                path,
+                registered,
+                found: Some(found),
+            } => write!(
+                f,
+                "refusing to write {}: the registry records uuid {registered} for this root, and \
+                 its manifest records uuid {found}",
+                path.display()
+            ),
+        }
+    }
+}
+
+/// A wrapped [`ManifestError`] is transparent: its own message is the
+/// whole message, so the chain continues below it rather than at it.
+impl std::error::Error for ManifestWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.0 {
+            WriteFault::Manifest(err) => err.source(),
+            WriteFault::Unidentified { .. } => None,
+        }
+    }
 }
 
 /// Set or clear the manifest's `index_profile`, atomically, and return
@@ -257,6 +338,14 @@ pub struct ManifestIdentitySeed<'a> {
 /// `Ok(None)` and writes nothing, since there is no stored reference to
 /// clear and minting an identity is not what `--unset` was asked to do.
 ///
+/// When `seed.registered_uuid` is `Some`, the root is expected to carry
+/// that uuid already. Setting a profile on a root with no manifest is
+/// refused rather than minted, and a manifest recording another uuid is
+/// refused and left untouched in either direction; clearing on a root
+/// with no manifest is still `Ok(None)`. With `None` — a root no entry
+/// claims, or an entry that cached no uuid — the rules above stand as
+/// they are.
+///
 /// A manifest that exists but does not load — corrupt, or from a future
 /// schema — is an error rather than a root to mint over: overwriting it
 /// would destroy the identity it was still carrying.
@@ -264,8 +353,22 @@ pub fn set_manifest_index_profile(
     data_dir: &Path,
     profile: Option<&str>,
     seed: ManifestIdentitySeed<'_>,
-) -> Result<Option<LibraryManifest>, ManifestError> {
+) -> Result<Option<LibraryManifest>, ManifestWriteError> {
     let existing = load_manifest(data_dir)?;
+    if let Some(registered) = seed.registered_uuid {
+        let found = existing.as_ref().map(|m| m.uuid.as_str());
+        let refused = match found {
+            Some(uuid) => uuid != registered,
+            None => profile.is_some(),
+        };
+        if refused {
+            return Err(ManifestWriteError(WriteFault::Unidentified {
+                path: data_dir.join(MANIFEST_FILENAME),
+                registered: registered.to_string(),
+                found: found.map(str::to_string),
+            }));
+        }
+    }
     let mut manifest = match (existing, profile) {
         (Some(m), _) => m,
         (None, None) => return Ok(None),
@@ -297,6 +400,7 @@ mod tests {
             name: "seeded",
             kind: LibraryKind::Test,
             description: Some("from the registry entry"),
+            registered_uuid: None,
         }
     }
 
@@ -524,9 +628,11 @@ mod tests {
              name = \"n\"\n",
         )
         .expect("seed");
+        let err = set_manifest_index_profile(dir.path(), Some("fast-local"), seed())
+            .expect_err("an unreadable manifest is not minted over");
         assert!(matches!(
-            set_manifest_index_profile(dir.path(), Some("fast-local"), seed()),
-            Err(ManifestError::SchemaVersion { found: 99, .. })
+            err.manifest_error(),
+            Some(ManifestError::SchemaVersion { found: 99, .. })
         ));
         // The file it refused to understand is still intact.
         let text = std::fs::read_to_string(dir.path().join(MANIFEST_FILENAME)).expect("read");
@@ -543,12 +649,115 @@ mod tests {
         std::fs::create_dir(&root).expect("create");
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).expect("chmod");
 
+        let err = set_manifest_index_profile(&root, Some("fast-local"), seed())
+            .expect_err("a read-only root cannot be written");
         assert!(matches!(
-            set_manifest_index_profile(&root, Some("fast-local"), seed()),
-            Err(ManifestError::Io { .. })
+            err.manifest_error(),
+            Some(ManifestError::Io { .. })
         ));
 
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).expect("restore");
+    }
+
+    fn registered(uuid: &'static str) -> ManifestIdentitySeed<'static> {
+        ManifestIdentitySeed {
+            registered_uuid: Some(uuid),
+            ..seed()
+        }
+    }
+
+    #[test]
+    fn a_registered_uuid_mints_nothing_on_a_bare_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = set_manifest_index_profile(
+            dir.path(),
+            Some("fast-local"),
+            registered("01890a5d-0000-7000-8000-000000000000"),
+        )
+        .expect_err("a root the registry has a uuid for is not minted");
+        assert!(err.manifest_error().is_none(), "{err}");
+        assert!(
+            err.to_string().ends_with("and it carries no manifest"),
+            "{err}"
+        );
+        assert!(!dir.path().join(MANIFEST_FILENAME).exists());
+    }
+
+    #[test]
+    fn a_registered_uuid_leaves_another_librarys_manifest_as_it_is() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let present = sample();
+        write_manifest(dir.path(), &present).expect("write");
+        let path = dir.path().join(MANIFEST_FILENAME);
+        let before = std::fs::read(&path).expect("read");
+        for profile in [Some("fast-local"), None] {
+            let err = set_manifest_index_profile(dir.path(), profile, registered("another"))
+                .expect_err("a manifest with another uuid is not written");
+            assert!(
+                err.to_string()
+                    .ends_with(&format!("its manifest records uuid {}", present.uuid)),
+                "{err}"
+            );
+            assert_eq!(std::fs::read(&path).expect("read"), before);
+        }
+    }
+
+    #[test]
+    fn a_registered_uuid_matching_the_manifest_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let present = sample();
+        write_manifest(dir.path(), &present).expect("write");
+        let written = set_manifest_index_profile(
+            dir.path(),
+            Some("fast-local"),
+            registered("01890a5d-0000-7000-8000-000000000000"),
+        )
+        .expect("the root carries the registered uuid")
+        .expect("a manifest is written");
+        assert_eq!(written.uuid, present.uuid);
+        assert_eq!(written.index_profile.as_deref(), Some("fast-local"));
+    }
+
+    #[test]
+    fn no_registered_uuid_mints_as_before() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let minted = set_manifest_index_profile(dir.path(), Some("fast-local"), seed())
+            .expect("an unclaimed root is minted")
+            .expect("a manifest is written");
+        assert_eq!(minted.name, "seeded");
+        assert!(dir.path().join(MANIFEST_FILENAME).exists());
+    }
+
+    #[test]
+    fn clearing_under_a_registered_uuid_on_a_bare_root_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = set_manifest_index_profile(dir.path(), None, registered("u"))
+            .expect("there is nothing to clear");
+        assert!(out.is_none());
+        assert!(!dir.path().join(MANIFEST_FILENAME).exists());
+    }
+
+    /// The wrapper adds no words of its own to a manifest failure, so a
+    /// report that walks the source chain says it once.
+    #[test]
+    fn a_wrapped_manifest_error_is_displayed_once_down_the_chain() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(MANIFEST_FILENAME),
+            "format = \"bookrack-library\"\n\
+             format_version = 99\n\
+             uuid = \"u\"\n\
+             name = \"n\"\n",
+        )
+        .expect("seed");
+        let err = set_manifest_index_profile(dir.path(), Some("fast-local"), seed())
+            .expect_err("an unreadable manifest is not minted over");
+        let chain = bookrack_core::error_chain(&err);
+        assert_eq!(
+            chain.matches("unsupported format_version 99").count(),
+            1,
+            "{chain}"
+        );
     }
 
     #[test]

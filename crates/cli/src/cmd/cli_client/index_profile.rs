@@ -308,6 +308,7 @@ fn declare_target(plan: &ApplyPlan, name: &str) -> Result<()> {
             name: plan.target.label(),
             kind: plan.target.kind(),
             description: plan.target.description(),
+            registered_uuid: plan.target.entry.as_ref().and_then(|e| e.uuid.as_deref()),
         },
     )
     .with_context(|| {

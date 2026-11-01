@@ -722,6 +722,7 @@ mod tests {
                 name: "lib",
                 kind: bookrack_config::LibraryKind::Test,
                 description: None,
+                registered_uuid: None,
             },
         )
         .expect("write a manifest");

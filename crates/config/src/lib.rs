@@ -40,7 +40,7 @@ pub use knobs::{
 };
 pub use manifest::{
     LibraryManifest, MANIFEST_FILENAME, MANIFEST_FORMAT, MANIFEST_SCHEMA_VERSION, ManifestError,
-    ManifestIdentitySeed, load_manifest, new_manifest, render_manifest_toml,
+    ManifestIdentitySeed, ManifestWriteError, load_manifest, new_manifest, render_manifest_toml,
     set_manifest_index_profile, write_manifest,
 };
 pub use profile_ref::{

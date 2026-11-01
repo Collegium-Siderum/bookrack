@@ -106,6 +106,7 @@ fn world() -> &'static Sandbox {
                 name: "alpha",
                 kind: LibraryKind::Test,
                 description: None,
+                registered_uuid: None,
             },
         )
         .expect("declare alpha's index profile");

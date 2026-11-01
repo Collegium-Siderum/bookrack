@@ -99,6 +99,7 @@ fn declare_profile(root: &Path, name: &str, profile: &str) {
             name,
             kind: LibraryKind::Test,
             description: None,
+            registered_uuid: None,
         },
     )
     .expect("declare the library's index profile");

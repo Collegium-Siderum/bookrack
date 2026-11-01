@@ -503,6 +503,7 @@ pub fn config(name: String, sets: Vec<(String, String)>, unset: Vec<String>) -> 
             name: &name,
             kind: entry.kind,
             description: entry.description.as_deref(),
+            registered_uuid: entry.uuid.as_deref(),
         };
         set_manifest_index_profile(&data_dir, profile_set.as_deref(), seed).map_err(|e| {
             Report::new(BookrackCliError::LocalUserError {

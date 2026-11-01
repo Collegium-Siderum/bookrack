@@ -199,6 +199,7 @@ fn declare_profile(root: &Path, name: &str, model: &str, dim: u32) -> Result<()>
             name: "default",
             kind: LibraryKind::Test,
             description: None,
+            registered_uuid: None,
         },
     )?;
     Ok(())
@@ -354,6 +355,7 @@ async fn a_reset_that_never_started_offers_no_resume(
             name: "default",
             kind: LibraryKind::Test,
             description: None,
+            registered_uuid: None,
         },
     )?;
     let (mut r, mut w) = connect(&sock).await?;

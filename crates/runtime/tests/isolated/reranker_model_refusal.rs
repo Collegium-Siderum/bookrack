@@ -67,6 +67,7 @@ async fn an_unpinned_reranker_model_is_not_sent_to_the_installer() {
             name: "default",
             kind: LibraryKind::Test,
             description: None,
+            registered_uuid: None,
         },
     )
     .expect("declare the profile");

@@ -2448,6 +2448,7 @@ mod tests {
                 name: "declared",
                 kind: bookrack_config::LibraryKind::Test,
                 description: None,
+                registered_uuid: None,
             },
         )
         .expect("seed a manifest declaring a profile");
@@ -2891,6 +2892,7 @@ mod tests {
                 name: "stamped",
                 kind: bookrack_config::LibraryKind::Test,
                 description: None,
+                registered_uuid: None,
             },
         )
         .expect("seed a manifest declaring a profile");

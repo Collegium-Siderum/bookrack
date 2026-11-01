@@ -1159,6 +1159,7 @@ async fn read_proxies_route_failures_through_the_shared_classifier() -> Result<(
                 name: "default",
                 kind: LibraryKind::Test,
                 description: None,
+                registered_uuid: None,
             },
         )?;
         let resp = call(&mut w, &mut reader, 1, "library.info", json!({})).await?;
