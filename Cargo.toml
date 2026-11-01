@@ -230,3 +230,10 @@ debug = "line-tables-only"
 # the line-tables setting above.
 [profile.dev.package."*"]
 debug = 0
+
+# Optimize the SHA-256 implementation in dev and test builds. Unoptimized,
+# hashing a debug `bookrack` binary of a few hundred megabytes takes
+# seconds, and the sandbox tool hashes the binary under test each time it
+# installs one.
+[profile.dev.package.sha2]
+opt-level = 3
