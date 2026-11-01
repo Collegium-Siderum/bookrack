@@ -1236,6 +1236,7 @@ async fn run() -> Result<()> {
         // would move the resolve ahead of the lock it is supposed to
         // follow, and would put a `Config` in the runtime's options for
         // no behaviour that differs.
+        // root identity: read-only; a probe whose result is discarded, the daemon resolves again
         if let Err(err) = Config::resolve(&selection) {
             match err {
                 ConfigError::MissingDataDir | ConfigError::DataDirNotFound(_) => {
@@ -1317,6 +1318,7 @@ async fn run() -> Result<()> {
                         // Quiet suppresses the listing but still reads
                         // the registry, so a malformed file is reported
                         // through the exit code.
+                        // root identity: registry
                         bookrack_config::list_libraries()?;
                         Ok(())
                     } else {
@@ -1413,6 +1415,7 @@ async fn run() -> Result<()> {
                     // BOOKRACK_DATA_DIR outranks the registry default on
                     // the next resolve. Warn at the moment the mistaken
                     // expectation forms — CLI-local, no daemon involved.
+                    // root identity: registry
                     let default_root = bookrack_config::find_library(&registry_path, &name)?
                         .map(|entry| entry.data_dir);
                     if !bookrack_cli::render::ctx().is_quiet()

@@ -110,6 +110,7 @@ pub async fn run(
     // is left to the repair's own resolution, which reports it with the
     // repair's context.
     if (rename_envelopes || backfill_ocr_derivation || close_abandoned_runs)
+        // root identity: gated; the gate for every repair below
         && let Ok(cfg) = bookrack_config::Config::resolve(selection)
     {
         bookrack_runtime::identity_check::refuse_offline_write(&cfg)?;
@@ -166,6 +167,7 @@ pub async fn run(
     // plan computed against a live library describes a moment that has
     // already passed.
     if close_abandoned_runs {
+        // root identity: gated; judged at the top of run, before any install
         let cfg = bookrack_config::Config::resolve(selection)?;
         let report = bookrack_runtime::open_runs::close_abandoned_runs(&cfg, dry_run);
         bookrack_runtime::open_runs::render_close_report(&report, json);

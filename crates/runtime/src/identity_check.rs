@@ -128,6 +128,7 @@ pub(crate) fn verify_registered_identity(
 /// entry that is gone now is a registry rewritten underneath the
 /// daemon, which is not this check's fault to report.
 pub(crate) fn registry_entry(name: &str) -> Result<Option<LibraryEntry>, ConfigError> {
+    // root identity: registry
     Ok(bookrack_config::list_libraries()?
         .and_then(|entries| entries.into_iter().find(|entry| entry.name == name)))
 }
@@ -166,6 +167,7 @@ impl Explain for OfflineWriteRefusal {
 /// resolution that produced `config` read the same file a moment ago.
 pub fn refuse_offline_write(config: &Config) -> eyre::Result<()> {
     let root = config.data_dir();
+    // root identity: registry; the offline gate looks its entry up here
     let entries = list_libraries()?.unwrap_or_default();
     let entry = match config.library() {
         Some(name) => entries.into_iter().find(|entry| entry.name == name),

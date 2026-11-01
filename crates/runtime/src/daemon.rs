@@ -327,6 +327,7 @@ impl DaemonRuntime {
         // throws that result away; resolution happens here, after the
         // lock, so the configuration the daemon serves is the one that
         // was in place when it took ownership.
+        // root identity: mount-checked; bring-up judges every library before it opens one
         let mut cfg = Config::resolve(&opts.selection).context("resolve configuration")?;
         // 4a. A path-class root whose manifest identity the registry
         //     records at another path is refused before anything is
@@ -347,6 +348,7 @@ impl DaemonRuntime {
                     root = %cfg.data_dir().display(),
                     "registered the selected root under its manifest name",
                 );
+                // root identity: mount-checked; bring-up judges every library before it opens one
                 cfg = Config::resolve(&opts.selection)
                     .context("resolve configuration after registering the selected root")?;
                 vec![name]
@@ -368,6 +370,7 @@ impl DaemonRuntime {
         //     `library.unmount`.
         let primary_name = cfg.library().unwrap_or("default").to_string();
         let (registry_entries, registry_default) = if cfg.library().is_some() {
+            // root identity: mount-checked; the eager loop judges each entry listed here
             bookrack_config::list_libraries_with_default()
                 .context("read the library registry for eager mounting")?
                 .unwrap_or_default()
@@ -389,6 +392,7 @@ impl DaemonRuntime {
                     .unwrap_or_default();
                 // A named selection resolves through the registry and
                 // is immune to a set BOOKRACK_DATA_DIR.
+                // root identity: mount-checked; verify_registered_identity below
                 let lib_cfg = match Config::resolve(&LibrarySelection {
                     data_dir: None,
                     library: Some(name.clone()),

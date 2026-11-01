@@ -34,9 +34,13 @@
 //! that carries its own marker is still held to it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use eyre::Result;
+
+use crate::source_scan::{
+    marker_above, member_crates, rust_sources, test_module_start, workspace_root,
+};
 
 /// Constant types the rule applies to.
 ///
@@ -69,35 +73,6 @@ const MARKER: &str = "// setting:";
 /// The marker payload that opts a constant out of the inventory.
 const NOT_A_SETTING: &str = "internal";
 
-/// Every member crate, by directory name.
-///
-/// Read off the filesystem rather than held as a list: a list is a
-/// second place to remember, and the failure it produces — a crate
-/// nobody added — is silent.
-fn member_crates(root: &Path) -> Result<Vec<String>> {
-    let mut names = Vec::new();
-    for entry in std::fs::read_dir(root.join("crates"))? {
-        let path = entry?.path();
-        if !path.join("src").is_dir() {
-            continue;
-        }
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            names.push(name.to_string());
-        }
-    }
-    names.sort();
-    Ok(names)
-}
-
-/// The workspace root, from this crate's manifest directory.
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("crates/<name> always has two ancestors")
-        .to_path_buf()
-}
-
 /// One numeric constant found in the source, with the marker above it.
 #[derive(Debug)]
 struct Found {
@@ -119,63 +94,24 @@ struct Found {
 /// to write `internal` without thinking.
 fn numeric_constants(crate_dir: &Path) -> Result<Vec<Found>> {
     let mut found = Vec::new();
-    let mut stack = vec![crate_dir.join("src")];
-    while let Some(dir) = stack.pop() {
-        if !dir.is_dir() {
-            continue;
-        }
-        for entry in std::fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.is_dir() {
-                stack.push(path);
+    for path in rust_sources(crate_dir)? {
+        let text = std::fs::read_to_string(&path)?;
+        let all: Vec<&str> = text.lines().collect();
+        let lines = &all[..test_module_start(&all)];
+        let whole_file = file_scoped_marker(lines);
+        for (idx, line) in lines.iter().enumerate() {
+            let Some(name) = declares_numeric_constant(line) else {
                 continue;
-            }
-            if path.extension().is_none_or(|e| e != "rs") {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path)?;
-            let all: Vec<&str> = text.lines().collect();
-            let lines = &all[..test_module_start(&all)];
-            let whole_file = file_scoped_marker(lines);
-            for (idx, line) in lines.iter().enumerate() {
-                let Some(name) = declares_numeric_constant(line) else {
-                    continue;
-                };
-                found.push(Found {
-                    site: format!("{}:{}", path.display(), idx + 1),
-                    name,
-                    marker: marker_above(lines, idx).or_else(|| whole_file.clone()),
-                });
-            }
+            };
+            found.push(Found {
+                site: format!("{}:{}", path.display(), idx + 1),
+                name,
+                marker: marker_above(lines, idx, MARKER).or_else(|| whole_file.clone()),
+            });
         }
     }
     found.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(found)
-}
-
-/// Where a file's test module begins, or its length when it has none.
-///
-/// `#[cfg(test)]` alone does not mark it: the attribute also gates
-/// imports a test-only derive needs, and cutting at the first one of
-/// those truncates a file at its `use` block and hides every constant
-/// below. Only the attribute standing on a `mod` starts the tests.
-fn test_module_start(lines: &[&str]) -> usize {
-    for (idx, line) in lines.iter().enumerate() {
-        if line.trim() != "#[cfg(test)]" {
-            continue;
-        }
-        let opens_a_module = lines[idx + 1..]
-            .iter()
-            .find(|next| !next.trim().is_empty())
-            .is_some_and(|next| {
-                let next = next.trim();
-                next.starts_with("mod ") || next.starts_with("pub mod ")
-            });
-        if opens_a_module {
-            return idx;
-        }
-    }
-    lines.len()
 }
 
 /// The constant's name when this line declares one of a tunable type.
@@ -200,28 +136,6 @@ fn declares_numeric_constant(line: &str) -> Option<String> {
     }
     let ty = rest.split('=').next()?.trim();
     TUNABLE_TYPES.contains(&ty).then(|| name.to_string())
-}
-
-/// The `// setting:` payload attached to the constant declared at
-/// `idx`.
-///
-/// The marker sits on the line directly above the declaration,
-/// attributes skipped — below the doc comment, which describes the
-/// constant, rather than above it, which would put a machine-readable
-/// line where a reader expects prose.
-fn marker_above(lines: &[&str], idx: usize) -> Option<String> {
-    let mut cursor = idx;
-    while cursor > 0 {
-        cursor -= 1;
-        let line = lines[cursor].trim();
-        if line.starts_with('#') {
-            continue;
-        }
-        return line
-            .strip_prefix(MARKER)
-            .map(|payload| payload.trim().to_string());
-    }
-    None
 }
 
 /// The one opt-out a whole file may state on behalf of its constants.

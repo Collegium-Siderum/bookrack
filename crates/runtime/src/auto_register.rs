@@ -85,6 +85,7 @@ pub fn auto_register(cfg: &Config) -> AutoRegistration {
             reason: "no registry path resolves on this machine".to_string(),
         });
     };
+    // root identity: registry
     let entries = match list_libraries_at(&registry_path) {
         Ok(entries) => entries,
         Err(e) => {

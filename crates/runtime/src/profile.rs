@@ -71,6 +71,7 @@ pub fn user_profile_dir() -> Option<PathBuf> {
 /// otherwise by data root. `None` when no entry matches or none records
 /// a profile.
 fn registry_profile_ref(cfg: &Config) -> Option<String> {
+    // root identity: registry
     let entries = list_libraries().ok().flatten()?;
     registry_profile_ref_in(&entries, cfg.library(), cfg.data_dir())
 }

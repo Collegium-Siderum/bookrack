@@ -193,6 +193,7 @@ impl Mounter {
             source: Box::new(source),
         };
         let cfg = Arc::new(
+            // root identity: mount-checked; verify_registered_identity below
             Config::resolve(&LibrarySelection {
                 data_dir: None,
                 library: Some(name.to_string()),

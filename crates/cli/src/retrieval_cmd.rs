@@ -23,6 +23,7 @@ use eyre::{Context as _, Result};
 
 /// Dispatch the requested `bookrack retrieval` action.
 pub fn run(selection: &bookrack_config::LibrarySelection, action: RetrievalAction) -> Result<()> {
+    // root identity: read-only
     let cfg = Config::resolve(selection).context("resolve configuration")?;
     let catalog_db = cfg.catalog_db();
     // A missing catalog means nothing was ever recorded: report the

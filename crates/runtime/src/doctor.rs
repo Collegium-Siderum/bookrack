@@ -174,6 +174,7 @@ pub enum Reporter<'a> {
 /// there is no in-process cache to invalidate between successive calls.
 pub async fn gather(selection: &LibrarySelection, runtime_dir: Option<&Path>) -> Report {
     gather_with(
+        // root identity: read-only; the report probes and writes nothing
         Config::resolve(selection).map(Arc::new),
         Reporter::InProcess { runtime_dir },
     )
@@ -212,6 +213,7 @@ pub async fn gather_with(
     push_daemon_state_rows(&mut rows);
     // One resolution feeds both registry-backed sections, so they can
     // never disagree about what the registry says.
+    // root identity: registry
     let registry = probe_registry(list_libraries());
     push_registry_consistency_rows(&mut rows, &registry);
     push_index_profile_coherence_rows(&mut rows, &registry);
@@ -272,6 +274,7 @@ pub struct RenameFailure {
 /// With `dry_run = true` the plan is computed and returned without
 /// touching the disk.
 pub async fn rename_envelopes(selection: &LibrarySelection, dry_run: bool) -> Result<RenameReport> {
+    // root identity: gated; the CLI doctor::run judges the root before calling this
     let cfg = Config::resolve(selection).context("resolve config for envelope rename")?;
     Ok(rename_envelopes_in(
         &cfg.books_dir(),
@@ -465,6 +468,7 @@ pub async fn backfill_ocr_derivation(
     selection: &LibrarySelection,
     dry_run: bool,
 ) -> Result<BackfillReport> {
+    // root identity: gated; the CLI doctor::run judges the root before calling this
     let cfg = Config::resolve(selection).context("resolve config for OCR derivation backfill")?;
     // A dry run must not touch the database: the read-only open neither
     // migrates nor writes. The real run opens read-write, which also

@@ -191,6 +191,7 @@ fn scan_register(outcome: &ScanOutcome, kind: Option<LibraryKind>) -> Result<()>
         // registry that still has no default is named here rather than
         // discovered by the next unqualified command.
         if registered > 0
+            // root identity: registry
             && let Ok(entries) = bookrack_config::list_libraries_at(&registry_path)
             && !entries.iter().any(|e| e.is_default)
         {
@@ -339,6 +340,7 @@ pub fn remove(name: String, purge: bool, yes: bool) -> Result<()> {
         // Read the entry before removing it: the detect gate refuses to
         // delete a path that no longer looks like a data root, so an
         // entry pointing at the wrong directory cannot delete it.
+        // root identity: gated; refuse_offline_write_to below, before the root lock
         let entry = find_library(&registry_path, &name)
             .map_err(config_error)?
             .ok_or_else(|| {
@@ -428,6 +430,7 @@ pub fn remove(name: String, purge: bool, yes: bool) -> Result<()> {
 /// down the same path `index-profile apply` uses.
 pub fn config(name: String, sets: Vec<(String, String)>, unset: Vec<String>) -> Result<()> {
     let registry_path = registry_path()?;
+    // root identity: gated; an edit passes refuse_offline_write_to below, a print only reads
     let entry = find_library(&registry_path, &name)
         .map_err(config_error)?
         .ok_or_else(|| {

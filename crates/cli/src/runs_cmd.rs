@@ -30,6 +30,7 @@ use crate::render::distribution::render_histogram_bars;
 
 /// Dispatch the requested `bookrack runs` action.
 pub fn run(selection: &bookrack_config::LibrarySelection, action: RunsAction) -> Result<()> {
+    // root identity: read-only
     let cfg = Config::resolve(selection).context("resolve configuration")?;
     let catalogs = open_run_catalogs(&cfg)?;
     match action {

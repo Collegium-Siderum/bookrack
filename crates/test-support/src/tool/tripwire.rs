@@ -327,6 +327,7 @@ pub fn check_registry(registry: &Path, host_root: &Path) -> Vec<Finding> {
         }
         Ok(_) => {}
     }
+    // root identity: registry
     let entries = match bookrack_config::list_libraries_at(registry) {
         Ok(entries) => entries,
         Err(err) => {

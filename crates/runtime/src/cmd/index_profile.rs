@@ -544,8 +544,10 @@ impl ProfileTarget {
 /// entry it was matched to by manifest uuid or by path — so a root the
 /// registry does not carry resolves without an entry instead of failing.
 fn resolve_target(selection: &LibrarySelection) -> Result<ProfileTarget> {
+    // root identity: gated; plan_apply judges the target right after, current only reads
     let config = Config::resolve(selection)?;
     let entry = match config.library() {
+        // root identity: registry
         Some(name) => list_libraries()?
             .unwrap_or_default()
             .into_iter()

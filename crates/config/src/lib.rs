@@ -702,6 +702,7 @@ impl Config {
     /// data root comes from the data-root variable (or the registry's
     /// default library, if one is set).
     pub fn load() -> Result<Config, ConfigError> {
+        // root identity: read-only; forwards to the resolver, each caller of load is marked
         Config::resolve(&LibrarySelection::default())
     }
 
@@ -998,6 +999,7 @@ pub struct LibraryEntry {
 /// is missing, malformed, or unreadable surfaces as the matching
 /// error; a missing platform-default file is simply `Ok(None)`.
 pub fn list_libraries() -> Result<Option<Vec<LibraryEntry>>, ConfigError> {
+    // root identity: registry
     Ok(list_libraries_with_default()?.map(|(entries, _)| entries))
 }
 

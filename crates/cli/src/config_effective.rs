@@ -96,6 +96,7 @@ struct ReportOut<'a> {
 /// not resolve is the case this command exists for, and every knob
 /// that never depended on one still has an answer to give.
 pub fn run(selection: &LibrarySelection) -> Result<()> {
+    // root identity: read-only; the report reads the resolution and writes nothing
     let resolved = Config::resolve(selection);
     let cfg = resolved.as_ref().ok();
     let problem = resolved.as_ref().err().map(resolution_problem);

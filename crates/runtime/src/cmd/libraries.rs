@@ -50,6 +50,7 @@ impl DaemonLibraries {
 /// listing is the same either way apart from the served column and the
 /// skipped libraries' reasons.
 pub fn list(json: bool, daemon: Option<&DaemonLibraries>) -> Result<()> {
+    // root identity: registry
     let entries = bookrack_config::list_libraries().context("list libraries")?;
     if json {
         render::libraries_list_json(entries.as_deref(), daemon);
@@ -250,6 +251,7 @@ fn validate_inputs(
             Some("Point --data-dir at a directory outside the library being forked."),
         ));
     }
+    // root identity: registry
     let entries = bookrack_config::list_libraries_at(registry_path)
         .with_context(|| format!("list libraries in registry {}", registry_path.display()))?;
     if entries.iter().any(|e| e.name == new_name) {

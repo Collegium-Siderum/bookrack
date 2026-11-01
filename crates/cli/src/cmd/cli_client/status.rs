@@ -362,6 +362,7 @@ fn not_running_card(lock_path: &Path) -> Result<()> {
             "lock": lock_path.display().to_string(),
         },
         "registry": {
+            // root identity: registry
             "default": registry_default(bookrack_config::list_libraries()),
         },
     });

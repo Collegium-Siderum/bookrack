@@ -76,6 +76,7 @@ pub async fn run(
     selection: &bookrack_config::LibrarySelection,
     action: DistillAction,
 ) -> Result<()> {
+    // root identity: gated; a build or dry run passes refuse_offline_write below
     let cfg = Config::resolve(selection).context("resolve configuration")?;
     // A build writes the catalog and `reference.db`, a dry run the
     // catalog's audit rows: both judge the root's identity first.
