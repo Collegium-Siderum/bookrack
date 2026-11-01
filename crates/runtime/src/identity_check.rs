@@ -3,12 +3,14 @@
 //! Does a registered library's data root carry the identity the
 //! registry cached for it?
 //!
-//! One judgement for the two places a registry entry becomes a mount:
-//! bring-up's eager loop in [`crate::daemon`] and the runtime
-//! [`crate::mount::Mounter::mount`]. An entry that caches a `uuid` was
-//! written against a root whose manifest records that uuid, so a root
-//! that now holds no manifest, or a manifest with another uuid, is not
-//! that library. The first is what an empty mount point looks like
+//! One judgement for the places a registry entry's root is about to be
+//! used: bring-up's eager loop in [`crate::daemon`] and the runtime
+//! [`crate::mount::Mounter::mount`], which serve the root, and the
+//! commands that write to it from the CLI process with no daemon in
+//! between ([`refuse_offline_write`]). An entry that caches a `uuid`
+//! was written against a root whose manifest records that uuid, so a
+//! root that now holds no manifest, or a manifest with another uuid, is
+//! not that library. The first is what an empty mount point looks like
 //! while its volume is not connected: the directory exists and holds
 //! nothing, so an existence check passes it, and serving it would
 //! answer searches with nothing and write an ingest into the mount
@@ -24,15 +26,18 @@
 //! file of a root that is otherwise present.
 //!
 //! The check returns an [`IdentityFault`], not a finished message. Its
-//! reason names the repair and no retry: the same fault is closed once
-//! for a daemon that goes on serving and once for a bring-up that
-//! refuses, and only the caller knows which
-//! ([`crate::unmounted::MountOccasion`]).
+//! reason names the repair and no retry: a daemon closes the same
+//! fault once for a mount it goes on serving and once for a bring-up
+//! that refuses, and only the caller knows which
+//! ([`crate::unmounted::MountOccasion`]). An offline write is closed
+//! here, by [`OfflineWriteRefusal`], with running the command again.
 
 use std::path::{Path, PathBuf};
 
-use bookrack_config::{ConfigError, LibraryEntry, MANIFEST_FILENAME, load_manifest};
-use bookrack_core::Problem;
+use bookrack_config::{
+    Config, ConfigError, LibraryEntry, MANIFEST_FILENAME, list_libraries, load_manifest, same_root,
+};
+use bookrack_core::{Explain, Problem};
 
 use crate::backend_probe::PreflightRefusal;
 
@@ -56,13 +61,21 @@ enum FaultKind {
 }
 
 impl IdentityFault {
-    /// The three-part reason, its hint naming the repair and no retry.
+    /// The three-part reason a daemon gives, its hint naming the repair
+    /// and no retry.
     pub(crate) fn problem(&self) -> Problem {
+        self.worded("serve")
+    }
+
+    /// The three-part reason with `verb` as what cannot be done to the
+    /// library.
+    fn worded(&self, verb: &str) -> Problem {
         match &self.kind {
             FaultKind::MissingManifest => {
-                missing_manifest_problem(&self.library, &self.root, &self.cached)
+                missing_manifest_problem(verb, &self.library, &self.root, &self.cached)
             }
             FaultKind::Mismatch { found, found_name } => identity_mismatch_problem(
+                verb,
                 &self.library,
                 &self.root,
                 &self.cached,
@@ -119,14 +132,68 @@ pub(crate) fn registry_entry(name: &str) -> Result<Option<LibraryEntry>, ConfigE
         .and_then(|entries| entries.into_iter().find(|entry| entry.name == name)))
 }
 
+/// A write from the CLI process refused before it touched the root: the
+/// registry caches a uuid for the library, and the root carries no
+/// manifest or one recording another uuid.
+#[derive(Debug, Clone)]
+pub struct OfflineWriteRefusal(IdentityFault);
+
+impl std::fmt::Display for OfflineWriteRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.worded("write to").summary)
+    }
+}
+
+impl std::error::Error for OfflineWriteRefusal {}
+
+impl Explain for OfflineWriteRefusal {
+    fn explain(&self) -> Problem {
+        let mut problem = self.0.worded("write to");
+        if let Some(hint) = problem.data.hint.take() {
+            problem.data.hint = Some(format!("{hint} Then run this command again."));
+        }
+        problem
+    }
+}
+
+/// Refuse a write to the root `config` resolved, when the registry
+/// entry that root belongs to caches a uuid the root does not carry.
+/// The entry is the one the resolution named, or, for a path-class root
+/// it left unnamed, the one whose data root is that path. A root no
+/// entry claims either way has nothing to compare and passes.
+///
+/// A registry that cannot be read is an error, not a pass: the
+/// resolution that produced `config` read the same file a moment ago.
+pub fn refuse_offline_write(config: &Config) -> eyre::Result<()> {
+    let root = config.data_dir();
+    let entries = list_libraries()?.unwrap_or_default();
+    let entry = match config.library() {
+        Some(name) => entries.into_iter().find(|entry| entry.name == name),
+        None => entries
+            .into_iter()
+            .find(|entry| same_root(&entry.data_dir, root)),
+    };
+    match entry {
+        Some(entry) => verify_registered_identity(&entry, root)
+            .map_err(|fault| OfflineWriteRefusal(fault).into()),
+        None => Ok(()),
+    }
+}
+
+/// [`refuse_offline_write`] for a caller that took the root straight
+/// from a registry entry: the entry's own data root is judged.
+pub fn refuse_offline_write_to(entry: &LibraryEntry) -> Result<(), OfflineWriteRefusal> {
+    verify_registered_identity(entry, &entry.data_dir).map_err(OfflineWriteRefusal)
+}
+
 /// The three-part refusal for a root with no manifest: the summary
 /// names the library, the detail what the registry expected to find
 /// there and what the directory looks like instead, the hint the two
 /// ways out — the volume comes back, or the library is registered
 /// where it now is.
-fn missing_manifest_problem(name: &str, root: &Path, cached: &str) -> Problem {
+fn missing_manifest_problem(verb: &str, name: &str, root: &Path, cached: &str) -> Problem {
     Problem::new(format!(
-        "cannot serve library '{name}': its data root carries no identity manifest"
+        "cannot {verb} library '{name}': its data root carries no identity manifest"
     ))
     .detail(format!(
         "The registry records uuid {cached} for '{name}' at '{}', but no {MANIFEST_FILENAME} is \
@@ -144,6 +211,7 @@ fn missing_manifest_problem(name: &str, root: &Path, cached: &str) -> Problem {
 /// this library under a refreshed identity, or another library's
 /// volume is mounted where this one's belongs.
 fn identity_mismatch_problem(
+    verb: &str,
     name: &str,
     root: &Path,
     cached: &str,
@@ -151,8 +219,8 @@ fn identity_mismatch_problem(
     found_name: &str,
 ) -> Problem {
     Problem::new(format!(
-        "cannot serve library '{name}': the identity manifest at its data root records another \
-         uuid"
+        "cannot {verb} library '{name}': the identity manifest at its data root records \
+         another uuid"
     ))
     .detail(format!(
         "The registry records uuid {cached} for '{name}'; the manifest at '{}' records uuid \
@@ -238,6 +306,10 @@ mod tests {
         let fault = verify_registered_identity(&e, root.path())
             .expect_err("a cached uuid with no manifest is refused");
         let problem = fault.problem();
+        assert!(
+            problem.summary.starts_with("cannot serve library 'beta'"),
+            "{problem:?}"
+        );
         assert!(!hint(&problem).contains("libraries mount"), "{problem:?}");
         assert!(!hint(&problem).contains("start the daemon"), "{problem:?}");
     }
@@ -268,12 +340,54 @@ mod tests {
         let fault =
             verify_registered_identity(&e, root.path()).expect_err("a different uuid is refused");
         let problem = fault.problem();
+        assert!(
+            problem.summary.starts_with("cannot serve library 'alpha'"),
+            "{problem:?}"
+        );
         let hint = hint(&problem);
         assert!(hint.starts_with("If this root is 'alpha'"), "{hint}");
         assert!(
             hint.ends_with("reconnect the one that holds 'alpha'."),
             "{hint}"
         );
+    }
+
+    /// An offline write says what it could not do, keeps the daemon's
+    /// detail and repair, and closes with the one retry that fits a
+    /// command run from the CLI process.
+    #[test]
+    fn an_offline_write_names_writing_and_closes_with_running_the_command_again() {
+        let bare = tempfile::tempdir().expect("tempdir");
+        let foreign = tempfile::tempdir().expect("tempdir");
+        write_manifest(
+            foreign.path(),
+            &new_manifest("other", LibraryKind::Test, None),
+        )
+        .expect("write manifest");
+        for (root, tail) in [
+            (bare.path(), "its data root carries no identity manifest"),
+            (
+                foreign.path(),
+                "the identity manifest at its data root records another uuid",
+            ),
+        ] {
+            let e = entry("alpha", root, Some("u"));
+            let refusal = refuse_offline_write_to(&e).expect_err("the root is refused");
+            let served = verify_registered_identity(&e, root)
+                .expect_err("the root is refused")
+                .problem();
+            let problem = refusal.explain();
+            assert_eq!(
+                problem.summary,
+                format!("cannot write to library 'alpha': {tail}")
+            );
+            assert_eq!(refusal.to_string(), problem.summary);
+            assert_eq!(problem.data.detail, served.data.detail);
+            assert_eq!(
+                hint(&problem),
+                format!("{} Then run this command again.", hint(&served))
+            );
+        }
     }
 
     #[test]

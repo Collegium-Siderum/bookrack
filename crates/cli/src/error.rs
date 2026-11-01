@@ -22,6 +22,7 @@ use bookrack_runtime::control::jsonrpc::{
     INVALID_PARAMS, INVALID_REQUEST, JOB_NOT_FOUND, METHOD_NOT_FOUND, NOT_READY, PARSE_ERROR,
     PLAN_KIND_MISMATCH, PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND, PLAN_TARGET_DRIFTED, STATE_UNUSABLE,
 };
+use bookrack_runtime::identity_check::OfflineWriteRefusal;
 use bookrack_runtime::wizard::WizardError;
 use serde_json::Value;
 
@@ -258,6 +259,15 @@ pub enum BookrackCliError {
     #[error("{}", .problem.summary)]
     QueueWaitRefused { problem: Problem },
 
+    /// A command that writes to a library from the CLI process, with no
+    /// daemon in between, refused the library's data root: the registry
+    /// caches a uuid for it, and the root carries no identity manifest
+    /// or one recording another uuid. Judged before anything in the
+    /// root is read or written. Operator input, not a bug: exit 2, and
+    /// the reporter draws the three parts.
+    #[error("{}", .problem.summary)]
+    RootIdentityRefused { problem: Problem },
+
     /// `libraries detect <path>` determined the path is not a confirmed
     /// or probable bookrack data root — a plain not-a-library verdict or
     /// an unreadable manifest. The renderer already printed the verdict;
@@ -288,7 +298,8 @@ impl BookrackCliError {
             | Self::ItemIdUnusable { .. }
             | Self::FilterOffItsSide { .. }
             | Self::InitRefused { .. }
-            | Self::QueueWaitRefused { .. } => 2,
+            | Self::QueueWaitRefused { .. }
+            | Self::RootIdentityRefused { .. } => 2,
             Self::DetectNegative(_) => 1,
         }
     }
@@ -370,7 +381,8 @@ impl BookrackCliError {
             | Self::ItemIdUnusable { problem }
             | Self::FilterOffItsSide { problem }
             | Self::InitRefused { problem }
-            | Self::QueueWaitRefused { problem } => {
+            | Self::QueueWaitRefused { problem }
+            | Self::RootIdentityRefused { problem } => {
                 return Some(problem.data.clone());
             }
             Self::RpcParamsInvalid { detail, .. } => {
@@ -451,7 +463,8 @@ impl CliReportCause<'_> {
 }
 
 /// Walk an `eyre::Report` chain for a typed CLI error, an unwrapped
-/// JSON-RPC error from the control client, or a wizard refusal.
+/// JSON-RPC error from the control client, a wizard refusal, or an
+/// offline write's identity refusal.
 pub fn classify_eyre(err: &eyre::Report) -> Option<CliReportCause<'_>> {
     for cause in err.chain() {
         if let Some(cli_err) = cause.downcast_ref::<BookrackCliError>() {
@@ -473,6 +486,13 @@ pub fn classify_eyre(err: &eyre::Report) -> Option<CliReportCause<'_>> {
             return Some(CliReportCause::Classified(BookrackCliError::InitRefused {
                 problem: refusal.explain(),
             }));
+        }
+        if let Some(refusal) = cause.downcast_ref::<OfflineWriteRefusal>() {
+            return Some(CliReportCause::Classified(
+                BookrackCliError::RootIdentityRefused {
+                    problem: refusal.explain(),
+                },
+            ));
         }
     }
     None

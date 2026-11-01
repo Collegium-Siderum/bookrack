@@ -26,6 +26,7 @@ mod libraries_default_reaches_the_daemon;
 mod libraries_list_served;
 mod library_routing_e2e;
 mod listing_names_its_library;
+mod offline_write_identity;
 mod oneshot_e2e;
 mod path_selected_root_routing;
 mod preflight_refusal;

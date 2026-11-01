@@ -17,6 +17,8 @@ use bookrack_config::{
     root_config_env_override, scan_for_libraries, set_manifest_index_profile,
     set_root_config_values, upsert_library_entry,
 };
+use bookrack_core::Explain;
+use bookrack_runtime::identity_check::{OfflineWriteRefusal, refuse_offline_write_to};
 use bookrack_session::{RootLock, is_root_lock_conflict};
 use eyre::{Context, Report, Result};
 use serde::Serialize;
@@ -344,6 +346,10 @@ pub fn remove(name: String, purge: bool, yes: bool) -> Result<()> {
                     message: format!("no library named '{name}' in the registry"),
                 })
             })?;
+        // The identity check comes first: the lock file is created
+        // inside the root, so a root that is not this library's must
+        // be refused before it is touched at all.
+        refuse_offline_write_to(&entry).map_err(root_identity_refused)?;
         // Take the data root's exclusive lock before the detect gate
         // and the confirmation: a root in use is refused before the
         // operator types the name, and the lock closes the window in
@@ -835,6 +841,13 @@ fn op_error(err: LibraryOpError) -> Report {
 
 /// Map a bare [`ConfigError`] the same way: an unknown-library fault is
 /// operator input (user-error exit), everything else is generic.
+/// An identity refusal as the three-part operator error it is.
+fn root_identity_refused(refusal: OfflineWriteRefusal) -> Report {
+    Report::new(BookrackCliError::RootIdentityRefused {
+        problem: refusal.explain(),
+    })
+}
+
 fn config_error(err: ConfigError) -> Report {
     match &err {
         ConfigError::UnknownLibrary { .. } => Report::new(BookrackCliError::LocalUserError {
