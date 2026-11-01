@@ -17,40 +17,15 @@ use std::path::{Path, PathBuf};
 use bookrack_catalog::{Catalog, GATE_STATUS_FAIL, GATE_STATUS_PASS};
 use bookrack_cli_grammar::{DistillAction, DistillBuildArgs};
 use bookrack_config::LibrarySelection;
+use bookrack_test_support::fixtures::{DISTILL_TINY_BOOK_TOML, DISTILL_TINY_SOURCE};
 use tempfile::TempDir;
-
-/// A two-headword book whose pipeline exercises every stage kind the
-/// distill runner reports on, kept minimal so the test asserts on the
-/// run lifecycle rather than on extraction quality.
-const TINY_BOOK_TOML: &str = r#"
-book_slug      = "tiny"
-schema_name    = "name_translation"
-schema_version = 1
-parser_version = "0.1.0"
-authority_rank = 10
-
-[parser]
-writes_properties = []
-stages = [
-  "split_pages",
-  { stage = "one_block_per_page", lang = "latin" },
-  { stage = "walk_anchors",
-    anchor = "latin_headword",
-    splice_orphans_to_prev_block = false },
-  "split_headline_only",
-  { stage = "to_entry_draft",
-    key_normalizer = "normalize_latin_key" },
-]
-"#;
-
-const TINY_SOURCE: &str = "<!-- page 1 (sheet 1) -->\nSmith\nJones\n";
 
 fn seed_book_dir(root: &Path, slug: &str) -> PathBuf {
     let book_dir = root.join("reference").join(slug);
     fs::create_dir_all(&book_dir).expect("mkdir");
-    let toml = TINY_BOOK_TOML.replace("\"tiny\"", &format!("\"{slug}\""));
+    let toml = DISTILL_TINY_BOOK_TOML.replace("\"tiny\"", &format!("\"{slug}\""));
     fs::write(book_dir.join("book.toml"), toml).expect("write book.toml");
-    fs::write(book_dir.join("source.md"), TINY_SOURCE).expect("write source.md");
+    fs::write(book_dir.join("source.md"), DISTILL_TINY_SOURCE).expect("write source.md");
     book_dir
 }
 

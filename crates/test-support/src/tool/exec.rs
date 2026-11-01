@@ -487,7 +487,9 @@ impl Session {
         })
     }
 
-    async fn exec_inner(
+    /// [`exec`](Self::exec) inside a call the caller already holds:
+    /// no lock is taken and the marker is not read again.
+    pub(crate) async fn exec_inner(
         &self,
         call: &mut Call,
         args: &[OsString],
@@ -787,7 +789,9 @@ impl Session {
         }
     }
 
-    async fn daemon_start_inner(
+    /// [`daemon_start`](Self::daemon_start) inside a call the caller
+    /// already holds.
+    pub(crate) async fn daemon_start_inner(
         &mut self,
         call: &mut Call,
         start: &DaemonStart,
@@ -903,21 +907,30 @@ impl Session {
         let mut call = self
             .begin("daemon stop", vec![format!("{within:?}")], true)
             .await?;
+        let result = self.daemon_stop_inner(&mut call, within).await;
+        self.end(call, result)
+    }
+
+    /// [`daemon_stop`](Self::daemon_stop) inside a call the caller
+    /// already holds.
+    pub(crate) async fn daemon_stop_inner(
+        &mut self,
+        call: &mut Call,
+        within: Duration,
+    ) -> ToolResult<Outcome> {
         let Some(live) = self.take_daemon() else {
-            let outcome = Outcome::refused(
+            return Err(Outcome::refused(
                 STAGE_INSTANCE,
                 Problem::new("no daemon this session started is running")
                     .hint("start one with daemon_start"),
-            );
-            return self.end(call, Err(outcome));
+            ));
         };
         call.set_instance(live.instance);
         let instance = self.paths().daemon_instance(live.instance);
         let outcome = stop_outcome(live.process.stop(within).await);
-        if let Err(e) = write_json(&instance.join("exit.json"), &ExitRecord::from(&outcome)) {
-            return self.end(call, Err(Outcome::io(STAGE_INSTANCE, "write exit.json", e)));
-        }
-        self.end(call, Ok(outcome))
+        write_json(&instance.join("exit.json"), &ExitRecord::from(&outcome))
+            .map_err(|e| Outcome::io(STAGE_INSTANCE, "write exit.json", e))?;
+        Ok(outcome)
     }
 }
 

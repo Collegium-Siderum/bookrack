@@ -1130,35 +1130,14 @@ mod tests {
         }
     }
 
-    const TINY_BOOK_TOML: &str = r#"
-book_slug      = "tiny"
-schema_name    = "name_translation"
-schema_version = 1
-parser_version = "0.1.0"
-authority_rank = 10
-
-[parser]
-writes_properties = []
-stages = [
-  "split_pages",
-  { stage = "one_block_per_page", lang = "latin" },
-  { stage = "walk_anchors",
-    anchor = "latin_headword",
-    splice_orphans_to_prev_block = false },
-  "split_headline_only",
-  { stage = "to_entry_draft",
-    key_normalizer = "normalize_latin_key" },
-]
-"#;
-
-    const TINY_SOURCE: &str = "<!-- page 1 (sheet 1) -->\nSmith\nJones\n";
+    use bookrack_test_support::fixtures::{DISTILL_TINY_BOOK_TOML, DISTILL_TINY_SOURCE};
 
     fn seed_book_dir(root: &Path, slug: &str) -> PathBuf {
         let book_dir = root.join("reference").join(slug);
         fs::create_dir_all(&book_dir).expect("mkdir");
-        let toml = TINY_BOOK_TOML.replace("\"tiny\"", &format!("\"{slug}\""));
+        let toml = DISTILL_TINY_BOOK_TOML.replace("\"tiny\"", &format!("\"{slug}\""));
         fs::write(book_dir.join("book.toml"), toml).expect("write book.toml");
-        fs::write(book_dir.join("source.md"), TINY_SOURCE).expect("write source.md");
+        fs::write(book_dir.join("source.md"), DISTILL_TINY_SOURCE).expect("write source.md");
         book_dir
     }
 
@@ -1608,7 +1587,7 @@ stages = [
     fn resolve_errors_when_md_has_no_book_toml() {
         let tmp = TempDir::new().expect("tmp");
         let lonely = tmp.path().join("lonely.md");
-        fs::write(&lonely, TINY_SOURCE).expect("write");
+        fs::write(&lonely, DISTILL_TINY_SOURCE).expect("write");
 
         let err = resolve_paths(std::slice::from_ref(&lonely), false).expect_err("must error");
         let msg = format!("{err}");
@@ -1621,8 +1600,8 @@ stages = [
         let dir = tmp.path().join("custom");
         fs::create_dir_all(&dir).expect("mkdir");
         let source = dir.join("entries.md");
-        fs::write(&source, TINY_SOURCE).expect("source");
-        let toml = TINY_BOOK_TOML.replace("\"tiny\"", "\"custom\"");
+        fs::write(&source, DISTILL_TINY_SOURCE).expect("source");
+        let toml = DISTILL_TINY_BOOK_TOML.replace("\"tiny\"", "\"custom\"");
         fs::write(dir.join("entries.book.toml"), toml).expect("toml");
 
         let resolved = resolve_paths(std::slice::from_ref(&source), false).expect("resolve");
@@ -1639,10 +1618,10 @@ stages = [
         let dir_b = tmp.path().join("b");
         fs::create_dir_all(&dir_a).expect("mkdir a");
         fs::create_dir_all(&dir_b).expect("mkdir b");
-        fs::write(dir_a.join("book.toml"), TINY_BOOK_TOML).expect("toml a");
-        fs::write(dir_a.join("source.md"), TINY_SOURCE).expect("source a");
-        fs::write(dir_b.join("book.toml"), TINY_BOOK_TOML).expect("toml b");
-        fs::write(dir_b.join("source.md"), TINY_SOURCE).expect("source b");
+        fs::write(dir_a.join("book.toml"), DISTILL_TINY_BOOK_TOML).expect("toml a");
+        fs::write(dir_a.join("source.md"), DISTILL_TINY_SOURCE).expect("source a");
+        fs::write(dir_b.join("book.toml"), DISTILL_TINY_BOOK_TOML).expect("toml b");
+        fs::write(dir_b.join("source.md"), DISTILL_TINY_SOURCE).expect("source b");
 
         let err = resolve_paths(&[dir_a, dir_b], false).expect_err("must error");
         let msg = format!("{err}");
@@ -1674,11 +1653,11 @@ stages = [
         let tmp = TempDir::new().expect("tmp");
         let book_dir = tmp.path().join("reference").join("bad");
         fs::create_dir_all(&book_dir).expect("mkdir");
-        let toml = TINY_BOOK_TOML
+        let toml = DISTILL_TINY_BOOK_TOML
             .replace("\"tiny\"", "\"bad\"")
             .replace("split_pages", "no_such_stage");
         fs::write(book_dir.join("book.toml"), toml).expect("write");
-        fs::write(book_dir.join("source.md"), TINY_SOURCE).expect("write");
+        fs::write(book_dir.join("source.md"), DISTILL_TINY_SOURCE).expect("write");
 
         let err = lint(lint_args(vec![book_dir], 16)).expect_err("must fail");
         let msg = format!("{err}");

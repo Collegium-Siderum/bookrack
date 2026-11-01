@@ -47,6 +47,7 @@
 
 mod child;
 mod embed_stub;
+pub mod fixtures;
 mod process;
 mod sandbox;
 mod spawn;

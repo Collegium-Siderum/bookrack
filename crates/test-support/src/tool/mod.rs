@@ -19,6 +19,7 @@
 //! run/daemon/<n>/    one daemon start: start.json, spawn.json, daemon.json, exit.json, stdout,
 //!                    stderr; a detached one also plan.json and its supervisor's files
 //! run/stub/<n>/      one detached stub start: start.json, serve.json, url, exit.json
+//! run/preset/        a preset build's steps: NN-cmd, NN-stdout, NN-stderr
 //! host/              the Sandbox tree the child is confined to
 //! golden/            a snapshot of host/, restored in place
 //! cells/<id>/        one exec's artifacts; cells/summary.tsv one line per cell
@@ -31,6 +32,7 @@ pub mod env;
 pub mod exec;
 pub mod preset;
 pub mod recover;
+pub mod rich;
 pub mod sig;
 pub mod snapshot;
 pub mod stub;
@@ -127,6 +129,7 @@ pub const STAGE_TOOL: &str = "tool";
 pub const STAGE_HANDOFF: &str = "handoff";
 pub const STAGE_SUPERVISOR: &str = "supervisor";
 pub const STAGE_STUB: &str = "stub";
+pub const STAGE_PRESET: &str = "preset";
 
 /// Every stage name a record can carry, the harness's and the tool's.
 const STAGES: &[&str] = &[
@@ -148,6 +151,7 @@ const STAGES: &[&str] = &[
     STAGE_HANDOFF,
     STAGE_SUPERVISOR,
     STAGE_STUB,
+    STAGE_PRESET,
 ];
 
 /// The stage `name` as the tool spells it, or [`STAGE_TOOL`] for a name
@@ -214,12 +218,17 @@ impl Source {
 pub enum Preset {
     /// One empty library root, `alpha`, registered as the default.
     Bare,
+    /// Five libraries in every state a command meets: served ones with
+    /// books, papers, an index and none, a failed and a paused job, a
+    /// reference book, and two that cannot be mounted (`rich`).
+    Rich,
 }
 
 impl Preset {
     fn name(self) -> &'static str {
         match self {
             Preset::Bare => "bare",
+            Preset::Rich => "rich",
         }
     }
 }
@@ -630,6 +639,11 @@ impl ToolPaths {
         self.daemon_dir().join(n.to_string())
     }
 
+    /// Where a preset's build keeps each step's command and output.
+    pub fn preset_dir(&self) -> PathBuf {
+        self.run().join("preset")
+    }
+
     pub fn stub_dir(&self) -> PathBuf {
         self.run().join("stub")
     }
@@ -1014,6 +1028,20 @@ impl Session {
             }
         }
 
+        // The marker goes first, not ready, so a build that fails from
+        // here on leaves a sandbox `new --replace` can rebuild.
+        let mut marker = Marker {
+            tool_version: TOOL_VERSION.to_string(),
+            preset: preset.name().to_string(),
+            source: source.kind().to_string(),
+            created: now(),
+            dir: paths.dir().display().to_string(),
+            workspace: workspace.display().to_string(),
+            ready: false,
+        };
+        write_json(&paths.marker(), &marker)
+            .map_err(|e| Outcome::io(STAGE_PATHS, "write the sandbox marker", e))?;
+
         let host = Sandbox::create_at(&paths.host())
             .map_err(|e| Outcome::io(STAGE_PATHS, "build the host tree", e))?;
         preset::write_profile(&host)
@@ -1023,6 +1051,7 @@ impl Session {
             paths.bin_dir(),
             paths.daemon_dir(),
             paths.stub_dir(),
+            paths.preset_dir(),
             paths.cells(),
         ] {
             std::fs::create_dir_all(&dir)
@@ -1035,19 +1064,14 @@ impl Session {
         };
         call.note(format!("binary: {} {}", record.kind, record.sha256));
         match preset {
-            Preset::Bare => preset::bare(&host)
-                .map_err(|e| Outcome::io(STAGE_PATHS, "lay out the preset", e))?,
+            Preset::Bare => {
+                preset::bare(&host)
+                    .map_err(|e| Outcome::io(STAGE_PATHS, "lay out the preset", e))?;
+                snapshot::switch(&paths, snapshot::Direction::Snapshot, &mut |_| Ok(()))?;
+            }
+            Preset::Rich => self.build_rich(call).await?,
         }
-        snapshot::switch(&paths, snapshot::Direction::Snapshot, &mut |_| Ok(()))?;
-        let marker = Marker {
-            tool_version: TOOL_VERSION.to_string(),
-            preset: preset.name().to_string(),
-            source: source.kind().to_string(),
-            created: now(),
-            dir: paths.dir().display().to_string(),
-            workspace: workspace.display().to_string(),
-            ready: true,
-        };
+        marker.ready = true;
         write_json(&paths.marker(), &marker)
             .map_err(|e| Outcome::io(STAGE_PATHS, "write the sandbox marker", e))?;
         Ok(Outcome::ok())

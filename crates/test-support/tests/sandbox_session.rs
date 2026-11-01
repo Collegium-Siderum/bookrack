@@ -958,3 +958,35 @@ async fn a_stopped_daemon_leaves_its_exit_status() {
         "the stop must not wait out a drain"
     );
 }
+
+/// A `new` that fails part way leaves a sandbox `new --replace` can
+/// rebuild: the marker is written, not ready, before anything else.
+#[test]
+fn a_failed_new_can_be_replaced() {
+    let root = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(root.path().join("ws")).expect("ws");
+    let stand_in = root.path().join("stand-in.sh");
+    write_script(
+        &stand_in,
+        &format!("{}echo ok\n", PRELUDE.replace("__HOOK__", "")),
+    );
+    let dir = root.path().join("sbx");
+    let new = |stand_in: &std::path::Path, replace: bool| {
+        let mut cmd = Command::new(TOOL);
+        cmd.arg("new")
+            .arg(&dir)
+            .arg("--stand-in")
+            .arg(stand_in)
+            .arg("--workspace")
+            .arg(root.path().join("ws"))
+            .stdin(Stdio::null());
+        if replace {
+            cmd.arg("--replace");
+        }
+        cmd.output().expect("new")
+    };
+    let failed = new(&root.path().join("missing.sh"), false);
+    assert_eq!(code(&failed), 125, "{}", stderr(&failed));
+    let replaced = new(&stand_in, true);
+    assert_eq!(code(&replaced), 0, "{}", stderr(&replaced));
+}

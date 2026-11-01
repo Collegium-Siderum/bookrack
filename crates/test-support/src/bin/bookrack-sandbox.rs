@@ -40,6 +40,7 @@ mod unix {
     enum PresetArg {
         #[default]
         Bare,
+        Rich,
     }
 
     #[derive(Clone, Copy, ValueEnum, Default)]
@@ -260,6 +261,7 @@ mod unix {
                 };
                 let preset = match preset {
                     PresetArg::Bare => Preset::Bare,
+                    PresetArg::Rich => Preset::Rich,
                 };
                 let created = Session::create(
                     &dir,
