@@ -15,6 +15,9 @@
 // Each test binary that includes this module uses its own subset.
 #![allow(dead_code)]
 
+#[cfg(unix)]
+pub mod sandbox;
+
 use std::os::fd::OwnedFd;
 use std::process::Stdio;
 use std::time::{Duration, Instant};

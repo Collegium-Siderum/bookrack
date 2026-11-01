@@ -10,17 +10,21 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use bookrack_core::Problem;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use super::build::{self, BinaryRecord};
 use super::snapshot::{self, Direction};
 use super::tripwire::{self, BinaryView, Finding, Input, PlacedDotenv};
 use super::{
-    Call, Class, Expect, LiveDaemon, Outcome, STAGE_INSTANCE, STAGE_PATHS, STAGE_SPAWN, Session,
-    ToolResult, env, now, problems, sig, stage_name, tripped, write_atomic, write_json,
+    Call, Class, Expect, InstanceKind, LiveDaemon, Outcome, STAGE_INSTANCE, STAGE_PATHS,
+    STAGE_SPAWN, Session, ToolResult, env, now, problems, sig, stage_name, stage_named, tripped,
+    write_atomic, write_json,
 };
-use crate::child::{CaptureMode, DaemonProcess, Output, Ready, Sink, SpawnOpts, Stage};
+use crate::child::{
+    CaptureMode, DaemonProcess, Exit, Failure, FailureKind, Output, Ready, ReadyFailure, Sink,
+    SpawnOpts, Stage,
+};
 use crate::sandbox::Sandbox;
 use crate::spawn::EnvPlan;
 
@@ -128,7 +132,15 @@ impl DaemonStart {
         self
     }
 
-    fn args(&self) -> Vec<OsString> {
+    pub(crate) fn timeout_value(&self) -> Duration {
+        self.timeout
+    }
+
+    pub(crate) fn dotenv_path(&self) -> Option<&Path> {
+        self.dotenv.as_deref()
+    }
+
+    pub(crate) fn args(&self) -> Vec<OsString> {
         let mut args = vec![OsString::from("run")];
         if let Some(library) = &self.library {
             args.push("--library".into());
@@ -138,45 +150,192 @@ impl DaemonStart {
     }
 }
 
+/// Who holds a daemon start's process: the calling process itself, or
+/// a supervisor it started in the background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Hosting {
+    /// A [`Session`] holds the daemon. A record without the field was
+    /// written by an in-process start.
+    #[default]
+    InProcess,
+    /// A supervisor the `daemon start` command left behind holds it.
+    Detached,
+}
+
 /// What a daemon instance records when it starts.
-#[derive(Serialize)]
-struct StartRecord {
-    args: Vec<String>,
-    dotenv: Option<String>,
-    started: f64,
-    parent_pid: u32,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartRecord {
+    pub args: Vec<String>,
+    pub dotenv: Option<String>,
+    pub started: f64,
+    /// The process that recorded the start.
+    pub parent_pid: u32,
+    #[serde(default)]
+    pub hosting: Hosting,
+    /// The stub address the start's plan points the daemon at.
+    #[serde(default)]
+    pub stub_url: Option<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// What a daemon instance records around its spawn: `spawning` alone
+/// before it, the pid and process group once it is known.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnRecord {
+    pub spawning: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pgid: Option<u32>,
+}
+
+impl SpawnRecord {
+    pub fn spawning() -> SpawnRecord {
+        SpawnRecord {
+            spawning: true,
+            pid: None,
+            pgid: None,
+        }
+    }
+
+    /// The record of a spawned leader, which is its own group's leader.
+    pub fn spawned(pid: u32) -> SpawnRecord {
+        SpawnRecord {
+            spawning: false,
+            pid: Some(pid),
+            pgid: Some(pid),
+        }
+    }
 }
 
 /// What a daemon instance records once it is ready.
-#[derive(Serialize)]
-struct ReadyRecord {
-    pid: u32,
-    control_sock: String,
-    ready_line: String,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadyRecord {
+    pub pid: u32,
+    pub control_sock: String,
+    pub ready_line: String,
 }
 
-/// What a daemon instance records when its start has ended.
-#[derive(Serialize)]
-struct ExitRecord {
-    class: Class,
-    stage: String,
-    code: Option<i32>,
-    signal: Option<i32>,
-    detail: Option<String>,
-    finished: f64,
+/// What an instance records when its start has ended. Its last write.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExitRecord {
+    pub class: Class,
+    pub stage: String,
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub detail: Option<String>,
+    /// Where a supervisor was when it was asked to stop: `handoff`,
+    /// `starting` or `running`. Absent for an in-process start and for a
+    /// start that ended by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    pub finished: f64,
 }
 
 impl ExitRecord {
-    fn from(outcome: &Outcome) -> ExitRecord {
+    pub fn from(outcome: &Outcome) -> ExitRecord {
         ExitRecord {
             class: outcome.class,
             stage: outcome.stage.to_string(),
             code: outcome.code,
             signal: outcome.signal,
+            summary: outcome.problem.as_ref().map(|p| p.summary.clone()),
             detail: outcome.problem.as_ref().and_then(|p| p.data.detail.clone()),
+            phase: None,
             finished: now(),
         }
     }
+
+    pub fn with_phase(mut self, phase: &str) -> ExitRecord {
+        self.phase = Some(phase.to_string());
+        self
+    }
+
+    /// The outcome the record tells: its class, stage and exit, with
+    /// its summary and detail as the problem when it has one.
+    pub fn outcome(&self) -> Outcome {
+        let problem = match (&self.summary, &self.detail) {
+            (None, None) => None,
+            (summary, detail) => {
+                let summary = summary
+                    .clone()
+                    .unwrap_or_else(|| format!("the start ended as {}", self.stage));
+                let problem = Problem::new(summary);
+                Some(match detail {
+                    Some(detail) => problem.detail(detail.clone()),
+                    None => problem,
+                })
+            }
+        };
+        Outcome {
+            class: self.class,
+            stage: stage_named(&self.stage),
+            code: self.code,
+            signal: self.signal,
+            problem,
+        }
+    }
+}
+
+/// How a stopped daemon's end reads: its own exit, or the failure with
+/// a failure at [`Stage::Run`] reported at [`Stage::Stop`]. The
+/// in-process stop and a supervisor's stop share it.
+pub(crate) fn stop_outcome(result: Result<Exit, Failure>) -> Outcome {
+    match result {
+        Ok(exit) => Outcome::from_exit(exit.status),
+        Err(failure) => {
+            let mut outcome = Outcome::from_failure(&failure);
+            if outcome.stage == stage_name(Stage::Run) {
+                outcome.stage = stage_name(Stage::Stop);
+            }
+            outcome
+        }
+    }
+}
+
+/// End the writes that follow a daemon's spawn. `step` is their result:
+/// on `Ok` the daemon is handed back; on `Err` its group is reclaimed
+/// first, then `exit.json` is written under `instance`, so a start that
+/// spawned a daemon never ends without a record and never leaves the
+/// daemon behind.
+// `Outcome` is the tool's one error value; boxing it here alone would
+// only add an allocation on a failure path.
+#[allow(clippy::result_large_err)]
+pub async fn finish_spawn(
+    daemon: DaemonProcess,
+    instance: &Path,
+    step: ToolResult<()>,
+) -> ToolResult<DaemonProcess> {
+    let Err(failed) = step else {
+        return Ok(daemon);
+    };
+    let failure = daemon
+        .give_up(ReadyFailure {
+            kind: FailureKind::NotReady,
+            stage: Stage::Run,
+            why: String::new(),
+        })
+        .await;
+    let (summary, why) = match &failed.problem {
+        Some(problem) => (
+            problem.summary.clone(),
+            problem.data.detail.clone().unwrap_or_default(),
+        ),
+        None => (
+            "could not record the daemon's start".to_string(),
+            String::new(),
+        ),
+    };
+    let outcome = Outcome::tool_error(
+        STAGE_INSTANCE,
+        Problem::new(summary).detail(format!("{why}; then {}", failure.why)),
+    );
+    let _ = write_json(&instance.join("exit.json"), &ExitRecord::from(&outcome));
+    Err(outcome)
 }
 
 /// Removes the `.env` a run placed, on every path out.
@@ -189,9 +348,12 @@ impl Drop for DotenvGuard {
 }
 
 /// What the four preflight steps leave for the command to run with.
-struct Preflight {
-    host: Sandbox,
-    plan: EnvPlan,
+pub(crate) struct Preflight {
+    pub(crate) host: Sandbox,
+    pub(crate) plan: EnvPlan,
+    /// The composed environment the tripwires judged: what the command
+    /// sees, every variable.
+    pub(crate) env: Vec<(OsString, OsString)>,
     _dotenv: Option<DotenvGuard>,
 }
 
@@ -199,12 +361,13 @@ impl Session {
     /// The four steps every command under test goes through, in this
     /// order: the tool's own paths, the pure tripwires without T4, the
     /// `.env` check and placement with T4, then T7.
-    async fn preflight(
+    pub(crate) async fn preflight(
         &self,
         args: &[OsString],
         cell: Option<&str>,
         stdin: Option<&Path>,
         dotenv: Option<&Path>,
+        stub_url: Option<&str>,
     ) -> ToolResult<Preflight> {
         let paths = self.paths();
         let refuse = |why: String| Outcome::refused(STAGE_PATHS, problems::path_refused(&why));
@@ -240,7 +403,7 @@ impl Session {
         // 2. The pure tripwires, T4 excepted: T3 walks the tree before
         //    anything is written into host/.
         let host = self.host()?;
-        let plan = self.plan(&host, dotenv.is_some());
+        let plan = self.plan(&host, dotenv.is_some(), stub_url);
         let env = plan.composed(std::env::vars_os());
         let placed = placed_content.map(|content| PlacedDotenv {
             path: host.cwd().join(".env"),
@@ -251,7 +414,7 @@ impl Session {
             host: &host,
             env: &env,
             argv: args,
-            stub_url: self.stub_url(),
+            stub_url,
             dotenv: placed.as_ref(),
         };
         let findings = tripwire::check_before_dotenv(&input);
@@ -298,6 +461,7 @@ impl Session {
         Ok(Preflight {
             host,
             plan,
+            env,
             _dotenv: guard,
         })
     }
@@ -337,12 +501,14 @@ impl Session {
             return Err(Outcome::refused(STAGE_PATHS, problems::bad_cell_id(id)));
         }
         build::verify(&paths)?;
+        let stub = self.refresh_stub().await?;
         let pre = self
             .preflight(
                 args,
                 opts.cell.as_deref(),
                 opts.stdin.as_deref(),
                 opts.dotenv.as_deref(),
+                stub.as_deref(),
             )
             .await?;
         let cell_dir = opts.cell.as_deref().map(|id| paths.cell(id));
@@ -496,15 +662,16 @@ impl Session {
             .collect();
         let call = self.begin("tripwire", shown, false).await?;
         let result = async {
+            let stub = self.refresh_stub().await?;
             let host = self.host()?;
-            let plan = self.plan(&host, false);
+            let plan = self.plan(&host, false, stub.as_deref());
             let env = plan.composed(std::env::vars_os());
             let input = Input {
                 dir: self.paths().dir(),
                 host: &host,
                 env: &env,
                 argv: args,
-                stub_url: self.stub_url(),
+                stub_url: stub.as_deref(),
                 dotenv: None,
             };
             let mut findings = tripwire::check(&input);
@@ -540,9 +707,12 @@ impl Session {
     /// The plan as shell lines, for debugging by hand.
     pub async fn env_lines(&self, dotenv: bool) -> ToolResult<String> {
         let call = self.begin("env", vec![dotenv.to_string()], false).await?;
-        let result = self
-            .host()
-            .map(|host| env::shell_lines(&self.plan(&host, dotenv), dotenv));
+        let result = match self.refresh_stub().await {
+            Ok(stub) => self
+                .host()
+                .map(|host| env::shell_lines(&self.plan(&host, dotenv, stub.as_deref()), dotenv)),
+            Err(outcome) => Err(outcome),
+        };
         match result {
             Ok(lines) => {
                 self.end(call, Ok(Outcome::ok()))?;
@@ -635,18 +805,12 @@ impl Session {
             ));
         }
         build::verify(&paths)?;
+        let stub = self.refresh_stub().await?;
         let pre = self
-            .preflight(args, None, None, start.dotenv.as_deref())
+            .preflight(args, None, None, start.dotenv.as_deref(), stub.as_deref())
             .await?;
 
-        let n = self
-            .instances()
-            .map_err(|e| Outcome::io(STAGE_INSTANCE, "list the daemon instances", e))?
-            .last()
-            .map_or(1, |n| n + 1);
-        let instance = paths.daemon_instance(n);
-        std::fs::create_dir_all(&instance)
-            .map_err(|e| Outcome::io(STAGE_INSTANCE, "create the daemon instance", e))?;
+        let (n, instance) = self.new_instance(InstanceKind::Daemon)?;
         call.set_instance(n);
         write_json(
             &instance.join("start.json"),
@@ -655,6 +819,9 @@ impl Session {
                 dotenv: start.dotenv.as_ref().map(|p| p.display().to_string()),
                 started: now(),
                 parent_pid: std::process::id(),
+                hosting: Hosting::InProcess,
+                stub_url: stub.clone(),
+                timeout_ms: Some(start.timeout.as_millis() as u64),
             },
         )
         .map_err(|e| Outcome::io(STAGE_INSTANCE, "write start.json", e))?;
@@ -680,7 +847,12 @@ impl Session {
                 return Err(outcome);
             }
         };
-        let mut daemon = match DaemonProcess::spawn_with(
+        if let Err(e) = write_json(&instance.join("spawn.json"), &SpawnRecord::spawning()) {
+            let outcome = Outcome::io(STAGE_INSTANCE, "write spawn.json", e);
+            exit_record(&outcome);
+            return Err(outcome);
+        }
+        let daemon = match DaemonProcess::spawn_with(
             Command::from(cmd),
             SpawnOpts {
                 stdin: Stdio::null(),
@@ -694,10 +866,12 @@ impl Session {
                 return Err(outcome);
             }
         };
+        let recorded = record_spawn(&instance, &daemon);
+        let mut daemon = finish_spawn(daemon, &instance, recorded).await?;
         let lock = pre.host.tty_lock_path();
         match daemon.probe_ready(&lock, start.timeout).await {
             Ok(ready) => {
-                write_json(
+                let recorded = write_json(
                     &instance.join("daemon.json"),
                     &ReadyRecord {
                         pid: ready.pid,
@@ -705,7 +879,8 @@ impl Session {
                         ready_line: ready.ready_line.clone(),
                     },
                 )
-                .map_err(|e| Outcome::io(STAGE_INSTANCE, "write daemon.json", e))?;
+                .map_err(|e| Outcome::io(STAGE_INSTANCE, "write daemon.json", e));
+                let daemon = finish_spawn(daemon, &instance, recorded).await?;
                 self.hold_daemon(LiveDaemon {
                     instance: n,
                     process: daemon,
@@ -738,21 +913,25 @@ impl Session {
         };
         call.set_instance(live.instance);
         let instance = self.paths().daemon_instance(live.instance);
-        let outcome = match live.process.stop(within).await {
-            Ok(exit) => Outcome::from_exit(exit.status),
-            Err(failure) => {
-                let mut outcome = Outcome::from_failure(&failure);
-                if outcome.stage == stage_name(Stage::Run) {
-                    outcome.stage = stage_name(Stage::Stop);
-                }
-                outcome
-            }
-        };
+        let outcome = stop_outcome(live.process.stop(within).await);
         if let Err(e) = write_json(&instance.join("exit.json"), &ExitRecord::from(&outcome)) {
             return self.end(call, Err(Outcome::io(STAGE_INSTANCE, "write exit.json", e)));
         }
         self.end(call, Ok(outcome))
     }
+}
+
+/// Rewrite `spawn.json` with the spawned daemon's pid and group.
+pub(crate) fn record_spawn(instance: &Path, daemon: &DaemonProcess) -> ToolResult<()> {
+    let pid = daemon.id().ok_or_else(|| {
+        Outcome::tool_error(
+            STAGE_INSTANCE,
+            Problem::new("could not record the daemon's start")
+                .detail("the spawned daemon has no pid"),
+        )
+    })?;
+    write_json(&instance.join("spawn.json"), &SpawnRecord::spawned(pid))
+        .map_err(|e| Outcome::io(STAGE_INSTANCE, "write spawn.json", e))
 }
 
 /// The digest of the real platform registry, in the tool's own

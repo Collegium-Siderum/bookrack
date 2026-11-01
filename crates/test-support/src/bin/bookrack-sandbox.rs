@@ -12,9 +12,14 @@ mod unix {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use bookrack_test_support::tool::exec::{Capture, ExecOpts};
+    use bookrack_test_support::Vectors;
+    use bookrack_test_support::tool::exec::{
+        Capture, DEFAULT_DAEMON_TIMEOUT, DaemonStart, ExecOpts,
+    };
+    use bookrack_test_support::tool::recover::{DEFAULT_STOP_TIMEOUT, Report};
+    use bookrack_test_support::tool::stub::DEFAULT_STUB_DIM;
     use bookrack_test_support::tool::{
-        CreateOpts, Outcome, Preset, Session, SessionOpts, Source, sig,
+        CreateOpts, Outcome, Preset, Session, SessionOpts, Source, sig, stub, supervise,
     };
     use clap::{Parser, Subcommand, ValueEnum};
 
@@ -35,6 +40,90 @@ mod unix {
     enum PresetArg {
         #[default]
         Bare,
+    }
+
+    #[derive(Clone, Copy, ValueEnum, Default)]
+    enum VectorsArg {
+        Constant,
+        #[default]
+        Spread,
+    }
+
+    impl VectorsArg {
+        fn vectors(self) -> Vectors {
+            match self {
+                VectorsArg::Constant => Vectors::Constant,
+                VectorsArg::Spread => Vectors::Spread,
+            }
+        }
+    }
+
+    #[derive(Subcommand)]
+    enum StubCommand {
+        /// Start the sandbox's embed stub in the background.
+        Start {
+            dir: PathBuf,
+            /// The vector width.
+            #[arg(long, default_value_t = DEFAULT_STUB_DIM)]
+            dim: usize,
+            #[arg(long, value_enum, default_value_t)]
+            vectors: VectorsArg,
+        },
+        /// Stop the stub, or close an instance whose process is gone.
+        Stop {
+            dir: PathBuf,
+            /// Close every unfinished instance without sending anything.
+            #[arg(long)]
+            forget: bool,
+        },
+        /// Switch the running stub's embed answers to a failure mode.
+        Fail { dir: PathBuf, mode: String },
+        /// Print what every unfinished stub instance is, as JSON.
+        Status { dir: PathBuf },
+        /// The stub's background process.
+        #[command(hide = true)]
+        Serve {
+            dir: PathBuf,
+            n: u32,
+            #[arg(long)]
+            dim: usize,
+            #[arg(long, value_enum)]
+            vectors: VectorsArg,
+            #[arg(long)]
+            identity: String,
+        },
+    }
+
+    #[derive(Subcommand)]
+    enum DaemonCommand {
+        /// Start a daemon held by a supervisor in the background.
+        Start {
+            dir: PathBuf,
+            /// The library the daemon serves, passed as --library.
+            #[arg(long)]
+            library: Option<String>,
+            /// A file under the sandbox to place as the daemon's .env.
+            #[arg(long, value_name = "FILE")]
+            dotenv: Option<PathBuf>,
+            /// How long the daemon may take to be ready, in seconds.
+            #[arg(long, value_name = "SECS", default_value_t = DEFAULT_DAEMON_TIMEOUT.as_secs())]
+            timeout: u64,
+        },
+        /// Stop the daemon, or close an instance whose processes are gone.
+        Stop {
+            dir: PathBuf,
+            /// How long the daemon may take to leave after SIGTERM, in seconds.
+            #[arg(long, value_name = "SECS")]
+            timeout: Option<u64>,
+            /// Close every unfinished instance without sending anything.
+            #[arg(long)]
+            forget: bool,
+        },
+        /// Print what every unfinished daemon instance is, as JSON.
+        Status { dir: PathBuf },
+        /// The daemon's background supervisor.
+        #[command(hide = true)]
+        Supervise { dir: PathBuf, n: u32 },
     }
 
     #[derive(Subcommand)]
@@ -97,6 +186,18 @@ mod unix {
         Snapshot { dir: PathBuf },
         /// Copy golden/ back over host/.
         Restore { dir: PathBuf },
+        /// The sandbox's embed stub.
+        Stub {
+            #[command(subcommand)]
+            command: StubCommand,
+        },
+        /// The sandbox's daemon, held in the background.
+        Daemon {
+            #[command(subcommand)]
+            command: DaemonCommand,
+        },
+        /// Stop the daemon, then the stub, in one call.
+        Teardown { dir: PathBuf },
     }
 
     fn session_opts(cli: &Cli) -> SessionOpts {
@@ -108,6 +209,30 @@ mod unix {
             opts.lock_wait = Duration::from_secs(secs);
         }
         opts
+    }
+
+    /// Print a stopping command's lines, then its outcome.
+    fn finish_report(report: Result<Report, Outcome>) -> i32 {
+        match report {
+            Ok(report) => {
+                for line in &report.lines {
+                    println!("{line}");
+                }
+                finish(Ok(report.outcome))
+            }
+            Err(outcome) => finish(Err(outcome)),
+        }
+    }
+
+    /// Print one line on success, then the outcome.
+    fn finish_line(result: Result<String, Outcome>) -> i32 {
+        match result {
+            Ok(line) => {
+                println!("{line}");
+                finish(Ok(Outcome::ok()))
+            }
+            Err(outcome) => finish(Err(outcome)),
+        }
     }
 
     /// The exit code, after the outcome has been printed.
@@ -235,6 +360,91 @@ mod unix {
                 Ok(mut session) => finish(session.restore().await),
                 Err(outcome) => finish(Err(outcome)),
             },
+            Command::Stub { command } => run_stub(command, opts).await,
+            Command::Daemon { command } => run_daemon(command, opts).await,
+            Command::Teardown { dir } => match Session::open(&dir, opts) {
+                Ok(mut session) => finish_report(session.teardown().await),
+                Err(outcome) => finish(Err(outcome)),
+            },
+        }
+    }
+
+    async fn run_stub(command: StubCommand, opts: SessionOpts) -> i32 {
+        if let StubCommand::Serve {
+            dir,
+            n,
+            dim,
+            vectors,
+            identity,
+        } = command
+        {
+            return stub::serve(&dir, n, dim, vectors.vectors(), identity, opts).await;
+        }
+        let dir = match &command {
+            StubCommand::Start { dir, .. }
+            | StubCommand::Stop { dir, .. }
+            | StubCommand::Fail { dir, .. }
+            | StubCommand::Status { dir } => dir.clone(),
+            StubCommand::Serve { .. } => unreachable!("handled above"),
+        };
+        let mut session = match Session::open(&dir, opts) {
+            Ok(session) => session,
+            Err(outcome) => return finish(Err(outcome)),
+        };
+        match command {
+            StubCommand::Start { dim, vectors, .. } => {
+                finish_line(session.detached_stub_start(dim, vectors.vectors()).await)
+            }
+            StubCommand::Stop { forget, .. } => finish_report(session.stub_stop(forget).await),
+            StubCommand::Fail { mode, .. } => finish(session.stub_fail(&mode).await),
+            StubCommand::Status { .. } => {
+                finish_line(session.stub_status().await.map(|v| v.to_string()))
+            }
+            StubCommand::Serve { .. } => unreachable!("handled above"),
+        }
+    }
+
+    async fn run_daemon(command: DaemonCommand, opts: SessionOpts) -> i32 {
+        if let DaemonCommand::Supervise { dir, n } = command {
+            return supervise::supervise(&dir, n, opts).await;
+        }
+        let dir = match &command {
+            DaemonCommand::Start { dir, .. }
+            | DaemonCommand::Stop { dir, .. }
+            | DaemonCommand::Status { dir } => dir.clone(),
+            DaemonCommand::Supervise { .. } => unreachable!("handled above"),
+        };
+        let mut session = match Session::open(&dir, opts) {
+            Ok(session) => session,
+            Err(outcome) => return finish(Err(outcome)),
+        };
+        match command {
+            DaemonCommand::Start {
+                library,
+                dotenv,
+                timeout,
+                ..
+            } => {
+                let mut start = match &library {
+                    Some(name) => DaemonStart::library(name),
+                    None => DaemonStart::default(),
+                };
+                if let Some(path) = &dotenv {
+                    start = start.dotenv(path);
+                }
+                start = start.timeout(Duration::from_secs(timeout));
+                finish_line(session.detached_daemon_start(start).await)
+            }
+            DaemonCommand::Stop {
+                timeout, forget, ..
+            } => {
+                let within = timeout.map_or(DEFAULT_STOP_TIMEOUT, Duration::from_secs);
+                finish_report(session.daemon_stop_instances(within, forget).await)
+            }
+            DaemonCommand::Status { .. } => {
+                finish_line(session.daemon_status().await.map(|v| v.to_string()))
+            }
+            DaemonCommand::Supervise { .. } => unreachable!("handled above"),
         }
     }
 

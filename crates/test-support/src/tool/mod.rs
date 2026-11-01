@@ -16,7 +16,9 @@
 //! .sandbox.json      the marker: tool version, preset, canonical path, ready
 //! .calls/<id>/       one result.json per call; .calls/last names the latest
 //! run/bin/bookrack   the copied binary under test, run/binary.json its record
-//! run/daemon/<n>/    one daemon start: start.json, daemon.json, exit.json, stdout, stderr
+//! run/daemon/<n>/    one daemon start: start.json, spawn.json, daemon.json, exit.json, stdout,
+//!                    stderr; a detached one also plan.json and its supervisor's files
+//! run/stub/<n>/      one detached stub start: start.json, serve.json, url, exit.json
 //! host/              the Sandbox tree the child is confined to
 //! golden/            a snapshot of host/, restored in place
 //! cells/<id>/        one exec's artifacts; cells/summary.tsv one line per cell
@@ -24,11 +26,15 @@
 
 pub mod argv;
 pub mod build;
+mod detach;
 pub mod env;
 pub mod exec;
 pub mod preset;
+pub mod recover;
 pub mod sig;
 pub mod snapshot;
+pub mod stub;
+pub mod supervise;
 pub mod tripwire;
 
 use std::ffi::OsString;
@@ -88,9 +94,22 @@ const SIGNAL_EXIT_BASE: i32 = 128;
 // setting: internal -- bounds a cell id's length, not a value to tune
 const CELL_ID_MAX: usize = 64;
 
-/// The one pause point this module has: `new --replace` has emptied the
-/// old tree and not yet started building the new one.
+/// `new --replace` has emptied the old tree and not yet started
+/// building the new one.
 pub const PAUSE_REPLACE_AFTER_CLEAR: &str = "replace:after-clear";
+
+/// A detached start has recorded its intent and not yet started its
+/// background process.
+pub const PAUSE_START_AFTER_INTENT: &str = "start:after-intent";
+
+/// A detached start has seen its background process register and not
+/// yet told it to go.
+pub const PAUSE_START_BEFORE_GO: &str = "start:before-go";
+
+/// A daemon's supervisor has spawned the daemon and not yet recorded
+/// its pid. A pause point with this prefix is forwarded to the
+/// background process rather than taken by the start itself.
+pub const PAUSE_SUPERVISE_AFTER_SPAWN: &str = "supervise:after-spawn";
 
 const LOCK_NAME: &str = ".session.lock";
 const MARKER_NAME: &str = ".sandbox.json";
@@ -105,6 +124,41 @@ pub const STAGE_BINARY: &str = "binary";
 pub const STAGE_TRIPWIRE: &str = "tripwire";
 pub const STAGE_SPAWN: &str = "spawn";
 pub const STAGE_TOOL: &str = "tool";
+pub const STAGE_HANDOFF: &str = "handoff";
+pub const STAGE_SUPERVISOR: &str = "supervisor";
+pub const STAGE_STUB: &str = "stub";
+
+/// Every stage name a record can carry, the harness's and the tool's.
+const STAGES: &[&str] = &[
+    "run",
+    "capture",
+    "drain",
+    "ready-line",
+    "daemon-lock",
+    "endpoint",
+    "control-plane",
+    "stop",
+    STAGE_SESSION_LOCK,
+    STAGE_PATHS,
+    STAGE_INSTANCE,
+    STAGE_BINARY,
+    STAGE_TRIPWIRE,
+    STAGE_SPAWN,
+    STAGE_TOOL,
+    STAGE_HANDOFF,
+    STAGE_SUPERVISOR,
+    STAGE_STUB,
+];
+
+/// The stage `name` as the tool spells it, or [`STAGE_TOOL`] for a name
+/// it does not know.
+pub(crate) fn stage_named(name: &str) -> &'static str {
+    STAGES
+        .iter()
+        .copied()
+        .find(|stage| *stage == name)
+        .unwrap_or(STAGE_TOOL)
+}
 
 /// Name the `bookrack` binary under test for the sandbox tool.
 ///
@@ -419,7 +473,24 @@ pub mod problems {
                     .join(", run/daemon/"),
                 if instances.len() == 1 { "s" } else { "ve" }
             ))
-            .hint("stop the daemon with 'daemon stop', or confirm it is gone and remove the instance directory")
+            .hint(
+                "run 'bookrack-sandbox daemon stop <dir>'; if it cannot tell whether the daemon is \
+                 gone, confirm by hand and pass --forget",
+            )
+    }
+
+    pub fn unfinished_stub(instances: &[u32]) -> Problem {
+        Problem::new("cannot change the sandbox: a stub start has not ended")
+            .detail(format!(
+                "run/stub/{} ha{} no exit.json",
+                instances
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", run/stub/"),
+                if instances.len() == 1 { "s" } else { "ve" }
+            ))
+            .hint("run 'bookrack-sandbox teardown <dir>' first")
     }
 
     pub fn session_lock_held(lock: &Path) -> Problem {
@@ -492,6 +563,13 @@ pub struct ToolPaths {
     dir: PathBuf,
 }
 
+/// The two kinds of background start a sandbox records under `run/`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstanceKind {
+    Daemon,
+    Stub,
+}
+
 /// What a tool-owned path is expected to be when it is checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expect {
@@ -550,6 +628,26 @@ impl ToolPaths {
 
     pub fn daemon_instance(&self, n: u32) -> PathBuf {
         self.daemon_dir().join(n.to_string())
+    }
+
+    pub fn stub_dir(&self) -> PathBuf {
+        self.run().join("stub")
+    }
+
+    pub fn stub_instance(&self, n: u32) -> PathBuf {
+        self.stub_dir().join(n.to_string())
+    }
+
+    /// Where the instances of `kind` live.
+    pub fn instances_dir(&self, kind: InstanceKind) -> PathBuf {
+        match kind {
+            InstanceKind::Daemon => self.daemon_dir(),
+            InstanceKind::Stub => self.stub_dir(),
+        }
+    }
+
+    pub fn instance(&self, kind: InstanceKind, n: u32) -> PathBuf {
+        self.instances_dir(kind).join(n.to_string())
     }
 
     pub fn host(&self) -> PathBuf {
@@ -864,6 +962,15 @@ impl Session {
         let paths = self.paths.clone();
         if replace {
             self.ensure_no_writer()?;
+            let stubs = self
+                .unfinished_instances(InstanceKind::Stub)
+                .map_err(|e| Outcome::io(STAGE_INSTANCE, "list the stub instances", e))?;
+            if !stubs.is_empty() {
+                return Err(Outcome::refused(
+                    STAGE_INSTANCE,
+                    problems::unfinished_stub(&stubs),
+                ));
+            }
             let mut marker: Marker = read_json(&paths.marker())
                 .map_err(|e| Outcome::io(STAGE_PATHS, "read the sandbox marker", e))?;
             marker.ready = false;
@@ -915,6 +1022,7 @@ impl Session {
             paths.run(),
             paths.bin_dir(),
             paths.daemon_dir(),
+            paths.stub_dir(),
             paths.cells(),
         ] {
             std::fs::create_dir_all(&dir)
@@ -996,12 +1104,13 @@ impl Session {
         url
     }
 
-    /// The plan a command under test runs with.
-    pub fn plan(&self, host: &Sandbox, dotenv: bool) -> EnvPlan {
+    /// The plan a command under test runs with, pointed at `stub_url`,
+    /// the stub this call reaches (see `refresh_stub`).
+    pub fn plan(&self, host: &Sandbox, dotenv: bool, stub_url: Option<&str>) -> EnvPlan {
         plan_for(
             &self.paths.bin(),
             host,
-            self.stub_url.as_deref(),
+            stub_url,
             dotenv,
             std::env::vars_os(),
         )
@@ -1260,7 +1369,7 @@ impl Session {
     /// and no daemon holds the host's session lock.
     pub(crate) fn ensure_no_writer(&self) -> ToolResult<()> {
         let unfinished = self
-            .unfinished_instances()
+            .unfinished_instances(InstanceKind::Daemon)
             .map_err(|e| Outcome::io(STAGE_INSTANCE, "list the daemon instances", e))?;
         if !unfinished.is_empty() {
             return Err(Outcome::refused(
@@ -1286,22 +1395,32 @@ impl Session {
         }
     }
 
-    /// Daemon instances without an `exit.json` or `recovered.json`.
-    pub(crate) fn unfinished_instances(&self) -> io::Result<Vec<u32>> {
+    /// Instances of `kind` without an `exit.json` or `recovered.json`.
+    pub(crate) fn unfinished_instances(&self, kind: InstanceKind) -> io::Result<Vec<u32>> {
         let mut out = Vec::new();
-        for n in self.instances()? {
-            let dir = self.paths.daemon_instance(n);
-            if !dir.join("exit.json").exists() && !dir.join("recovered.json").exists() {
+        for n in self.instances(kind)? {
+            if !instance_ended(&self.paths.instance(kind, n)) {
                 out.push(n);
             }
         }
         Ok(out)
     }
 
-    /// Every daemon instance number, ascending.
-    pub(crate) fn instances(&self) -> io::Result<Vec<u32>> {
+    /// Every instance number of `kind`, ascending. The directory holding
+    /// them is checked level by level first, so a link planted in its
+    /// place is refused rather than read through.
+    pub(crate) fn instances(&self, kind: InstanceKind) -> io::Result<Vec<u32>> {
         let mut out = Vec::new();
-        let entries = match std::fs::read_dir(self.paths.daemon_dir()) {
+        let dir = self.paths.instances_dir(kind);
+        for level in [self.paths.run(), dir.clone()] {
+            self.paths
+                .check(&level, Expect::DirOrAbsent)
+                .map_err(io::Error::other)?;
+            if !level.exists() {
+                return Ok(out);
+            }
+        }
+        let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(out),
             Err(err) => return Err(err),
@@ -1347,6 +1466,12 @@ impl Session {
             && first.is_ascii_alphanumeric()
             && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     }
+}
+
+/// Whether the start recorded at `instance` has ended: it has an
+/// `exit.json` or a `recovered.json`.
+pub(crate) fn instance_ended(instance: &Path) -> bool {
+    instance.join("exit.json").exists() || instance.join("recovered.json").exists()
 }
 
 /// The plan the tool runs `bin` under against `host`.

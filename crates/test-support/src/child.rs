@@ -112,6 +112,15 @@ const SINK_QUEUE: usize = 64;
 // setting: internal -- how long the harness waits on a sink, not a value to tune
 const SINK_DEADLINE: Duration = Duration::from_secs(2);
 
+/// The most a teardown spends beyond the run's own deadline once the
+/// harness has to end the run: one [`SETTLE_DEADLINE`] for the two
+/// streams to reach EOF, which they wait out together, one
+/// [`SINK_DEADLINE`] for their sinks, and one more [`SETTLE_DEADLINE`]
+/// to reap the leader.
+// setting: internal -- derived from the harness's settle and sink deadlines, not a value to tune
+pub const TEARDOWN_BUDGET: Duration =
+    Duration::from_secs(2 * SETTLE_DEADLINE.as_secs() + SINK_DEADLINE.as_secs());
+
 /// File name of the control socket the daemon binds in its runtime
 /// directory, beside the session lock.
 #[cfg(unix)]
@@ -882,6 +891,13 @@ impl DaemonProcess {
 
     pub fn id(&self) -> Option<u32> {
         self.child.id()
+    }
+
+    /// Whether the leader has exited, without reaping it: its pid and
+    /// group id stay reserved, and a later
+    /// [`exit_within`](Self::exit_within) still reports its own status.
+    pub fn has_exited(&mut self) -> io::Result<bool> {
+        self.leader_exited()
     }
 
     /// The daemon's ready line, once stdout holds it whole, without its
@@ -2125,5 +2141,76 @@ mod tests {
             }
             Output::Streamed { .. } => panic!("a memory run reported streamed output"),
         }
+    }
+
+    /// `has_exited` looks without reaping: false while the leader runs,
+    /// true once it has exited, and the leader's own status is still
+    /// there for the teardown that follows.
+    #[tokio::test]
+    async fn has_exited_looks_without_reaping() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("sleep 0.3; exit 3");
+        let mut child = DaemonProcess::spawn(cmd).expect("spawn sh");
+        assert!(
+            !child.has_exited().expect("look at the leader"),
+            "a running leader reads as exited"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !child.has_exited().expect("look at the leader") {
+            assert!(Instant::now() < deadline, "the leader never read as exited");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(child.has_exited().expect("look again"), "a second look");
+        let exit = child
+            .exit_within(Duration::ZERO)
+            .await
+            .expect("an exited leader is a clean exit");
+        assert_eq!(exit.status.code(), Some(3));
+    }
+
+    /// A run the harness has to end spends at most `TEARDOWN_BUDGET`
+    /// beyond its deadline, even with both streams held open by a
+    /// process outside the group and both sinks stuck: the streams
+    /// settle together, then their sinks, then the reap.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_forced_teardown_stays_inside_its_budget() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("escaped.pid");
+        let (stdout, release_out) = stuck();
+        let (stderr, release_err) = stuck();
+        let child = sh_streamed(
+            "echo out; echo err >&2; \
+             perl -e 'setpgrp(0, 0); sleep 30' & echo $! > \"$1\"; exec sleep 30",
+            &[pidfile.as_os_str()],
+            stdout,
+            stderr,
+        );
+        let within = Duration::from_secs(1);
+        let started = Instant::now();
+        let result = child.exit_within(within).await;
+        let elapsed = started.elapsed();
+        if let Some(pid) = std::fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+            .and_then(Pid::from_raw)
+        {
+            let _ = rustix::process::kill_process(pid, Signal::KILL);
+        }
+        let _ = release_out.send(());
+        let _ = release_err.send(());
+        let failure = match result {
+            Err(failure) => failure,
+            Ok(exit) => panic!("a child past its deadline was Ok: {:?}", exit.status),
+        };
+        assert_eq!(failure.kind, FailureKind::Timeout, "{failure}");
+        assert!(
+            failure.why.contains("stdout") && failure.why.contains("stderr"),
+            "premise: both streams were held: {failure}"
+        );
+        let budget = within + TEARDOWN_BUDGET + Duration::from_secs(1);
+        assert!(
+            elapsed < budget,
+            "the teardown took {elapsed:?}, past {budget:?}: {failure}"
+        );
     }
 }

@@ -1,0 +1,1054 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Pins the detached half of `bookrack-sandbox`: a stub and a daemon
+//! held by background processes, the handoff that starts them, the stop
+//! that ends them, and the recovery that closes an instance whose
+//! processes are gone without ever signaling one it does not own.
+
+#![cfg(unix)]
+
+mod common;
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
+use std::os::unix::net::UnixListener;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output};
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::time::{Duration, Instant};
+
+use bookrack_test_support::tool::exec::finish_spawn;
+use bookrack_test_support::tool::{Outcome, STAGE_INSTANCE};
+use bookrack_test_support::{DaemonProcess, SpawnOpts, TEARDOWN_BUDGET};
+use rustix::process::{Pid, Signal};
+use serde_json::{Value, json};
+
+use common::sandbox::{DAEMON_BODY, PRELUDE, Probe, World, code, read_json, serve_version, stderr};
+
+/// What a client adds over a supervisor's own bound, restated.
+const CLIENT_MARGIN: Duration = Duration::from_secs(2);
+
+/// Replace the stand-in with `body` after the prelude and copy it in.
+fn rebuild(world: &World, body: &str) {
+    common::sandbox::write_script(
+        &world.stand_in,
+        &format!("{}{body}\n", PRELUDE.replace("__HOOK__", "")),
+    );
+    let out = world.tool(&["build", &world.dir_s()]);
+    assert!(out.status.success(), "build failed: {}", stderr(&out));
+}
+
+/// A stand-in that behaves like a daemon, with the control socket
+/// answered by the test.
+fn ready_world() -> (World, Arc<AtomicUsize>) {
+    let world = World::new(DAEMON_BODY);
+    let accepted = serve_version(&world.host().join("runtime/control.sock"));
+    (world, accepted)
+}
+
+fn instance(world: &World, kind: &str, n: u32) -> PathBuf {
+    world.dir.join("run").join(kind).join(n.to_string())
+}
+
+fn spawn(world: &World, args: &[&str]) -> Child {
+    world.command(args).spawn().expect("spawn bookrack-sandbox")
+}
+
+fn stdout(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Wait until `ready` holds, up to `within`.
+fn wait_until(what: &str, within: Duration, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + within;
+    while !ready() {
+        assert!(
+            Instant::now() < deadline,
+            "{what} did not happen within {within:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_file(path: &Path) {
+    wait_until(&path.display().to_string(), Duration::from_secs(15), || {
+        path.exists()
+    });
+}
+
+fn pid(raw: u32) -> Pid {
+    Pid::from_raw(raw as i32).expect("a positive pid")
+}
+
+fn alive(raw: u32) -> bool {
+    match rustix::process::test_kill_process(pid(raw)) {
+        Ok(()) => true,
+        Err(err) => err != rustix::io::Errno::SRCH,
+    }
+}
+
+fn kill(raw: u32) {
+    let _ = rustix::process::kill_process(pid(raw), Signal::KILL);
+}
+
+fn kill_group(raw: u32) {
+    let _ = rustix::process::kill_process_group(pid(raw), Signal::KILL);
+}
+
+fn registered_pid(world: &World, kind: &str, file: &str) -> u32 {
+    let path = instance(world, kind, 1).join(file);
+    wait_for_file(&path);
+    read_json(&path)["pid"].as_u64().expect("a registered pid") as u32
+}
+
+/// A pid file the stand-in writes through a rename, so a reader never
+/// sees it half written.
+fn pid_file_line(path: &Path) -> String {
+    format!(
+        "echo $$ > \"{0}.tmp\" && mv \"{0}.tmp\" \"{0}\"",
+        path.display()
+    )
+}
+
+fn read_pid(path: &Path) -> u32 {
+    wait_for_file(path);
+    std::fs::read_to_string(path)
+        .expect("pid file")
+        .trim()
+        .parse()
+        .expect("a pid")
+}
+
+/// A stand-in daemon that takes the host's session lock with `flock`,
+/// writes it, prints the ready line, then its pid file, then sleeps.
+fn holding_body(pidfile: &Path) -> String {
+    format!(
+        r#"exec perl -e '
+use Fcntl qw(:flock);
+my ($lock, $sock, $pidfile) = @ARGV;
+open(my $fh, ">", $lock) or die "open: $!";
+flock($fh, LOCK_EX) or die "flock: $!";
+$fh->autoflush(1);
+print $fh "pid=$$\nmcp=127.0.0.1:1\ncontrol_sock=$sock\n";
+$| = 1;
+print "bookrack daemon running: pid=$$ mcp=127.0.0.1:1 control_sock=$sock\n";
+open(my $p, ">", "$pidfile.tmp") or die "pid: $!";
+print $p "$$\n";
+close $p;
+rename("$pidfile.tmp", $pidfile) or die "rename: $!";
+sleep 60;
+' "$BOOKRACK_RUNTIME_DIR/bookrack.tty.lock" "$BOOKRACK_RUNTIME_DIR/control.sock" "{}""#,
+        pidfile.display()
+    )
+}
+
+/// One HTTP request to a stub, read by its content-length.
+fn http(url: &str, method: &str, path: &str, body: &[u8]) -> (u16, Value) {
+    let addr = url.strip_prefix("http://").expect("loopback url");
+    let mut stream = TcpStream::connect(addr).expect("connect to the stub");
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nhost: {addr}\r\ncontent-length: {}\r\n\r\n",
+        body.len()
+    )
+    .expect("write");
+    stream.write_all(body).expect("write body");
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("status line");
+    let status = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .expect("a status");
+    let mut length = 0;
+    loop {
+        let mut header = String::new();
+        reader.read_line(&mut header).expect("header");
+        let header = header.trim().to_ascii_lowercase();
+        if header.is_empty() {
+            break;
+        }
+        if let Some(v) = header.strip_prefix("content-length:") {
+            length = v.trim().parse().expect("length");
+        }
+    }
+    let mut payload = vec![0; length];
+    reader.read_exact(&mut payload).expect("body");
+    (
+        status,
+        serde_json::from_slice(&payload).expect("a JSON body"),
+    )
+}
+
+fn stub_start(world: &World, extra: &[&str]) -> String {
+    let dir = world.dir_s();
+    let mut args = vec!["stub", "start", dir.as_str()];
+    args.extend_from_slice(extra);
+    let out = world.tool(&args);
+    assert_eq!(code(&out), 0, "stub start: {}", stderr(&out));
+    stdout(&out).trim().to_string()
+}
+
+fn daemon_start(world: &World) {
+    let out = world.tool(&["daemon", "start", &world.dir_s(), "--library", "alpha"]);
+    assert_eq!(code(&out), 0, "daemon start: {}", stderr(&out));
+    assert!(
+        stdout(&out).starts_with("bookrack daemon running: "),
+        "{}",
+        stdout(&out)
+    );
+}
+
+fn status(world: &World, kind: &str) -> Value {
+    let out = world.tool(&[kind, "status", &world.dir_s()]);
+    assert_eq!(code(&out), 0, "{kind} status: {}", stderr(&out));
+    serde_json::from_str(stdout(&out).trim()).expect("status is JSON")
+}
+
+fn pause_file(world: &World, point: &str) -> PathBuf {
+    world.dir.join(format!(".pause-{point}"))
+}
+
+// Readiness and failure, judged by the supervisor
+
+/// The supervisor's own teardown may take past `--timeout`: here a
+/// descendant outside the daemon's group holds its stdout, so the drain
+/// waits out its settle deadline. The start waits for the supervisor's
+/// record rather than giving up at `--timeout` itself.
+#[test]
+fn a_daemon_without_a_ready_line_times_out() {
+    let world = World::new("");
+    let mut probe = Probe::new(world.root.path());
+    let escaped = world.root.path().join("escaped.pid");
+    rebuild(
+        &world,
+        &format!(
+            "exec 3>\"{}\"; printf . >&3\n\
+             perl -e 'setpgrp(0, 0); sleep 30' 3>&- &\n\
+             echo $! > \"{}\"\n\
+             exec sleep 30",
+            probe.path.display(),
+            escaped.display()
+        ),
+    );
+    let started = Instant::now();
+    let launched = spawn(
+        &world,
+        &[
+            "daemon",
+            "start",
+            &world.dir_s(),
+            "--library",
+            "alpha",
+            "--timeout",
+            "1",
+        ],
+    );
+    probe.wait_held();
+    let out = launched.wait_with_output().expect("daemon start");
+    let elapsed = started.elapsed();
+    kill(read_pid(&escaped));
+    assert_eq!(code(&out), 124, "{}", stderr(&out));
+    let record = world.last_record();
+    assert_eq!(
+        (record["class"].as_str(), record["stage"].as_str()),
+        (Some("timeout"), Some("ready-line")),
+        "{record}"
+    );
+    let exit = read_json(&instance(&world, "daemon", 1).join("exit.json"));
+    assert_eq!(exit["stage"], "ready-line", "{exit}");
+    assert!(
+        exit["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("stdout was still open")),
+        "premise: the drain waited out the held stream: {exit}"
+    );
+    let budget = Duration::from_secs(1) + TEARDOWN_BUDGET + CLIENT_MARGIN;
+    assert!(elapsed < budget, "took {elapsed:?}, past {budget:?}");
+    assert!(
+        probe.closes_within(Duration::from_secs(2)),
+        "the stand-in outlived the start"
+    );
+    let supervisor = registered_pid(&world, "daemon", "supervisor.json");
+    wait_until("the supervisor leaving", Duration::from_secs(5), || {
+        !alive(supervisor)
+    });
+}
+
+#[test]
+fn a_ready_line_without_a_control_plane_answer_times_out() {
+    let world = World::new(DAEMON_BODY);
+    let listener =
+        UnixListener::bind(world.host().join("runtime/control.sock")).expect("bind control");
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming().flatten() {
+            held.push(stream);
+        }
+    });
+    let started = Instant::now();
+    let out = world.tool(&[
+        "daemon",
+        "start",
+        &world.dir_s(),
+        "--library",
+        "alpha",
+        "--timeout",
+        "1",
+    ]);
+    let elapsed = started.elapsed();
+    assert_eq!(code(&out), 124, "{}", stderr(&out));
+    assert_eq!(world.last_record()["stage"], "control-plane");
+    let budget = Duration::from_secs(1) + TEARDOWN_BUDGET + CLIENT_MARGIN;
+    assert!(elapsed < budget, "took {elapsed:?}, past {budget:?}");
+}
+
+#[test]
+fn a_daemon_that_exits_before_ready_records_its_status() {
+    let world = World::new(
+        "printf 'pid=%s\\n' $$ > \"$BOOKRACK_RUNTIME_DIR/bookrack.tty.lock\"; \
+         echo 'dying on purpose' >&2; exit 3",
+    );
+    let out = world.tool(&["daemon", "start", &world.dir_s(), "--library", "alpha"]);
+    assert_eq!(code(&out), 125, "{}", stderr(&out));
+    assert_eq!(world.last_record()["class"], "not-ready");
+    let instance = instance(&world, "daemon", 1);
+    let exit = read_json(&instance.join("exit.json"));
+    assert_eq!(exit["code"], 3, "{exit}");
+    let daemon_stderr = std::fs::read_to_string(instance.join("stderr")).expect("stderr");
+    assert!(
+        daemon_stderr.contains("dying on purpose"),
+        "{daemon_stderr}"
+    );
+}
+
+#[test]
+fn a_leftover_lock_does_not_make_a_daemon_ready() {
+    let world = World::new("exec sleep 30");
+    let mut other = Command::new("sleep").arg("30").spawn().expect("sleep");
+    std::fs::write(
+        world.tty_lock(),
+        format!(
+            "pid={}\nmcp=127.0.0.1:1\ncontrol_sock={}\n",
+            other.id(),
+            world.host().join("runtime/control.sock").display()
+        ),
+    )
+    .expect("write lock");
+    let out = world.tool(&[
+        "daemon",
+        "start",
+        &world.dir_s(),
+        "--library",
+        "alpha",
+        "--timeout",
+        "1",
+    ]);
+    let _ = other.kill();
+    let _ = other.wait();
+    assert_eq!(code(&out), 124, "{}", stderr(&out));
+}
+
+#[test]
+fn a_ready_line_naming_a_foreign_socket_is_refused() {
+    let world = World::new("");
+    let foreign = world.root.path().join("foreign.sock");
+    let listener = UnixListener::bind(&foreign).expect("bind foreign");
+    listener.set_nonblocking(true).expect("nonblocking");
+    rebuild(
+        &world,
+        &format!(
+            "printf 'pid=%s\\nmcp=127.0.0.1:1\\ncontrol_sock=%s\\n' $$ \"{0}\" > \
+             \"$BOOKRACK_RUNTIME_DIR/bookrack.tty.lock\"\n\
+             echo \"bookrack daemon running: pid=$$ mcp=127.0.0.1:1 control_sock={0}\"\n\
+             exec sleep 30",
+            foreign.display()
+        ),
+    );
+    let out = world.tool(&["daemon", "start", &world.dir_s(), "--library", "alpha"]);
+    assert_eq!(code(&out), 125, "{}", stderr(&out));
+    assert_eq!(world.last_record()["stage"], "endpoint");
+    assert!(listener.accept().is_err(), "the foreign socket was dialed");
+}
+
+// The handoff
+
+#[test]
+fn a_start_killed_before_handoff_starts_nothing() {
+    let world = World::new("");
+    let marker = world.root.path().join("started.pid");
+    rebuild(
+        &world,
+        &format!("{}\n{DAEMON_BODY}", pid_file_line(&marker)),
+    );
+    let mut launched = spawn(
+        &world,
+        &[
+            "--pause-at",
+            "start:before-go",
+            "daemon",
+            "start",
+            &world.dir_s(),
+            "--library",
+            "alpha",
+        ],
+    );
+    let pause = pause_file(&world, "start:before-go");
+    wait_for_file(&pause);
+    launched.kill().expect("kill the start");
+    launched.wait().expect("reap the start");
+    std::fs::remove_file(&pause).expect("remove the pause file");
+
+    let exit_path = instance(&world, "daemon", 1).join("exit.json");
+    wait_for_file(&exit_path);
+    let exit = read_json(&exit_path);
+    assert_eq!(
+        (
+            exit["class"].as_str(),
+            exit["stage"].as_str(),
+            exit["phase"].as_str()
+        ),
+        (Some("refused"), Some("handoff"), Some("handoff")),
+        "{exit}"
+    );
+    assert!(!marker.exists(), "the daemon started without a go");
+    let out = world.tool(&["daemon", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+}
+
+#[test]
+fn a_background_dead_before_go_leaves_no_open_instance() {
+    for (kind, registration, extra) in [
+        ("daemon", "supervisor.json", &["--library", "alpha"][..]),
+        ("stub", "serve.json", &[][..]),
+    ] {
+        let world = World::new("");
+        let dir = world.dir_s();
+        let mut args = vec!["--pause-at", "start:before-go", kind, "start", dir.as_str()];
+        args.extend_from_slice(extra);
+        let launched = spawn(&world, &args);
+        let pause = pause_file(&world, "start:before-go");
+        wait_for_file(&pause);
+        let background = registered_pid(&world, kind, registration);
+        kill(background);
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::remove_file(&pause).expect("remove the pause file");
+        let out = launched.wait_with_output().expect("start");
+        assert_eq!(code(&out), 125, "{kind}: {}", stderr(&out));
+        assert_eq!(world.last_record()["stage"], "handoff", "{kind}");
+        let recovered = read_json(&instance(&world, kind, 1).join("recovered.json"));
+        assert_eq!(
+            recovered["reason"], "ended-without-record",
+            "{kind}: {recovered}"
+        );
+        let out = world.tool(&["restore", &world.dir_s()]);
+        assert_eq!(code(&out), 0, "{kind}: restore: {}", stderr(&out));
+    }
+}
+
+#[test]
+fn a_start_killed_after_its_intent_is_recoverable() {
+    let (world, _accepted) = ready_world();
+    let mut launched = spawn(
+        &world,
+        &[
+            "--pause-at",
+            "start:after-intent",
+            "daemon",
+            "start",
+            &world.dir_s(),
+            "--library",
+            "alpha",
+        ],
+    );
+    let pause = pause_file(&world, "start:after-intent");
+    wait_for_file(&pause);
+    launched.kill().expect("kill the start");
+    launched.wait().expect("reap the start");
+    std::fs::remove_file(&pause).expect("remove the pause file");
+
+    let out = world.tool(&["daemon", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let recovered = read_json(&instance(&world, "daemon", 1).join("recovered.json"));
+    assert_eq!(recovered["reason"], "never-handed-off", "{recovered}");
+    daemon_start(&world);
+    let out = world.tool(&["teardown", &world.dir_s()]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+}
+
+#[test]
+fn a_supervisor_lost_while_spawning_is_refused() {
+    let world = World::new("");
+    let pidfile = world.root.path().join("holder.pid");
+    rebuild(&world, &holding_body(&pidfile));
+    let launched = spawn(
+        &world,
+        &[
+            "--pause-at",
+            "supervise:after-spawn",
+            "daemon",
+            "start",
+            &world.dir_s(),
+            "--library",
+            "alpha",
+        ],
+    );
+    let holder = read_pid(&pidfile);
+    let supervisor = registered_pid(&world, "daemon", "supervisor.json");
+    kill(supervisor);
+    let out = launched.wait_with_output().expect("start");
+    assert_eq!(code(&out), 125, "{}", stderr(&out));
+
+    let state = status(&world, "daemon");
+    assert_eq!(state["unfinished"][0]["state"], "unknown", "{state}");
+    let out = world.tool(&["daemon", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 125, "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("spawning") && stderr(&out).contains("lock is held"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        alive(holder),
+        "the stop signaled the daemon it could not judge"
+    );
+    kill(holder);
+    wait_until("the holder leaving", Duration::from_secs(5), || {
+        !alive(holder)
+    });
+    let out = world.tool(&["daemon", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 125, "spawning stays unknown: {}", stderr(&out));
+    let out = world.tool(&["daemon", "stop", &world.dir_s(), "--forget"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let _ = std::fs::remove_file(pause_file(&world, "supervise:after-spawn"));
+}
+
+#[test]
+fn a_spawning_mark_is_refused_even_without_the_lock() {
+    let world = World::new("");
+    let pidfile = world.root.path().join("holder.pid");
+    rebuild(
+        &world,
+        &format!("{}\nexec sleep 60", pid_file_line(&pidfile)),
+    );
+    let launched = spawn(
+        &world,
+        &[
+            "--pause-at",
+            "supervise:after-spawn",
+            "daemon",
+            "start",
+            &world.dir_s(),
+            "--library",
+            "alpha",
+        ],
+    );
+    let holder = read_pid(&pidfile);
+    kill(registered_pid(&world, "daemon", "supervisor.json"));
+    let _ = launched.wait_with_output();
+    let out = world.tool(&["daemon", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 125, "{}", stderr(&out));
+    assert!(
+        alive(holder),
+        "the stop signaled the daemon it could not judge"
+    );
+    kill(holder);
+    let out = world.tool(&["daemon", "stop", &world.dir_s(), "--forget"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let _ = std::fs::remove_file(pause_file(&world, "supervise:after-spawn"));
+}
+
+#[test]
+fn a_supervisor_closing_mid_request_is_read_from_its_exit() {
+    let world = World::new("");
+    let instance = instance(&world, "daemon", 1);
+    std::fs::create_dir_all(&instance).expect("instance");
+    let me = std::process::id();
+    std::fs::write(
+        instance.join("start.json"),
+        json!({ "args": ["run"], "dotenv": null, "started": 0.0, "parent_pid": me,
+                "hosting": "detached" })
+        .to_string(),
+    )
+    .expect("start.json");
+    std::fs::write(
+        instance.join("supervisor.json"),
+        json!({ "pid": me, "pgid": me, "nonce": "forged-1" }).to_string(),
+    )
+    .expect("supervisor.json");
+    std::fs::write(
+        instance.join("spawn.json"),
+        json!({ "spawning": false, "pid": me, "pgid": me }).to_string(),
+    )
+    .expect("spawn.json");
+    let sock = instance.join("supervisor.sock");
+    eprintln!("supervisor.sock is {} bytes", sock.as_os_str().len());
+    let listener = UnixListener::bind(&sock).expect("bind supervisor.sock");
+    let exit_path = instance.join("exit.json");
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            if line.contains("status") {
+                let mut stream = stream;
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    json!({ "n": 1, "nonce": "forged-1", "phase": "running", "daemon_pid": me })
+                );
+            } else {
+                drop(stream);
+                let exit_path = exit_path.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(300));
+                    std::fs::write(
+                        &exit_path,
+                        json!({ "class": "exited", "stage": "run", "code": 0, "signal": null,
+                                "detail": null, "finished": 0.0 })
+                        .to_string(),
+                    )
+                    .expect("exit.json");
+                });
+            }
+        }
+    });
+    let started = Instant::now();
+    let out = world.tool(&["daemon", "stop", &world.dir_s()]);
+    let elapsed = started.elapsed();
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(stdout(&out).contains("\"exited\""), "{}", stdout(&out));
+    assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
+}
+
+// Stopping and recovery
+
+#[test]
+fn a_stop_during_bring_up_stops_the_daemon() {
+    let world = World::new("");
+    let mut probe = Probe::new(world.root.path());
+    rebuild(
+        &world,
+        &format!(
+            "exec 3>\"{}\"; printf . >&3; exec sleep 60",
+            probe.path.display()
+        ),
+    );
+    let mut launched = spawn(
+        &world,
+        &[
+            "daemon",
+            "start",
+            &world.dir_s(),
+            "--library",
+            "alpha",
+            "--timeout",
+            "60",
+        ],
+    );
+    probe.wait_held();
+    let spawn_json = instance(&world, "daemon", 1).join("spawn.json");
+    wait_until("a recorded daemon pid", Duration::from_secs(10), || {
+        spawn_json.exists() && read_json(&spawn_json)["pid"].is_u64()
+    });
+    launched.kill().expect("kill the start");
+    launched.wait().expect("reap the start");
+
+    let started = Instant::now();
+    let out = world.tool(&["daemon", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let notes = world.last_record()["notes"].to_string();
+    assert!(
+        notes.contains("stopped in phase starting"),
+        "the stop must be answered by the supervisor, not read from its exit: {notes}"
+    );
+    let exit = read_json(&instance(&world, "daemon", 1).join("exit.json"));
+    assert_eq!(
+        (exit["class"].as_str(), exit["phase"].as_str()),
+        (Some("not-ready"), Some("starting")),
+        "{exit}"
+    );
+    assert!(
+        probe.closes_within(Duration::from_secs(2)),
+        "the stand-in outlived the stop"
+    );
+}
+
+#[test]
+fn a_lost_supervisor_is_left_for_the_operator() {
+    let world = World::new("");
+    let mut probe = Probe::new(world.root.path());
+    rebuild(
+        &world,
+        &format!(
+            "exec 3>\"{}\"; printf . >&3\n{DAEMON_BODY}",
+            probe.path.display()
+        ),
+    );
+    let _accepted = serve_version(&world.host().join("runtime/control.sock"));
+    daemon_start(&world);
+    let state = status(&world, "daemon");
+    assert_eq!(state["unfinished"][0]["state"], "running", "{state}");
+    let supervisor = registered_pid(&world, "daemon", "supervisor.json");
+    let daemon = read_json(&instance(&world, "daemon", 1).join("spawn.json"))["pid"]
+        .as_u64()
+        .expect("daemon pid") as u32;
+    kill(supervisor);
+    wait_until("the supervisor leaving", Duration::from_secs(5), || {
+        !alive(supervisor)
+    });
+
+    let state = status(&world, "daemon");
+    assert_eq!(state["unfinished"][0]["state"], "held", "{state}");
+    let out = world.tool(&["daemon", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 125, "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains(&daemon.to_string()),
+        "{}",
+        stderr(&out)
+    );
+    assert!(alive(daemon), "the fallback signaled the daemon");
+    kill_group(daemon);
+    assert!(
+        probe.closes_within(Duration::from_secs(2)),
+        "the daemon did not die"
+    );
+    wait_until("the daemon leaving", Duration::from_secs(5), || {
+        !alive(daemon)
+    });
+    let out = world.tool(&["daemon", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let recovered = read_json(&instance(&world, "daemon", 1).join("recovered.json"));
+    assert_eq!(recovered["reason"], "lost-supervisor", "{recovered}");
+    assert_eq!(status(&world, "daemon")["unfinished"], json!([]));
+}
+
+#[tokio::test]
+async fn a_record_failure_after_spawn_still_reclaims_and_records() {
+    let (mut probe, stdin) = common::Probe::new();
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c").arg("exec sleep 30");
+    let daemon = DaemonProcess::spawn_with(
+        cmd,
+        SpawnOpts {
+            stdin,
+            ..SpawnOpts::default()
+        },
+    )
+    .expect("spawn sh");
+    probe.assert_open().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let failed = Err(Outcome::io(
+        STAGE_INSTANCE,
+        "write daemon.json",
+        std::io::Error::other("injected write failure"),
+    ));
+    let outcome = match finish_spawn(daemon, dir.path(), failed).await {
+        Err(outcome) => outcome,
+        Ok(_) => panic!("a failed write handed the daemon back"),
+    };
+    assert_eq!(outcome.stage, "instance", "{outcome:?}");
+    probe
+        .assert_closed("the daemon after a failed record")
+        .await;
+    let exit = read_json(&dir.path().join("exit.json"));
+    assert_eq!(
+        (exit["class"].as_str(), exit["stage"].as_str()),
+        (Some("tool-error"), Some("instance")),
+        "{exit}"
+    );
+    assert!(
+        exit["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("injected write failure")),
+        "{exit}"
+    );
+}
+
+#[test]
+fn an_in_process_instance_waits_for_its_holder() {
+    let world = World::new("");
+    let mut holder = Command::new("sleep").arg("30").spawn().expect("sleep");
+    let mut gone = Command::new("true").spawn().expect("true");
+    let gone_pid = gone.id();
+    gone.wait().expect("reap");
+    let instance = instance(&world, "daemon", 1);
+    std::fs::create_dir_all(&instance).expect("instance");
+    std::fs::write(
+        instance.join("start.json"),
+        json!({ "args": ["run"], "dotenv": null, "started": 0.0, "parent_pid": holder.id() })
+            .to_string(),
+    )
+    .expect("start.json");
+    std::fs::write(
+        instance.join("spawn.json"),
+        json!({ "spawning": false, "pid": gone_pid, "pgid": gone_pid }).to_string(),
+    )
+    .expect("spawn.json");
+
+    let out = world.tool(&["daemon", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 125, "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains(&holder.id().to_string()),
+        "{}",
+        stderr(&out)
+    );
+    holder.kill().expect("kill the holder");
+    holder.wait().expect("reap the holder");
+    let out = world.tool(&["daemon", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let recovered = read_json(&instance.join("recovered.json"));
+    assert_eq!(recovered["reason"], "lost-holder", "{recovered}");
+}
+
+#[test]
+fn a_stop_never_signals_a_process_it_does_not_own() {
+    let world = World::new("");
+    let mut other = Command::new("sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()
+        .expect("sleep");
+    let other_pid = other.id();
+    let instance = instance(&world, "daemon", 1);
+    std::fs::create_dir_all(&instance).expect("instance");
+    std::fs::write(
+        instance.join("start.json"),
+        json!({ "args": ["run"], "dotenv": null, "started": 0.0, "parent_pid": other_pid,
+                "hosting": "detached" })
+        .to_string(),
+    )
+    .expect("start.json");
+    std::fs::write(
+        instance.join("supervisor.json"),
+        json!({ "pid": other_pid, "pgid": other_pid, "nonce": "forged" }).to_string(),
+    )
+    .expect("supervisor.json");
+    std::fs::write(
+        instance.join("spawn.json"),
+        json!({ "spawning": false, "pid": other_pid, "pgid": other_pid }).to_string(),
+    )
+    .expect("spawn.json");
+    std::fs::write(
+        world.tty_lock(),
+        format!(
+            "pid={other_pid}\nmcp=127.0.0.1:1\ncontrol_sock={}\n",
+            world.host().join("runtime/control.sock").display()
+        ),
+    )
+    .expect("lock");
+
+    let out = world.tool(&["daemon", "stop", &world.dir_s()]);
+    let still_running = other.try_wait().expect("look at the process").is_none();
+    let _ = other.kill();
+    let _ = other.wait();
+    assert_eq!(code(&out), 125, "{}", stderr(&out));
+    assert!(stderr(&out).contains("--forget"), "{}", stderr(&out));
+    assert!(still_running, "the stop signaled a process it does not own");
+}
+
+#[test]
+fn stop_and_teardown_are_idempotent() {
+    let (world, _accepted) = ready_world();
+    stub_start(&world, &[]);
+    daemon_start(&world);
+    for args in [
+        ["daemon", "stop"],
+        ["daemon", "stop"],
+        ["teardown", ""],
+        ["teardown", ""],
+    ] {
+        let dir = world.dir_s();
+        let args: Vec<&str> = args
+            .iter()
+            .copied()
+            .filter(|a| !a.is_empty())
+            .chain([dir.as_str()])
+            .collect();
+        let out = world.tool(&args);
+        assert_eq!(code(&out), 0, "{args:?}: {}", stderr(&out));
+    }
+}
+
+#[test]
+fn a_stop_that_has_to_kill_reports_a_timeout() {
+    let world = World::new(&DAEMON_BODY.replace("trap 'exit 0' TERM", "trap '' TERM"));
+    let _accepted = serve_version(&world.host().join("runtime/control.sock"));
+    daemon_start(&world);
+    let started = Instant::now();
+    let out = world.tool(&["daemon", "stop", &world.dir_s(), "--timeout", "1"]);
+    let elapsed = started.elapsed();
+    assert_eq!(code(&out), 124, "{}", stderr(&out));
+    assert_eq!(world.last_record()["class"], "timeout");
+    let budget = Duration::from_secs(1) + TEARDOWN_BUDGET + CLIENT_MARGIN;
+    assert!(elapsed < budget, "took {elapsed:?}, past {budget:?}");
+}
+
+// The stub
+
+#[test]
+fn a_stub_stop_checks_its_identity() {
+    let world = World::new("");
+    let url = stub_start(&world, &[]);
+    let serve = instance(&world, "stub", 1).join("serve.json");
+    let real = std::fs::read(&serve).expect("serve.json");
+    let mut forged = read_json(&serve);
+    forged["nonce"] = json!("forged");
+    std::fs::write(&serve, forged.to_string()).expect("forge");
+
+    let out = world.tool(&["stub", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 125, "{}", stderr(&out));
+    assert_eq!(
+        http(&url, "GET", "/__stub/identity", b"").0,
+        200,
+        "the stub was stopped"
+    );
+
+    std::fs::write(&serve, real).expect("restore serve.json");
+    let out = world.tool(&["stub", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+}
+
+#[test]
+fn a_stub_starts_once_and_stops_twice() {
+    let world = World::new("");
+    let url = stub_start(&world, &[]);
+    let out = world.tool(&["stub", "start", &world.dir_s()]);
+    assert_eq!(code(&out), 125, "a second start: {}", stderr(&out));
+    let state = status(&world, "stub");
+    assert_eq!(state["unfinished"][0]["state"], "running", "{state}");
+    assert_eq!(state["unfinished"][0]["url"], url.as_str(), "{state}");
+    for _ in 0..2 {
+        let out = world.tool(&["stub", "stop", &world.dir_s()]);
+        assert_eq!(code(&out), 0, "{}", stderr(&out));
+    }
+    assert_eq!(status(&world, "stub")["unfinished"], json!([]));
+    let again = stub_start(&world, &[]);
+    let second = instance(&world, "stub", 2);
+    assert_eq!(
+        std::fs::read_to_string(second.join("url"))
+            .expect("url")
+            .trim(),
+        again
+    );
+    assert_ne!(
+        read_json(&second.join("serve.json"))["nonce"],
+        read_json(&instance(&world, "stub", 1).join("serve.json"))["nonce"]
+    );
+    let out = world.tool(&["stub", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+}
+
+#[test]
+fn a_stub_width_out_of_range_is_refused_before_it_starts() {
+    let world = World::new("");
+    for dim in ["0", "8193"] {
+        let out = world.tool(&["stub", "start", &world.dir_s(), "--dim", dim]);
+        assert_eq!(code(&out), 125, "{dim}: {}", stderr(&out));
+        assert_eq!(world.last_record()["stage"], "stub", "{dim}");
+        assert!(stderr(&out).contains("1 to 8192"), "{}", stderr(&out));
+    }
+    assert!(
+        std::fs::read_dir(world.dir.join("run/stub"))
+            .expect("run/stub")
+            .next()
+            .is_none(),
+        "a refused width left an instance"
+    );
+}
+
+#[test]
+fn commands_reach_the_running_stub() {
+    let world = World::new("echo bookrack 0.0.0-sandbox");
+    let url = stub_start(&world, &[]);
+    let out = world.tool(&["env", &world.dir_s()]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains(&format!("export BOOKRACK_OLLAMA_URL='{url}'")),
+        "{}",
+        stdout(&out)
+    );
+    let out = world.tool(&["tripwire", &world.dir_s(), "--", "--version"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let serve = registered_pid(&world, "stub", "serve.json");
+    kill(serve);
+    wait_until("the stub leaving", Duration::from_secs(5), || !alive(serve));
+    let out = world.exec(&[], &["--version"]);
+    assert_eq!(code(&out), 125, "{}", stderr(&out));
+    assert_eq!(world.last_record()["stage"], "stub");
+}
+
+#[test]
+fn a_stub_without_a_url_is_refused_not_skipped() {
+    let world = World::new("");
+    let ran = world.root.path().join("ran");
+    rebuild(&world, &format!("touch \"{}\"; echo ran", ran.display()));
+    let mut other = Command::new("sleep").arg("30").spawn().expect("sleep");
+    let instance = instance(&world, "stub", 1);
+    std::fs::create_dir_all(&instance).expect("instance");
+    std::fs::write(
+        instance.join("start.json"),
+        json!({ "dimension": 8, "vectors": "spread", "identity": "forged", "started": 0.0,
+                "parent_pid": other.id() })
+        .to_string(),
+    )
+    .expect("start.json");
+    std::fs::write(
+        instance.join("serve.json"),
+        json!({ "pid": other.id(), "pgid": other.id(), "nonce": "forged" }).to_string(),
+    )
+    .expect("serve.json");
+    let out = world.exec(&[], &["--version"]);
+    let _ = other.kill();
+    let _ = other.wait();
+    assert_eq!(code(&out), 125, "{}", stderr(&out));
+    assert_eq!(world.last_record()["stage"], "stub");
+    assert!(
+        !ran.exists(),
+        "the command ran with the stub unaccounted for"
+    );
+}
+
+#[test]
+fn the_stub_stays_while_a_daemon_runs() {
+    let (world, _accepted) = ready_world();
+    stub_start(&world, &[]);
+    daemon_start(&world);
+    for args in [["stub", "stop"], ["stub", "start"]] {
+        let out = world.tool(&[args[0], args[1], &world.dir_s()]);
+        assert_eq!(code(&out), 125, "{args:?}: {}", stderr(&out));
+        assert_eq!(world.last_record()["stage"], "instance", "{args:?}");
+    }
+    let out = world.tool(&["teardown", &world.dir_s()]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(instance(&world, "daemon", 1).join("exit.json").exists());
+    assert!(instance(&world, "stub", 1).join("exit.json").exists());
+}
+
+#[test]
+fn a_started_stub_answers_at_its_width() {
+    let world = World::new("");
+    let url = stub_start(&world, &["--dim", "16", "--vectors", "spread"]);
+    let embed = json!({ "model": "any", "input": ["one"] }).to_string();
+    let (status_code, body) = http(&url, "POST", "/api/embed", embed.as_bytes());
+    assert_eq!(status_code, 200, "{body}");
+    assert_eq!(body["embeddings"][0].as_array().map(Vec::len), Some(16));
+    let out = world.tool(&["stub", "fail", &world.dir_s(), "overloaded"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(http(&url, "POST", "/api/embed", embed.as_bytes()).0, 503);
+    let out = world.tool(&["stub", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let addr = url.strip_prefix("http://").expect("loopback");
+    assert!(
+        TcpStream::connect(addr).is_err(),
+        "the stopped stub still answers"
+    );
+}

@@ -56,7 +56,7 @@ pub mod tool;
 
 pub use child::{
     CaptureMode, DaemonProcess, Exit, Failure, FailureKind, Output, Ready, ReadyFailure, Sink,
-    SpawnOpts, Stage, StreamStats,
+    SpawnOpts, Stage, StreamStats, TEARDOWN_BUDGET,
 };
 #[cfg(unix)]
 pub use child::{endpoint_matches, endpoint_path_matches};
