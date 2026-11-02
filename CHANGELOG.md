@@ -127,6 +127,12 @@ release workflow extracts the matching section verbatim from this file.
   `cssparser`) and with the PDFium binary, by release tag and archive
   digest.
 
+### Removed
+
+- **`index-profile validate --allow-unknown-model`.** The flag has had
+  no effect since 0.13.0, when a model outside the registry stopped
+  being a validation error; passing it is now a usage error (exit `2`).
+
 ### Fixed
 
 - **`libraries mount` of a library that is still broken explains

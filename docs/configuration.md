@@ -515,8 +515,7 @@ consults an offline model registry. The registry records what is known
 about the qualified models rather than which models may be used: a
 listed model must be declared at the dimension it emits, while a model
 it does not list validates on structure alone, and `index-profile
-apply` and `libraries config` accept it. `--allow-unknown-model` is
-deprecated and has no effect.
+apply` and `libraries config` accept it.
 
 What the registry does not know — an unlisted embed or cross-encoder
 model, a pairing across model families — those two write entrances say

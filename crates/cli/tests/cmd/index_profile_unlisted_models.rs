@@ -5,8 +5,8 @@
 //! The registry records what is known about a few models; a profile
 //! naming another one validates on its structure alone, and both write
 //! entrances accept it. What the registry does know stays binding: a
-//! listed model must be declared at the dimension it emits, and the
-//! deprecated `--allow-unknown-model` no longer waives that.
+//! listed model must be declared at the dimension it emits, and no
+//! flag waives that.
 //!
 //! A write entrance says what the registry does not know once per
 //! library: a remark already shown for a library is not shown again
@@ -145,7 +145,7 @@ impl Fixture {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_unlisted_model_validates_and_the_old_flag_is_a_deprecated_no_op() -> Result<()> {
+async fn an_unlisted_model_validates_and_the_removed_flag_is_refused() -> Result<()> {
     let fx = Fixture::new()?;
     fx.write_profile(
         "unlisted",
@@ -168,33 +168,36 @@ async fn an_unlisted_model_validates_and_the_old_flag_is_a_deprecated_no_op() ->
             "--allow-unknown-model",
         ])
         .await?;
-    assert_eq!(code, Some(0), "{stdout} {stderr}");
-    assert!(
-        stderr.contains("--allow-unknown-model is deprecated"),
-        "the flag says it does nothing now: {stderr}"
+    assert_eq!(
+        code,
+        Some(2),
+        "the removed flag is a usage error: {stdout} {stderr}"
     );
+    assert!(
+        stderr.contains("--allow-unknown-model") && !stderr.contains("deprecated"),
+        "the refusal names the flag: {stderr}"
+    );
+    assert!(stdout.is_empty(), "nothing was validated: {stdout}");
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_listed_model_at_a_foreign_dimension_fails_with_or_without_the_flag() -> Result<()> {
+async fn a_listed_model_at_a_foreign_dimension_fails() -> Result<()> {
     let fx = Fixture::new()?;
     fx.write_profile(
         "foreign-dim",
         &profile_toml("foreign-dim", "qwen3-embedding:0.6b", 8, NO_RERANKER),
     )?;
-    for extra in [None, Some("--allow-unknown-model")] {
-        let mut args = vec!["index-profile", "validate", "foreign-dim"];
-        args.extend(extra);
-        let (code, stdout, stderr) = fx.run(&args).await?;
-        assert_eq!(
-            code,
-            Some(1),
-            "{extra:?}: the registry's dimension for a listed model binds: {stdout} {stderr}"
-        );
-        assert!(stdout.contains("embed.dim"), "{extra:?}: {stdout}");
-        assert!(!stdout.contains("--allow"), "{extra:?}: {stdout}");
-    }
+    let (code, stdout, stderr) = fx
+        .run(&["index-profile", "validate", "foreign-dim"])
+        .await?;
+    assert_eq!(
+        code,
+        Some(1),
+        "the registry's dimension for a listed model binds: {stdout} {stderr}"
+    );
+    assert!(stdout.contains("embed.dim"), "{stdout}");
+    assert!(!stdout.contains("--allow"), "{stdout}");
     Ok(())
 }
 

@@ -66,10 +66,6 @@ pub enum IndexProfileAction {
     Validate {
         /// Profile name.
         name: String,
-        /// Deprecated; has no effect. A model outside the registry is
-        /// not a validation error.
-        #[arg(long)]
-        allow_unknown_model: bool,
     },
     /// Print the profile a library effectively runs under and compare it
     /// against the built stamps.
@@ -165,10 +161,7 @@ pub fn run(action: IndexProfileAction, selection: &LibrarySelection) -> Result<(
     match action {
         IndexProfileAction::List { json } => list(json),
         IndexProfileAction::Show { name } => show(&name),
-        IndexProfileAction::Validate {
-            name,
-            allow_unknown_model,
-        } => validate_cmd(&name, allow_unknown_model),
+        IndexProfileAction::Validate { name } => validate_cmd(&name),
         IndexProfileAction::Current { json } => current(selection, json),
         IndexProfileAction::Diff { a, b, json } => diff(&a, &b, json),
         // Apply connects to the daemon and confirms interactively, so
@@ -268,16 +261,10 @@ fn show(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_cmd(name: &str, allow_unknown_model: bool) -> Result<()> {
+fn validate_cmd(name: &str) -> Result<()> {
     let dir = user_profile_dir();
     let (profile, _source) = resolve(dir.as_deref(), name)?
         .ok_or_else(|| eyre::eyre!("unknown index profile '{name}'"))?;
-    if allow_unknown_model {
-        eprintln!(
-            "warning: --allow-unknown-model is deprecated and has no effect; models outside \
-             the registry are accepted"
-        );
-    }
     let findings = validate(&profile);
     render_findings(&findings);
     if has_errors(&findings) {

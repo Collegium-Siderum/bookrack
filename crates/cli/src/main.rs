@@ -1841,13 +1841,6 @@ mod tests {
                 "validate",
                 "qwen3-0.6b-default",
             ],
-            vec![
-                "bookrack",
-                "index-profile",
-                "validate",
-                "x",
-                "--allow-unknown-model",
-            ],
         ] {
             Cli::try_parse_from(argv.iter().copied())
                 .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
@@ -1855,13 +1848,22 @@ mod tests {
     }
 
     #[test]
-    fn index_profile_allow_unknown_model_is_only_on_validate() {
-        let Err(err) =
-            Cli::try_parse_from(["bookrack", "index-profile", "list", "--allow-unknown-model"])
-        else {
-            panic!("--allow-unknown-model must not attach to list");
-        };
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    fn index_profile_refuses_allow_unknown_model() {
+        for verb in [vec!["list"], vec!["validate", "x"]] {
+            let argv: Vec<&str> = ["bookrack", "index-profile"]
+                .into_iter()
+                .chain(verb.iter().copied())
+                .chain(["--allow-unknown-model"])
+                .collect();
+            let Err(err) = Cli::try_parse_from(&argv) else {
+                panic!("--allow-unknown-model must not parse: {argv:?}");
+            };
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "argv: {argv:?}"
+            );
+        }
     }
 
     /// The library selectors on the two library-selecting verbs are the
