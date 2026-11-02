@@ -127,6 +127,14 @@ release workflow extracts the matching section verbatim from this file.
   `cssparser`) and with the PDFium binary, by release tag and archive
   digest.
 
+### Deprecated
+
+- **`bookrack papers ingest`; use `bookrack glean`.** The two take the
+  same arguments and run the same pipeline. `papers ingest` keeps
+  working through this release: its summary in `--help` starts with
+  `Deprecated:`, and it prints a warning naming `glean` on stderr before
+  it runs. It is removed in the next minor release.
+
 ### Removed
 
 - **`index-profile validate --allow-unknown-model`.** The flag has had

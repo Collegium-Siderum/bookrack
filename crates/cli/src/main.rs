@@ -352,10 +352,10 @@ enum Command {
     Ingest(IngestArgs),
     /// Submit one or more papers for ingest.
     ///
-    /// The paper-side pipeline verb, equivalent to `papers ingest` and
-    /// symmetric with the book-side `ingest`. Requires a running
-    /// bookrack daemon; the command exits with code 2 if no daemon is
-    /// found.
+    /// The paper-side pipeline verb, symmetric with the book-side
+    /// `ingest`; `papers ingest` is its deprecated form. Requires a
+    /// running bookrack daemon; the command exits with code 2 if no
+    /// daemon is found.
     #[command(after_long_help = bookrack_cli_grammar::examples![
         "glean /path/to/paper.pdf",
         "glean /path/to/papers-dir/ --recursive",
@@ -1131,6 +1131,11 @@ async fn run() -> Result<()> {
         }
         bookrack_cli::render::init(RenderCtx::new(output, color));
     }
+    // Printed ahead of every check, so a deprecated command that then
+    // fails still says what replaces it.
+    if let Some(notice) = deprecation_notice(&cli.command) {
+        eprintln!("{notice}");
+    }
     // A locally resolving command keeps its selection to itself: a path
     // is a switch into that root, a name is resolved through the
     // config crate, and nothing goes on a wire. A daemon-routed one
@@ -1577,6 +1582,20 @@ fn accepts_audit_profile(command: &Command) -> bool {
         | Command::Init { .. }
         | Command::Run { .. }
         | Command::Rpc { .. } => false,
+    }
+}
+
+/// The warning a deprecated command prints on stderr before it runs,
+/// naming the command that replaces it; `None` for every other command.
+fn deprecation_notice(command: &Command) -> Option<&'static str> {
+    match command {
+        Command::Papers {
+            action: PapersAction::Ingest(_),
+        } => Some(
+            "warning: `bookrack papers ingest` is deprecated and is removed in the next minor \
+             release; use `bookrack glean`, which takes the same arguments",
+        ),
+        _ => None,
     }
 }
 
@@ -2674,6 +2693,97 @@ mod tests {
              into TOP_LEVEL_BY_ACCRETION when it does not, and record the change \
              in CHANGELOG.md. Added: {added:?}; no longer present: {removed:?}"
         );
+    }
+
+    /// Commands kept on the surface through their deprecation period: the
+    /// invocation path, the command that replaces it, and arguments both
+    /// accept. Each is removed in the minor release after the one that
+    /// deprecates it.
+    const DEPRECATED: &[(&str, &str, &[&str])] = &[("papers ingest", "glean", &["/tmp/paper.pdf"])];
+
+    /// Collects `(invocation path, summary)` for every command in the
+    /// tree, clap's generated `help` pseudo-subcommand excepted.
+    fn summaries(cmd: &clap::Command, path: &str, out: &mut BTreeMap<String, String>) {
+        for sub in cmd.get_subcommands().filter(|sub| sub.get_name() != "help") {
+            let sub_path = if path.is_empty() {
+                sub.get_name().to_string()
+            } else {
+                format!("{path} {}", sub.get_name())
+            };
+            let about = sub.get_about().map(ToString::to_string).unwrap_or_default();
+            out.insert(sub_path.clone(), about);
+            summaries(sub, &sub_path, out);
+        }
+    }
+
+    /// A deprecated command is recorded in two places that have to agree:
+    /// `DEPRECATED` here, and a summary starting `Deprecated:` that points
+    /// at its replacement, which is what `--help` shows wherever the
+    /// command is listed.
+    #[test]
+    fn the_deprecated_commands_are_exactly_those_whose_summary_says_so() {
+        use clap::CommandFactory;
+
+        let mut by_path = BTreeMap::new();
+        summaries(&Cli::command(), "", &mut by_path);
+        let recorded: BTreeSet<&str> = DEPRECATED.iter().map(|(path, _, _)| *path).collect();
+        assert_eq!(
+            recorded.len(),
+            DEPRECATED.len(),
+            "DEPRECATED holds a duplicate path"
+        );
+        let marked: BTreeSet<&str> = by_path
+            .iter()
+            .filter(|(_, about)| about.to_ascii_lowercase().starts_with("deprecated"))
+            .map(|(path, _)| path.as_str())
+            .collect();
+        assert_eq!(
+            marked, recorded,
+            "the commands whose summary says they are deprecated differ from \
+             DEPRECATED; a deprecated command carries both"
+        );
+        for (path, replacement, _) in DEPRECATED {
+            let about = &by_path[*path];
+            let wanted = format!("Deprecated: use `bookrack {replacement}`");
+            assert!(
+                about.starts_with(&wanted),
+                "the summary of `{path}` is {about:?}; it starts with {wanted:?}"
+            );
+            assert!(
+                by_path.contains_key(*replacement) && !marked.contains(replacement),
+                "`{path}` points at `{replacement}`, which is not a live command"
+            );
+        }
+    }
+
+    /// The deprecated form warns and names its replacement; the
+    /// replacement, given the same arguments, does not warn.
+    #[test]
+    fn a_deprecated_command_names_its_replacement_and_the_replacement_is_silent() {
+        for (path, replacement, args) in DEPRECATED {
+            let argv = |command: &str| -> Vec<String> {
+                std::iter::once("bookrack")
+                    .chain(command.split(' '))
+                    .chain(args.iter().copied())
+                    .map(String::from)
+                    .collect()
+            };
+            let old = Cli::try_parse_from(argv(path)).expect("the deprecated form parses");
+            let notice = deprecation_notice(&old.command)
+                .unwrap_or_else(|| panic!("`{path}` prints no deprecation warning"));
+            assert!(
+                notice.starts_with("warning: ")
+                    && notice.contains(&format!("`bookrack {path}`"))
+                    && notice.contains(&format!("`bookrack {replacement}`")),
+                "the warning names the command and its replacement: {notice:?}"
+            );
+            let new = Cli::try_parse_from(argv(replacement)).expect("the replacement parses");
+            assert_eq!(
+                deprecation_notice(&new.command),
+                None,
+                "`{replacement}` is not deprecated"
+            );
+        }
     }
 
     /// How an explicit library selection reaches a command: as a switch

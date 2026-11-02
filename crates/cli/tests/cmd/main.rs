@@ -9,6 +9,7 @@ bookrack_test_support::test_group!("cmd", spec = None);
 
 mod config_effective;
 mod config_knobs;
+mod deprecated_commands;
 mod distill_run_lifecycle;
 mod dotenv_entry_point;
 mod error_rendering;

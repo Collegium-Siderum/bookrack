@@ -971,10 +971,12 @@ fn book_intake_id(raw: &str) -> Result<i64, String> {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum PapersAction {
-    /// Submit a paper file to the glean pipeline.
+    /// Deprecated: use `bookrack glean`, which takes the same arguments.
     ///
-    /// Mirrors the book-side `ingest` command. With `--recursive`,
-    /// every supported file under a directory is enqueued.
+    /// Submits a paper file to the glean pipeline exactly as `glean`
+    /// does, after a deprecation warning on stderr; it is removed in the
+    /// next minor release. With `--recursive`, every supported file
+    /// under a directory is enqueued.
     #[command(after_long_help = crate::examples![
         "papers ingest /path/to/paper.pdf",
         "papers ingest /path/to/papers-dir/ --recursive",
