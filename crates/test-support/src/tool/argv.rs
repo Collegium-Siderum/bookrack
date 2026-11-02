@@ -17,7 +17,7 @@ use super::tripwire::{Finding, Rule, is_within, resolve};
 
 /// The control-plane methods `rpc call` may name inside a sandbox: the
 /// ones the daemon's own method table marks `read`.
-pub const READ_ONLY_RPC: [&str; 9] = [
+pub const READ_ONLY_RPC: [&str; 10] = [
     "daemon.version",
     "daemon.status",
     "status",
@@ -27,6 +27,7 @@ pub const READ_ONLY_RPC: [&str; 9] = [
     "library.info",
     "library.stats",
     "library.vectors_status",
+    "library.show_pipeline_trail",
 ];
 
 /// The top-level flags `bookrack` accepts anywhere, with whether each
@@ -385,6 +386,48 @@ mod tests {
         let s = strip_globals(&args(&["status", "--", "--library", "beta"])).expect("strips");
         assert_eq!(s.library, None);
         assert_eq!(s.rest, ["status", "--library", "beta"]);
+    }
+
+    /// `library.show_pipeline_trail` is on the whitelist; its sibling
+    /// `library.show_audit_trail`, marked `read` in the daemon's table
+    /// too, is not.
+    #[test]
+    fn the_pipeline_trail_is_the_one_trail_rpc_call_admits() {
+        let here = Path::new(".");
+        let findings = check(
+            &args(&[
+                "rpc",
+                "call",
+                "library.show_pipeline_trail",
+                r#"{"intake_id":1}"#,
+            ]),
+            here,
+            here,
+        );
+        assert!(
+            findings.is_empty(),
+            "the pipeline trail must be admitted: {:?}",
+            findings.iter().map(|f| &f.detail).collect::<Vec<_>>()
+        );
+
+        let findings = check(
+            &args(&[
+                "rpc",
+                "call",
+                "library.show_audit_trail",
+                r#"{"intake_id":1}"#,
+            ]),
+            here,
+            here,
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::T8Arguments
+                    && f.detail.contains("is not a read-only method")),
+            "the audit trail must stay refused: {:?}",
+            findings.iter().map(|f| &f.detail).collect::<Vec<_>>()
+        );
     }
 
     /// A value-taking global flag with nothing after it, or with a bare
