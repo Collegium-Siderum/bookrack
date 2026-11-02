@@ -87,7 +87,7 @@ earlier ones already happened.
 | `bookrack_extract::EXTRACTOR_VERSION` (manual bump) | `extractor_version` | same as above | re-ingest the affected sources: `bookrack ingest` (books), `bookrack papers ingest` (papers) — see *Re-ingesting a source file* below |
 | Externalised extract-side knobs (HTML block / skip tags, PDF quality thresholds, language codes / ratios) — bumped 3 → 4 | `extractor_version` | same as above | re-ingest the affected sources |
 | `Block` carries per-paragraph `BlockStyle` geometry on the PDF path (font-size median / p90, bold-majority flag, line count, first-line left, normalized above-gap) — bumped 5 → 6 | `extractor_version` | same as above | re-ingest the affected PDF sources (book-side TXT / EPUB / OCR partitions read fine without a refresh, as their `style` is `None` on both old and new envelopes) |
-| PDFium `chromium/7763` → `chromium/7881` with `pdfium-render` 0.9.4, `rbook` 0.7.12 (bringing `quick-xml` 0.42 and `zip` 9), `encoding_rs` 0.8.44, `tendril` 0.5.1, `web_atoms` 0.2.6 — bumped 6 → 7 | `extractor_version` | same as above | re-ingest the affected sources; books extracted at version 6 keep serving meanwhile, so the refresh can run a few sources at a time. The PDFium fixes apply to every PDF parsed after the upgrade, without a refresh. A library of the previous PDFium build no longer loads — see *A moved PDFium build* above |
+| PDFium `chromium/7763` → `chromium/7881` with `pdfium-render` 0.9.4, `rbook` 0.7.12 (bringing `quick-xml` 0.42 and `zip` 9), `encoding_rs` 0.8.44, `tendril` 0.5.1, `web_atoms` 0.2.6 — bumped 6 → 7 | `extractor_version` | same as above | re-ingest the affected sources; a book the new extractor reads as the old one did only has its stamp advanced, see *Re-ingesting a source file*. Books extracted at version 6 keep serving meanwhile, so the refresh can run a few sources at a time. The PDFium fixes apply to every PDF parsed after the upgrade, without a refresh. A library of the previous PDFium build no longer loads — see *A moved PDFium build* above |
 | `bookrack_extract::OCR_INTAKE_VERSION` (manual bump) | `extractor_version` on OCR rows only | OCR extract → structure → chunks → vectors | re-run `bookrack intake ocr` against each affected OCR product |
 | `text-splitter`, `icu_*`, `bookrack_ingest::CHUNK_VERSION` | `chunk_version` | chunks → vectors | `bookrack vectors reembed` (books); `bookrack papers vectors reembed` (papers) |
 | `text-splitter`, `icu_*`, `bookrack_glean::CHUNK_VERSION` | `chunk_version` on the papers store | papers chunks → papers vectors | `bookrack papers vectors reset` |
@@ -197,13 +197,26 @@ Re-ingesting a source file — the only path that refreshes
 file. No `--force` is needed and no catalog state has to be cleared
 first: ingest skips a source already on file only when it is
 `Embedded` and its stored stamps match this binary's, so a row whose
-`extractor_version` is behind runs the full pipeline. The source is
-extracted again, its envelope in the intake store is replaced, and the
-corpus tree, chunks, and vectors are derived afresh. Pointing
-`--recursive` at the original source directory therefore refreshes
-every stale file under it: the files whose stamps are current finish
-as `skipped_duplicate` jobs without doing any work. `--force` runs the
-full pipeline for the current files as well.
+`extractor_version` is behind is extracted again. For a book, the new
+extraction is then compared with the envelope in the intake store.
+When the two match apart from the version, the envelope is rewritten
+and the stamp advances, and the corpus tree, chunks, and vectors stay
+as they are: the refresh costs the extraction alone. When they differ,
+or the envelope is missing, unreadable, older than the stamp, or
+cannot be rewritten, the full pipeline runs and the corpus tree,
+chunks, and vectors are derived afresh. A paper always runs the full
+pipeline. Pointing `--recursive` at the original source directory
+therefore refreshes every stale file under it: the files whose stamps
+are current finish as `skipped_duplicate` jobs without doing any work.
+`--force` runs the full pipeline for every file, current or stale,
+without the comparison.
+
+A stale book's job ends `done` whether the run only advanced the stamp
+or went through the full pipeline; the book's pipeline trail carries
+an `extract` / `compare` row naming which.
+`rpc` does not read the global `--library`, so the library goes in the
+params, and an omitted one is the registry default:
+`bookrack rpc call library.show_pipeline_trail '{"intake_id":<id>,"library":"<name>"}'`.
 
 The intake is keyed on the file's SHA-256, so the refresh needs the
 bytes the library first saw. A book's intake store keeps the extraction
@@ -221,6 +234,12 @@ stands even where the new extractor changed the record that was
 reviewed — compare the refreshed report with the record to find those.
 `bookrack papers metadata reopen <id>` returns a paper to the review
 queue; the book side has no matching verb.
+
+A book whose stamp only advanced does not run the metadata step again:
+its audit report, its stored verdict, and the fields seeded from the
+file name stay as the earlier run left them. `bookrack metadata
+reaudit <id>` refreshes the stored verdict and confidence; a `--force`
+re-ingest re-seeds the fields and rewrites the report as well.
 
 `corpus rebuild --stale-only` and `vectors reembed --stale-only`, and
 their `papers` counterparts, do not refresh the stamp. Both re-derive

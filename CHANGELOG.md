@@ -80,6 +80,32 @@ release workflow extracts the matching section verbatim from this file.
   `bookrack vectors reembed` each list the version-6 intakes within
   their own target set, as *Re-ingesting a source file* in
   `docs/UPGRADE.md` describes.
+- **Re-ingesting a book whose extraction has not changed only advances
+  its stamp.** A book whose `extractor_version` is behind ran the whole
+  pipeline when its original file was ingested again, re-embedding
+  every chunk even when the new extractor read the file exactly as the
+  old one had. The new extraction is now compared with the envelope the
+  intake store holds; when the two match apart from the version, the
+  envelope is rewritten and the stamp advances, and the corpus tree,
+  chunks, and vectors are kept. A book whose extraction differs, or
+  whose envelope is missing, unreadable, or older than its stamp, runs
+  the full pipeline as before, and so does any re-ingest with
+  `--force`. The job ends `done` whether the stamp alone advanced or
+  the full pipeline ran; the book's pipeline trail records an
+  `extract` / `compare` row naming which. Papers are re-gleaned in
+  full.
+
+  An ingest now advances a book's stamp and writes its envelope only
+  once the corpus tree has been built. A re-ingest that fails while
+  building the tree leaves the stamp and the envelope as they were, so
+  a stale book stays on the `--stale-only` lists; a new book that fails
+  there is listed too, since it has no stamp yet. Writing an envelope
+  also removes the copy under the unprefixed name that
+  `doctor --rename-envelopes` migrates from. When the envelope cannot
+  be written, the one it would have replaced is removed instead of
+  being left to describe an older extraction, so `corpus rebuild`
+  reports that book's envelope as missing rather than rebuilding it
+  from stale content.
 - **EPUB files are opened more strictly.** A package document holding a
   byte that is not valid UTF-8, even inside an XML comment, is now
   rejected as a corrupt file, and an archive entry larger than the
