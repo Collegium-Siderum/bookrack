@@ -1055,8 +1055,7 @@ enum Absent {
 /// while both absent is a library that pipeline was never used for.
 fn push_store_rows(rows: &mut Vec<Row>, cfg: &Config) {
     const BOOKS_ABSENT: &str = "no books ingested yet; the first `bookrack ingest` creates it";
-    const PAPERS_ABSENT: &str =
-        "no papers ingested yet; the first `bookrack papers ingest` creates it";
+    const PAPERS_ABSENT: &str = "no papers ingested yet; the first `bookrack glean` creates it";
 
     let books_index = if cfg.corpus_db().exists() {
         Absent::Expected(

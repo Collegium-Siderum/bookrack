@@ -133,7 +133,9 @@ release workflow extracts the matching section verbatim from this file.
   same arguments and run the same pipeline. `papers ingest` keeps
   working through this release: its summary in `--help` starts with
   `Deprecated:`, and it prints a warning naming `glean` on stderr before
-  it runs. It is removed in the next minor release.
+  it runs. It is removed in the next minor release. The documentation,
+  the `papers` summary, and the `bookrack doctor` row for a library
+  with no papers name `glean` instead.
 
 ### Removed
 

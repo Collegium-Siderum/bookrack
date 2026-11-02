@@ -133,13 +133,13 @@ are still being hardened for production use.
    .\bookrack.exe ingest path\to\book.epub
    ```
 
-   Submit a paper through the parallel `papers` subcommand instead;
-   ingest follows the same control-plane streaming, and `--recursive`
+   Submit a paper with `glean`, the paper-side counterpart of `ingest`;
+   it follows the same control-plane streaming, and `--recursive`
    walks a directory and forwards every supported file it finds:
 
    ```
-   ./bookrack papers ingest /path/to/paper.pdf
-   ./bookrack papers ingest --recursive /path/to/papers-dir/
+   ./bookrack glean /path/to/paper.pdf
+   ./bookrack glean --recursive /path/to/papers-dir/
    ```
 
    Papers live in a second cluster (catalog, corpus, vector store,

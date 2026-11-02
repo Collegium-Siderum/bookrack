@@ -82,16 +82,15 @@ snapshots its log ring (see [Observability](#observability)).
 
 `bookrack ingest <path>` submits one or more files (or a directory
 with `--recursive`) to the daemon and streams the queue worker's
-progress until the batch reaches a terminal state. `bookrack papers
-ingest <path>` is the parallel entry point for academic papers, which
-live in a second cluster under the same data root. `bookrack glean` is
-the same verb at the top level — same arguments, same pipeline — so the
-paper side reads symmetrically with `bookrack ingest`.
+progress until the batch reaches a terminal state. `bookrack glean
+<path>` is the parallel entry point for academic papers, which live in
+a second cluster under the same data root. `bookrack papers ingest` is
+its deprecated form — same arguments, same pipeline, plus a warning on
+stderr — and is removed in the next minor release.
 
 ```
 bookrack ingest /path/to/book.epub
 bookrack ingest --recursive /path/to/books-dir/
-bookrack papers ingest --recursive /path/to/papers-dir/
 bookrack glean --recursive /path/to/papers-dir/
 ```
 
@@ -176,7 +175,7 @@ library, then retry again.
 
 `queue wait` reads the queue once, when it attaches, and refuses up
 front when a selected job is pending on a paused queue or the daemon has
-no queue worker; `ingest`, `papers ingest` and `intake ocr` make the same
+no queue worker; `ingest`, `glean` and `intake ocr` make the same
 read, and the same refusal, once they have submitted. A refused wait
 still prints what the read showed: the jobs that had ended, and the rest
 by id. After that the wait follows the event stream, and whatever the

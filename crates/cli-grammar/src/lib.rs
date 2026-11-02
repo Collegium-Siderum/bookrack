@@ -1462,9 +1462,9 @@ pub struct PapersDryrunArgs {
     pub no_chunk: bool,
 }
 
-/// Positional + flag bundle for `papers ingest`. Mirrors
-/// [`IngestArgs`] for the paper pipeline. `--priority` controls the
-/// queue priority of the resulting job.
+/// Positional + flag bundle for `glean` and its deprecated form
+/// `papers ingest`. Mirrors [`IngestArgs`] for the paper pipeline.
+/// `--priority` controls the queue priority of the resulting job.
 #[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
 pub struct PapersIngestArgs {
     /// Source file, or a directory the ingest walks recursively (with

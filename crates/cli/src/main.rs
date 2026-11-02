@@ -410,12 +410,12 @@ enum Command {
         "remove --sha a1b2c3d4 --yes",
     ])]
     Remove(RemoveArgs),
-    /// Ingest, browse, and export papers on the paper-side surface.
+    /// Browse, curate, and export papers on the paper-side surface.
     ///
-    /// Ingest a paper file, browse the paper catalog, or export one
-    /// paper's bibliographic record as CSL-JSON. The book-side
-    /// counterparts are `ingest`, `metadata`, `corpus`, `vectors`,
-    /// and `stamps`.
+    /// Browse the paper catalog, curate its metadata, or export one
+    /// paper's bibliographic record as CSL-JSON; `glean` submits a
+    /// paper. The book-side counterparts are `metadata`, `corpus`,
+    /// `vectors`, and `stamps`.
     Papers {
         #[command(subcommand)]
         action: PapersAction,

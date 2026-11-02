@@ -84,7 +84,7 @@ earlier ones already happened.
 | Dependency or constant bumped | Stamp it advances | Layers that go stale | Refresh command |
 |---|---|---|---|
 | `rbook`, `scraper`, `encoding_rs`, `pdfium-render`, and the crates under them that parse or decode (`quick-xml`, `zip`, `percent-encoding`, `html5ever`, `markup5ever`, `tendril`, `web_atoms`, `selectors`, `cssparser`); the PDFium binary (`PDFIUM_RELEASE_TAG` and its archive digests) | `extractor_version` | extract → structure → chunks → vectors | re-ingest the affected sources |
-| `bookrack_extract::EXTRACTOR_VERSION` (manual bump) | `extractor_version` | same as above | re-ingest the affected sources: `bookrack ingest` (books), `bookrack papers ingest` (papers) — see *Re-ingesting a source file* below |
+| `bookrack_extract::EXTRACTOR_VERSION` (manual bump) | `extractor_version` | same as above | re-ingest the affected sources: `bookrack ingest` (books), `bookrack glean` (papers) — see *Re-ingesting a source file* below |
 | Externalised extract-side knobs (HTML block / skip tags, PDF quality thresholds, language codes / ratios) — bumped 3 → 4 | `extractor_version` | same as above | re-ingest the affected sources |
 | `Block` carries per-paragraph `BlockStyle` geometry on the PDF path (font-size median / p90, bold-majority flag, line count, first-line left, normalized above-gap) — bumped 5 → 6 | `extractor_version` | same as above | re-ingest the affected PDF sources (book-side TXT / EPUB / OCR partitions read fine without a refresh, as their `style` is `None` on both old and new envelopes) |
 | PDFium `chromium/7763` → `chromium/7881` with `pdfium-render` 0.9.4, `rbook` 0.7.12 (bringing `quick-xml` 0.42 and `zip` 9), `encoding_rs` 0.8.44, `tendril` 0.5.1, `web_atoms` 0.2.6 — bumped 6 → 7 | `extractor_version` | same as above | re-ingest the affected sources; a book the new extractor reads as the old one did only has its stamp advanced, see *Re-ingesting a source file*. Books extracted at version 6 keep serving meanwhile, so the refresh can run a few sources at a time. The PDFium fixes apply to every PDF parsed after the upgrade, without a refresh. A library of the previous PDFium build no longer loads — see *A moved PDFium build* above |
@@ -193,7 +193,7 @@ themselves are not touched.
 
 Re-ingesting a source file — the only path that refreshes
 `extractor_version`. Run `bookrack ingest <path>` for a book, or
-`bookrack papers ingest <path>` for a paper, against the original
+`bookrack glean <path>` for a paper, against the original
 file. No `--force` is needed and no catalog state has to be cleared
 first: ingest skips a source already on file only when it is
 `Embedded` and its stored stamps match this binary's, so a row whose

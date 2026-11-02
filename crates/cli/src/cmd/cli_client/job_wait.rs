@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! One wait path for every command that waits on queue jobs: the
-//! `--wait` of `ingest`, `papers ingest` and `intake ocr`, and
+//! `--wait` of `ingest`, `glean` and `intake ocr`, and
 //! `queue wait`.
 //!
 //! The caller subscribes to the event stream first, then the queue is

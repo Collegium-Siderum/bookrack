@@ -5,7 +5,7 @@
 //! When a command enqueues one or more queue jobs and then waits for
 //! them to finish, it folds the daemon's `queue.tick` events into a
 //! [`JobOutcomeReport`]. The report exposes both a one-line human
-//! summary (used by `ingest`, `papers ingest`, ...) and a serializable
+//! summary (used by `ingest`, `glean`, ...) and a serializable
 //! shape for the `--json` rendering mode.
 
 use std::time::Duration;

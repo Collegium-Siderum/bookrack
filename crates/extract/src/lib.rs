@@ -45,13 +45,13 @@ bookrack_core::fixed_settings! {
     owner = "extract";
     "extract.paper_abstract_chars_max" = pdf_paper::MAX_BODY_CHARS,
         "characters of a paper's abstract one extraction returns",
-        acts on "papers ingest, and every abstract the catalog then holds";
+        acts on "glean, and every abstract the catalog then holds";
     "extract.paper_fallback_chars_max" = pdf_paper::MAX_FALLBACK_CHARS,
         "characters the no-anchor fallback returns when no abstract heading matches",
-        acts on "papers ingest against a PDF with no recognisable abstract";
+        acts on "glean against a PDF with no recognisable abstract";
     "extract.paper_metadata_chars_max" = pdf_paper::MAX_METADATA_CHARS,
         "characters of front matter the DOI and venue scans read",
-        acts on "the identifiers papers ingest can find on a long front matter";
+        acts on "the identifiers glean can find on a long front matter";
     "extract.pdf_toc_depth_max" = pdf::MAX_TOC_DEPTH,
         "levels of a PDF outline one table of contents keeps",
         acts on "show_toc against a book ingested from a PDF";
