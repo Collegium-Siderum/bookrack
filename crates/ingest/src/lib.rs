@@ -335,9 +335,12 @@ pub struct IngestParams {
     pub heading_patterns: bookrack_audit_profile::HeadingPatterns,
     /// When true, run the full pipeline even if the source's
     /// `source_sha256` is already on file and the stored
-    /// `extractor_version` / `embed_model` stamps match this binary's.
-    /// Off by default — a re-ingest of an up-to-date source returns a
-    /// no-op report instead of re-extracting and re-embedding.
+    /// `extractor_version` / `embed_model` stamps match this binary's,
+    /// and without comparing a fresh extraction against the stored
+    /// envelope when only `extractor_version` is behind. Off by default
+    /// — a re-ingest of an up-to-date source returns a no-op report
+    /// instead of re-extracting and re-embedding, and one whose fresh
+    /// extraction matches its envelope only advances the stamp.
     pub force: bool,
 }
 
@@ -380,8 +383,15 @@ pub struct IngestReport {
     pub no_op: bool,
     /// True when the caller asked for [`IngestParams::force`] and the
     /// pipeline therefore ran end-to-end even though the source was
-    /// already on file. Mutually exclusive with `no_op`.
+    /// already on file. Mutually exclusive with `no_op` and `restamped`.
     pub forced: bool,
+    /// True when only the extractor stamp was behind and the fresh
+    /// extraction matched the envelope on file apart from that stamp: the
+    /// run rewrote the envelope and advanced the stamp without running
+    /// STRUCTURE, CHUNK, or EMBED. The `nodes_written`, `prose_leaves`, and
+    /// `chunks_written` counts are all zero. Mutually exclusive with
+    /// `no_op` and `forced`.
+    pub restamped: bool,
     /// The audit's plausibility verdict for the book's effective
     /// metadata, as a stable token (`clean` / `needs_work`). `None`
     /// when no audit ran — either the active profile disabled it
@@ -401,10 +411,15 @@ pub struct IngestReport {
 /// store.
 ///
 /// The whole-file SHA-256 keys the intake, so re-ingesting the same file
-/// reuses its intake and replaces its corpus tree and vector rows rather
-/// than duplicating them. `lancedb_dir` is the vector store directory;
-/// `embedder` turns chunk text into vectors. A file whose text layer is
-/// unusable yields [`IngestError::NeedsOcr`].
+/// reuses its intake rather than duplicating it. A re-ingest whose stamps
+/// all match returns a no-op report; one whose only stale stamp is
+/// `extractor_version` extracts the file again and, when the result
+/// matches the stored envelope apart from that stamp, rewrites the
+/// envelope and advances the stamp alone (see [`IngestReport::restamped`]).
+/// Every other re-ingest replaces the corpus tree and vector rows.
+/// `lancedb_dir` is the vector store directory; `embedder` turns chunk
+/// text into vectors. A file whose text layer is unusable yields
+/// [`IngestError::NeedsOcr`].
 pub async fn ingest_book<E: Embedder>(
     file: &Path,
     corpus: &mut Corpus,
@@ -458,17 +473,29 @@ pub async fn ingest_book_with_progress<E: Embedder>(
     // True-idempotent fast path: if the source is already on file, the
     // intake reached `Embedded`, and every stamp this binary would write
     // matches what is already stored, the run has nothing left to do.
-    // The caller can override with [`IngestParams::force`] to re-extract
-    // and re-embed regardless.
-    if !params.force
-        && let Some(report) = noop_if_up_to_date(catalog, corpus, &source_sha, &params.embed.model)?
-    {
-        tracing::info!(
-            intake_id = report.intake_id,
-            "ingest noop: source unchanged and stamps current",
-        );
-        return Ok(report);
-    }
+    // When `extractor_version` is the only stamp behind, the run extracts
+    // and compares the result with the stored envelope before deciding
+    // whether the later stages run. The caller can override both with
+    // [`IngestParams::force`] to re-extract and re-embed regardless.
+    let behind = if params.force {
+        None
+    } else {
+        match on_file(catalog, corpus, &source_sha, &params.embed.model)? {
+            OnFile::Current(report) => {
+                tracing::Span::current().record("intake_id", report.intake_id);
+                tracing::info!(
+                    intake_id = report.intake_id,
+                    "ingest noop: source unchanged and stamps current",
+                );
+                return Ok(report);
+            }
+            OnFile::ExtractorBehind(intake) => {
+                tracing::Span::current().record("intake_id", intake.intake_id);
+                Some(intake)
+            }
+            OnFile::Rerun => None,
+        }
+    };
 
     // EXTRACT.
     let started = std::time::Instant::now();
@@ -555,6 +582,19 @@ pub async fn ingest_book_with_progress<E: Embedder>(
     );
     tracing::info!(adapter = %adapter, "extracted source file");
 
+    if let Some(intake) = &behind
+        && let Some(report) = restamp_if_unchanged(
+            catalog,
+            intake,
+            &extraction,
+            books_dir,
+            &run_id,
+            &source_sha,
+        )?
+    {
+        return Ok(report);
+    }
+
     // Register the file, keyed idempotently on its whole-file hash.
     // `original_path` is recorded for forensics and for the search-layer
     // breadcrumb fallback when no title is known; the column may be
@@ -573,48 +613,11 @@ pub async fn ingest_book_with_progress<E: Embedder>(
     tracing::Span::current().record("intake_id", intake_id);
     tracing::info!(intake_id, already_registered, "registered intake");
 
-    // Stamp the extraction provenance, so a later re-extraction can tell
-    // whether this book's partition is stale.
-    catalog.set_extraction(
-        ItemKind::Book,
-        intake_id,
-        &extraction.provenance.adapter,
-        extraction.provenance.extractor_version,
-    )?;
     // The status track is `Pending` (set by `register_intake`) →
-    // `Extracted` here → `Embedded` after the embed run completes.
+    // `Extracted` here → `Embedded` after the embed run completes. The
+    // book leaves `Embedded` before STRUCTURE touches its tree, so a run
+    // that fails part way through never reads as finished.
     catalog.set_intake_status(ItemKind::Book, intake_id, IntakeStatus::Extracted)?;
-
-    // Cache the post-EXTRACT Extraction as a v1 envelope in the opaque
-    // store and record its path in `intake.stored_path`. Failure is
-    // logged but not fatal: the envelope is a rebuild cache, not the
-    // source of truth.
-    let envelope_path = books_dir.join(bookrack_extract::envelope_filename(
-        ItemKind::Book,
-        intake_id,
-    ));
-    match bookrack_extract::write_envelope(&envelope_path, &extraction, intake_id, &source_sha) {
-        Ok(()) => {
-            if let Err(err) = catalog.set_stored_path(
-                ItemKind::Book,
-                intake_id,
-                envelope_path.to_string_lossy().as_ref(),
-            ) {
-                tracing::warn!(
-                    intake_id,
-                    error = %err,
-                    "failed to record stored_path; rebuild path unavailable for this intake"
-                );
-            }
-        }
-        Err(err) => {
-            tracing::warn!(
-                intake_id,
-                error = %err,
-                "failed to write extraction envelope; rebuild path unavailable for this intake"
-            );
-        }
-    }
 
     // STRUCTURE.
     let started = std::time::Instant::now();
@@ -672,6 +675,18 @@ pub async fn ingest_book_with_progress<E: Embedder>(
         NewItemState::new(book_root_id, intake_id, "structure").parsed_at(&parsed_at),
     );
 
+    // Stamp the extraction provenance, so a later re-extraction can tell
+    // whether this book's partition is stale, and cache the extraction as
+    // the intake's envelope. Both wait for the corpus tree they describe:
+    // a run that fails in STRUCTURE leaves the earlier stamp and envelope.
+    catalog.set_extraction(
+        ItemKind::Book,
+        intake_id,
+        &extraction.provenance.adapter,
+        extraction.provenance.extractor_version,
+    )?;
+    store_envelope(catalog, intake_id, &extraction, books_dir, &source_sha);
+
     // METADATA (non-blocking): seed the publication-attrs base from the
     // extracted biblio, run the deterministic audit over the resulting
     // effective record, and persist the review row's report plus the
@@ -723,6 +738,7 @@ pub async fn ingest_book_with_progress<E: Embedder>(
             already_registered,
             no_op: false,
             forced: params.force,
+            restamped: false,
             audit_verdict,
             audit_confidence,
         });
@@ -752,36 +768,52 @@ pub async fn ingest_book_with_progress<E: Embedder>(
         already_registered,
         no_op: false,
         forced: params.force,
+        restamped: false,
         audit_verdict,
         audit_confidence,
     })
 }
 
-/// Inspect the catalog and book state to decide whether a re-ingest of
-/// `source_sha` would do any new work. Returns `Some(report)` if every
-/// stamp matches, in which case the caller should return the report
-/// immediately; returns `None` to fall through to the full pipeline.
-fn noop_if_up_to_date(
+/// What the catalog already holds for a source, against what this run
+/// would write.
+#[derive(Debug)]
+enum OnFile {
+    /// Run every stage.
+    Rerun,
+    /// Every stamp matches: return this report and do nothing.
+    Current(IngestReport),
+    /// Only `extractor_version` is behind: extract, then compare the
+    /// result with the envelope on file.
+    ExtractorBehind(bookrack_catalog::Intake),
+}
+
+/// Inspect the catalog and book state to decide how much of a re-ingest
+/// of `source_sha` has work to do.
+///
+/// Anything short of [`OnFile::Rerun`] needs the intake on file and
+/// `Embedded`, the book embedded with `embed_model`, and the corpus
+/// stamped with this binary's chunk and normalize versions. The extractor
+/// stamp then decides: equal to this binary's is [`OnFile::Current`];
+/// behind it is [`OnFile::ExtractorBehind`], except on an OCR-intake row,
+/// whose staleness is a separate version dimension.
+fn on_file(
     catalog: &Catalog,
     corpus: &Corpus,
     source_sha: &str,
     embed_model: &str,
-) -> Result<Option<IngestReport>> {
+) -> Result<OnFile> {
     let Some(intake) = catalog.intake_by_sha(source_sha)? else {
-        return Ok(None);
+        return Ok(OnFile::Rerun);
     };
     if intake.status != IntakeStatus::Embedded {
-        return Ok(None);
-    }
-    if intake.extractor_version != bookrack_extract::EXTRACTOR_VERSION {
-        return Ok(None);
+        return Ok(OnFile::Rerun);
     }
     let book_root_id = PartitionIdx::new(intake.intake_id).root();
     let Some(state) = catalog.book_state(book_root_id.get())? else {
-        return Ok(None);
+        return Ok(OnFile::Rerun);
     };
     if state.embed_model.as_deref() != Some(embed_model) {
-        return Ok(None);
+        return Ok(OnFile::Rerun);
     }
     // The chunk and normalize versions are recorded in corpus index_meta
     // rather than on the catalog row; a bump on either invalidates the
@@ -791,21 +823,22 @@ fn noop_if_up_to_date(
         .meta_get(bookrack_corpus::CHUNK_VERSION_KEY)?
         .and_then(|v| v.parse::<u32>().ok());
     if stored_chunk != Some(CHUNK_VERSION) {
-        return Ok(None);
+        return Ok(OnFile::Rerun);
     }
     let stored_normalize = corpus
         .meta_get(bookrack_corpus::NORMALIZE_VERSION_KEY)?
         .and_then(|v| v.parse::<u32>().ok());
     if stored_normalize != Some(bookrack_normalize::NORMALIZE_VERSION) {
-        return Ok(None);
+        return Ok(OnFile::Rerun);
     }
-    // Surface the audit outcome stored on the row at the previous
-    // ingest so a noop run still tells the operator whether the book
-    // landed `clean` or `needs_work`.
-    let attrs = catalog.publication_attrs(intake.intake_id, ItemKind::Book)?;
-    let audit_verdict = attrs.as_ref().and_then(|a| a.audit_verdict.clone());
-    let audit_confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
-    Ok(Some(IngestReport {
+    if intake.extractor_version != bookrack_extract::EXTRACTOR_VERSION {
+        if intake.adapter.as_deref() == Some(bookrack_extract::ocr::ADAPTER) {
+            return Ok(OnFile::Rerun);
+        }
+        return Ok(OnFile::ExtractorBehind(intake));
+    }
+    let (audit_verdict, audit_confidence) = stored_audit_outcome(catalog, intake.intake_id)?;
+    Ok(OnFile::Current(IngestReport {
         intake_id: intake.intake_id,
         book_root_id,
         nodes_written: 0,
@@ -814,9 +847,267 @@ fn noop_if_up_to_date(
         already_registered: true,
         no_op: true,
         forced: false,
+        restamped: false,
         audit_verdict,
         audit_confidence,
     }))
+}
+
+/// The audit verdict and confidence stored on the book's attrs row by its
+/// previous ingest, so a run that skips the metadata sub-step still tells
+/// the operator whether the book landed `clean` or `needs_work`.
+fn stored_audit_outcome(
+    catalog: &Catalog,
+    intake_id: i64,
+) -> Result<(Option<String>, Option<String>)> {
+    let attrs = catalog.publication_attrs(intake_id, ItemKind::Book)?;
+    Ok(match attrs {
+        Some(attrs) => (attrs.audit_verdict, attrs.confidence),
+        None => (None, None),
+    })
+}
+
+/// How a fresh extraction compares with the envelope on file. Each value
+/// is recorded under its [`token`](Self::token) on the `extract` /
+/// `compare` audit row.
+#[derive(Debug)]
+enum EnvelopeCheck {
+    /// No envelope under the canonical name or the legacy one.
+    Missing,
+    /// An envelope is there but cannot be read.
+    Unreadable(bookrack_extract::EnvelopeError),
+    /// The envelope names another source hash or another intake.
+    Mismatched,
+    /// The envelope's extractor version is neither the catalog's stamp
+    /// nor this binary's, so it predates the corpus tree.
+    Outdated,
+    /// The two extractions differ apart from the extractor version.
+    Changed,
+    /// The two match, but the rewritten envelope could not be stored.
+    Unwritable,
+    /// The two match, and the rewritten envelope is stored.
+    Unchanged,
+}
+
+impl EnvelopeCheck {
+    fn token(&self) -> &'static str {
+        match self {
+            EnvelopeCheck::Missing => "missing",
+            EnvelopeCheck::Unreadable(_) => "unreadable",
+            EnvelopeCheck::Mismatched => "mismatched",
+            EnvelopeCheck::Outdated => "outdated",
+            EnvelopeCheck::Changed => "changed",
+            EnvelopeCheck::Unwritable => "unwritable",
+            EnvelopeCheck::Unchanged => "unchanged",
+        }
+    }
+
+    /// `ok` when the two extractions were compared, `skipped` when the
+    /// envelope could not take part or the result could not be stored.
+    fn outcome(&self) -> &'static str {
+        match self {
+            EnvelopeCheck::Changed | EnvelopeCheck::Unchanged => "ok",
+            _ => "skipped",
+        }
+    }
+}
+
+/// Compare a fresh extraction of a source whose only stale stamp is
+/// `extractor_version` with the envelope on file. When the two match
+/// apart from that stamp, rewrite the envelope and advance the stamp,
+/// leaving the corpus tree, chunks, vectors, and status as they are.
+///
+/// Returns the report of that run, or `None` when the full pipeline has
+/// to run with the same extraction. Either way one `extract` / `compare`
+/// audit row on the book's root records the outcome.
+fn restamp_if_unchanged(
+    catalog: &Catalog,
+    intake: &bookrack_catalog::Intake,
+    extraction: &Extraction,
+    books_dir: &Path,
+    run_id: &str,
+    source_sha: &str,
+) -> Result<Option<IngestReport>> {
+    let started = std::time::Instant::now();
+    let intake_id = intake.intake_id;
+    let book_root_id = PartitionIdx::new(intake_id).root();
+    let from = intake.extractor_version;
+    let to = extraction.provenance.extractor_version;
+
+    let check = check_envelope(catalog, intake, extraction, books_dir, source_sha);
+    // The envelope is stored before the stamp moves: an interruption in
+    // between leaves an envelope at this version and a catalog behind it,
+    // which the next run compares again.
+    let restamped = matches!(check, EnvelopeCheck::Unchanged);
+    if restamped {
+        catalog.set_extraction(
+            ItemKind::Book,
+            intake_id,
+            &extraction.provenance.adapter,
+            to,
+        )?;
+    }
+    let error = match &check {
+        EnvelopeCheck::Unreadable(err) => Some(error_chain(err)),
+        _ => None,
+    };
+    audit(
+        catalog,
+        run_id,
+        source_sha,
+        Some(book_root_id.get()),
+        "extract",
+        "compare",
+        check.outcome(),
+        started,
+        Some(format!(
+            r#"{{"envelope":"{}","from":{from},"to":{to}}}"#,
+            check.token()
+        )),
+        error.as_deref(),
+    );
+    if !restamped {
+        tracing::info!(
+            intake_id,
+            envelope = check.token(),
+            "ingest restamp declined: running the full pipeline"
+        );
+        return Ok(None);
+    }
+    tracing::info!(
+        intake_id,
+        from,
+        to,
+        "ingest restamp: extraction unchanged, stamp advanced"
+    );
+
+    let (audit_verdict, audit_confidence) = stored_audit_outcome(catalog, intake_id)?;
+    Ok(Some(IngestReport {
+        intake_id,
+        book_root_id,
+        nodes_written: 0,
+        prose_leaves: 0,
+        chunks_written: 0,
+        already_registered: true,
+        no_op: false,
+        forced: false,
+        restamped: true,
+        audit_verdict,
+        audit_confidence,
+    }))
+}
+
+/// Judge the envelope on file against `extraction`, and store the fresh
+/// one in its place when the two match apart from the extractor version.
+///
+/// The envelope is read at its canonical path in `books_dir`, where every
+/// ingest writes it, falling back to the legacy name; `stored_path` is
+/// not consulted. An envelope found there describes the current corpus
+/// tree: [`store_envelope`] removes one it cannot replace, and the full
+/// pipeline stores one only after building the tree. The version check
+/// backs that up for the case where the removal failed too.
+fn check_envelope(
+    catalog: &Catalog,
+    intake: &bookrack_catalog::Intake,
+    extraction: &Extraction,
+    books_dir: &Path,
+    source_sha: &str,
+) -> EnvelopeCheck {
+    let path = books_dir.join(bookrack_extract::envelope_filename(
+        ItemKind::Book,
+        intake.intake_id,
+    ));
+    let on_file = match bookrack_extract::read_envelope_with_fallback(&path) {
+        Ok(envelope) => envelope,
+        Err(bookrack_extract::EnvelopeError::Io(err))
+            if err.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return EnvelopeCheck::Missing;
+        }
+        Err(err) => return EnvelopeCheck::Unreadable(err),
+    };
+    if on_file.source_sha256 != intake.source_sha256 || on_file.intake_id != intake.intake_id {
+        return EnvelopeCheck::Mismatched;
+    }
+    let current = extraction.provenance.extractor_version;
+    let mut stored = on_file.extraction;
+    let stamped = stored.provenance.extractor_version;
+    if stamped != intake.extractor_version && stamped != current {
+        return EnvelopeCheck::Outdated;
+    }
+    stored.provenance.extractor_version = current;
+    if stored != *extraction {
+        return EnvelopeCheck::Changed;
+    }
+    if !store_envelope(catalog, intake.intake_id, extraction, books_dir, source_sha) {
+        return EnvelopeCheck::Unwritable;
+    }
+    EnvelopeCheck::Unchanged
+}
+
+/// Cache `extraction` as the intake's envelope at its canonical path in
+/// `books_dir` and record that path in `intake.stored_path`. Returns
+/// whether the envelope was written.
+///
+/// Leaves behind no envelope that describes another extraction: a write
+/// that succeeds removes the copy under the legacy name, and one that
+/// fails removes both the canonical and the legacy copy. Neither outcome
+/// is fatal — the envelope is a rebuild cache, not the source of truth —
+/// so failures are logged and the caller carries on.
+fn store_envelope(
+    catalog: &Catalog,
+    intake_id: i64,
+    extraction: &Extraction,
+    books_dir: &Path,
+    source_sha: &str,
+) -> bool {
+    let envelope_path = books_dir.join(bookrack_extract::envelope_filename(
+        ItemKind::Book,
+        intake_id,
+    ));
+    let legacy_path = books_dir.join(bookrack_extract::envelope_filename_legacy(intake_id));
+    match bookrack_extract::write_envelope(&envelope_path, extraction, intake_id, source_sha) {
+        Ok(()) => {
+            if let Err(err) = catalog.set_stored_path(
+                ItemKind::Book,
+                intake_id,
+                envelope_path.to_string_lossy().as_ref(),
+            ) {
+                tracing::warn!(
+                    intake_id,
+                    error = %err,
+                    "failed to record stored_path; rebuild path unavailable for this intake"
+                );
+            }
+            remove_superseded_envelope(&legacy_path, intake_id);
+            true
+        }
+        Err(err) => {
+            tracing::warn!(
+                intake_id,
+                error = %err,
+                "failed to write extraction envelope; rebuild path unavailable for this intake"
+            );
+            remove_superseded_envelope(&envelope_path, intake_id);
+            remove_superseded_envelope(&legacy_path, intake_id);
+            false
+        }
+    }
+}
+
+/// Remove the envelope file at `path`, best-effort. A file that is not
+/// there is the usual case and logs nothing.
+fn remove_superseded_envelope(path: &Path, intake_id: i64) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => tracing::warn!(
+            intake_id,
+            file = %path.display(),
+            error = %err,
+            "failed to remove a superseded extraction envelope"
+        ),
+    }
 }
 
 /// Run CHUNK and EMBED for a book whose corpus tree is already in
@@ -2466,6 +2757,7 @@ mod book_pipeline_tests {
         assert_eq!(second.nodes_written, 0);
         assert!(second.already_registered);
         assert!(!second.forced);
+        assert!(!second.restamped);
         // A noop run still surfaces the stored audit outcome so the
         // operator sees the historical verdict on a re-ingest.
         assert_eq!(second.audit_verdict, first.audit_verdict);
@@ -2518,6 +2810,7 @@ mod book_pipeline_tests {
         .expect("forced ingest");
         assert!(!forced.no_op);
         assert!(forced.forced);
+        assert!(!forced.restamped);
         assert!(forced.already_registered);
         assert!(forced.chunks_written > 0);
 
@@ -2529,12 +2822,24 @@ mod book_pipeline_tests {
         assert!(after > baseline, "forced ingest must add new audit rows");
     }
 
-    /// Ingest the sample, then rewrite its catalog row as if an older
-    /// extractor had produced it. Returns the first report and the
-    /// stale version written.
+    /// Ingest the sample, then rewrite its catalog row and its envelope
+    /// as if an older extractor had produced both. Returns the first
+    /// report and the stale version written.
     async fn ingest_then_mark_stale(
         file: &Path,
         dir: &Path,
+        corpus: &mut Corpus,
+        catalog: &mut Catalog,
+    ) -> (IngestReport, u32) {
+        ingest_then_mark_stale_in(file, dir, dir, corpus, catalog).await
+    }
+
+    /// [`ingest_then_mark_stale`] with the vector store in `lance_dir`
+    /// and the envelopes in `books_dir`.
+    async fn ingest_then_mark_stale_in(
+        file: &Path,
+        lance_dir: &Path,
+        books_dir: &Path,
         corpus: &mut Corpus,
         catalog: &mut Catalog,
     ) -> (IngestReport, u32) {
@@ -2542,8 +2847,8 @@ mod book_pipeline_tests {
             file,
             corpus,
             catalog,
-            dir,
-            dir,
+            lance_dir,
+            books_dir,
             &Fake { dim: 8 },
             &IngestParams::default(),
         )
@@ -2562,6 +2867,10 @@ mod book_pipeline_tests {
                 stale,
             )
             .expect("stale extractor_version stamp");
+        rewrite_envelope(
+            &books_dir.join(envelope_filename(ItemKind::Book, first.intake_id)),
+            |envelope| envelope.extraction.provenance.extractor_version = stale,
+        );
         assert_eq!(
             catalog
                 .stale_partitions(bookrack_extract::EXTRACTOR_VERSION)
@@ -2569,6 +2878,776 @@ mod book_pipeline_tests {
             [first.intake_id],
         );
         (first, stale)
+    }
+
+    /// Read the envelope at `path`, change it with `edit`, and write it
+    /// back as it stands, `captured_at` included.
+    fn rewrite_envelope(path: &Path, edit: impl FnOnce(&mut bookrack_extract::ExtractionEnvelope)) {
+        let mut envelope = read_envelope(path).expect("read envelope");
+        edit(&mut envelope);
+        let bytes = serde_json::to_vec(&envelope).expect("serialize envelope");
+        std::fs::write(path, bytes).expect("write envelope");
+    }
+
+    /// The marker [`drift_envelope`] appends to the first block.
+    const DRIFT: &str = " drift";
+
+    /// Change the first block of the envelope at `path`, so it no longer
+    /// matches a fresh extraction of the sample.
+    fn drift_envelope(path: &Path) {
+        rewrite_envelope(path, |envelope| {
+            envelope.extraction.blocks[0].text.push_str(DRIFT)
+        });
+    }
+
+    /// The `extract` / `compare` audit rows of the book rooted at `root`.
+    fn compare_rows(catalog: &Catalog, root: NodeId) -> Vec<bookrack_catalog::ItemPipelineAudit> {
+        catalog
+            .pipeline_audit_for_book(root.get())
+            .expect("audit")
+            .into_iter()
+            .filter(|row| row.sub_step == "compare")
+            .collect()
+    }
+
+    /// Assert that the book rooted at `root` has exactly one `compare`
+    /// row, and that it records `outcome` and the `envelope` token
+    /// `token` for a stamp moving from `from` to the current version.
+    fn assert_compared(
+        catalog: &Catalog,
+        root: NodeId,
+        outcome: &str,
+        token: &str,
+        from: u32,
+        case: &str,
+    ) -> bookrack_catalog::ItemPipelineAudit {
+        let rows = compare_rows(catalog, root);
+        assert_eq!(rows.len(), 1, "{case}: one compare row expected: {rows:?}");
+        let row = rows.into_iter().next().expect("one row");
+        assert_eq!(row.stage, "extract", "{case}");
+        assert_eq!(row.outcome, outcome, "{case}");
+        let metric: serde_json::Value = serde_json::from_str(
+            row.metric_summary
+                .as_deref()
+                .unwrap_or_else(|| panic!("{case}: compare row without a metric")),
+        )
+        .unwrap_or_else(|e| panic!("{case}: compare metric is not JSON: {e}"));
+        assert_eq!(metric["envelope"], token, "{case}: {metric}");
+        assert_eq!(metric["from"], from, "{case}: {metric}");
+        assert_eq!(
+            metric["to"],
+            bookrack_extract::EXTRACTOR_VERSION,
+            "{case}: {metric}"
+        );
+        row
+    }
+
+    /// Rows in the vector store under `dir`.
+    async fn vector_rows(dir: &Path) -> usize {
+        bookrack_vectors::ChunkStore::open(dir, 8)
+            .await
+            .expect("open store")
+            .count_rows()
+            .await
+            .expect("count")
+    }
+
+    /// A stale book whose fresh extraction matches its envelope apart
+    /// from the version advances its stamp and rewrites its envelope,
+    /// and no stage after EXTRACT runs. Two envelopes: the usual one,
+    /// written at the old version, and one an interrupted restamp
+    /// already rewrote at the current version.
+    #[tokio::test]
+    async fn a_stale_book_read_as_before_only_advances_its_stamp() {
+        const EARLIER_CAPTURE: &str = "2000-01-01T00:00:00Z";
+        for already_current in [false, true] {
+            let case = if already_current {
+                "envelope at the current version"
+            } else {
+                "envelope at the old version"
+            };
+            let dir = tempfile::tempdir().expect("tempdir");
+            let file = write_sample(dir.path());
+            let mut corpus = Corpus::open_in_memory().expect("corpus");
+            let mut catalog = Catalog::open_in_memory().expect("catalog");
+            let (first, stale) =
+                ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
+            let envelope_path = dir
+                .path()
+                .join(envelope_filename(ItemKind::Book, first.intake_id));
+            if already_current {
+                rewrite_envelope(&envelope_path, |envelope| {
+                    envelope.extraction.provenance.extractor_version =
+                        bookrack_extract::EXTRACTOR_VERSION;
+                    envelope.captured_at = EARLIER_CAPTURE.to_string();
+                });
+            }
+            let before = read_envelope(&envelope_path).expect("envelope");
+            let root = first.book_root_id;
+            let rows_before = catalog
+                .pipeline_audit_for_book(root.get())
+                .expect("audit")
+                .len();
+            let vectors_before = vector_rows(dir.path()).await;
+
+            // An embedder that fails on any call: a run that reaches
+            // EMBED fails, so success means EMBED never ran.
+            let again = ingest_book(
+                &file,
+                &mut corpus,
+                &mut catalog,
+                dir.path(),
+                dir.path(),
+                &Offline,
+                &IngestParams::default(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{case}: re-ingest: {e:?}"));
+            assert!(again.restamped, "{case}: {again:?}");
+            assert!(!again.no_op, "{case}");
+            assert!(!again.forced, "{case}");
+            assert!(again.already_registered, "{case}");
+            assert_eq!(
+                (
+                    again.nodes_written,
+                    again.prose_leaves,
+                    again.chunks_written
+                ),
+                (0, 0, 0),
+                "{case}"
+            );
+
+            let intake = catalog
+                .intake_by_id(first.intake_id)
+                .expect("intake")
+                .expect("present");
+            assert_eq!(
+                intake.extractor_version,
+                bookrack_extract::EXTRACTOR_VERSION,
+                "{case}"
+            );
+            assert_eq!(intake.status, IntakeStatus::Embedded, "{case}");
+            assert!(
+                catalog
+                    .stale_partitions(bookrack_extract::EXTRACTOR_VERSION)
+                    .expect("stale partitions")
+                    .is_empty(),
+                "{case}"
+            );
+
+            let after = read_envelope(&envelope_path).expect("envelope");
+            let mut expected = before.extraction.clone();
+            expected.provenance.extractor_version = bookrack_extract::EXTRACTOR_VERSION;
+            assert_eq!(
+                after.extraction, expected,
+                "{case}: the envelope must carry the same extraction at the current version"
+            );
+            if already_current {
+                assert_ne!(
+                    after.captured_at, EARLIER_CAPTURE,
+                    "{case}: the envelope must be rewritten"
+                );
+            }
+
+            let rows_after = catalog
+                .pipeline_audit_for_book(root.get())
+                .expect("audit")
+                .len();
+            assert_eq!(
+                rows_after,
+                rows_before + 1,
+                "{case}: only the compare row is new"
+            );
+            assert_compared(&catalog, root, "ok", "unchanged", stale, case);
+            assert_eq!(
+                vector_rows(dir.path()).await,
+                vectors_before,
+                "{case}: the vectors must stay"
+            );
+        }
+    }
+
+    /// A stale book whose fresh extraction differs from its envelope runs
+    /// every stage and leaves the fresh extraction in the envelope.
+    #[tokio::test]
+    async fn a_stale_book_read_differently_runs_the_full_pipeline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let (first, stale) =
+            ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
+        let envelope_path = dir
+            .path()
+            .join(envelope_filename(ItemKind::Book, first.intake_id));
+        drift_envelope(&envelope_path);
+
+        let again = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("re-ingest");
+        assert_compared(
+            &catalog,
+            first.book_root_id,
+            "ok",
+            "changed",
+            stale,
+            "drifted",
+        );
+        assert!(!again.restamped);
+        assert!(again.chunks_written > 0, "the chunks must be re-derived");
+        let after = read_envelope(&envelope_path).expect("envelope");
+        assert_eq!(
+            after.extraction.provenance.extractor_version,
+            bookrack_extract::EXTRACTOR_VERSION
+        );
+        assert!(
+            !after.extraction.blocks[0].text.ends_with(DRIFT),
+            "the envelope must hold the fresh extraction"
+        );
+    }
+
+    /// Delete the envelope at `path`.
+    fn remove_envelope(path: &Path) {
+        std::fs::remove_file(path).expect("remove envelope");
+    }
+
+    /// Put bytes that do not parse at `path`.
+    fn garble_envelope(path: &Path) {
+        std::fs::write(path, b"not an envelope").expect("garble envelope");
+    }
+
+    /// Give the envelope at `path` another source hash.
+    fn reattribute_envelope_source(path: &Path) {
+        rewrite_envelope(path, |envelope| envelope.source_sha256 = "f".repeat(64));
+    }
+
+    /// Give the envelope at `path` another intake id.
+    fn reattribute_envelope_intake(path: &Path) {
+        rewrite_envelope(path, |envelope| envelope.intake_id += 1000);
+    }
+
+    /// Date the envelope at `path` before the catalog's stale stamp.
+    fn predate_envelope(path: &Path) {
+        rewrite_envelope(path, |envelope| {
+            envelope.extraction.provenance.extractor_version =
+                bookrack_extract::EXTRACTOR_VERSION - 2
+        });
+    }
+
+    /// A stale book whose envelope cannot vouch for its corpus tree runs
+    /// every stage, and the compare row says why.
+    #[tokio::test]
+    async fn a_stale_book_without_a_trustworthy_envelope_runs_the_full_pipeline() {
+        /// An edit to the envelope at a path.
+        type Damage = fn(&Path);
+        let cases: [(&str, Damage, &str); 5] = [
+            ("deleted", remove_envelope, "missing"),
+            ("garbled", garble_envelope, "unreadable"),
+            ("another source", reattribute_envelope_source, "mismatched"),
+            ("another intake", reattribute_envelope_intake, "mismatched"),
+            ("older than the stamp", predate_envelope, "outdated"),
+        ];
+        for (case, damage, token) in cases {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let file = write_sample(dir.path());
+            let mut corpus = Corpus::open_in_memory().expect("corpus");
+            let mut catalog = Catalog::open_in_memory().expect("catalog");
+            let (first, stale) =
+                ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
+            damage(
+                &dir.path()
+                    .join(envelope_filename(ItemKind::Book, first.intake_id)),
+            );
+
+            let again = ingest_book(
+                &file,
+                &mut corpus,
+                &mut catalog,
+                dir.path(),
+                dir.path(),
+                &Fake { dim: 8 },
+                &IngestParams::default(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{case}: re-ingest: {e:?}"));
+            let row = assert_compared(&catalog, first.book_root_id, "skipped", token, stale, case);
+            assert_eq!(
+                row.error_message.is_some(),
+                token == "unreadable",
+                "{case}: only a read error carries its chain: {:?}",
+                row.error_message
+            );
+            assert!(!again.restamped, "{case}");
+            assert!(
+                again.chunks_written > 0,
+                "{case}: the chunks must be re-derived"
+            );
+        }
+    }
+
+    /// The comparison reads the envelope at the path every ingest writes,
+    /// not the one `stored_path` names: a `stored_path` left on the
+    /// legacy name points at a file no ingest has written since.
+    #[tokio::test]
+    async fn the_comparison_reads_the_envelope_where_ingest_writes_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let (first, stale) =
+            ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
+        let canonical = dir
+            .path()
+            .join(envelope_filename(ItemKind::Book, first.intake_id));
+        let legacy = dir
+            .path()
+            .join(bookrack_extract::envelope_filename_legacy(first.intake_id));
+        std::fs::copy(&canonical, &legacy).expect("copy envelope");
+        drift_envelope(&legacy);
+        catalog
+            .set_stored_path(
+                ItemKind::Book,
+                first.intake_id,
+                legacy.to_string_lossy().as_ref(),
+            )
+            .expect("stored_path");
+
+        let again = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Offline,
+            &IngestParams::default(),
+        )
+        .await
+        .expect("re-ingest");
+        assert!(again.restamped);
+        assert_compared(
+            &catalog,
+            first.book_root_id,
+            "ok",
+            "unchanged",
+            stale,
+            "stored_path on the legacy name",
+        );
+    }
+
+    /// Restores a directory's permissions when dropped, so a failing
+    /// assertion still leaves a tempdir that can be removed.
+    #[cfg(unix)]
+    struct Writable<'a>(&'a Path);
+
+    #[cfg(unix)]
+    impl Drop for Writable<'_> {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// Make `dir` read-only until the returned guard drops, and fail
+    /// rather than skip when the change does not take.
+    #[cfg(unix)]
+    fn read_only(dir: &Path) -> Writable<'_> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555))
+            .expect("make read-only");
+        let guard = Writable(dir);
+        assert!(
+            std::fs::File::create(dir.join("probe")).is_err(),
+            "{} is still writable after chmod 0o555; under root permissions \
+             have no effect, and this test cannot run there",
+            dir.display()
+        );
+        guard
+    }
+
+    /// A restamp whose envelope cannot be written leaves the stamp to the
+    /// full pipeline instead of advancing it over an envelope that is not
+    /// there.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_restamp_that_cannot_write_its_envelope_runs_the_full_pipeline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let books_dir = dir.path().join("books");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let (first, stale) =
+            ingest_then_mark_stale_in(&file, dir.path(), &books_dir, &mut corpus, &mut catalog)
+                .await;
+        // The envelope survives only under the legacy name, where the
+        // fallback read still finds it.
+        std::fs::rename(
+            books_dir.join(envelope_filename(ItemKind::Book, first.intake_id)),
+            books_dir.join(bookrack_extract::envelope_filename_legacy(first.intake_id)),
+        )
+        .expect("move envelope");
+        let _writable = read_only(&books_dir);
+
+        let again = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            &books_dir,
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("re-ingest");
+        assert_compared(
+            &catalog,
+            first.book_root_id,
+            "skipped",
+            "unwritable",
+            stale,
+            "read-only books_dir",
+        );
+        assert!(!again.restamped);
+        assert!(again.chunks_written > 0, "the chunks must be re-derived");
+        let intake = catalog
+            .intake_by_id(first.intake_id)
+            .expect("intake")
+            .expect("present");
+        assert_eq!(
+            intake.extractor_version,
+            bookrack_extract::EXTRACTOR_VERSION,
+            "the full pipeline still advances the stamp"
+        );
+    }
+
+    /// A run that cannot write its envelope removes the one it would have
+    /// replaced, so a rebuild reports the envelope missing instead of
+    /// rebuilding from an older extraction.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_full_run_that_cannot_write_its_envelope_removes_the_old_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let first = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("first ingest");
+        let canonical = dir
+            .path()
+            .join(envelope_filename(ItemKind::Book, first.intake_id));
+        let legacy = dir
+            .path()
+            .join(bookrack_extract::envelope_filename_legacy(first.intake_id));
+        std::fs::rename(&canonical, &legacy).expect("move envelope");
+        catalog
+            .set_stored_path(
+                ItemKind::Book,
+                first.intake_id,
+                legacy.to_string_lossy().as_ref(),
+            )
+            .expect("stored_path");
+        // A directory where the envelope goes: the rename onto it fails.
+        std::fs::create_dir(&canonical).expect("block the canonical path");
+
+        ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams {
+                force: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("re-ingest");
+        assert!(
+            !legacy.exists(),
+            "the envelope of the earlier extraction must be removed"
+        );
+
+        std::fs::remove_dir(&canonical).expect("unblock the canonical path");
+        let rebuilt = crate::rebuild::rebuild_from_intakes(
+            &mut corpus,
+            &catalog,
+            &crate::rebuild::RebuildParams::default(),
+        )
+        .expect("rebuild");
+        assert_eq!(rebuilt.missing_envelope, [first.intake_id]);
+        assert!(rebuilt.rebuilt.is_empty(), "{rebuilt:?}");
+    }
+
+    /// A written envelope leaves no second copy under the legacy name for
+    /// a reader of `stored_path` or the rename tool to pick up.
+    #[tokio::test]
+    async fn a_written_envelope_retires_its_legacy_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let first = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("first ingest");
+        let canonical = dir
+            .path()
+            .join(envelope_filename(ItemKind::Book, first.intake_id));
+        let legacy = dir
+            .path()
+            .join(bookrack_extract::envelope_filename_legacy(first.intake_id));
+        std::fs::copy(&canonical, &legacy).expect("copy envelope");
+        drift_envelope(&legacy);
+
+        ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams {
+                force: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("re-ingest");
+        let written = read_envelope(&canonical).expect("canonical envelope");
+        assert!(!written.extraction.blocks[0].text.ends_with(DRIFT));
+        assert!(
+            !legacy.exists(),
+            "the legacy copy must not outlive a written envelope"
+        );
+    }
+
+    /// A run that fails while building the tree leaves the stamp and the
+    /// envelope of the earlier run, and the book outside `Embedded`.
+    #[tokio::test]
+    async fn a_run_whose_tree_cannot_be_built_leaves_stamp_and_envelope_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let corpus_path = dir.path().join("corpus.db");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let (first, stale) = {
+            let mut corpus = Corpus::open(&corpus_path).expect("corpus");
+            ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await
+        };
+        let envelope_path = dir
+            .path()
+            .join(envelope_filename(ItemKind::Book, first.intake_id));
+        drift_envelope(&envelope_path);
+        // A read-only handle: the first corpus write, dropping the old
+        // tree, fails.
+        let mut corpus = Corpus::open_read_only(&corpus_path).expect("read-only corpus");
+
+        ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams {
+                force: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("STRUCTURE must fail on a read-only corpus");
+        let intake = catalog
+            .intake_by_id(first.intake_id)
+            .expect("intake")
+            .expect("present");
+        assert_eq!(
+            intake.extractor_version, stale,
+            "the stamp must not advance past a tree that was not built"
+        );
+        assert!(
+            read_envelope(&envelope_path)
+                .expect("envelope")
+                .extraction
+                .blocks[0]
+                .text
+                .ends_with(DRIFT),
+            "the envelope must not be replaced by an extraction whose tree was not built"
+        );
+        assert_eq!(
+            intake.status,
+            IntakeStatus::Extracted,
+            "the book must leave Embedded before its tree changes"
+        );
+    }
+
+    /// A first ingest that fails while building the tree leaves the book
+    /// without a stamp or an envelope, so it reads as stale and a rebuild
+    /// reports its envelope missing.
+    #[tokio::test]
+    async fn a_new_book_whose_tree_cannot_be_built_reads_as_stale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let corpus_path = dir.path().join("corpus.db");
+        drop(Corpus::open(&corpus_path).expect("create corpus"));
+        let mut corpus = Corpus::open_read_only(&corpus_path).expect("read-only corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+
+        ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect_err("STRUCTURE must fail on a read-only corpus");
+        let sha = sha256_hex(&std::fs::read(&file).expect("read sample"));
+        let intake = catalog
+            .intake_by_sha(&sha)
+            .expect("intake")
+            .expect("registered");
+        assert_eq!(intake.status, IntakeStatus::Extracted);
+        assert_eq!(
+            catalog
+                .stale_partitions(bookrack_extract::EXTRACTOR_VERSION)
+                .expect("stale partitions"),
+            [intake.intake_id],
+            "a book whose tree was never built must read as stale"
+        );
+        assert!(
+            !dir.path()
+                .join(envelope_filename(ItemKind::Book, intake.intake_id))
+                .exists(),
+            "no envelope may describe a tree that was never built"
+        );
+        let rebuilt = crate::rebuild::rebuild_from_intakes(
+            &mut corpus,
+            &catalog,
+            &crate::rebuild::RebuildParams {
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .expect("rebuild");
+        assert_eq!(rebuilt.missing_envelope, [intake.intake_id]);
+    }
+
+    /// `--force` runs every stage for a stale book whose extraction has
+    /// not changed, without comparing.
+    #[tokio::test]
+    async fn force_takes_a_stale_book_read_as_before_through_the_full_pipeline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let (first, _) = ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
+        let forced = IngestParams {
+            force: true,
+            ..Default::default()
+        };
+
+        ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Offline,
+            &forced,
+        )
+        .await
+        .expect_err("a forced run reaches EMBED");
+        let again = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &forced,
+        )
+        .await
+        .expect("forced re-ingest");
+        assert!(again.forced);
+        assert!(!again.restamped);
+        assert!(again.chunks_written > 0);
+        assert!(
+            compare_rows(&catalog, first.book_root_id).is_empty(),
+            "a forced run must not compare"
+        );
+    }
+
+    /// Any stamp other than `extractor_version` that is off, or a book
+    /// not `Embedded`, keeps the comparison out.
+    #[tokio::test]
+    async fn only_a_behind_extractor_stamp_admits_the_comparison() {
+        for case in ["another model", "another chunk version", "not embedded"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let file = write_sample(dir.path());
+            let mut corpus = Corpus::open_in_memory().expect("corpus");
+            let mut catalog = Catalog::open_in_memory().expect("catalog");
+            let (first, _) =
+                ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
+            let mut params = IngestParams::default();
+            match case {
+                "another model" => params.embed.model = "another-model".to_string(),
+                "another chunk version" => corpus
+                    .meta_set(
+                        bookrack_corpus::CHUNK_VERSION_KEY,
+                        &(CHUNK_VERSION + 1).to_string(),
+                    )
+                    .expect("chunk version"),
+                _ => {
+                    catalog
+                        .set_intake_status(ItemKind::Book, first.intake_id, IntakeStatus::Extracted)
+                        .expect("status");
+                }
+            }
+
+            let outcome = ingest_book(
+                &file,
+                &mut corpus,
+                &mut catalog,
+                dir.path(),
+                dir.path(),
+                &Fake { dim: 8 },
+                &params,
+            )
+            .await;
+            assert!(
+                compare_rows(&catalog, first.book_root_id).is_empty(),
+                "{case}: the comparison must not run"
+            );
+            if let Ok(report) = outcome {
+                assert!(!report.restamped, "{case}: {report:?}");
+                assert!(report.chunks_written > 0, "{case}: {report:?}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -2687,6 +3766,42 @@ mod book_pipeline_tests {
             [first.intake_id],
             "neither sweep re-extracts, so the intake must still read as stale"
         );
+    }
+
+    /// An OCR-intake row behind on the born-digital extractor stamp is not
+    /// stale by that stamp, so it is never offered for comparison.
+    #[tokio::test]
+    async fn an_ocr_pages_row_is_never_offered_for_comparison() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let (first, stale) =
+            ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
+        let params = IngestParams::default();
+        let sha = catalog
+            .intake_by_id(first.intake_id)
+            .expect("intake")
+            .expect("present")
+            .source_sha256;
+        assert!(
+            matches!(
+                on_file(&catalog, &corpus, &sha, &params.embed.model).expect("on_file"),
+                OnFile::ExtractorBehind(_)
+            ),
+            "the born-digital row must be offered, or the OCR case proves nothing"
+        );
+
+        catalog
+            .set_extraction(
+                ItemKind::Book,
+                first.intake_id,
+                bookrack_extract::ocr::ADAPTER,
+                stale,
+            )
+            .expect("ocr adapter");
+        let decided = on_file(&catalog, &corpus, &sha, &params.embed.model).expect("on_file");
+        assert!(matches!(decided, OnFile::Rerun), "{decided:?}");
     }
 
     #[tokio::test]
@@ -3147,29 +4262,60 @@ mod book_pipeline_tests {
     }
 
     /// The refresh the upgrade runbook prescribes — re-ingesting a
-    /// stale source, with or without `--force` — keeps the verdict.
+    /// stale source, with or without `--force` — keeps the verdict. A
+    /// run that only advances the stamp leaves the report and the attrs
+    /// row as they were; a run of every stage refreshes both.
     #[tokio::test]
     async fn re_ingest_keeps_a_reviewed_verdict() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let file = write_sample(dir.path());
-        let mut corpus = Corpus::open_in_memory().expect("corpus");
-        let mut catalog = Catalog::open_in_memory().expect("catalog");
-        let (first, _) = ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
-        catalog
-            .upsert_review(&bookrack_catalog::NewReview::new(
-                first.intake_id,
-                ItemKind::Book,
-                HUMAN_REVIEWER,
-                bookrack_catalog::STATUS_APPROVED,
-            ))
-            .expect("approve");
-
-        for force in [false, true] {
+        /// A publisher no ingest writes, standing in for the attrs an
+        /// earlier run seeded.
+        const EARLIER_PUBLISHER: &str = "An Earlier Press";
+        let cases = [
+            ("unchanged", false, false),
+            ("drifted", true, false),
+            ("forced", false, true),
+        ];
+        for (case, drift, force) in cases {
+            let dir = tempfile::tempdir().expect("tempdir");
+            // A name the filename parser reads a title, a year, and a
+            // publisher from.
+            let file = dir
+                .path()
+                .join("Alice Author - A Sample Title (2003, Sample Press).txt");
+            std::fs::rename(write_sample(dir.path()), &file).expect("name the sample");
+            let mut corpus = Corpus::open_in_memory().expect("corpus");
+            let mut catalog = Catalog::open_in_memory().expect("catalog");
+            let (first, _) =
+                ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
+            if drift {
+                drift_envelope(
+                    &dir.path()
+                        .join(envelope_filename(ItemKind::Book, first.intake_id)),
+                );
+            }
+            catalog
+                .upsert_review(&bookrack_catalog::NewReview::new(
+                    first.intake_id,
+                    ItemKind::Book,
+                    HUMAN_REVIEWER,
+                    bookrack_catalog::STATUS_APPROVED,
+                ))
+                .expect("approve");
             assert!(
                 catalog
                     .update_review_notes(first.intake_id, ItemKind::Book, EARLIER_REPORT)
                     .expect("age the report")
             );
+            let mut earlier = NewPublicationAttrs::new(first.intake_id, ItemKind::Book);
+            earlier.publisher = Some(EARLIER_PUBLISHER.to_string());
+            catalog
+                .upsert_publication_attrs(&earlier)
+                .expect("age the attrs");
+            let earlier = catalog
+                .publication_attrs(first.intake_id, ItemKind::Book)
+                .expect("attrs")
+                .expect("present");
+
             let again = ingest_book(
                 &file,
                 &mut corpus,
@@ -3183,9 +4329,13 @@ mod book_pipeline_tests {
                 },
             )
             .await
-            .expect("re-ingest");
-            assert!(!again.no_op, "force={force}: the pipeline must run");
-            assert_eq!(again.forced, force);
+            .unwrap_or_else(|e| panic!("{case}: re-ingest: {e:?}"));
+            assert!(
+                !again.no_op,
+                "{case}: the stale stamp must not read as current"
+            );
+            assert_eq!(again.forced, force, "{case}");
+            assert_eq!(again.restamped, case == "unchanged", "{case}");
 
             let review = catalog
                 .review(first.intake_id, ItemKind::Book)
@@ -3194,18 +4344,44 @@ mod book_pipeline_tests {
             assert_eq!(
                 review.status,
                 bookrack_catalog::STATUS_APPROVED,
-                "force={force}: a re-ingest must not walk the verdict back to pending"
+                "{case}: a re-ingest must not walk the verdict back to pending"
             );
-            assert_eq!(review.reviewed_by, HUMAN_REVIEWER, "force={force}");
-            assert!(
-                review
-                    .notes
-                    .as_deref()
-                    .unwrap_or_default()
-                    .contains("audit verdict="),
-                "force={force}: the re-ingest must refresh the report: {:?}",
-                review.notes,
-            );
+            assert_eq!(review.reviewed_by, HUMAN_REVIEWER, "{case}");
+            let attrs = catalog
+                .publication_attrs(first.intake_id, ItemKind::Book)
+                .expect("attrs")
+                .expect("present");
+            if case == "unchanged" {
+                assert_eq!(
+                    review.notes.as_deref(),
+                    Some(EARLIER_REPORT),
+                    "{case}: a run that only advances the stamp must keep the earlier report"
+                );
+                assert_eq!(
+                    attrs, earlier,
+                    "{case}: a run that only advances the stamp must leave the attrs row, \
+                     verdict and filename-seeded fields included, as the earlier run left it"
+                );
+            } else {
+                assert!(
+                    review
+                        .notes
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("audit verdict="),
+                    "{case}: the re-ingest must refresh the report: {:?}",
+                    review.notes,
+                );
+                assert_eq!(
+                    attrs.publisher.as_deref(),
+                    Some("Sample Press"),
+                    "{case}: the re-ingest must reseed the attrs from the filename"
+                );
+                assert!(
+                    attrs.audit_verdict.is_some(),
+                    "{case}: the re-ingest must store a verdict"
+                );
+            }
         }
     }
 

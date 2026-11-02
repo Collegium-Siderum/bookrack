@@ -434,7 +434,7 @@ pub async fn ingest_ocr_intake_with_progress<E: Embedder>(
 /// matching stamps. Returns `None` when any precondition fails — in
 /// which case the caller falls through to the full pipeline.
 ///
-/// Mirrors [`noop_if_up_to_date`](crate::noop_if_up_to_date) but on
+/// Mirrors the book side's [`on_file`](crate::on_file) but on
 /// the OCR side: the dimensions checked are the OCR intake's status,
 /// `OCR_INTAKE_VERSION`, the configured embed model, the corpus-side
 /// chunk and normalize stamps, and the rebuild-cache envelope's
