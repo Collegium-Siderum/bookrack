@@ -229,6 +229,13 @@ pub enum BookrackCliError {
     #[error("{}", .problem.summary)]
     ItemIdUnusable { problem: Problem },
 
+    /// A read by item id reached the daemon and the library has no such
+    /// item: `show` got a `null` body for a book or paper, or no hits
+    /// for a reference entry. Operator input, not a bug: exit 2, and
+    /// the reporter draws the three parts.
+    #[error("{}", .problem.summary)]
+    ItemNotFound { problem: Problem },
+
     /// A top-level read verb was handed a filter only one catalog
     /// carries, under a scope that reaches the other. Refused before
     /// the call goes out, because the side that does not carry the
@@ -296,6 +303,7 @@ impl BookrackCliError {
             | Self::RootNotRoutable { .. }
             | Self::PreflightRefused { .. }
             | Self::ItemIdUnusable { .. }
+            | Self::ItemNotFound { .. }
             | Self::FilterOffItsSide { .. }
             | Self::InitRefused { .. }
             | Self::QueueWaitRefused { .. }
@@ -379,6 +387,7 @@ impl BookrackCliError {
             | Self::RootNotRoutable { problem }
             | Self::PreflightRefused { problem }
             | Self::ItemIdUnusable { problem }
+            | Self::ItemNotFound { problem }
             | Self::FilterOffItsSide { problem }
             | Self::InitRefused { problem }
             | Self::QueueWaitRefused { problem }
@@ -572,6 +581,13 @@ mod tests {
         assert_eq!(
             BookrackCliError::LocalUserError {
                 message: "x".into()
+            }
+            .exit_code(),
+            2
+        );
+        assert_eq!(
+            BookrackCliError::ItemNotFound {
+                problem: bookrack_core::Problem::new("no item \"book:999\" in library \"x\""),
             }
             .exit_code(),
             2

@@ -892,20 +892,20 @@ async fn a_bare_id_at_the_top_level_is_refused_with_a_hint() -> Result<()> {
     Ok(())
 }
 
-/// A `reference:` id parses and is refused at the verb, before any
-/// connection is opened: the kind is one the syntax accepts and the
-/// command line has no read path for.
+/// A `reference:` id without a key parses and is refused at the verb,
+/// before any connection is opened: the kind is one the syntax accepts,
+/// and the verb reads one entry, not a whole book.
 ///
 /// The negative assertion carries the discrimination. An
 /// implementation that dispatched the id like any other would fail
 /// too — with "daemon not running", which says nothing about the
-/// capability being absent and would send the operator off to start a
-/// daemon that could not answer either.
+/// boundary and would send the operator off to start a daemon that
+/// could not answer either.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reference_id_is_refused_before_a_daemon_is_looked_for() -> Result<()> {
     let sandbox = Sandbox::new();
     let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
-        .args(["show", "reference:name_alpha/smith"])
+        .args(["show", "reference:name_alpha"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -914,12 +914,12 @@ async fn a_reference_id_is_refused_before_a_daemon_is_looked_for() -> Result<()>
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "stderr={stderr}");
     assert!(
-        stderr.contains("reference ids are not readable from the command line yet"),
-        "the summary should state the capability boundary: {stderr}",
+        stderr.contains("cannot show a whole reference book"),
+        "the summary should state what the verb does not read: {stderr}",
     );
     assert!(
-        stderr.contains("control plane") && stderr.contains("hint:"),
-        "the refusal should carry its detail and hint: {stderr}",
+        stderr.contains("reference:<slug>/<key>") && stderr.contains("hint:"),
+        "the refusal should carry its detail and the readable form in its hint: {stderr}",
     );
     assert!(
         !stderr.contains("bookrack daemon not running"),
@@ -928,7 +928,7 @@ async fn a_reference_id_is_refused_before_a_daemon_is_looked_for() -> Result<()>
     Ok(())
 }
 
-/// Both readable kinds get past the grammar and into the
+/// All three readable kinds get past the grammar and into the
 /// control-plane client, which is as far as anything gets without a
 /// daemon.
 ///
@@ -936,11 +936,12 @@ async fn a_reference_id_is_refused_before_a_daemon_is_looked_for() -> Result<()>
 /// on the top-level argument: clap would refuse `book:12` with
 /// `invalid value` and exit 2 as well, and the `Explain`
 /// implementation written for this surface would never have a
-/// consumer.
+/// consumer. For the keyed reference id it also catches a verb that
+/// still refuses the kind before looking for a daemon.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn both_readable_kinds_reach_the_control_plane_client() -> Result<()> {
+async fn every_readable_kind_reaches_the_control_plane_client() -> Result<()> {
     let sandbox = Sandbox::new();
-    for id in ["book:12", "paper:101"] {
+    for id in ["book:12", "paper:101", "reference:name_alpha/smith"] {
         let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
             .args(["show", id])
             .stdin(Stdio::null())

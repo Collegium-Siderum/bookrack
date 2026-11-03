@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 use bookrack_cli::daemon_call::DEFAULT_AWAIT_STALL_TIMEOUT;
+use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::render::confirm::ConfirmMode;
 use bookrack_cli::render::human::truncate_to;
 use bookrack_cli::render::progress::SurfaceKind;
@@ -18,7 +19,7 @@ use bookrack_cli_grammar::{
     PapersAction, PapersCorpusAction, PapersDryrunArgs, PapersFindArgs, PapersIngestArgs,
     PapersListArgs, PapersRemoveArgs, PapersStampsAction, PapersVectorsAction,
 };
-use bookrack_core::ItemKind;
+use bookrack_core::{ItemKind, TypedItemId};
 use eyre::Result;
 use serde_json::{Value, json};
 
@@ -26,6 +27,7 @@ use super::helpers;
 use super::helpers::DestructivePrompt;
 use super::job_wait::{self, Daemon};
 use super::listing::{page_footer, row_id};
+use super::show;
 
 pub async fn run(
     action: PapersAction,
@@ -588,6 +590,13 @@ async fn show(intake_id: i64, runtime_dir: Option<PathBuf>) -> Result<()> {
         json!({ "intake_id": intake_id }),
     )
     .await?;
+    if show::is_null(&response) {
+        let library = helpers::answering_library(&client).await;
+        return Err(BookrackCliError::ItemNotFound {
+            problem: show::not_found_problem(&TypedItemId::Paper(intake_id), library.as_deref()),
+        }
+        .into());
+    }
     if ctx().is_json() {
         helpers::print_value(&response);
         return Ok(());

@@ -266,6 +266,7 @@ takes one directly:
 ```
 bookrack show book:12
 bookrack show paper:101
+bookrack show 'reference:names/Ashgrove, Wren'
 ```
 
 `bookrack show paper:101` and `bookrack papers show 101` are the same
@@ -273,13 +274,26 @@ read; both stay. Under the card is the library the record came from —
 the one `--library` named, or the one an unnamed call resolves to. If
 no daemon can be asked, the line is absent rather than guessed.
 
+A keyed `reference:` id reads one entry of a reference book: the key
+is everything after the first `/`, tried as written and then in its
+latin form (lower case, letters and digits only), so a headword as it
+appears in the book finds the entry stored under its normalised key.
+The card then carries a `matched as` row with the key that matched,
+and a `redirected from` row when the entry was reached through a
+redirect. The read is the control plane's `reference.lookup`, the same
+call the MCP tool of that name makes.
+
+An id the library does not hold exits `2` with a three-part message
+that names the id, the library and the listing command for the kind;
+nothing is printed to stdout, in `--json` and `--quiet` as well.
+
 `--json` prints the response as it came off the control plane, and
 `--quiet` prints nothing; both skip the card and its library line.
 
-`reference:` ids parse but have no read path on the command line yet:
-the reference tools are published to MCP clients, and the control plane
-carries no matching method. The refusal says so and names the surface
-that does have it.
+A `reference:` id without a key names a whole reference book, which
+`show` does not read: the verb reads one item, and a reference book's
+card belongs to the reference query model. The refusal names the keyed
+form and `bookrack distill list`, which lists the reference books.
 
 
 ### Browsing and searching both catalogs

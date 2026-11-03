@@ -15,6 +15,12 @@ release workflow extracts the matching section verbatim from this file.
   with the same parameters, body and error codes, reachable as
   `bookrack rpc call reference.lookup '{"book": "<slug>", "entry_key":
   "<key>"}'`.
+- **`bookrack show reference:<slug>/<key>` reads one reference-book
+  entry.** The key is tried as written and then in its latin form, a
+  single redirect is followed, and the card says how the key was
+  resolved; `--json` prints the `reference.lookup` body. A `reference:`
+  id without a key still refuses, now saying that `show` reads one
+  entry and naming the keyed form.
 - **Skipped libraries are reported.** `daemon.status` and the MCP
   `session.info` tool carry `unmounted` — each registered library
   bring-up did not mount, with its root and three-part reason — and
@@ -31,6 +37,10 @@ release workflow extracts the matching section verbatim from this file.
   direction of the mismatch in the hint, no longer `-32603`; and the
   request is validated before the store is looked for, so a bad
   argument on an unreadable store is reported as the argument error.
+- **`show` and `papers show` exit `2` for an id the library does not
+  hold**, with a three-part message naming the id, the library and the
+  listing command for the kind, and nothing on stdout. They used to
+  print an empty card, or `null` under `--json`, and exit `0`.
 - **An unnamed call reaches the registry default only when it is
   mounted.** A call that names no library used to go to the daemon's
   default pointer, which was seeded from the library the daemon came

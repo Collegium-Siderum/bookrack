@@ -45,6 +45,7 @@ mod rpc_e2e;
 mod run_ready_line;
 mod sandbox_rich;
 mod sandbox_session;
+mod show_reference;
 mod source_scan;
 mod status_card_identity;
 mod status_registered_at_startup;

@@ -20,7 +20,6 @@
 use std::path::PathBuf;
 
 use bookrack_cli::error::BookrackCliError;
-use bookrack_cli::library_param;
 use bookrack_cli::render::ctx;
 use bookrack_cli::render::human::truncate_to;
 use bookrack_cli::render::table::RowTable;
@@ -125,7 +124,7 @@ pub async fn search(args: SearchArgs, runtime_dir: Option<PathBuf>) -> Result<()
     if ctx().is_quiet() {
         return Ok(());
     }
-    let library = answering_library(&client).await;
+    let library = helpers::answering_library(&client).await;
     let library = library.as_deref();
     if ctx().is_json() {
         helpers::print_value(&compose_hits(hits, library));
@@ -231,7 +230,7 @@ async fn emit(client: &ControlClient, pages: &[(&Side, Value)]) -> Result<()> {
     if ctx().is_quiet() {
         return Ok(());
     }
-    let library = answering_library(client).await;
+    let library = helpers::answering_library(client).await;
     let library = library.as_deref();
     if ctx().is_json() {
         helpers::print_value(&compose(pages, library));
@@ -346,21 +345,6 @@ fn find_params(kind: ItemKind, args: &FindArgs) -> Value {
         params.insert("offset".to_string(), Value::from(n));
     }
     Value::Object(params)
-}
-
-/// The library the rows came from, or `None` when nobody can say.
-///
-/// A named invocation already knows: the selection is what routed the
-/// calls above. An unnamed one has to ask the daemon, because the
-/// library it reaches is the registry default among the served set,
-/// which is not necessarily the one the daemon came up under.
-async fn answering_library(client: &ControlClient) -> Option<String> {
-    let selected = library_param::selected();
-    if selected.is_some() {
-        return card_library(selected, None);
-    }
-    let status = helpers::dispatch(client, "status", Value::Null).await.ok();
-    card_library(None, status.as_ref())
 }
 
 /// The library name a card or a listing should print, or `None` when

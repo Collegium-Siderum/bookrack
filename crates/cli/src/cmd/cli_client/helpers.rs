@@ -18,6 +18,7 @@ use eyre::{Context, Result};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
+use super::listing::card_library;
 use super::progress_view::ProgressView;
 
 /// Discover the daemon and open a control-plane connection. Returns
@@ -248,6 +249,22 @@ pub(super) async fn queue_worker_enabled(client: &ControlClient) -> Result<bool>
 /// building block underneath every other call helper in this module
 /// and the unit of work subcommands compose with the wait in
 /// `job_wait` when they want to wait for queue completion.
+/// The library a read's answer came from, or `None` when nobody can
+/// say.
+///
+/// A named invocation already knows: the selection is what routed the
+/// call. An unnamed one has to ask the daemon, because the library it
+/// reaches is the registry default among the served set, which is not
+/// necessarily the one the daemon came up under.
+pub(super) async fn answering_library(client: &ControlClient) -> Option<String> {
+    let selected = library_param::selected();
+    if selected.is_some() {
+        return card_library(selected, None);
+    }
+    let status = dispatch(client, "status", Value::Null).await.ok();
+    card_library(None, status.as_ref())
+}
+
 pub async fn dispatch(client: &ControlClient, method: &str, params: Value) -> Result<Value> {
     let params = library_param::apply(method, params)?;
     client
