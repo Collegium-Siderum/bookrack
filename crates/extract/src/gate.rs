@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Two-state handling for a host resource a test needs.
+//! Three outcomes for a host resource a test needs.
 //!
 //! A test that returns early when its resource is missing is
 //! indistinguishable, to the harness, from a test that ran and passed.
@@ -9,12 +9,25 @@
 //! everywhere the resource was meant to be present, because the
 //! coverage is lost without anything saying so.
 //!
-//! A [`Gate`] holds both states at once. Where the resource is
-//! optional, an absence is explained on stderr and the test returns
-//! early. Where the environment declares it mandatory, an absence is a
+//! A [`Gate`] tells the cases apart. A usable resource runs the test.
+//! An absent one depends on the environment: where the resource is
+//! optional, the absence is explained on stderr and the test returns
+//! early; where the environment declares it mandatory, the absence is a
 //! panic. Which of the two applies is that resource's own `REQUIRE`
 //! variable, falling back to `CI` — the variable every provider sets —
-//! when it says nothing.
+//! when it says nothing. A resource that is found and cannot be used is
+//! a panic in every environment: the opt-out is for a machine that does
+//! not carry the resource, and a machine that carries an unusable one
+//! is misconfigured rather than exempt.
+
+/// Why a probed resource cannot be used.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Unavailable {
+    /// Nothing was found where the resource is searched for.
+    Absent(String),
+    /// Something was found and cannot be used.
+    Broken(String),
+}
 
 /// One host resource a test needs, and what its absence means.
 ///
@@ -52,22 +65,45 @@ impl Gate {
 
     /// Run `probe` and report whether the resource is usable.
     ///
-    /// `probe` returns `Err(reason)` when the resource is unavailable;
-    /// the reason is carried into whichever of the two outcomes
-    /// applies, so the caller's own diagnosis — the directories it
-    /// searched, the remedy it suggests — reaches the reader either
-    /// way.
+    /// `probe` returns `Err` when the resource is unavailable, saying
+    /// whether it is absent or broken; the reason it carries reaches
+    /// whichever outcome applies, so the caller's own diagnosis — the
+    /// directories it searched, the remedy it suggests — reaches the
+    /// reader either way.
     ///
     /// # Panics
     ///
-    /// When the resource is unavailable and the environment declares it
+    /// When the resource is absent and the environment declares it
     /// mandatory: a skipped test there is a silently lost guarantee,
-    /// not a courtesy to the contributor.
-    pub fn check(&self, probe: impl FnOnce() -> Result<(), String>) -> bool {
+    /// not a courtesy to the contributor. When the resource is broken,
+    /// whatever the environment declares.
+    pub fn check(&self, probe: impl FnOnce() -> Result<(), Unavailable>) -> bool {
         match probe() {
             Ok(()) => true,
-            Err(reason) => self.unavailable(&reason, self.required()),
+            Err(outcome) => self.resolve(outcome, self.required()),
         }
+    }
+
+    /// Resolve an unavailable resource, with `required` passed in
+    /// rather than read from the environment: an absence goes to
+    /// [`Gate::unavailable`], a broken resource to [`Gate::broken`],
+    /// which does not consult `required` at all.
+    fn resolve(&self, outcome: Unavailable, required: bool) -> bool {
+        match outcome {
+            Unavailable::Absent(reason) => self.unavailable(&reason, required),
+            Unavailable::Broken(reason) => self.broken(&reason),
+        }
+    }
+
+    /// Resolve the broken case: a panic in every environment, naming
+    /// the variable that excuses an absence so the reader knows it does
+    /// not excuse this.
+    fn broken(&self, reason: &str) -> ! {
+        panic!(
+            "{} was found but cannot be used ({reason}); {} / CI only excuses a {} \
+             that is absent, so this fails whatever they declare",
+            self.resource, self.require_env, self.subject,
+        )
     }
 
     /// Resolve the absent case: a note on stderr and `false` where the
@@ -164,6 +200,30 @@ mod tests {
     #[should_panic(expected = "BOOKRACK_REQUIRE_WIDGETRON / CI declares it mandatory")]
     fn the_panic_names_the_variable_that_opts_out() {
         TEST_GATE.unavailable("nothing found", true);
+    }
+
+    /// The broken half: found and unusable fails even where an absence
+    /// would be skipped. `required` is passed as `false` explicitly
+    /// rather than read from the environment, so the test still
+    /// discriminates on a CI runner, where `CI` alone would make any
+    /// unavailable resource panic.
+    #[test]
+    #[should_panic(expected = "Widgetron was found but cannot be used (bad build)")]
+    fn a_broken_resource_fails_even_where_it_is_optional() {
+        TEST_GATE.resolve(Unavailable::Broken("bad build".into()), false);
+    }
+
+    #[test]
+    #[should_panic(expected = "BOOKRACK_REQUIRE_WIDGETRON / CI only excuses")]
+    fn a_broken_resource_names_the_variable_that_does_not_excuse_it() {
+        TEST_GATE.resolve(Unavailable::Broken("bad build".into()), false);
+    }
+
+    /// The absent half still goes through the require flag when it
+    /// arrives as an [`Unavailable`].
+    #[test]
+    fn an_absent_resource_still_skips_where_it_is_optional() {
+        assert!(!TEST_GATE.resolve(Unavailable::Absent("nothing found".into()), false));
     }
 
     /// A present resource is unaffected by the require flag: the flag

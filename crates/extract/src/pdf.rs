@@ -59,7 +59,23 @@ pub(crate) const ADAPTER: &str = "pdf";
 /// repeatedly would be wasteful. The stored `Result` keeps a failed
 /// load from being retried on every call and lets the failure surface
 /// as an ordinary `ExtractError` (see [`pdfium`]).
-static PDFIUM: OnceLock<Result<Pdfium, String>> = OnceLock::new();
+static PDFIUM: OnceLock<Result<Pdfium, LoadFailure>> = OnceLock::new();
+
+/// Why the process-wide PDFium handle could not be loaded.
+///
+/// `message` is the report every caller sees; `found` records which of
+/// the two failures it describes, so a reader of the cached outcome can
+/// tell a library that is not there from one that is there and will not
+/// bind, without searching again.
+#[derive(Debug)]
+pub(crate) struct LoadFailure {
+    /// Whether the search chain yielded a directory to bind from.
+    pub(crate) found: bool,
+    /// The loader's one-line report: the directories searched and the
+    /// remedies when nothing was found, the directory and the binding
+    /// error when something was.
+    pub(crate) message: String,
+}
 
 /// Serializes whole PDF extractions against PDFium — see the module's
 /// thread-safety note. It guards only a sequence of PDFium calls, never
@@ -352,27 +368,40 @@ fn parse_pdf_year(date: &str, fallbacks: &mut Vec<FallbackEvent>) -> Option<i32>
 pub(crate) fn pdfium() -> Result<&'static Pdfium, ExtractError> {
     match PDFIUM.get_or_init(load_pdfium) {
         Ok(pdfium) => Ok(pdfium),
-        Err(message) => Err(ExtractError::Io(std::io::Error::other(message.clone()))),
+        Err(failure) => Err(ExtractError::Io(std::io::Error::other(
+            failure.message.clone(),
+        ))),
     }
 }
 
+/// The outcome of loading the process-wide PDFium handle, loading it on
+/// first use: the same `OnceLock` [`pdfium`] reads, so every call after
+/// the first costs one atomic load.
+pub(crate) fn pdfium_load() -> Result<(), &'static LoadFailure> {
+    PDFIUM.get_or_init(load_pdfium).as_ref().map(|_| ())
+}
+
 /// Bind the PDFium native library from the first directory in the
-/// search chain that holds it. The error is a plain `String` so it can
-/// be stored in the `OnceLock` and re-reported on every later call —
-/// `PdfiumError` is not `Clone`.
-fn load_pdfium() -> Result<Pdfium, String> {
+/// search chain that holds it. The failure carries a plain `String` so
+/// it can be stored in the `OnceLock` and re-reported on every later
+/// call — `PdfiumError` is not `Clone`.
+fn load_pdfium() -> Result<Pdfium, LoadFailure> {
     let location = bookrack_config::locate_pdfium();
     let Some(dir) = location.dir else {
-        return Err(missing_library_message(&location.probed));
+        return Err(LoadFailure {
+            found: false,
+            message: missing_library_message(&location.probed),
+        });
     };
     let library = Pdfium::pdfium_platform_library_name_at_path(&dir);
     Pdfium::bind_to_library(&library)
         .map(Pdfium::new)
-        .map_err(|e| {
-            format!(
+        .map_err(|e| LoadFailure {
+            found: true,
+            message: format!(
                 "PDFium library could not be loaded from {}: {e}",
                 dir.display()
-            )
+            ),
         })
 }
 
