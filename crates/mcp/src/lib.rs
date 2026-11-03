@@ -39,7 +39,8 @@ mod error_map;
 mod reference;
 use error_map::{
     internal_message, invalid_params_err, invalid_params_message, ops_error_to_mcp,
-    reference_error_to_mcp, registry_err, report_to_mcp, respond_with, unknown_filter_value_to_mcp,
+    reference_error_to_mcp, reference_lookup_error_to_mcp, registry_err, report_to_mcp,
+    respond_with, unknown_filter_value_to_mcp,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -2144,12 +2145,13 @@ impl BookrackServer {
         Parameters(args): Parameters<reference::ReferenceLookupArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
-        let refs_path = handle.ops().reference_db_path();
-        let refs = bookrack_refs::Refs::open_read_only(&refs_path)
-            .map_err(|e| internal_message(format!("open reference.db: {e}")))?;
-        let catalogs = reference::catalogs().map_err(reference_error_to_mcp)?;
-        let result = reference::reference_lookup_logic(&refs, catalogs, &args)
-            .map_err(reference_error_to_mcp)?;
+        let catalogs = reads::reference::catalogs().map_err(reference_lookup_error_to_mcp)?;
+        let result = reads::reference::lookup_at(
+            &handle.ops().reference_db_path(),
+            catalogs,
+            &args.to_lookup(),
+        )
+        .map_err(reference_lookup_error_to_mcp)?;
         respond_with(&result)
     }
 

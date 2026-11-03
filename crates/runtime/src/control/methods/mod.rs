@@ -93,6 +93,7 @@ pub mod papers_vectors;
 pub mod queue_writes;
 pub mod reads;
 pub mod reads_library;
+pub mod reads_reference;
 pub mod remove;
 pub mod stamps;
 pub mod vectors;
@@ -228,6 +229,7 @@ use reads_library::{
     PageParams, PaperAuditReadParams, ReadContextParams, ReadSpanParams, SearchInBookParams,
     SearchInPaperParams, SearchParams, ShowTocParams,
 };
+use reads_reference::ReferenceLookupParams;
 use remove::RemoveParams;
 use stamps::ReconcileParams as BookStampsReconcileParams;
 use vectors::{VectorsDropParams, VectorsRebuildParams, VectorsReembedParams, VectorsResetParams};
@@ -420,6 +422,10 @@ methods! {
         "library.search_in_paper" => reads_library::search_in_paper,
     read  no_queue async   routed(LibraryOnlyParams)
         "library.vectors_status" => reads_library::vectors_status,
+
+    // reference reads
+    read  no_queue sync    routed(ReferenceLookupParams)
+        "reference.lookup" => reads_reference::lookup,
 
     // events
     stream no_queue sidebar process                    "events.subscribe",

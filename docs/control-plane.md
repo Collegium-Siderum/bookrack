@@ -1137,6 +1137,27 @@ defined profile, or an embedding model the backend does not hold is
 - `library.list_ocr_pending` — scan sources still awaiting OCR: every
   `needs_ocr` intake anchor with no successfully-processed OCR product
   derived from it. Peer of the CLI `bookrack intake list-ocr-pending`.
+- `reference.lookup` — `{ library?, book, entry_key, fields?,
+  min_severity?, exclude_books? }` → one keyed read over the library's
+  reference store, the same call as the MCP tool of the same name.
+  `book` is a reference-book slug or `*` for every book, ranked by
+  `authority_rank`; `entry_key` is tried as given and then in its latin
+  form (lower case, letters and digits only), and a single hit that
+  redirects is followed one hop. `fields` keeps only the named payload
+  keys on each hit; `min_severity` (`ok` | `info` | `warn` | `error`)
+  drops hits whose quality flags carry no concern at or above it;
+  `exclude_books` names slugs to leave out and is admissible only with
+  `book = "*"`. The body is the store's `LookupResult`: `entry_key`
+  echoes the query, `hits` are the resolved entries (`book_slug`,
+  `entry_key`, `headword`, `aliases`, `payload`, `source`,
+  `quality_flags`, `edit_reason`, `edited_at`, `has_overlay`),
+  `primary_by_authority` indexes the highest-ranked hit or is `null`,
+  and `redirect_followed` names the key a redirect left from. A library
+  with no reference store answers no hits rather than an error: the
+  request is validated first, so a bad argument is `-32602` whatever
+  the store's state; a store at a schema this build does not read is
+  `-32018`, with the direction of the mismatch in the hint; a store
+  that exists but cannot be inspected or opened is `-32603`.
 
 ## MCP tool surface
 

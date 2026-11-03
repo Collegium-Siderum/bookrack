@@ -11,7 +11,7 @@
 
 use std::collections::BTreeSet;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use bookrack_distill::{Catalogs, ParseError};
@@ -48,9 +48,18 @@ pub enum ReferenceLookupError {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
-    /// The reference store could not be opened or queried.
+    /// The reference store could not be queried.
     #[error("refs error: {0}")]
     Store(#[from] RefsError),
+
+    /// The reference store at `path` exists but could not be opened:
+    /// a schema this build does not read, or a damaged file.
+    #[error("cannot open the reference store at {path}")]
+    Open {
+        path: PathBuf,
+        #[source]
+        source: RefsError,
+    },
 
     /// Looking for the store at `path` failed for a reason other than
     /// its absence.
@@ -137,6 +146,44 @@ pub fn lookup(
     }
 
     Ok(result)
+}
+
+/// Run the lookup against the store at `path`, which may not exist.
+///
+/// The request is validated as a whole before the store is looked for,
+/// so a bad argument is reported as such whatever the store's state.
+/// A path that does not exist answers no hits: a library without
+/// reference books has no entries to find. Any other failure to
+/// inspect the path, and a store that exists but cannot be opened, are
+/// errors.
+pub fn lookup_at(
+    path: &Path,
+    catalogs: &Catalogs,
+    req: &ReferenceLookup,
+) -> Result<LookupResult, ReferenceLookupError> {
+    validate(req)?;
+    match std::fs::metadata(path) {
+        Ok(_) => {}
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            return Ok(LookupResult {
+                entry_key: req.entry_key.clone(),
+                hits: Vec::new(),
+                primary_by_authority: None,
+                redirect_followed: None,
+            });
+        }
+        Err(source) => {
+            return Err(ReferenceLookupError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    }
+    let refs = Refs::open_read_only(path).map_err(|source| ReferenceLookupError::Open {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    lookup(&refs, catalogs, req)
 }
 
 fn scope(req: &ReferenceLookup) -> Result<Option<&str>, ReferenceLookupError> {

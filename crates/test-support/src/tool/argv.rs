@@ -16,8 +16,9 @@ use std::path::Path;
 use super::tripwire::{Finding, Rule, is_within, resolve};
 
 /// The control-plane methods `rpc call` may name inside a sandbox: the
-/// ones the daemon's own method table marks `read`.
-pub const READ_ONLY_RPC: [&str; 10] = [
+/// subset of the methods the daemon's own method table marks `read`
+/// that a sandbox cell has a use for.
+pub const READ_ONLY_RPC: [&str; 11] = [
     "daemon.version",
     "daemon.status",
     "status",
@@ -28,6 +29,7 @@ pub const READ_ONLY_RPC: [&str; 10] = [
     "library.stats",
     "library.vectors_status",
     "library.show_pipeline_trail",
+    "reference.lookup",
 ];
 
 /// The top-level flags `bookrack` accepts anywhere, with whether each

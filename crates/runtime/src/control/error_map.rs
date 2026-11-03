@@ -74,8 +74,10 @@ use bookrack_glean::GleanError;
 use bookrack_ingest::IngestError;
 use bookrack_ops::OpsError;
 use bookrack_ops::dto::UnknownFilterValue;
+use bookrack_ops::reads::reference::ReferenceLookupError;
 use bookrack_ops::registry::RegistryError;
 use bookrack_query::QueryError;
+use bookrack_refs::RefsError;
 use bookrack_vectors::{TrainingLimit, VectorsError};
 use eyre::Report;
 
@@ -224,6 +226,60 @@ pub fn job_failure_problem(err: &Report) -> Option<Problem> {
 /// code, so one typed error takes one code on both surfaces.
 pub fn ops_err(e: OpsError) -> RpcError {
     from_ops(&e)
+}
+
+/// Map a reference lookup failure onto its wire code. The control
+/// plane's `reference.lookup` and the MCP tool of the same name both
+/// come here, so one failure takes one code on both surfaces.
+///
+/// A request field outside what the lookup accepts is caller input
+/// (`-32602`); its message already names the field. A store whose
+/// schema this build does not read is a state the operator has to
+/// change (`-32018`), with the direction of the mismatch deciding the
+/// hint. Everything else — a path that could not be inspected, a
+/// damaged store, a query fault, a catalog that did not parse — is an
+/// internal error carrying its full cause chain.
+pub fn reference_lookup_err(e: ReferenceLookupError) -> RpcError {
+    match &e {
+        ReferenceLookupError::InvalidArgument(message) => {
+            rpc_from_problem(INVALID_PARAMS, Problem::new(message.as_str()))
+        }
+        ReferenceLookupError::Open {
+            path,
+            source: RefsError::SchemaTooNew { found, supported },
+        } => rpc_from_problem(
+            STATE_UNUSABLE,
+            reference_schema_problem(path, *found, *supported).hint(
+                "This build is older than the store. Run the build that wrote the store, \
+                 or a newer one.",
+            ),
+        ),
+        ReferenceLookupError::Open {
+            path,
+            source: RefsError::SchemaTooOld { found, supported },
+        } => rpc_from_problem(
+            STATE_UNUSABLE,
+            reference_schema_problem(path, *found, *supported).hint(
+                "Run `bookrack distill build` with this build to rewrite the store at \
+                 its schema.",
+            ),
+        ),
+        ReferenceLookupError::Open { .. }
+        | ReferenceLookupError::Store(_)
+        | ReferenceLookupError::Io { .. }
+        | ReferenceLookupError::Catalog(_) => {
+            rpc_from_problem(INTERNAL_ERROR, Problem::from_error_chain(&e))
+        }
+    }
+}
+
+/// The summary and detail of a reference store at a schema this build
+/// does not read; the caller adds the hint its direction calls for.
+fn reference_schema_problem(path: &std::path::Path, found: i64, supported: i64) -> Problem {
+    Problem::new("cannot read the reference store").detail(format!(
+        "The store at {} is at schema {found}; this build reads schema {supported}.",
+        path.display()
+    ))
 }
 
 /// Map a directly-held [`RegistryError`] without an `anyhow` round-trip.

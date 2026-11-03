@@ -17,6 +17,7 @@
 use bookrack_core::{Explain, Problem};
 use bookrack_ops::OpsError;
 use bookrack_ops::dto::UnknownFilterValue;
+use bookrack_ops::reads::reference::ReferenceLookupError;
 use bookrack_ops::registry::RegistryError;
 use rmcp::ErrorData;
 use rmcp::model::{CallToolResult, ContentBlock, ErrorCode};
@@ -141,6 +142,17 @@ pub(crate) fn ops_error_to_mcp(e: OpsError) -> ErrorData {
 /// [`bookrack_runtime::control::error_map::handler_err`].
 pub(crate) fn report_to_mcp(method: &str, e: eyre::Report) -> ErrorData {
     let rpc = bookrack_runtime::control::error_map::handler_err(method, e);
+    envelope(ErrorCode(rpc.code), rpc.message, rpc.data)
+}
+
+/// Map a reference lookup failure onto the MCP envelope through the
+/// control plane's classifier, as [`ops_error_to_mcp`] does: the code
+/// is decided once, in
+/// [`bookrack_runtime::control::error_map::reference_lookup_err`], so
+/// the `reference.lookup` tool and the control-plane method of the
+/// same name answer one failure with one code.
+pub(crate) fn reference_lookup_error_to_mcp(e: ReferenceLookupError) -> ErrorData {
+    let rpc = bookrack_runtime::control::error_map::reference_lookup_err(e);
     envelope(ErrorCode(rpc.code), rpc.message, rpc.data)
 }
 

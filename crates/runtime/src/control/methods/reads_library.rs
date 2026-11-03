@@ -284,7 +284,7 @@ pub struct ReadSpanParams {
     pub library: Option<String>,
 }
 
-fn parse<T>(params: &Option<Value>, method: &str) -> Result<T, RpcError>
+pub(super) fn parse<T>(params: &Option<Value>, method: &str) -> Result<T, RpcError>
 where
     T: for<'de> Deserialize<'de>,
 {
@@ -297,14 +297,14 @@ where
         .map_err(|e| RpcError::new(INVALID_PARAMS, format!("invalid {method} params: {e}")))
 }
 
-fn resolve(
+pub(super) fn resolve(
     ctx: &MethodContext,
     library: Option<&str>,
 ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>, RpcError> {
     ctx.registry.get(library).map_err(registry_err)
 }
 
-fn to_value<T: serde::Serialize + ?Sized>(v: &T) -> Result<Value, RpcError> {
+pub(super) fn to_value<T: serde::Serialize + ?Sized>(v: &T) -> Result<Value, RpcError> {
     serde_json::to_value(v)
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("serialise response: {e}")))
 }

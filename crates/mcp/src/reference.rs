@@ -116,7 +116,9 @@ impl From<ReferenceLookupError> for ReferenceError {
     fn from(e: ReferenceLookupError) -> Self {
         match e {
             ReferenceLookupError::InvalidArgument(m) => ReferenceError::InvalidArgument(m),
-            ReferenceLookupError::Store(e) => ReferenceError::Refs(e),
+            ReferenceLookupError::Store(e) | ReferenceLookupError::Open { source: e, .. } => {
+                ReferenceError::Refs(e)
+            }
             ReferenceLookupError::Io { path, source } => ReferenceError::Io { path, source },
             ReferenceLookupError::Catalog(e) => ReferenceError::Catalog(e),
         }
@@ -134,6 +136,10 @@ pub(crate) fn catalogs() -> Result<&'static Catalogs, ReferenceError> {
 // ---------------------------------------------------------------------------
 
 /// Run the ops-layer lookup for `args` against an open store.
+///
+/// The tool method reads through `lookup_at`, which opens the store
+/// itself; this entry serves callers that already hold one open.
+#[allow(dead_code)]
 pub(crate) fn reference_lookup_logic(
     refs: &Refs,
     catalogs: &Catalogs,

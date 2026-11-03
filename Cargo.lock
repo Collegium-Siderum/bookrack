@@ -930,6 +930,7 @@ dependencies = [
  "bookrack-catalog",
  "bookrack-config",
  "bookrack-core",
+ "bookrack-dbkit",
  "bookrack-distill",
  "bookrack-embed",
  "bookrack-obs",

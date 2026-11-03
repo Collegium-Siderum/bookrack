@@ -125,6 +125,7 @@ mod tests {
             "library.search_in_paper",
             "papers.export_csl",
             "library.vectors_status",
+            "reference.lookup",
         ] {
             let entry = REGISTRY
                 .iter()

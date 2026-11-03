@@ -10,6 +10,11 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **`reference.lookup` on the control plane.** The keyed reference-book
+  read the MCP tool of that name offers is now a control-plane method
+  with the same parameters, body and error codes, reachable as
+  `bookrack rpc call reference.lookup '{"book": "<slug>", "entry_key":
+  "<key>"}'`.
 - **Skipped libraries are reported.** `daemon.status` and the MCP
   `session.info` tool carry `unmounted` — each registered library
   bring-up did not mount, with its root and three-part reason — and
@@ -20,6 +25,12 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **MCP `reference.lookup` answers a library without reference books
+  with no hits**, where it used to report an internal error. A store
+  at a schema this build does not read is now `-32018` with the
+  direction of the mismatch in the hint, no longer `-32603`; and the
+  request is validated before the store is looked for, so a bad
+  argument on an unreadable store is reported as the argument error.
 - **An unnamed call reaches the registry default only when it is
   mounted.** A call that names no library used to go to the daemon's
   default pointer, which was seeded from the library the daemon came

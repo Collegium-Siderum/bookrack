@@ -40,6 +40,10 @@ serde_json.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# Stamp a `user_version` the build does not read onto a fixture
+# reference store, so the schema-mismatch mapping is exercised end to
+# end.
+bookrack-dbkit = { path = "../dbkit" }
 # Tempdir-backed catalog fixtures for the handler-level tool-call
 # tests, which drive `serve` through a real streamable-HTTP client.
 tempfile.workspace = true
