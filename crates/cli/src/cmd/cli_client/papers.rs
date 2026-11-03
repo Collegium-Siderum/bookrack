@@ -695,7 +695,7 @@ fn render_paper_detail(response: &Value) {
 const BIBLIO_KEYS_ROWED_SEPARATELY: [&str; 2] = ["abstract_text", "title"];
 
 /// Renders one `library.show_paper` response as a key-value card:
-/// the intake identity, the basename of the ingested file, the audit
+/// the typed id the listings print, the basename of the ingested file, the audit
 /// verdict and the profile that produced it, the effective biblio
 /// section, contributor and override counts, and the first line of the
 /// abstract. The rest of the source-side record — the recorded path,
@@ -705,7 +705,7 @@ const BIBLIO_KEYS_ROWED_SEPARATELY: [&str; 2] = ["abstract_text", "title"];
 pub(super) fn format_paper_detail(response: &Value) -> String {
     let mut t = KvTable::new();
     if let Some(id) = response.get("intake_id").and_then(Value::as_i64) {
-        t.push("intake_id", id.to_string());
+        t.push("id", TypedItemId::Paper(id).to_string());
     }
     for key in ["title", "status", "format", "source_filename"] {
         if let Some(val) = response.get(key).and_then(Value::as_str) {

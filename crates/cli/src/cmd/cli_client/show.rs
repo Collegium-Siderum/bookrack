@@ -179,7 +179,7 @@ pub(super) fn not_found_problem(id: &TypedItemId, library: Option<&str>) -> Prob
 }
 
 /// Renders one `library.show_book` response as a key-value card: the
-/// intake identity, the basename of the ingested file, the effective
+/// typed id the listings print, the basename of the ingested file, the effective
 /// biblio section, contributor and override counts, and the shape of
 /// the ingested TOC. The rest of the source-side record — the recorded
 /// path, the hash, the intake timestamp, the page count and the byte
@@ -191,7 +191,7 @@ pub(super) fn not_found_problem(id: &TypedItemId, library: Option<&str>) -> Prob
 fn format_book_detail(response: &Value) -> String {
     let mut t = KvTable::new();
     if let Some(id) = response.get("intake_id").and_then(Value::as_i64) {
-        t.push("intake_id", id.to_string());
+        t.push("id", TypedItemId::Book(id).to_string());
     }
     for key in ["title", "status", "format", "source_filename"] {
         if let Some(val) = response.get(key).and_then(Value::as_str) {
@@ -583,6 +583,27 @@ mod tests {
         assert!(card.contains("biblio.publisher"), "{card}");
         assert!(card.contains("contributors"), "{card}");
         assert!(card.contains("42 entries, depth 3"), "{card}");
+    }
+
+    /// Each card names its item the way the listings do, as a typed id
+    /// an operator can paste back into `show`, and never as a bare
+    /// intake number.
+    #[test]
+    fn a_card_names_its_item_by_its_typed_id() {
+        let book = format_book_detail(&json!({ "intake_id": 12, "status": "ready" }));
+        assert!(book.contains("book:12"), "{book}");
+        assert!(!book.contains("intake_id"), "{book}");
+
+        let paper = format_paper_detail(&json!({ "intake_id": 101, "status": "ready" }));
+        assert!(paper.contains("paper:101"), "{paper}");
+        assert!(!paper.contains("intake_id"), "{paper}");
+        for card in [&book, &paper] {
+            let id_row = card
+                .lines()
+                .find(|l| l.contains(":12") || l.contains(":101"))
+                .expect("an id row");
+            assert!(id_row.contains(" id "), "the row is keyed `id`: {id_row}");
+        }
     }
 
     /// A book with no ingested corpus has no TOC row rather than an

@@ -39,6 +39,10 @@ release workflow extracts the matching section verbatim from this file.
   argument on an unreadable store is reported as the argument error.
   `reference.overlay_set` reports a store at a newer schema the same
   way, `-32018` where it was `-32603`, and leaves the store unwritten.
+- **`show` and `papers show` cards name the item by its typed id.** The
+  card's first row is `id` with `book:12` or `paper:101`, the form the
+  listings print and `show` reads, where it was a bare `intake_id`
+  number. `--json` is unchanged.
 - **`show` and `papers show` exit `2` for an id the library does not
   hold**, with a three-part message naming the id, the library and the
   listing command for the kind, and nothing on stdout. They used to
