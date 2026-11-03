@@ -85,6 +85,25 @@ pub struct World {
     pub stand_in: PathBuf,
 }
 
+/// A world runs the tool's own `teardown` when it goes, so a test that
+/// fails before its own teardown leaves no stub or supervisor behind
+/// once its tempdir is gone. The teardown signals only what the
+/// sandbox's records prove the tool started; its outcome is not judged,
+/// and a session lock still held gives up after a short wait.
+impl Drop for World {
+    fn drop(&mut self) {
+        if !self.dir.join(".sandbox.json").exists() {
+            return;
+        }
+        let _ = Command::new(TOOL)
+            .args(["--lock-wait", "2", "teardown", &self.dir_s()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
 impl World {
     /// A stand-in with `body` after the prelude, and a `bare` sandbox
     /// built from it.

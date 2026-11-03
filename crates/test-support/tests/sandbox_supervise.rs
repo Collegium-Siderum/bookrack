@@ -1343,3 +1343,27 @@ fn a_quit_stop_checks_the_endpoint_again() {
     let out = world.tool(&["daemon", "stop", &world.dir_s()]);
     assert_eq!(code(&out), 0, "{}", stderr(&out));
 }
+
+// The test world's own cleanup
+
+/// A world dropped part way, with a stub and a daemon still running,
+/// leaves neither behind: a test that fails before its own teardown
+/// must not strand processes whose tempdir is already gone.
+#[test]
+fn a_dropped_world_takes_its_running_instances_down() {
+    let (world, _accepted) = ready_world();
+    stub_start(&world, &[]);
+    daemon_start(&world);
+    let stub = registered_pid(&world, "stub", "serve.json");
+    let supervisor = registered_pid(&world, "daemon", "supervisor.json");
+    let daemon = registered_pid(&world, "daemon", "daemon.json");
+    for pid in [stub, supervisor, daemon] {
+        assert!(alive(pid), "premise: {pid} runs");
+    }
+    drop(world);
+    wait_until(
+        "the world's processes to leave",
+        Duration::from_secs(10),
+        || [stub, supervisor, daemon].iter().all(|pid| !alive(*pid)),
+    );
+}
