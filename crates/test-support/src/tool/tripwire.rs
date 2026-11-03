@@ -156,11 +156,23 @@ pub struct Input<'a> {
 /// being folded away; and the result must start with the canonical
 /// `root`. A relative `path` is never within.
 pub fn is_within(path: &Path, root: &Path) -> io::Result<bool> {
-    if !path.is_absolute() {
-        return Ok(false);
-    }
     let root = root.canonicalize()?;
-    let mut resolved = None;
+    let Ok(resolved) = resolve_existing_prefix(path) else {
+        return Ok(false);
+    };
+    Ok(resolved.starts_with(&root))
+}
+
+/// Canonicalize the nearest existing ancestor of `path` and append what
+/// follows it, so a path that does not exist yet resolves the way it
+/// will once it does. A relative path, and `..` or a second root past
+/// the existing prefix, are errors: they would not fold the way the
+/// text suggests.
+pub fn resolve_existing_prefix(path: &Path) -> io::Result<PathBuf> {
+    let invalid = |why: String| io::Error::new(io::ErrorKind::InvalidInput, why);
+    if !path.is_absolute() {
+        return Err(invalid(format!("{} is not absolute", path.display())));
+    }
     for ancestor in path.ancestors() {
         if let Ok(prefix) = ancestor.canonicalize() {
             let suffix = path
@@ -172,18 +184,21 @@ pub fn is_within(path: &Path, root: &Path) -> io::Result<bool> {
                     Component::Normal(name) => joined.push(name),
                     Component::CurDir => {}
                     Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                        return Ok(false);
+                        return Err(invalid(format!(
+                            "{} steps outside its existing prefix {}",
+                            path.display(),
+                            joined.display()
+                        )));
                     }
                 }
             }
-            resolved = Some(joined);
-            break;
+            return Ok(joined);
         }
     }
-    let Some(resolved) = resolved else {
-        return Ok(false);
-    };
-    Ok(resolved.starts_with(&root))
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("no ancestor of {} exists", path.display()),
+    ))
 }
 
 /// `value` as the child would read it: an absolute path as is, anything

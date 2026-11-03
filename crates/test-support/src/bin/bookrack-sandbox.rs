@@ -42,6 +42,7 @@ mod unix {
         #[default]
         Bare,
         Rich,
+        Release,
     }
 
     #[derive(Clone, Copy, ValueEnum, Default)]
@@ -146,9 +147,20 @@ mod unix {
             #[arg(long)]
             replace: bool,
             /// Copy this script in as the binary under test.
-            #[arg(long, hide = true, value_name = "PATH")]
+            #[arg(long, hide = true, value_name = "PATH", conflicts_with = "binary")]
             stand_in: Option<PathBuf>,
+            /// Copy this file in as the binary under test instead of
+            /// building one; it must know every variable the sandbox sets.
+            #[arg(long, value_name = "PATH")]
+            binary: Option<PathBuf>,
+            /// The frozen sandbox a release golden is imported from;
+            /// required with --preset release.
+            #[arg(long, value_name = "DIR", required_if_eq("preset", "release"))]
+            from: Option<PathBuf>,
         },
+        /// Freeze a rich sandbox's golden as a release golden: run both
+        /// checks, record it, and take its write permission off.
+        Freeze { dir: PathBuf },
         /// Rebuild or re-copy the binary under test.
         Build { dir: PathBuf },
         /// Print the child's environment as shell lines.
@@ -264,14 +276,20 @@ mod unix {
                 workspace,
                 replace,
                 stand_in,
+                binary,
+                from,
             } => {
-                let source = match stand_in {
-                    Some(path) => Source::StandIn(path),
-                    None => Source::Cargo,
+                let source = match (stand_in, binary) {
+                    (Some(path), _) => Source::StandIn(path),
+                    (None, Some(path)) => Source::File(path),
+                    (None, None) => Source::Cargo,
                 };
                 let preset = match preset {
                     PresetArg::Bare => Preset::Bare,
                     PresetArg::Rich => Preset::Rich,
+                    PresetArg::Release => Preset::Release {
+                        from: from.expect("clap requires --from with --preset release"),
+                    },
                 };
                 let created = Session::create(
                     &dir,
@@ -283,6 +301,10 @@ mod unix {
                 .await;
                 finish(created.map(|_| Outcome::ok()))
             }
+            Command::Freeze { dir } => match Session::open_for_freeze(&dir, opts) {
+                Ok(mut session) => finish(session.freeze().await),
+                Err(outcome) => finish(Err(outcome)),
+            },
             Command::Build { dir } => match Session::open(&dir, opts) {
                 Ok(mut session) => finish(session.build().await.map(|_| Outcome::ok())),
                 Err(outcome) => finish(Err(outcome)),

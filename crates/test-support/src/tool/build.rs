@@ -10,7 +10,25 @@ use std::path::{Path, PathBuf};
 use bookrack_core::Problem;
 use serde::{Deserialize, Serialize};
 
-use super::{Outcome, STAGE_BINARY, ToolPaths, ToolResult, problems, read_json, sig, write_json};
+use super::{
+    Outcome, STAGE_BINARY, ToolPaths, ToolResult, problems, read_json, release, sig, write_json,
+};
+use crate::sandbox::Sandbox;
+
+/// The name an incoming binary is staged under beside `bookrack` until
+/// the variable-claim gate passes.
+pub const INCOMING: &str = "bookrack.incoming";
+
+/// A hook run once between two steps.
+pub type StepHook = Box<dyn FnOnce() -> io::Result<()>>;
+
+/// Points in an install at which a test may step in.
+#[derive(Default)]
+pub struct BuildHooks {
+    /// Runs after the incoming binary has taken `bookrack`'s place and
+    /// before its record is written.
+    pub after_rename: Option<StepHook>,
+}
 
 /// Up to this size the copied binary is re-hashed before every use; a
 /// larger one is checked by length, mtime and inode alone.
@@ -232,13 +250,19 @@ async fn cargo_build(workspace: &Path) -> ToolResult<Artifact> {
 
 /// Build `bookrack` in `workspace` and copy it into the sandbox,
 /// checking that neither the source tree nor the artifact moved
-/// underneath the copy.
-pub async fn build_cargo(paths: &ToolPaths, workspace: &Path) -> ToolResult<BinaryRecord> {
+/// underneath the copy. With `host`, the copy passes the variable-claim
+/// gate before it replaces the binary in place.
+pub async fn build_cargo(
+    paths: &ToolPaths,
+    host: Option<&Sandbox>,
+    workspace: &Path,
+    hooks: &mut BuildHooks,
+) -> ToolResult<BinaryRecord> {
     let (head, state_before) = source_state(workspace).await?;
     let artifact = cargo_build(workspace).await?;
     let before = stat(&artifact.executable)
         .map_err(|e| Outcome::io(STAGE_BINARY, "inspect the built binary", e))?;
-    let (sha256, copied) = copy_into(paths, &artifact.executable)?;
+    let (sha256, incoming) = stage(paths, &artifact.executable)?;
     // A fresh second build re-links the artifact into place, so its inode
     // moves even when nothing was rebuilt; the digest is what has to hold.
     let again = cargo_build(workspace).await?;
@@ -259,62 +283,110 @@ pub async fn build_cargo(paths: &ToolPaths, workspace: &Path) -> ToolResult<Bina
     }
     let (_, state_after) = source_state(workspace).await?;
     if state_after != state_before {
+        let _ = std::fs::remove_file(&incoming);
         return Err(Outcome::tool_error(
             STAGE_BINARY,
             Problem::new("the source tree changed during the build")
                 .hint("stop editing, then run 'bookrack-sandbox build <dir>' again"),
         ));
     }
-    let record = BinaryRecord {
+    let partial = BinaryRecord {
         kind: "cargo".to_string(),
         origin: artifact.executable.display().to_string(),
         sha256,
-        len: copied.len,
-        mtime_secs: copied.mtime_secs,
-        mtime_nanos: copied.mtime_nanos,
-        inode: copied.inode,
+        len: 0,
+        mtime_secs: 0,
+        mtime_nanos: 0,
+        inode: 0,
         head: Some(head),
         source_state: Some(state_before),
         profile: artifact.profile,
         features: artifact.features,
     };
-    write_json(&paths.binary_record(), &record)
-        .map_err(|e| Outcome::io(STAGE_BINARY, "write the binary record", e))?;
-    Ok(record)
+    install(paths, host, &incoming, partial, hooks).await
 }
 
-/// Copy a prebuilt binary or a stand-in script from `origin` into the
-/// sandbox and record it.
-pub fn install_copy(paths: &ToolPaths, origin: &Path, kind: &str) -> ToolResult<BinaryRecord> {
+/// Copy a binary, a prebuilt one or a stand-in script, from `origin`
+/// into the sandbox and record it. With `host`, the copy passes the
+/// variable-claim gate before it replaces the binary in place; a
+/// stand-in passes `None`.
+pub async fn install_copy(
+    paths: &ToolPaths,
+    host: Option<&Sandbox>,
+    origin: &Path,
+    kind: &str,
+    hooks: &mut BuildHooks,
+) -> ToolResult<BinaryRecord> {
     let origin = origin
         .canonicalize()
         .map_err(|e| Outcome::io(STAGE_BINARY, &format!("resolve {}", origin.display()), e))?;
-    let (sha256, copied) = copy_into(paths, &origin)?;
-    let record = BinaryRecord {
+    let (sha256, incoming) = stage(paths, &origin)?;
+    let partial = BinaryRecord {
         kind: kind.to_string(),
         origin: origin.display().to_string(),
         sha256,
-        len: copied.len,
-        mtime_secs: copied.mtime_secs,
-        mtime_nanos: copied.mtime_nanos,
-        inode: copied.inode,
+        len: 0,
+        mtime_secs: 0,
+        mtime_nanos: 0,
+        inode: 0,
         head: None,
         source_state: None,
         profile: None,
         features: Vec::new(),
     };
+    install(paths, host, &incoming, partial, hooks).await
+}
+
+/// The second half of an install: the gate, when there is a host to
+/// judge it against; the rename into place; the record. A gate that
+/// does not pass removes the incoming copy and leaves the installed
+/// binary and its record as they were.
+async fn install(
+    paths: &ToolPaths,
+    host: Option<&Sandbox>,
+    incoming: &Path,
+    mut record: BinaryRecord,
+    hooks: &mut BuildHooks,
+) -> ToolResult<BinaryRecord> {
+    if let Some(host) = host
+        && let Err(outcome) = release::gate(paths, host, incoming).await
+    {
+        let _ = std::fs::remove_file(incoming);
+        return Err(outcome);
+    }
+    let io_err = |what: &str, err: io::Error| Outcome::io(STAGE_BINARY, what, err);
+    std::fs::rename(incoming, paths.bin())
+        .map_err(|e| io_err("move the copied binary into place", e))?;
+    if let Some(after_rename) = hooks.after_rename.take() {
+        after_rename().map_err(|e| io_err("continue the install", e))?;
+    }
+    let copied = stat(&paths.bin()).map_err(|e| io_err("inspect the copied binary", e))?;
+    record.len = copied.len;
+    record.mtime_secs = copied.mtime_secs;
+    record.mtime_nanos = copied.mtime_nanos;
+    record.inode = copied.inode;
     write_json(&paths.binary_record(), &record)
-        .map_err(|e| Outcome::io(STAGE_BINARY, "write the binary record", e))?;
+        .map_err(|e| io_err("write the binary record", e))?;
     Ok(record)
 }
 
-/// Copy `origin` to `run/bin/bookrack` through a temporary file created
-/// exclusively, hashing on the way.
-fn copy_into(paths: &ToolPaths, origin: &Path) -> ToolResult<(String, Stat)> {
+/// Copy `origin` to `run/bin/bookrack.incoming`, hashing on the way; a
+/// stale incoming copy is removed first.
+fn stage(paths: &ToolPaths, origin: &Path) -> ToolResult<(String, PathBuf)> {
     let io_err = |what: &str, err: io::Error| Outcome::io(STAGE_BINARY, what, err);
-    let tmp = paths
-        .bin_dir()
-        .join(format!("bookrack.tmp-{}", std::process::id()));
+    let incoming = paths.bin_dir().join(INCOMING);
+    match std::fs::remove_file(&incoming) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_err("remove a stale incoming binary", e)),
+    }
+    let sha256 = copy_into(origin, &incoming)?;
+    Ok((sha256, incoming))
+}
+
+/// Copy `origin` to `tmp`, created exclusively, hashing on the way.
+fn copy_into(origin: &Path, tmp: &Path) -> ToolResult<String> {
+    let io_err = |what: &str, err: io::Error| Outcome::io(STAGE_BINARY, what, err);
     let mut src = std::fs::File::open(origin).map_err(|e| io_err("open the binary to copy", e))?;
     let mode = src
         .metadata()
@@ -324,7 +396,7 @@ fn copy_into(paths: &ToolPaths, origin: &Path) -> ToolResult<(String, Stat)> {
     let mut dst = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&tmp)
+        .open(tmp)
         .map_err(|e| io_err("create the copied binary", e))?;
     let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
     let mut buf = vec![0u8; 1 << 16];
@@ -345,11 +417,7 @@ fn copy_into(paths: &ToolPaths, origin: &Path) -> ToolResult<(String, Stat)> {
         .map_err(|e| io_err("set the copied binary's mode", e))?;
     drop(dst);
     let digest = sha2::Digest::finalize(hasher);
-    let sha256: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    std::fs::rename(&tmp, paths.bin())
-        .map_err(|e| io_err("move the copied binary into place", e))?;
-    let copied = stat(&paths.bin()).map_err(|e| io_err("inspect the copied binary", e))?;
-    Ok((sha256, copied))
+    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// The record `run/binary.json` holds.

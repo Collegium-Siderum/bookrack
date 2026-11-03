@@ -32,6 +32,7 @@ pub mod env;
 pub mod exec;
 pub mod preset;
 pub mod recover;
+pub mod release;
 pub mod rich;
 pub mod sig;
 pub mod snapshot;
@@ -201,6 +202,9 @@ pub enum Source {
     Prebuilt(BookrackBin),
     /// A script standing in for the binary, for the tool's own tests.
     StandIn(PathBuf),
+    /// A binary already on disk, such as a release's: copied in after
+    /// the variable-claim gate passes.
+    File(PathBuf),
 }
 
 impl Source {
@@ -209,12 +213,13 @@ impl Source {
             Source::Cargo => "cargo",
             Source::Prebuilt(_) => "prebuilt",
             Source::StandIn(_) => "stand-in",
+            Source::File(_) => "file",
         }
     }
 }
 
 /// What a new sandbox is filled with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Preset {
     /// One empty library root, `alpha`, registered as the default.
     Bare,
@@ -222,13 +227,17 @@ pub enum Preset {
     /// books, papers, an index and none, a failed and a paused job, a
     /// reference book, and two that cannot be mounted (`rich`).
     Rich,
+    /// The frozen golden of a rich sandbox another build made, imported
+    /// from the sandbox directory `from`.
+    Release { from: PathBuf },
 }
 
 impl Preset {
-    fn name(self) -> &'static str {
+    fn name(&self) -> &'static str {
         match self {
             Preset::Bare => "bare",
             Preset::Rich => "rich",
+            Preset::Release { .. } => "release",
         }
     }
 }
@@ -759,6 +768,20 @@ pub struct Marker {
     pub workspace: String,
     /// `false` from the start of a `new --replace` until it has finished.
     pub ready: bool,
+    /// `true` once `freeze` has recorded the golden: every command but a
+    /// freeze refuses the sandbox from then on.
+    #[serde(default)]
+    pub frozen: bool,
+    /// For the `release` preset, the frozen sandbox the golden came from.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// For the `release` preset, the version the frozen record names.
+    #[serde(default)]
+    pub release_version: Option<String>,
+    /// For the `release` preset, the SHA-256 of the imported golden's
+    /// signature.
+    #[serde(default)]
+    pub imported_sig_sha256: Option<String>,
 }
 
 /// One call's record, `.calls/<id>/result.json`.
@@ -879,13 +902,31 @@ pub struct CreateOpts {
     pub workspace: Option<PathBuf>,
 }
 
+/// A hook run once on a directory.
+pub type DirHook = Box<dyn FnOnce(&Path) -> io::Result<()>>;
+
+/// A hook run after each file of a copy, with the count so far.
+pub type CopyHook = Box<dyn FnMut(usize) -> io::Result<()>>;
+
 /// Points in a build at which a test may step in.
 #[derive(Default)]
 pub struct CreateHooks {
     /// Runs on the inputs directory after the preset's inputs are
     /// written and before the first step reads them, so a test can hand
     /// the build inputs that disagree with their manifest.
-    pub on_inputs: Option<Box<dyn FnOnce(&Path) -> io::Result<()>>>,
+    pub on_inputs: Option<DirHook>,
+    /// Runs after each file an import copies, so a test can change the
+    /// source part way through the copy.
+    pub on_import_copy: Option<CopyHook>,
+}
+
+/// What `create_inner` builds: the binary's source, the preset, the
+/// release record an import was checked against, and the workspace.
+struct Build {
+    source: Source,
+    preset: Preset,
+    release: Option<release::ReleaseRecord>,
+    workspace: PathBuf,
 }
 
 /// A sandbox opened in this process: one command at a time, each under
@@ -929,6 +970,18 @@ impl Session {
                 .join(dir)
         };
         let args: Vec<String> = vec![abs.display().to_string()];
+
+        // A frozen sandbox refuses to be rebuilt before anything is
+        // locked or cleared; the marker alone says so.
+        if let Ok((_, marker)) = Self::marker_prelock(&abs)
+            && marker.frozen
+        {
+            return Err(Outcome::refused(STAGE_PATHS, release::frozen_problem(&abs)));
+        }
+        let release = match &preset {
+            Preset::Release { from } => Some(release::preflight_import(&abs, from)?),
+            _ => None,
+        };
 
         let existing = if create.replace {
             Some(Self::marker_prelock(&abs)?)
@@ -981,15 +1034,14 @@ impl Session {
             _lock: lock,
             cell: None,
         };
+        let build = Build {
+            source,
+            preset,
+            release,
+            workspace,
+        };
         let result = session
-            .create_inner(
-                &mut call,
-                source,
-                preset,
-                create.replace,
-                &workspace,
-                &mut hooks,
-            )
+            .create_inner(&mut call, build, create.replace, &mut hooks)
             .await;
         session.end(call, result)?;
         Ok(session)
@@ -998,12 +1050,17 @@ impl Session {
     async fn create_inner(
         &mut self,
         call: &mut Call,
-        source: Source,
-        preset: Preset,
+        build: Build,
         replace: bool,
-        workspace: &Path,
         hooks: &mut CreateHooks,
     ) -> ToolResult<Outcome> {
+        let Build {
+            source,
+            preset,
+            release,
+            workspace,
+        } = build;
+        let workspace = workspace.as_path();
         let paths = self.paths.clone();
         if replace {
             self.ensure_no_writer()?;
@@ -1061,7 +1118,7 @@ impl Session {
 
         // The marker goes first, not ready, so a build that fails from
         // here on leaves a sandbox `new --replace` can rebuild.
-        let mut marker = Marker {
+        let marker = Marker {
             tool_version: TOOL_VERSION.to_string(),
             preset: preset.name().to_string(),
             source: source.kind().to_string(),
@@ -1069,6 +1126,10 @@ impl Session {
             dir: paths.dir().display().to_string(),
             workspace: workspace.display().to_string(),
             ready: false,
+            frozen: false,
+            from: None,
+            release_version: None,
+            imported_sig_sha256: None,
         };
         write_json(&paths.marker(), &marker)
             .map_err(|e| Outcome::io(STAGE_PATHS, "write the sandbox marker", e))?;
@@ -1088,10 +1149,21 @@ impl Session {
             std::fs::create_dir_all(&dir)
                 .map_err(|e| Outcome::io(STAGE_PATHS, "build the run tree", e))?;
         }
+        let mut no_hooks = build::BuildHooks::default();
         let record = match &source {
-            Source::Cargo => build::build_cargo(&paths, workspace).await?,
-            Source::Prebuilt(bin) => build::install_copy(&paths, &bin.path, "prebuilt")?,
-            Source::StandIn(path) => build::install_copy(&paths, path, "stand-in")?,
+            Source::Cargo => {
+                build::build_cargo(&paths, Some(&host), workspace, &mut no_hooks).await?
+            }
+            Source::Prebuilt(bin) => {
+                build::install_copy(&paths, Some(&host), &bin.path, "prebuilt", &mut no_hooks)
+                    .await?
+            }
+            Source::File(path) => {
+                build::install_copy(&paths, Some(&host), path, "file", &mut no_hooks).await?
+            }
+            Source::StandIn(path) => {
+                build::install_copy(&paths, None, path, "stand-in", &mut no_hooks).await?
+            }
         };
         call.note(format!("binary: {} {}", record.kind, record.sha256));
         match preset {
@@ -1101,7 +1173,15 @@ impl Session {
                 snapshot::switch(&paths, snapshot::Direction::Snapshot, &mut |_| Ok(()))?;
             }
             Preset::Rich => self.build_rich(call, hooks).await?,
+            Preset::Release { from } => {
+                let release = release.expect("an import was checked before the lock");
+                self.import_release(call, &from, &release, hooks).await?;
+            }
         }
+        // The preset may have added to the marker; the ready flag goes on
+        // what is there now.
+        let mut marker: Marker = read_json(&paths.marker())
+            .map_err(|e| Outcome::io(STAGE_PATHS, "read the sandbox marker", e))?;
         marker.ready = true;
         write_json(&paths.marker(), &marker)
             .map_err(|e| Outcome::io(STAGE_PATHS, "write the sandbox marker", e))?;
@@ -1109,8 +1189,27 @@ impl Session {
     }
 
     /// Open the sandbox at `dir`, checking its marker. No lock is taken
-    /// until a call.
+    /// until a call. A frozen sandbox is refused here.
     pub fn open(dir: &Path, opts: SessionOpts) -> ToolResult<Session> {
+        let (paths, marker) = Self::marker_prelock(dir)?;
+        if marker.frozen {
+            return Err(Outcome::refused(
+                STAGE_PATHS,
+                release::frozen_problem(paths.dir()),
+            ));
+        }
+        Ok(Session {
+            paths,
+            opts,
+            stub_url: None,
+            stubs: Vec::new(),
+            daemon: None,
+        })
+    }
+
+    /// [`open`](Self::open) for `freeze` alone: a frozen sandbox opens,
+    /// so an interrupted freeze can be finished.
+    pub fn open_for_freeze(dir: &Path, opts: SessionOpts) -> ToolResult<Session> {
         let (paths, _) = Self::marker_prelock(dir)?;
         Ok(Session {
             paths,
@@ -1291,6 +1390,36 @@ impl Session {
         args: Vec<String>,
         exclusive: bool,
     ) -> ToolResult<Call> {
+        self.begin_with(command, args, exclusive, false).await
+    }
+
+    /// [`begin`](Self::begin), with the frozen checks skipped for the
+    /// one command they must not stop. The frozen state is read before
+    /// the lock is taken and again once it is held, so a session opened
+    /// before the freeze, or one that waited for the lock while another
+    /// froze the sandbox, is refused too; neither refusal writes a
+    /// record or touches the tree.
+    pub(crate) async fn begin_with(
+        &self,
+        command: &'static str,
+        args: Vec<String>,
+        exclusive: bool,
+        allow_frozen: bool,
+    ) -> ToolResult<Call> {
+        let frozen = |this: &Self| -> ToolResult<()> {
+            if allow_frozen {
+                return Ok(());
+            }
+            let (_, marker) = Self::marker_prelock(this.paths.dir())?;
+            if marker.frozen {
+                return Err(Outcome::refused(
+                    STAGE_PATHS,
+                    release::frozen_problem(this.paths.dir()),
+                ));
+            }
+            Ok(())
+        };
+        frozen(self)?;
         let lock = match self.acquire(exclusive).await {
             Ok(lock) => lock,
             Err(outcome) => {
@@ -1307,6 +1436,7 @@ impl Session {
             _lock: lock,
             cell: None,
         };
+        frozen(self)?;
         if exclusive {
             match snapshot::cleanup_residue(&self.paths) {
                 Ok(notes) => call.notes.extend(notes),

@@ -43,6 +43,7 @@ mod retrieval_weak_advisory;
 mod root_identity_gate;
 mod rpc_e2e;
 mod run_ready_line;
+mod sandbox_release;
 mod sandbox_rich;
 mod sandbox_session;
 mod show_reference;

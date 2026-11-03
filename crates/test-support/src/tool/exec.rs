@@ -724,18 +724,41 @@ impl Session {
         }
     }
 
-    /// Rebuild or re-copy the binary under test.
+    /// Rebuild or re-copy the binary under test, through the
+    /// variable-claim gate for every source but a stand-in.
     pub async fn build(&mut self) -> ToolResult<BinaryRecord> {
+        self.build_with(build::BuildHooks::default()).await
+    }
+
+    /// [`build`](Self::build) with `hooks` run at the points they name,
+    /// for a test to interrupt the install between its steps.
+    #[doc(hidden)]
+    pub async fn build_with(&mut self, mut hooks: build::BuildHooks) -> ToolResult<BinaryRecord> {
         let call = self.begin("build", Vec::new(), true).await?;
         let result = async {
             self.ensure_no_writer()?;
             let marker = super::Session::marker_prelock(self.paths().dir())?.1;
             let paths = self.paths().clone();
+            let host = self.host()?;
             match marker.source.as_str() {
-                "cargo" => build::build_cargo(&paths, Path::new(&marker.workspace)).await,
+                "cargo" => {
+                    build::build_cargo(
+                        &paths,
+                        Some(&host),
+                        Path::new(&marker.workspace),
+                        &mut hooks,
+                    )
+                    .await
+                }
                 kind => {
                     let record = build::read_record(&paths)?;
-                    build::install_copy(&paths, Path::new(&record.origin), kind)
+                    let gated = if kind == "stand-in" {
+                        None
+                    } else {
+                        Some(&host)
+                    };
+                    build::install_copy(&paths, gated, Path::new(&record.origin), kind, &mut hooks)
+                        .await
                 }
             }
         }

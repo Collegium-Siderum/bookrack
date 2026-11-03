@@ -450,6 +450,7 @@ async fn a_golden_that_kept_only_the_unique_sentences_fails_acceptance() {
                 .collect();
             std::fs::write(&path, format!("{}\n\n", kept.join("\n\n")))
         })),
+        ..CreateHooks::default()
     };
     let failed = build_rich(root.path(), hooks)
         .await
