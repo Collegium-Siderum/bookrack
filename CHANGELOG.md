@@ -37,6 +37,8 @@ release workflow extracts the matching section verbatim from this file.
   direction of the mismatch in the hint, no longer `-32603`; and the
   request is validated before the store is looked for, so a bad
   argument on an unreadable store is reported as the argument error.
+  `reference.overlay_set` reports a store at a newer schema the same
+  way, `-32018` where it was `-32603`, and leaves the store unwritten.
 - **`show` and `papers show` exit `2` for an id the library does not
   hold**, with a three-part message naming the id, the library and the
   listing command for the kind, and nothing on stdout. They used to

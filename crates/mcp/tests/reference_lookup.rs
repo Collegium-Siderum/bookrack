@@ -11,9 +11,10 @@
 //!   followed redirect, a `fields` projection and a `min_severity`
 //!   filter — and, when they fail, the same error code;
 //! * a library with no reference store answers no hits from the tool;
-//! * the `reference.overlay_set` tool keeps its own mapping: a store
-//!   schema this build does not read is `internal_error` there and
-//!   `state unusable` from the lookup tool.
+//! * a reference store at a schema newer than this build is
+//!   `state unusable` from the `reference.overlay_set` tool as it is
+//!   from the lookup tool, with the same summary, and the overlay is not
+//!   written.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -427,7 +428,7 @@ async fn a_library_without_reference_books_answers_no_hits() {
 }
 
 #[tokio::test]
-async fn overlay_keeps_its_error_mapping() {
+async fn a_newer_store_is_unusable_to_the_overlay_as_to_the_lookup() {
     let fx = Fixture::start().await;
     let client = fx.connect().await;
     fx.stamp_newer_schema();
@@ -447,7 +448,27 @@ async fn overlay_keeps_its_error_mapping() {
             .await
             .expect_err("the overlay cannot open a newer store"),
     );
-    assert_eq!(overlay.code, ErrorCode::INTERNAL_ERROR, "{overlay:?}");
+    assert_eq!(overlay.code, ErrorCode(STATE_UNUSABLE), "{overlay:?}");
+    assert_eq!(
+        overlay.message, "cannot read the reference store",
+        "{overlay:?}"
+    );
+    let data = overlay.data.clone().expect("detail and hint");
+    assert!(
+        data["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains(&format!("schema {}", bookrack_refs::TARGET_VERSION + 1))),
+        "{overlay:?}"
+    );
+    let version: i64 = bookrack_dbkit::open_production(&fx.with_root.join("reference.db"))
+        .expect("open reference.db")
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("user_version");
+    assert_eq!(
+        version,
+        bookrack_refs::TARGET_VERSION + 1,
+        "the refused overlay must not have migrated the store"
+    );
 
     let lookup = rpc_error(
         client

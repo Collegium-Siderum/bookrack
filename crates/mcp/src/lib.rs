@@ -2171,6 +2171,20 @@ impl BookrackServer {
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(Some(args.library.as_str()))?;
         let refs_path = handle.ops().reference_db_path();
+        // A store at a schema newer than this build is refused the way
+        // the lookup refuses it, before the writable open would try to
+        // migrate it.
+        if refs_path.exists()
+            && let Err(source @ bookrack_refs::RefsError::SchemaTooNew { .. }) =
+                bookrack_refs::Refs::open_read_only(&refs_path)
+        {
+            return Err(reference_lookup_error_to_mcp(
+                reads::reference::ReferenceLookupError::Open {
+                    path: refs_path,
+                    source,
+                },
+            ));
+        }
         let refs = bookrack_refs::Refs::open(&refs_path)
             .map_err(|e| internal_message(format!("open reference.db: {e}")))?;
         let edited_at = chrono::Utc::now().to_rfc3339();
