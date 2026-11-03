@@ -51,6 +51,34 @@ sleep 30 >/dev/null 2>&1 &
 wait
 "#;
 
+/// [`DAEMON_BODY`] with a `quit` arm: `bookrack quit` records its
+/// environment under `__ROOT__/quit.env` and runs `__QUIT_ARM__`, whose
+/// usual form creates `__ROOT__/quit.flag`; the daemon leaves when the
+/// flag appears, with the exit code the flag holds (empty is 0), and
+/// notes a `SIGTERM` under `__ROOT__/term.seen` before exiting 0 on
+/// it. The test substitutes both placeholders when it writes the
+/// script, so no path travels through the environment.
+pub const QUIT_DAEMON_BODY: &str = r#"
+case " $* " in
+  *" quit "*)
+    env > "__ROOT__/quit.env"
+    __QUIT_ARM__
+    exit 0 ;;
+esac
+LOCK="$BOOKRACK_RUNTIME_DIR/bookrack.tty.lock"
+SOCK="$BOOKRACK_RUNTIME_DIR/control.sock"
+printf 'pid=%s\nmcp=127.0.0.1:1\ncontrol_sock=%s\n' $$ "$SOCK" > "$LOCK"
+echo "bookrack daemon running: pid=$$ mcp=127.0.0.1:1 control_sock=$SOCK"
+trap 'echo term > "__ROOT__/term.seen"; exit 0' TERM
+while [ ! -e "__ROOT__/quit.flag" ]; do sleep 0.1; done
+CODE=$(cat "__ROOT__/quit.flag")
+exit "${CODE:-0}"
+"#;
+
+/// The `__QUIT_ARM__` of a `quit` that takes effect: the flag appears,
+/// empty, and the daemon leaves with 0.
+pub const QUIT_ARM_OK: &str = r#": > "__ROOT__/quit.flag""#;
+
 pub struct World {
     pub root: TempDir,
     pub dir: PathBuf,

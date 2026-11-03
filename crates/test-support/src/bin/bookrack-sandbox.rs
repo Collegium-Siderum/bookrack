@@ -15,7 +15,7 @@ mod unix {
     use bookrack_core::Problem;
     use bookrack_test_support::Vectors;
     use bookrack_test_support::tool::exec::{
-        Capture, DEFAULT_DAEMON_TIMEOUT, DaemonStart, ExecOpts,
+        Capture, DEFAULT_DAEMON_TIMEOUT, DaemonStart, ExecOpts, QUIT_DEADLINE, StopVia,
     };
     use bookrack_test_support::tool::recover::{DEFAULT_STOP_TIMEOUT, Report};
     use bookrack_test_support::tool::stub::DEFAULT_STUB_DIM;
@@ -43,6 +43,24 @@ mod unix {
         Bare,
         Rich,
         Release,
+    }
+
+    #[derive(Clone, Copy, ValueEnum, Default)]
+    enum ViaArg {
+        #[default]
+        Term,
+        Quit,
+    }
+
+    impl ViaArg {
+        fn via(self) -> StopVia {
+            match self {
+                ViaArg::Term => StopVia::Term,
+                ViaArg::Quit => StopVia::Quit {
+                    deadline: QUIT_DEADLINE,
+                },
+            }
+        }
     }
 
     #[derive(Clone, Copy, ValueEnum, Default)]
@@ -121,8 +139,12 @@ mod unix {
             #[arg(long, value_name = "SECS")]
             timeout: Option<u64>,
             /// Close every unfinished instance without sending anything.
-            #[arg(long)]
+            #[arg(long, conflicts_with = "via")]
             forget: bool,
+            /// How the daemon is asked to leave: SIGTERM, or `bookrack
+            /// quit` run inside the sandbox.
+            #[arg(long, value_enum, default_value_t)]
+            via: ViaArg,
         },
         /// Print what every unfinished daemon instance is, as JSON.
         Status { dir: PathBuf },
@@ -492,10 +514,17 @@ mod unix {
                 finish_line(session.detached_daemon_start(start).await)
             }
             DaemonCommand::Stop {
-                timeout, forget, ..
+                timeout,
+                forget,
+                via,
+                ..
             } => {
                 let within = timeout.map_or(DEFAULT_STOP_TIMEOUT, Duration::from_secs);
-                finish_report(session.daemon_stop_instances(within, forget).await)
+                finish_report(
+                    session
+                        .daemon_stop_instances_via(within, forget, via.via())
+                        .await,
+                )
             }
             DaemonCommand::Status { .. } => {
                 finish_line(session.daemon_status().await.map(|v| v.to_string()))

@@ -94,6 +94,21 @@ pub struct ExecOutcome {
     pub cell: Option<PathBuf>,
 }
 
+/// How a held daemon is asked to leave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopVia {
+    /// `SIGTERM`, then the wait.
+    Term,
+    /// `bookrack quit` run inside the sandbox, through the tripwires,
+    /// within `deadline`; then the wait, with no signal sent. A `quit`
+    /// that does not exit 0 leaves the daemon alone.
+    Quit { deadline: Duration },
+}
+
+/// How long `daemon stop --via quit` gives the `quit` command itself.
+// setting: internal -- the deadline of the quit command a stop runs, not a value to tune
+pub const QUIT_DEADLINE: Duration = Duration::from_secs(10);
+
 /// How a daemon is started.
 #[derive(Debug, Clone)]
 pub struct DaemonStart {
@@ -927,10 +942,19 @@ impl Session {
 
     /// Stop the held daemon with `SIGTERM`, recording how it ended.
     pub async fn daemon_stop(&mut self, within: Duration) -> ToolResult<Outcome> {
+        self.daemon_stop_via(within, StopVia::Term).await
+    }
+
+    /// Stop the held daemon as `via` says, recording how it ended.
+    pub async fn daemon_stop_via(&mut self, within: Duration, via: StopVia) -> ToolResult<Outcome> {
         let mut call = self
-            .begin("daemon stop", vec![format!("{within:?}")], true)
+            .begin(
+                "daemon stop",
+                vec![format!("{within:?}"), format!("via={}", via_word(via))],
+                true,
+            )
             .await?;
-        let result = self.daemon_stop_inner(&mut call, within).await;
+        let result = self.daemon_stop_via_inner(&mut call, within, via).await;
         self.end(call, result)
     }
 
@@ -941,7 +965,22 @@ impl Session {
         call: &mut Call,
         within: Duration,
     ) -> ToolResult<Outcome> {
-        let Some(live) = self.take_daemon() else {
+        self.daemon_stop_via_inner(call, within, StopVia::Term)
+            .await
+    }
+
+    /// [`daemon_stop_via`](Self::daemon_stop_via) inside a call the
+    /// caller already holds. The daemon stays held until `quit` has
+    /// exited 0: a daemon taken out of the session and then returned
+    /// from part way would be reclaimed by its guard, which a failed
+    /// `quit` must not do.
+    pub(crate) async fn daemon_stop_via_inner(
+        &mut self,
+        call: &mut Call,
+        within: Duration,
+        via: StopVia,
+    ) -> ToolResult<Outcome> {
+        let Some(live) = self.daemon() else {
             return Err(Outcome::refused(
                 STAGE_INSTANCE,
                 Problem::new("no daemon this session started is running")
@@ -949,13 +988,77 @@ impl Session {
             ));
         };
         call.set_instance(live.instance);
+        if let StopVia::Quit { deadline } = via {
+            self.run_quit(call, deadline).await?;
+        }
+        let live = self
+            .take_daemon()
+            .expect("the daemon was held a moment ago");
         let instance = self.paths().daemon_instance(live.instance);
-        let outcome = stop_outcome(live.process.stop(within).await);
+        let outcome = match via {
+            StopVia::Term => stop_outcome(live.process.stop(within).await),
+            StopVia::Quit { .. } => stop_outcome(live.process.exit_within(within).await),
+        };
         write_json(&instance.join("exit.json"), &ExitRecord::from(&outcome))
             .map_err(|e| Outcome::io(STAGE_INSTANCE, "write exit.json", e))?;
         Ok(outcome)
     }
+
+    /// Run `bookrack quit` inside the sandbox, as `exec` would, within
+    /// `deadline`. A tripped wire is the refusal it always is; a `quit`
+    /// that did not exit 0 is a tool error at the stop stage, and the
+    /// daemon is left as it is, since the request may or may not have
+    /// reached it.
+    pub(crate) async fn run_quit(&self, call: &mut Call, deadline: Duration) -> ToolResult<()> {
+        let opts = ExecOpts {
+            timeout: deadline,
+            capture: Capture::Memory,
+            ..ExecOpts::default()
+        };
+        let mut output = None;
+        let args = [OsString::from("quit")];
+        let outcome = self.exec_inner(call, &args, &opts, &mut output).await?;
+        let stderr = match output {
+            Some(Output::Memory { stderr, .. }) => stderr,
+            _ => Vec::new(),
+        };
+        let tail = {
+            let start = stderr.len().saturating_sub(QUIT_STDERR_TAIL);
+            String::from_utf8_lossy(&stderr[start..]).trim().to_string()
+        };
+        if (outcome.class, outcome.code) != (Class::Exited, Some(0)) {
+            return Err(Outcome::tool_error(
+                stage_name(Stage::Stop),
+                Problem::new("could not stop the daemon through quit")
+                    .detail(format!(
+                        "quit ended as {:?} {:?}; stderr: {tail}",
+                        outcome.class, outcome.code
+                    ))
+                    .hint(
+                        "Run 'bookrack-sandbox daemon status <dir>'; if the daemon is still \
+                         running, 'bookrack-sandbox daemon stop <dir>' stops it with SIGTERM.",
+                    ),
+            ));
+        }
+        call.note("quit: exited 0");
+        if !tail.is_empty() {
+            call.note(format!("quit stderr: {tail}"));
+        }
+        Ok(())
+    }
 }
+
+/// The word a record carries for a [`StopVia`].
+pub fn via_word(via: StopVia) -> &'static str {
+    match via {
+        StopVia::Term => "term",
+        StopVia::Quit { .. } => "quit",
+    }
+}
+
+/// The most of `quit`'s stderr a note or a problem carries.
+// setting: internal -- bounds a stderr excerpt, not a value to tune
+const QUIT_STDERR_TAIL: usize = 1024;
 
 /// Rewrite `spawn.json` with the spawned daemon's pid and group.
 pub(crate) fn record_spawn(instance: &Path, daemon: &DaemonProcess) -> ToolResult<()> {

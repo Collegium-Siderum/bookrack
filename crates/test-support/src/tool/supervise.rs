@@ -83,6 +83,9 @@ pub enum Request {
     Status,
     Stop {
         within: Duration,
+        /// Whether to send `SIGTERM`; `false` waits for an exit the
+        /// daemon was asked for another way.
+        signal: bool,
     },
     /// Anything else, with what was wrong with it.
     Unknown(String),
@@ -101,6 +104,9 @@ pub enum Action {
     /// Stop the ready daemon within the duration, write `exit.json`,
     /// answer, exit.
     Stop(Duration),
+    /// Wait for the ready daemon to exit within the duration without
+    /// signalling it, write `exit.json`, answer, exit.
+    AwaitExit(Duration),
     /// Answer with an error and go on.
     Refuse(String),
 }
@@ -111,7 +117,20 @@ pub fn respond(phase: Phase, request: &Request) -> Action {
         (_, Request::Status) => Action::Status,
         (Phase::Handoff, Request::Stop { .. }) => Action::AbortHandoff,
         (Phase::Starting, Request::Stop { .. }) => Action::CancelStart,
-        (Phase::Running, Request::Stop { within }) => Action::Stop(*within),
+        (
+            Phase::Running,
+            Request::Stop {
+                within,
+                signal: true,
+            },
+        ) => Action::Stop(*within),
+        (
+            Phase::Running,
+            Request::Stop {
+                within,
+                signal: false,
+            },
+        ) => Action::AwaitExit(*within),
         (_, Request::Unknown(why)) => Action::Refuse(why.clone()),
     }
 }
@@ -127,6 +146,7 @@ pub fn parse_request(line: &str) -> Request {
         Some("stop") => match value.get("within_ms").and_then(Value::as_u64) {
             Some(ms) => Request::Stop {
                 within: Duration::from_millis(ms),
+                signal: value.get("signal").and_then(Value::as_bool).unwrap_or(true),
             },
             None => Request::Unknown("a stop needs within_ms".to_string()),
         },
@@ -661,6 +681,14 @@ pub async fn supervise(dir: &Path, n: u32, opts: SessionOpts) -> i32 {
                         incoming.reply.send(json!({ "phase": "running", "exit": record })).await;
                         return finish(&sock);
                     }
+                    Action::AwaitExit(within) => {
+                        let record =
+                            ExitRecord::from(&stop_outcome(daemon.exit_within(within).await))
+                                .with_phase("running");
+                        exit(&record);
+                        incoming.reply.send(json!({ "phase": "running", "exit": record })).await;
+                        return finish(&sock);
+                    }
                     Action::AbortHandoff | Action::CancelStart => {
                         unreachable!("a running supervisor neither hands off nor starts")
                     }
@@ -670,11 +698,13 @@ pub async fn supervise(dir: &Path, n: u32, opts: SessionOpts) -> i32 {
                 match daemon.has_exited() {
                     Ok(false) => {}
                     Ok(true) | Err(_) => {
+                        // An exit noticed here happened in the running
+                        // phase, whoever asked for it.
                         let outcome = match daemon.exit_within(Duration::ZERO).await {
                             Ok(exit) => Outcome::from_exit(exit.status),
                             Err(failure) => Outcome::from_failure(&failure),
                         };
-                        exit(&ExitRecord::from(&outcome));
+                        exit(&ExitRecord::from(&outcome).with_phase("running"));
                         return finish(&sock);
                     }
                 }
@@ -697,17 +727,29 @@ mod tests {
     fn every_phase_answers_every_request() {
         let stop = Request::Stop {
             within: Duration::from_secs(3),
+            signal: true,
+        };
+        let wait = Request::Stop {
+            within: Duration::from_secs(3),
+            signal: false,
         };
         let unknown = Request::Unknown("x".to_string());
         let table = [
             (Phase::Handoff, &Request::Status, Action::Status),
             (Phase::Handoff, &stop, Action::AbortHandoff),
+            (Phase::Handoff, &wait, Action::AbortHandoff),
             (Phase::Handoff, &unknown, Action::Refuse("x".into())),
             (Phase::Starting, &Request::Status, Action::Status),
             (Phase::Starting, &stop, Action::CancelStart),
+            (Phase::Starting, &wait, Action::CancelStart),
             (Phase::Starting, &unknown, Action::Refuse("x".into())),
             (Phase::Running, &Request::Status, Action::Status),
             (Phase::Running, &stop, Action::Stop(Duration::from_secs(3))),
+            (
+                Phase::Running,
+                &wait,
+                Action::AwaitExit(Duration::from_secs(3)),
+            ),
             (Phase::Running, &unknown, Action::Refuse("x".into())),
         ];
         for (phase, request, action) in table {
@@ -721,7 +763,15 @@ mod tests {
         assert_eq!(
             parse_request(r#"{"op":"stop","within_ms":1500}"#),
             Request::Stop {
-                within: Duration::from_millis(1500)
+                within: Duration::from_millis(1500),
+                signal: true,
+            }
+        );
+        assert_eq!(
+            parse_request(r#"{"op":"stop","within_ms":1500,"signal":false}"#),
+            Request::Stop {
+                within: Duration::from_millis(1500),
+                signal: false,
             }
         );
         for bad in [

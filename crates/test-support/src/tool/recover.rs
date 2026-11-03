@@ -18,7 +18,7 @@ use bookrack_core::Problem;
 use serde_json::{Value, json};
 
 use super::detach::{self, Reason, Registration, read_state_opt, write_recovered};
-use super::exec::{ExitRecord, Hosting, SpawnRecord, StartRecord};
+use super::exec::{ExitRecord, Hosting, SpawnRecord, StartRecord, StopVia, via_word};
 use super::stub::{forget_hint, poll_exit};
 use super::supervise::{CLIENT_MARGIN, STATUS_DEADLINE, ask};
 use super::{
@@ -322,16 +322,34 @@ impl Session {
         within: Duration,
         forget: bool,
     ) -> ToolResult<Report> {
+        self.daemon_stop_instances_via(within, forget, StopVia::Term)
+            .await
+    }
+
+    /// [`daemon_stop_instances`](Self::daemon_stop_instances) as `via`
+    /// says. `quit` applies to a daemon a supervisor holds in its
+    /// running phase; every other instance is handled as a `SIGTERM`
+    /// stop would, and the record says so.
+    pub async fn daemon_stop_instances_via(
+        &mut self,
+        within: Duration,
+        forget: bool,
+        via: StopVia,
+    ) -> ToolResult<Report> {
         let mut call = self
             .begin(
                 "daemon stop",
-                vec![format!("{within:?}"), format!("forget={forget}")],
+                vec![
+                    format!("{within:?}"),
+                    format!("forget={forget}"),
+                    format!("via={}", via_word(via)),
+                ],
                 true,
             )
             .await?;
         let mut lines = Vec::new();
         let result = self
-            .daemon_stop_detached(&mut call, within, forget, &mut lines)
+            .daemon_stop_detached(&mut call, within, forget, via, &mut lines)
             .await;
         let outcome = match self.end(call, result) {
             Ok(outcome) | Err(outcome) => outcome,
@@ -344,6 +362,7 @@ impl Session {
         call: &mut Call,
         within: Duration,
         forget: bool,
+        via: StopVia,
         lines: &mut Vec<String>,
     ) -> ToolResult<Outcome> {
         let paths = self.paths().clone();
@@ -371,9 +390,25 @@ impl Session {
             }
             let (state, view, _) = judge_daemon(&paths, n).await?;
             let this = match state {
-                DaemonState::Running { .. } => {
+                DaemonState::Running { phase } => {
+                    let quit = match via {
+                        StopVia::Quit { deadline } if phase == "running" => Some(deadline),
+                        StopVia::Quit { .. } => {
+                            call.note("via quit applies only to a running daemon");
+                            None
+                        }
+                        StopVia::Term => None,
+                    };
+                    if let Some(deadline) = quit {
+                        self.run_quit(call, deadline).await?;
+                        self.pause(super::PAUSE_STOP_BEFORE_REQUEST).await;
+                    }
                     let sock = instance.join("supervisor.sock");
-                    let request = json!({ "op": "stop", "within_ms": within.as_millis() as u64 });
+                    let request = json!({
+                        "op": "stop",
+                        "within_ms": within.as_millis() as u64,
+                        "signal": quit.is_none(),
+                    });
                     match ask(&sock, &request, within + TEARDOWN_BUDGET + CLIENT_MARGIN).await {
                         Ok(answer) => {
                             let exit: Option<ExitRecord> =
@@ -403,7 +438,14 @@ impl Session {
                                 Some(exit) => {
                                     call.note(format!("the stop went unanswered ({why}); the supervisor wrote exit.json"));
                                     lines.push(json!({ "n": n, "exit": exit }).to_string());
-                                    Ok(Outcome::ok())
+                                    // After a quit the daemon's own exit is
+                                    // the answer; after a signal, that it
+                                    // stopped is.
+                                    if quit.is_some() {
+                                        Ok(exit.outcome())
+                                    } else {
+                                        Ok(Outcome::ok())
+                                    }
                                 }
                                 None => Err(Outcome::tool_error(
                                     STAGE_SUPERVISOR,
@@ -514,7 +556,13 @@ impl Session {
         let mut call = self.begin("teardown", Vec::new(), true).await?;
         let mut lines = Vec::new();
         let daemon = match self
-            .daemon_stop_detached(&mut call, DEFAULT_STOP_TIMEOUT, false, &mut lines)
+            .daemon_stop_detached(
+                &mut call,
+                DEFAULT_STOP_TIMEOUT,
+                false,
+                StopVia::Term,
+                &mut lines,
+            )
             .await
         {
             Ok(outcome) | Err(outcome) => outcome,

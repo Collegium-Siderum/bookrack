@@ -25,7 +25,10 @@ use bookrack_test_support::{DaemonProcess, SpawnOpts, TEARDOWN_BUDGET};
 use rustix::process::{Pid, Signal};
 use serde_json::{Value, json};
 
-use common::sandbox::{DAEMON_BODY, PRELUDE, Probe, World, code, read_json, serve_version, stderr};
+use common::sandbox::{
+    DAEMON_BODY, PRELUDE, Probe, QUIT_ARM_OK, QUIT_DAEMON_BODY, World, code, read_json,
+    serve_version, stderr,
+};
 
 /// What a client adds over a supervisor's own bound, restated.
 const CLIENT_MARGIN: Duration = Duration::from_secs(2);
@@ -1064,4 +1067,279 @@ fn a_started_stub_answers_at_its_width() {
         TcpStream::connect(addr).is_err(),
         "the stopped stub still answers"
     );
+}
+
+// Stopping through quit
+
+/// A daemon-shaped stand-in whose `quit` runs `arm`, with the control
+/// socket answered by the test. The root is written into the script.
+fn quit_world(arm: &str) -> (World, Arc<AtomicUsize>) {
+    let world = World::new("");
+    let root = world.root.path().canonicalize().expect("canonical");
+    let body = QUIT_DAEMON_BODY
+        .replace("__QUIT_ARM__", arm)
+        .replace("__ROOT__", &root.display().to_string());
+    rebuild(&world, &body);
+    let accepted = serve_version(&world.host().join("runtime/control.sock"));
+    (world, accepted)
+}
+
+fn quit_file(world: &World, name: &str) -> PathBuf {
+    world
+        .root
+        .path()
+        .canonicalize()
+        .expect("canonical")
+        .join(name)
+}
+
+/// The variable `key` as `quit` saw it, from the environment it wrote.
+fn quit_env(world: &World, key: &str) -> Option<String> {
+    let env = std::fs::read_to_string(quit_file(world, "quit.env")).expect("quit.env");
+    env.lines()
+        .find_map(|line| line.strip_prefix(&format!("{key}=")).map(str::to_string))
+}
+
+/// Q1: a quit stop runs `quit` in the daemon's plan, sends no signal,
+/// and waits for the exit the daemon makes on its own.
+#[test]
+fn a_quit_stop_runs_quit_in_the_plan_and_waits() {
+    let (world, _accepted) = quit_world(QUIT_ARM_OK);
+    let url = stub_start(&world, &[]);
+    daemon_start(&world);
+    let out = world.tool(&["daemon", "stop", &world.dir_s(), "--via", "quit"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let exit = read_json(&instance(&world, "daemon", 1).join("exit.json"));
+    assert_eq!(
+        (
+            exit["class"].as_str(),
+            exit["code"].as_i64(),
+            exit["phase"].as_str()
+        ),
+        (Some("exited"), Some(0), Some("running")),
+        "{exit}"
+    );
+    assert_eq!(
+        quit_env(&world, "HOME").as_deref(),
+        Some(world.host().join("home").to_str().unwrap()),
+        "quit ran in the sandbox's plan"
+    );
+    assert_eq!(
+        quit_env(&world, "BOOKRACK_OLLAMA_URL").as_deref(),
+        Some(url.as_str())
+    );
+    assert!(
+        !quit_file(&world, "term.seen").exists(),
+        "no signal was sent after quit"
+    );
+    let notes = world.last_record()["notes"].to_string();
+    assert!(notes.contains("quit: exited 0"), "{notes}");
+}
+
+/// Q1': when the daemon leaves before the stop request reaches the
+/// supervisor, the supervisor's own record still says `running`, and the
+/// stop reports the daemon's exit rather than a bare ok.
+#[test]
+fn a_daemon_gone_before_the_stop_request_reports_its_own_exit() {
+    for (arm, expected) in [(QUIT_ARM_OK, 0), (r#"printf 3 > "__ROOT__/quit.flag""#, 3)] {
+        let (world, _accepted) = quit_world(arm);
+        stub_start(&world, &[]);
+        daemon_start(&world);
+        let mut stopping = spawn(
+            &world,
+            &[
+                "--pause-at",
+                "stop:before-request",
+                "daemon",
+                "stop",
+                &world.dir_s(),
+                "--via",
+                "quit",
+            ],
+        );
+        let pause = pause_file(&world, "stop:before-request");
+        wait_for_file(&pause);
+        wait_for_file(&instance(&world, "daemon", 1).join("exit.json"));
+        std::fs::remove_file(&pause).expect("resume the stop");
+        let status = stopping.wait().expect("the stop ends");
+        assert_eq!(status.code(), Some(expected), "arm {arm:?}");
+        let exit = read_json(&instance(&world, "daemon", 1).join("exit.json"));
+        assert_eq!(
+            (
+                exit["class"].as_str(),
+                exit["code"].as_i64(),
+                exit["phase"].as_str()
+            ),
+            (Some("exited"), Some(expected as i64), Some("running")),
+            "{exit}"
+        );
+    }
+}
+
+/// Q2: a quit the daemon ignores ends in the wait's timeout, not in a
+/// signal.
+#[test]
+fn a_quit_the_daemon_ignores_ends_in_a_timeout() {
+    let (world, _accepted) = quit_world(":");
+    stub_start(&world, &[]);
+    daemon_start(&world);
+    let started = Instant::now();
+    let out = world.tool(&[
+        "daemon",
+        "stop",
+        &world.dir_s(),
+        "--via",
+        "quit",
+        "--timeout",
+        "1",
+    ]);
+    let elapsed = started.elapsed();
+    assert_eq!(code(&out), 124, "{}", stderr(&out));
+    assert_eq!(world.last_record()["class"], "timeout");
+    let budget = Duration::from_secs(1) + TEARDOWN_BUDGET + CLIENT_MARGIN + Duration::from_secs(5);
+    assert!(elapsed < budget, "took {elapsed:?}, past {budget:?}");
+    assert!(!quit_file(&world, "term.seen").exists());
+}
+
+/// Q3: a quit that fails leaves the daemon running for a later stop.
+#[test]
+fn a_failed_quit_leaves_the_daemon_running() {
+    let (world, _accepted) = quit_world("exit 3");
+    stub_start(&world, &[]);
+    daemon_start(&world);
+    let out = world.tool(&["daemon", "stop", &world.dir_s(), "--via", "quit"]);
+    assert_eq!(code(&out), 125, "{}", stderr(&out));
+    let record = world.last_record();
+    assert_eq!(record["class"], "tool-error", "{record}");
+    assert_eq!(record["stage"], "stop", "{record}");
+    assert!(
+        record["problem"]["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains('3')),
+        "{record}"
+    );
+    let state = status(&world, "daemon");
+    assert_eq!(state["unfinished"][0]["state"], "running", "{state}");
+    let out = world.tool(&["daemon", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+}
+
+/// Q3': a quit that took effect and then failed is a failed quit to the
+/// tool, which does not touch the daemon; the daemon's own exit is read
+/// from the record the supervisor wrote.
+#[test]
+fn a_quit_that_fails_after_taking_effect_is_read_from_the_record() {
+    let (world, _accepted) = quit_world(&format!("{QUIT_ARM_OK}; exit 1"));
+    stub_start(&world, &[]);
+    daemon_start(&world);
+    let out = world.tool(&["daemon", "stop", &world.dir_s(), "--via", "quit"]);
+    assert_eq!(code(&out), 125, "{}", stderr(&out));
+    assert_eq!(world.last_record()["stage"], "stop");
+    assert!(!quit_file(&world, "term.seen").exists());
+    wait_for_file(&instance(&world, "daemon", 1).join("exit.json"));
+    let state = status(&world, "daemon");
+    assert_eq!(state["unfinished"], json!([]), "{state}");
+    let exit = &state["last_ended"]["exit"];
+    assert_eq!(
+        (
+            exit["class"].as_str(),
+            exit["code"].as_i64(),
+            exit["phase"].as_str()
+        ),
+        (Some("exited"), Some(0), Some("running")),
+        "{state}"
+    );
+}
+
+/// Q5: a quit stop during bring-up cancels the start the way a signal
+/// stop does, and runs no `quit`.
+#[test]
+fn quit_during_bring_up_cancels_like_term() {
+    let world = World::new("");
+    let root = world.root.path().canonicalize().expect("canonical");
+    let quit_arm = QUIT_DAEMON_BODY
+        .split("esac")
+        .next()
+        .expect("the quit arm")
+        .to_string()
+        + "esac\nexec sleep 60\n";
+    rebuild(
+        &world,
+        &quit_arm
+            .replace("__QUIT_ARM__", QUIT_ARM_OK)
+            .replace("__ROOT__", &root.display().to_string()),
+    );
+    let mut launched = spawn(
+        &world,
+        &[
+            "daemon",
+            "start",
+            &world.dir_s(),
+            "--library",
+            "alpha",
+            "--timeout",
+            "60",
+        ],
+    );
+    let spawn_json = instance(&world, "daemon", 1).join("spawn.json");
+    wait_until("a recorded daemon pid", Duration::from_secs(10), || {
+        spawn_json.exists() && read_json(&spawn_json)["pid"].is_u64()
+    });
+    launched.kill().expect("kill the start");
+    launched.wait().expect("reap the start");
+
+    let out = world.tool(&["daemon", "stop", &world.dir_s(), "--via", "quit"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let exit = read_json(&instance(&world, "daemon", 1).join("exit.json"));
+    assert_eq!(
+        (exit["class"].as_str(), exit["phase"].as_str()),
+        (Some("not-ready"), Some("starting")),
+        "{exit}"
+    );
+    assert!(!root.join("quit.flag").exists(), "quit ran during bring-up");
+}
+
+/// T9': a quit stop runs the tripwires first; a session lock pointing
+/// at a foreign endpoint stops it before `quit` runs.
+#[test]
+fn a_quit_stop_checks_the_endpoint_again() {
+    let (world, _accepted) = quit_world(QUIT_ARM_OK);
+    stub_start(&world, &[]);
+    daemon_start(&world);
+    let lock = world.tty_lock();
+    let original = std::fs::read_to_string(&lock).expect("lock");
+    let foreign_dir = tempfile::tempdir().expect("foreign dir");
+    let foreign = foreign_dir.path().join("f.sock");
+    let listener = UnixListener::bind(&foreign).expect("bind the foreign socket");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let forged: String = original
+        .lines()
+        .map(|line| {
+            if line.starts_with("control_sock=") {
+                format!("control_sock={}", foreign.display())
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&lock, forged).expect("forge the lock");
+
+    let out = world.tool(&["daemon", "stop", &world.dir_s(), "--via", "quit"]);
+    assert_eq!(code(&out), 125, "{}", stderr(&out));
+    let record = world.last_record();
+    assert_eq!(record["class"], "refused", "{record}");
+    assert_eq!(record["stage"], "tripwire", "{record}");
+    assert!(stderr(&out).contains("T9"), "{}", stderr(&out));
+    assert!(!quit_file(&world, "quit.flag").exists(), "quit ran");
+    assert!(
+        matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "something connected to the foreign endpoint"
+    );
+    assert!(alive(registered_pid(&world, "daemon", "daemon.json")));
+
+    std::fs::write(&lock, original).expect("restore the lock");
+    let out = world.tool(&["daemon", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
 }

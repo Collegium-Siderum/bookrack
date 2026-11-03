@@ -114,6 +114,10 @@ pub const PAUSE_START_BEFORE_GO: &str = "start:before-go";
 /// background process rather than taken by the start itself.
 pub const PAUSE_SUPERVISE_AFTER_SPAWN: &str = "supervise:after-spawn";
 
+/// A `daemon stop --via quit` pauses here after `quit` exited 0 and
+/// before the stop request goes to the supervisor.
+pub const PAUSE_STOP_BEFORE_REQUEST: &str = "stop:before-request";
+
 const LOCK_NAME: &str = ".session.lock";
 const MARKER_NAME: &str = ".sandbox.json";
 const CALLS_DIR: &str = ".calls";

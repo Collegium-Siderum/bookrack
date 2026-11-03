@@ -17,7 +17,8 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use bookrack_test_support::tool::exec::{DaemonStart, ExecOpts};
+use bookrack_test_support::StubSpec;
+use bookrack_test_support::tool::exec::{DaemonStart, ExecOpts, StopVia};
 use bookrack_test_support::tool::{
     Class, CreateOpts, PAUSE_REPLACE_AFTER_CLEAR, Preset, Session, SessionOpts, Source,
 };
@@ -25,8 +26,8 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 use common::sandbox::{
-    DAEMON_BODY, PRELUDE, Probe, TOOL, World, code, read_json, serve_version, signature, stderr,
-    write_script,
+    DAEMON_BODY, PRELUDE, Probe, QUIT_ARM_OK, QUIT_DAEMON_BODY, TOOL, World, code, read_json,
+    serve_version, signature, stderr, write_script,
 };
 
 // Timeouts, capture, exit codes
@@ -989,4 +990,119 @@ fn a_failed_new_can_be_replaced() {
     assert_eq!(code(&failed), 125, "{}", stderr(&failed));
     let replaced = new(&stand_in, true);
     assert_eq!(code(&replaced), 0, "{}", stderr(&replaced));
+}
+
+/// A [`SessionWorld`] whose stand-in is the quit-capable daemon with
+/// `arm` as its `quit`, the root written into the script.
+fn quit_session_world(arm: &str) -> SessionWorld {
+    let world = SessionWorld::new("", "");
+    let root = world.root.path().canonicalize().expect("canonical");
+    let body = QUIT_DAEMON_BODY
+        .replace("__QUIT_ARM__", arm)
+        .replace("__ROOT__", &root.display().to_string());
+    write_script(
+        &world.stand_in,
+        &format!("{}{body}\n", PRELUDE.replace("__HOOK__", "")),
+    );
+    world
+}
+
+fn last_record(dir: &std::path::Path) -> Value {
+    let id = std::fs::read_to_string(dir.join(".calls/last")).expect("last");
+    read_json(&dir.join(".calls").join(id.trim()).join("result.json"))
+}
+
+/// Q1, in process: a quit stop runs `quit` in the plan, sends no signal,
+/// and waits for the daemon's own exit.
+#[tokio::test]
+async fn a_quit_stop_runs_quit_in_the_plan_and_waits_in_process() {
+    let world = quit_session_world(QUIT_ARM_OK);
+    let root = world.root.path().canonicalize().expect("canonical");
+    let mut session = world.session().await;
+    let url = session.stub_start(StubSpec::default());
+    let _accepted = serve_version(&world.dir().join("host/runtime/control.sock"));
+    session
+        .daemon_start(DaemonStart::library("alpha"))
+        .await
+        .unwrap_or_else(|o| panic!("start: {o:?}"));
+    let outcome = session
+        .daemon_stop_via(
+            Duration::from_secs(10),
+            StopVia::Quit {
+                deadline: Duration::from_secs(10),
+            },
+        )
+        .await
+        .unwrap_or_else(|o| panic!("stop: {o:?}"));
+    assert_eq!(
+        (outcome.class, outcome.code),
+        (Class::Exited, Some(0)),
+        "{outcome:?}"
+    );
+    let exit = read_json(&world.dir().join("run/daemon/1/exit.json"));
+    assert_eq!(
+        (exit["class"].as_str(), exit["code"].as_i64()),
+        (Some("exited"), Some(0))
+    );
+    let env = std::fs::read_to_string(root.join("quit.env")).expect("quit.env");
+    assert!(
+        env.lines()
+            .any(|l| l == format!("HOME={}", world.dir().join("host/home").display())),
+        "quit ran in the sandbox's plan:\n{env}"
+    );
+    assert!(
+        env.lines()
+            .any(|l| l == format!("BOOKRACK_OLLAMA_URL={url}")),
+        "{env}"
+    );
+    assert!(
+        !root.join("term.seen").exists(),
+        "no signal was sent after quit"
+    );
+    let notes = last_record(&world.dir())["notes"].to_string();
+    assert!(notes.contains("quit: exited 0"), "{notes}");
+}
+
+/// Q4: a quit that hangs past its deadline is a failed quit; the daemon
+/// is left running and still held, for a later stop.
+#[tokio::test]
+async fn a_quit_that_hangs_leaves_the_daemon_running() {
+    let world = quit_session_world("sleep 30");
+    let mut session = world.session().await;
+    session.stub_start(StubSpec::default());
+    let _accepted = serve_version(&world.dir().join("host/runtime/control.sock"));
+    let ready = session
+        .daemon_start(DaemonStart::library("alpha"))
+        .await
+        .unwrap_or_else(|o| panic!("start: {o:?}"));
+    let failed = session
+        .daemon_stop_via(
+            Duration::from_secs(10),
+            StopVia::Quit {
+                deadline: Duration::from_secs(1),
+            },
+        )
+        .await
+        .expect_err("a hanging quit fails the stop");
+    assert_eq!(failed.stage, "stop", "{failed:?}");
+    let detail = failed
+        .problem
+        .as_ref()
+        .and_then(|p| p.data.detail.clone())
+        .unwrap_or_default();
+    assert!(detail.contains("Timeout"), "{failed:?}");
+    let pid = rustix::process::Pid::from_raw(ready.pid as i32).expect("a pid");
+    assert!(
+        rustix::process::test_kill_process(pid).is_ok(),
+        "the daemon was taken down by the failed quit"
+    );
+    assert!(
+        session.daemon().is_some(),
+        "the session let go of the daemon"
+    );
+    let outcome = session
+        .daemon_stop(Duration::from_secs(10))
+        .await
+        .unwrap_or_else(|o| panic!("stop: {o:?}"));
+    assert_eq!((outcome.class, outcome.code), (Class::Exited, Some(0)));
 }
