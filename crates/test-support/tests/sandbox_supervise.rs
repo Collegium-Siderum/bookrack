@@ -917,6 +917,19 @@ fn a_stub_stop_checks_its_identity() {
     assert_eq!(code(&out), 0, "{}", stderr(&out));
 }
 
+/// A stub started without `--vectors` answers in the topic mode, the
+/// fill the acceptance check reads against.
+#[test]
+fn a_stub_starts_in_the_topic_mode_by_default() {
+    let world = World::new("");
+    stub_start(&world, &[]);
+    let record = read_json(&instance(&world, "stub", 1).join("start.json"));
+    assert_eq!(record["vectors"], "topic", "{record}");
+    assert_eq!(record["dimension"], 1024, "{record}");
+    let out = world.tool(&["stub", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+}
+
 #[test]
 fn a_stub_starts_once_and_stops_twice() {
     let world = World::new("");

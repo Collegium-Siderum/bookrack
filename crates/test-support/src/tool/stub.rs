@@ -70,6 +70,7 @@ pub fn vectors_word(vectors: Vectors) -> &'static str {
     match vectors {
         Vectors::Constant => "constant",
         Vectors::Spread => "spread",
+        Vectors::Topic => "topic",
     }
 }
 
@@ -78,6 +79,7 @@ pub fn parse_vectors(word: &str) -> Option<Vectors> {
     match word {
         "constant" => Some(Vectors::Constant),
         "spread" => Some(Vectors::Spread),
+        "topic" => Some(Vectors::Topic),
         _ => None,
     }
 }

@@ -2,6 +2,7 @@
 
 //! A loopback stand-in for the Ollama surface daemon bring-up touches.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io::{self, BufRead, Read, Write};
 use std::net::TcpListener;
@@ -39,6 +40,17 @@ const SPLITMIX_MIX1: u64 = 0xbf58_476d_1ce4_e5b9;
 /// splitmix64's second finalizer multiplier.
 // setting: internal -- part of the splitmix64 definition
 const SPLITMIX_MIX2: u64 = 0x94d0_49bb_1331_11eb;
+
+/// The weight of the input's spread vector inside a topic vector: small
+/// enough that two inputs on one topic sit within a few thousandths of
+/// each other in cosine distance, large enough that two inputs on one
+/// topic are still distinct vectors.
+// setting: internal -- the stub's topic geometry, fixed by the acceptance thresholds reading it
+const TOPIC_SCATTER: f64 = 0.05;
+
+/// The text that opens a topic mark; the ASCII digits that follow it
+/// number the topic.
+const TOPIC_MARK: &str = "sbx-topic-";
 
 /// What the `/api/embed` arm answers.
 ///
@@ -124,6 +136,20 @@ pub enum Vectors {
     /// gets the same vector, and different inputs point in different
     /// directions.
     Spread,
+    /// A retrieval-shaped fill: inputs that carry the same topic mark
+    /// point the same way, inputs on different topics are nearly
+    /// orthogonal, and an input without a mark is its spread vector.
+    ///
+    /// A mark is `sbx-topic-` followed by the longest run of ASCII
+    /// digits, read as the topic number `k`; a run that is empty or does
+    /// not fit a `usize` is not a mark. `sbx-topic-1` and `sbx-topic-12`
+    /// are two marks. An input's vector is the sum of one basis vector
+    /// per distinct `k` it carries, at axis `k mod dimension`, plus
+    /// [`TOPIC_SCATTER`] times its spread vector, normalized. The axis
+    /// wraps when `k` reaches the width, so a caller keeps its topic
+    /// numbers below the dimension; a query's instruction prefix carries
+    /// no mark and so does not move the vector.
+    Topic,
 }
 
 /// A stub's width, vector fill, and identity, valid by construction.
@@ -229,6 +255,7 @@ impl Default for StubSpec {
 /// dropped stub stops answering only when the process ends.
 pub struct EmbedStub {
     url: String,
+    spec: Arc<StubSpec>,
     failure: Arc<AtomicU8>,
     /// Receives one `()` per accepted shutdown. Behind a mutex because a
     /// receiver is not `Sync`, and the shared stub lives in a static.
@@ -269,11 +296,12 @@ impl EmbedStub {
         let failure = Arc::new(AtomicU8::new(EmbedFailure::None.as_u8()));
         let switch = Arc::clone(&failure);
         let spec = Arc::new(spec);
+        let served = Arc::clone(&spec);
         let (announce, shutdown) = mpsc::channel();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let switch = Arc::clone(&switch);
-                let spec = Arc::clone(&spec);
+                let spec = Arc::clone(&served);
                 let announce: Sender<()> = announce.clone();
                 std::thread::spawn(move || {
                     let _ = serve(stream, &switch, &spec, &|| {
@@ -284,10 +312,16 @@ impl EmbedStub {
         });
         EmbedStub {
             url,
+            spec,
             failure,
             shutdown: Mutex::new(shutdown),
             shut_down: AtomicBool::new(false),
         }
+    }
+
+    /// The width, fill and identity this stub answers with.
+    pub fn spec(&self) -> &StubSpec {
+        &self.spec
     }
 
     /// The stub shared by the whole binary, started on first call.
@@ -531,7 +565,43 @@ fn vector(input: &str, spec: &StubSpec) -> Vec<f32> {
     match spec.vectors {
         Vectors::Constant => vec![0.5; spec.dimension],
         Vectors::Spread => spread(input.as_bytes(), spec.dimension),
+        Vectors::Topic => topic(input, spec.dimension),
     }
+}
+
+/// The topic numbers `input` carries, each once; see [`Vectors::Topic`].
+fn topic_marks(input: &str) -> BTreeSet<usize> {
+    let mut marks = BTreeSet::new();
+    for (at, _) in input.match_indices(TOPIC_MARK) {
+        let rest = &input[at + TOPIC_MARK.len()..];
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        if let Ok(k) = rest[..end].parse::<usize>() {
+            marks.insert(k);
+        }
+    }
+    marks
+}
+
+/// The [`Vectors::Topic`] vector for `input`: its spread vector when it
+/// carries no mark, otherwise the marked axes plus the scattered spread
+/// vector, normalized.
+fn topic(input: &str, dimension: usize) -> Vec<f32> {
+    let scatter = spread(input.as_bytes(), dimension);
+    let marks = topic_marks(input);
+    if marks.is_empty() {
+        return scatter;
+    }
+    let mut components: Vec<f64> = scatter
+        .iter()
+        .map(|c| f64::from(*c) * TOPIC_SCATTER)
+        .collect();
+    for k in marks {
+        components[k % dimension] += 1.0;
+    }
+    let norm = components.iter().map(|c| c * c).sum::<f64>().sqrt();
+    components.iter().map(|c| (c / norm) as f32).collect()
 }
 
 /// A unit vector of `dimension` components drawn from splitmix64,
@@ -849,6 +919,156 @@ mod tests {
 
     fn spec(dimension: usize, vectors: Vectors, identity: Option<&str>) -> StubSpec {
         StubSpec::new(dimension, vectors, identity.map(str::to_string)).expect("a valid spec")
+    }
+
+    /// Three inputs on one topic, one of them behind a query-side
+    /// instruction prefix, point the same way.
+    #[test]
+    fn the_topic_mode_points_one_topic_one_way() {
+        let stub = EmbedStub::start_with(spec(1024, Vectors::Topic, None));
+        let got = embed(
+            stub.url(),
+            &[
+                "The marker sbx-alpha-b1-c1 opens this chapter under sbx-topic-3. A lantern.",
+                "Represent this sentence for searching relevant passages: sbx-topic-3",
+                "sbx-topic-3 is the only thing these three inputs share, in different words",
+            ],
+        );
+        for (i, j) in [(0, 1), (0, 2), (1, 2)] {
+            let c = cosine(&got[i], &got[j]);
+            assert!(c > 0.99, "inputs {i} and {j} have cosine {c}");
+        }
+    }
+
+    /// Different topics are nearly orthogonal, and a mark is read to
+    /// the end of its digits: `sbx-topic-1` is not a prefix of
+    /// `sbx-topic-12`.
+    #[test]
+    fn different_topics_are_nearly_orthogonal() {
+        let stub = EmbedStub::start_with(spec(1024, Vectors::Topic, None));
+        let got = embed(
+            stub.url(),
+            &[
+                "about sbx-topic-1",
+                "about sbx-topic-2",
+                "about sbx-topic-12",
+            ],
+        );
+        for (i, j) in [(0, 1), (0, 2), (1, 2)] {
+            let c = cosine(&got[i], &got[j]);
+            assert!(c.abs() < 0.1, "inputs {i} and {j} have cosine {c}");
+        }
+    }
+
+    /// An input on two topics sits between them.
+    #[test]
+    fn two_topics_split_the_vector_between_them() {
+        let stub = EmbedStub::start_with(spec(1024, Vectors::Topic, None));
+        let got = embed(
+            stub.url(),
+            &[
+                "sbx-topic-1 and sbx-topic-2 together",
+                "only sbx-topic-1",
+                "only sbx-topic-2",
+            ],
+        );
+        for j in [1, 2] {
+            let c = cosine(&got[0], &got[j]);
+            assert!((0.6..=0.8).contains(&c), "input {j}: cosine {c}");
+        }
+    }
+
+    /// A mark repeated in one input counts once: {1, 1, 2} and {1, 2}
+    /// point the same way, where counting twice would tilt the first
+    /// towards axis 1 (cosine about 0.95).
+    #[test]
+    fn a_repeated_mark_counts_once() {
+        let stub = EmbedStub::start_with(spec(1024, Vectors::Topic, None));
+        let got = embed(
+            stub.url(),
+            &[
+                "sbx-topic-1 then sbx-topic-1 again, then sbx-topic-2",
+                "sbx-topic-1 with sbx-topic-2",
+            ],
+        );
+        let c = cosine(&got[0], &got[1]);
+        assert!(c > 0.99, "cosine {c}");
+    }
+
+    /// The topic number selects the axis directly, modulo the width.
+    #[test]
+    fn the_mark_picks_its_axis() {
+        fn argmax(v: &[f64]) -> usize {
+            v.iter()
+                .enumerate()
+                .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+                .map(|(i, _)| i)
+                .expect("a component")
+        }
+        let wide = EmbedStub::start_with(spec(1024, Vectors::Topic, None));
+        assert_eq!(argmax(&embed(wide.url(), &["sbx-topic-7"])[0]), 7);
+        let narrow = EmbedStub::start_with(spec(8, Vectors::Topic, None));
+        assert_eq!(argmax(&embed(narrow.url(), &["sbx-topic-9"])[0]), 1);
+    }
+
+    /// `sbx-topic-` with no digits, or with digits past `usize`, marks
+    /// nothing: the input reads as it would in the spread mode.
+    #[test]
+    fn a_malformed_mark_reads_as_no_mark() {
+        let topic = EmbedStub::start_with(spec(64, Vectors::Topic, None));
+        let spread = EmbedStub::start_with(spec(64, Vectors::Spread, None));
+        let inputs = [
+            "sbx-topic- has nothing after it",
+            "sbx-topic-99999999999999999999999999 does not fit",
+            "sbx-topic-x is not a number",
+        ];
+        assert_eq!(embed(topic.url(), &inputs), embed(spread.url(), &inputs));
+    }
+
+    /// An input without a mark is its spread vector, component for
+    /// component.
+    #[test]
+    fn an_input_without_a_topic_reads_as_spread() {
+        let topic = EmbedStub::start_with(spec(1024, Vectors::Topic, None));
+        let spread = EmbedStub::start_with(spec(1024, Vectors::Spread, None));
+        let inputs = [
+            "a chapter with no mark at all",
+            "sbx-alpha-b1-c1 is another kind of mark",
+        ];
+        assert_eq!(embed(topic.url(), &inputs), embed(spread.url(), &inputs));
+    }
+
+    /// Topic vectors are unit vectors at any width, and the axis wraps:
+    /// at width 8, topics 9 and 1 share an axis.
+    #[test]
+    fn the_topic_mode_is_a_unit_vector_at_any_width() {
+        for width in [8, 1024] {
+            let stub = EmbedStub::start_with(spec(width, Vectors::Topic, None));
+            let got = embed(
+                stub.url(),
+                &["sbx-topic-9 here", "sbx-topic-1 there", "no mark"],
+            );
+            for v in &got {
+                assert_eq!(v.len(), width);
+                assert!(
+                    (norm(v) - 1.0).abs() < 1e-5,
+                    "width {width}: norm {}",
+                    norm(v)
+                );
+            }
+            let c = cosine(&got[0], &got[1]);
+            if width == 8 {
+                assert!(
+                    c > 0.99,
+                    "width {width}: 9 and 1 should wrap onto one axis: {c}"
+                );
+            } else {
+                assert!(
+                    c.abs() < 0.1,
+                    "width {width}: 9 and 1 are distinct topics: {c}"
+                );
+            }
+        }
     }
 
     /// Spread vectors are unit vectors, and different inputs point in

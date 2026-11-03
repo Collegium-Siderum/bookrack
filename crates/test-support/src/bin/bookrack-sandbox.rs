@@ -46,8 +46,9 @@ mod unix {
     #[derive(Clone, Copy, ValueEnum, Default)]
     enum VectorsArg {
         Constant,
-        #[default]
         Spread,
+        #[default]
+        Topic,
     }
 
     impl VectorsArg {
@@ -55,6 +56,7 @@ mod unix {
             match self {
                 VectorsArg::Constant => Vectors::Constant,
                 VectorsArg::Spread => Vectors::Spread,
+                VectorsArg::Topic => Vectors::Topic,
             }
         }
     }
