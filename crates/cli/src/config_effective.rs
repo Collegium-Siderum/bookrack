@@ -106,7 +106,10 @@ pub fn run(selection: &LibrarySelection) -> Result<()> {
     let out: Vec<RowOut<'_>> = rows.iter().map(|r| row_out(r, &scope_instance)).collect();
     let foreign = foreign_out();
     let dotenv_path = bookrack_config::dotenv_load().map(|load| load.supply().path);
-    let native = bookrack_config::native_dependency_origins(reranker_tag(cfg));
+    let native = bookrack_config::native_dependency_origins(
+        bookrack_extract::pdfium_pin::PDFIUM_RELEASE_TAG,
+        reranker_tag(cfg),
+    );
 
     let ctx = crate::render::ctx();
     if !ctx.is_quiet() {

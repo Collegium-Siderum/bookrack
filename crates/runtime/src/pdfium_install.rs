@@ -4,9 +4,10 @@
 //!
 //! Downloads the archive named by [`bookrack_extract::pdfium_pin`],
 //! verifies its SHA-256 against the pin, and unpacks the dynamic
-//! library into the per-user managed directory — the last stop in the
-//! library search chain, so every later run finds it without any
-//! configuration. Network access happens only here, behind an explicit
+//! library into the pinned build's managed directory — the last stop
+//! in the library search chain, so every later run of this build finds
+//! it without any configuration, and a copy another build installed is
+//! left where it is. Network access happens only here, behind an explicit
 //! operator action (`bookrack doctor --install-pdfium` or a wizard
 //! confirmation); no ingest path ever downloads anything.
 
@@ -14,18 +15,19 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use bookrack_config::{pdfium_library_filename, pdfium_managed_dir};
-use bookrack_extract::pdfium_pin::{pdfium_download_url, pinned_pdfium_binary};
+use bookrack_extract::pdfium_pin::{PDFIUM_RELEASE_TAG, pdfium_download_url, pinned_pdfium_binary};
 use eyre::{Context, ContextCompat, Result, bail};
 use sha2::{Digest, Sha256};
 
 /// Download, verify, and unpack the pinned PDFium library into the
-/// managed directory. Returns the path of the installed library.
+/// pinned build's managed directory. Returns the path of the installed
+/// library.
 pub async fn install_pinned_pdfium() -> Result<PathBuf> {
     let Some(pin) = pinned_pdfium_binary() else {
         bail!("no pinned PDFium binary is published for this platform");
     };
-    let dir =
-        pdfium_managed_dir().context("locate the per-user data directory for this platform")?;
+    let dir = pdfium_managed_dir(PDFIUM_RELEASE_TAG)
+        .context("locate the per-user data directory for this platform")?;
     let url = pdfium_download_url(pin);
     let response = reqwest::get(&url)
         .await

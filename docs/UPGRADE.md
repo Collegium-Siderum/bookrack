@@ -40,13 +40,20 @@ directory, and an MCP client holds a URL — so none of them move.
 
 A release that moves the pinned PDFium build cannot load a library of
 the previous build. What to do depends on where the binary finds the
-library; `bookrack doctor` reports the one it found.
+library; `bookrack doctor` reports the library it found, or every
+directory it searched.
 
 - **Beside the executable.** The release archive ships the matching
   library there, and it is searched before the per-user copy, so
   nothing needs to change.
-- **The per-user managed copy.** `bookrack doctor --install-pdfium`
-  replaces it with the pinned build.
+- **The per-user managed copy.** Each build installs into, and
+  searches, a directory named for its own PDFium release under the
+  platform data directory — `bookrack/pdfium/chromium/7881/` for this
+  one. Run `bookrack doctor --install-pdfium` from the new build: it
+  installs beside the previous build's copy instead of replacing it, so
+  a binary of the previous build still on the machine keeps loading its
+  own. Builds before 0.14.0 installed into `bookrack/pdfium/` itself;
+  only they read that copy, and it can be deleted once none is left.
 - **`BOOKRACK_PDFIUM_LIB`.** When set, it is the only directory
   searched: point it at a directory holding the pinned build. Unsetting
   it sends the search to the executable's directory and then to the

@@ -145,8 +145,11 @@ pub const NATIVE_DEPENDENCY_KNOBS: &[NativeDependencyKnob] = &[
 ///
 /// Touches the filesystem: each entry reports what a load would find
 /// right now, which is the whole point of asking.
-pub fn native_dependency_origins(reranker_tag: &str) -> Vec<NativeDependencyOrigin> {
-    let pdfium = crate::locate_pdfium();
+pub fn native_dependency_origins(
+    pdfium_tag: &str,
+    reranker_tag: &str,
+) -> Vec<NativeDependencyOrigin> {
+    let pdfium = crate::locate_pdfium(pdfium_tag);
     let llama = crate::llama_server_pin::locate_llama_server();
     let model = crate::reranker_model_pin::locate_reranker_model(reranker_tag);
 
@@ -608,7 +611,7 @@ mod tests {
     /// dependency with no variable to point it at.
     #[test]
     fn every_located_dependency_is_named_in_the_inventory() {
-        let located: Vec<String> = native_dependency_origins("")
+        let located: Vec<String> = native_dependency_origins("chromium/7881", "")
             .into_iter()
             .map(|d| d.name)
             .collect();

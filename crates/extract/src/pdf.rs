@@ -386,7 +386,7 @@ pub(crate) fn pdfium_load() -> Result<(), &'static LoadFailure> {
 /// it can be stored in the `OnceLock` and re-reported on every later
 /// call — `PdfiumError` is not `Clone`.
 fn load_pdfium() -> Result<Pdfium, LoadFailure> {
-    let location = bookrack_config::locate_pdfium();
+    let location = bookrack_config::locate_pdfium(crate::pdfium_pin::PDFIUM_RELEASE_TAG);
     let Some(dir) = location.dir else {
         return Err(LoadFailure {
             found: false,

@@ -138,14 +138,18 @@ release workflow extracts the matching section verbatim from this file.
   rejected as a corrupt file, and an archive entry larger than the
   uncompressed size its headers declare is rejected as a malformed
   package. Both used to be read as they were.
-- **A PDFium library of the previous build no longer loads.** The
-  binaries bind the `chromium/7881` API. The release archives ship the
-  matching library beside the executables, which is searched first. A
-  managed copy installed for an earlier release is replaced by
-  `bookrack doctor --install-pdfium`, and a `BOOKRACK_PDFIUM_LIB`
-  directory holding the previous build has to point at the new one; the
-  daemon then needs a restart. *A moved PDFium build* in
-  `docs/UPGRADE.md` covers each case.
+- **A PDFium library of the previous build no longer loads, and each
+  build keeps its own managed copy.** The binaries bind the
+  `chromium/7881` API. The release archives ship the matching library
+  beside the executables, which is searched first.
+  `bookrack doctor --install-pdfium` now installs into a directory named
+  for the pinned build, `<platform data dir>/bookrack/pdfium/chromium/7881/`,
+  and the search reads that directory only, so two builds on one
+  machine no longer replace each other's library. The copy an earlier
+  release installed is not read: run `doctor --install-pdfium` once
+  after upgrading. A `BOOKRACK_PDFIUM_LIB` directory holding the
+  previous build has to point at the new one; the daemon then needs a
+  restart. *A moved PDFium build* in `docs/UPGRADE.md` covers each case.
 - **The extractor's version stamp covers every parser under it.**
   `extractor_version` was tied to `rbook`, `scraper`, `encoding_rs`,
   and `pdfium-render`. It now also moves with the crates under them

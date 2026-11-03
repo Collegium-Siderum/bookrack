@@ -115,7 +115,7 @@ impl Wizard {
 /// a pinned binary could be installed for this platform.
 fn probe_pdfium() -> PdfiumReport {
     let filename = pdfium_library_filename();
-    let location = locate_pdfium();
+    let location = locate_pdfium(bookrack_extract::pdfium_pin::PDFIUM_RELEASE_TAG);
     PdfiumReport {
         filename,
         found: location.dir.map(|d| d.join(filename)),

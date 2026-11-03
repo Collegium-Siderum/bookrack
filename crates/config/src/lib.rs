@@ -13,7 +13,7 @@
 
 use std::collections::BTreeSet;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -3976,16 +3976,33 @@ pub fn pdfium_library_filename() -> &'static str {
 }
 
 /// Per-user directory where an operator-initiated install places the
-/// pinned PDFium library; the last stop in the [`locate_pdfium`] search
-/// chain. `None` when the platform data directory cannot be located.
-pub fn pdfium_managed_dir() -> Option<PathBuf> {
-    pdfium_managed_dir_from(dirs::data_dir())
+/// PDFium library of the build `tag` names; the last stop in the
+/// [`locate_pdfium`] search chain.
+///
+/// `tag` is the upstream release tag (`chromium/7881`). Its segments
+/// are path segments, so each pinned build has a directory of its own
+/// under `<platform data dir>/bookrack/pdfium/`. `None` when the
+/// platform data directory cannot be located, or when `tag` is empty
+/// or has a segment that is not one plain path component — such a tag
+/// would resolve to a directory another build shares, or outside the
+/// managed tree.
+pub fn pdfium_managed_dir(tag: &str) -> Option<PathBuf> {
+    pdfium_managed_dir_from(dirs::data_dir(), tag)
 }
 
 /// Pure form of [`pdfium_managed_dir`], factored out so the join shape
 /// can be tested without depending on the host's data directory.
-fn pdfium_managed_dir_from(data_dir: Option<PathBuf>) -> Option<PathBuf> {
-    data_dir.map(|d| d.join("bookrack").join("pdfium"))
+fn pdfium_managed_dir_from(data_dir: Option<PathBuf>, tag: &str) -> Option<PathBuf> {
+    let plain_segment = |segment: &str| {
+        let mut components = Path::new(segment).components();
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+    };
+    if !tag.split('/').all(plain_segment) {
+        return None;
+    }
+    let mut dir = data_dir?.join("bookrack").join("pdfium");
+    dir.extend(tag.split('/'));
+    Some(dir)
 }
 
 /// Outcome of the PDFium library search.
@@ -4003,19 +4020,21 @@ pub struct PdfiumLocation {
 /// directory is checked, so a typo in the override surfaces as a miss
 /// instead of being papered over by a fallback. When unset, the running
 /// executable's own directory (the release-archive layout) is checked
-/// first, then the per-user managed directory installs land in.
+/// first, then the managed directory of the build `tag` names (see
+/// [`pdfium_managed_dir`]); a tag with no managed directory leaves the
+/// executable's directory as the only stop.
 ///
 /// This is a free function, not a [`Config`] method: the PDF adapter
 /// needs the directory but takes no `Config`, and threading one through
 /// only to reach this would widen its signature for nothing.
-pub fn locate_pdfium() -> PdfiumLocation {
+pub fn locate_pdfium(tag: &str) -> PdfiumLocation {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf));
     locate_pdfium_from(
         std::env::var(PDFIUM_LIB_ENV).ok(),
         exe_dir,
-        pdfium_managed_dir(),
+        pdfium_managed_dir(tag),
         &|dir| dir.join(pdfium_library_filename()).is_file(),
     )
 }
@@ -5470,7 +5489,7 @@ mod tests {
         // The impure entry point must always have at least the running
         // executable's own directory to probe; an empty candidate list
         // would make the not-found report useless.
-        assert!(!locate_pdfium().probed.is_empty());
+        assert!(!locate_pdfium("chromium/7881").probed.is_empty());
     }
 
     #[test]
@@ -5517,12 +5536,65 @@ mod tests {
             default_data_root_from(Some(base.clone())),
             Some(base.join("bookrack").join("library"))
         );
-        assert_eq!(
-            default_data_root_from(Some(base.clone()))
-                .expect("some")
-                .parent(),
-            pdfium_managed_dir_from(Some(base)).expect("some").parent(),
+        let root = default_data_root_from(Some(base.clone())).expect("some");
+        let shared = root.parent().expect("a parent");
+        let pdfium = pdfium_managed_dir_from(Some(base), "chromium/7881").expect("some");
+        assert!(
+            pdfium.starts_with(shared),
+            "{} is not under {}",
+            pdfium.display(),
+            shared.display()
         );
+    }
+
+    /// The layout `PDFIUM_VERSION.md` and `docs/UPGRADE.md` give the
+    /// operator: one directory per pinned build, the release tag's
+    /// segments as path segments.
+    #[test]
+    fn each_pinned_build_has_a_managed_directory_of_its_own() {
+        let root = PathBuf::from("/opt/state");
+        let current = pdfium_managed_dir_from(Some(root.clone()), "chromium/7881");
+        let previous = pdfium_managed_dir_from(Some(root.clone()), "chromium/7763");
+
+        assert_eq!(
+            current,
+            Some(
+                root.join("bookrack")
+                    .join("pdfium")
+                    .join("chromium")
+                    .join("7881")
+            )
+        );
+        assert_ne!(current, previous, "two builds share one managed directory");
+        let shared = root.join("bookrack").join("pdfium");
+        for dir in [&current, &previous] {
+            assert_ne!(
+                dir.as_deref(),
+                Some(shared.as_path()),
+                "a build resolves to the directory every build shares"
+            );
+        }
+    }
+
+    /// A tag that would not land in a directory of its own — empty,
+    /// absolute, or with an empty or non-plain segment — has no managed
+    /// directory rather than a shared or escaped one.
+    #[test]
+    fn a_tag_that_is_not_a_plain_relative_path_has_no_managed_directory() {
+        let root = PathBuf::from("/opt/state");
+        for tag in [
+            "",
+            "chromium//7881",
+            "/chromium/7881",
+            "../7881",
+            "chromium/..",
+        ] {
+            assert_eq!(
+                pdfium_managed_dir_from(Some(root.clone()), tag),
+                None,
+                "tag {tag:?} must have no managed directory"
+            );
+        }
     }
 
     #[test]

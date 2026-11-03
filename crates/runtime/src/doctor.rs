@@ -666,7 +666,7 @@ fn data_root_status(
 
 fn push_pdfium_row(rows: &mut Vec<Row>) {
     let filename = pdfium_library_filename();
-    let location = locate_pdfium();
+    let location = locate_pdfium(bookrack_extract::pdfium_pin::PDFIUM_RELEASE_TAG);
     match location.dir {
         Some(dir) => rows.push(Row {
             label: "PDFium library".to_string(),
