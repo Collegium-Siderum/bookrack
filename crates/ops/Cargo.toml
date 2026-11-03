@@ -10,10 +10,12 @@ bookrack-catalog = { path = "../catalog" }
 bookrack-config = { path = "../config" }
 bookrack-core = { path = "../core" }
 bookrack-corpus = { path = "../corpus" }
+bookrack-distill = { path = "../distill" }
 bookrack-embed = { path = "../embed" }
 bookrack-glean = { path = "../glean" }
 bookrack-ingest = { path = "../ingest" }
 bookrack-query = { path = "../query" }
+bookrack-refs = { path = "../refs" }
 bookrack-rerank = { path = "../rerank" }
 bookrack-search = { path = "../search" }
 bookrack-vectors = { path = "../vectors" }

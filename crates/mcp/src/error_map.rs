@@ -152,7 +152,9 @@ pub(crate) fn reference_error_to_mcp(e: reference::ReferenceError) -> ErrorData 
     match e {
         reference::ReferenceError::InvalidArgument(_)
         | reference::ReferenceError::UnknownOverlayProperty { .. } => invalid_params_err(&e),
-        reference::ReferenceError::Refs(_) | reference::ReferenceError::Catalog(_) => {
+        reference::ReferenceError::Refs(_)
+        | reference::ReferenceError::Io { .. }
+        | reference::ReferenceError::Catalog(_) => {
             mcp_from_problem(ErrorCode::INTERNAL_ERROR, Problem::from_error_chain(&e))
         }
     }

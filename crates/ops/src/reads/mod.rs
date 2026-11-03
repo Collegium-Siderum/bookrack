@@ -21,6 +21,7 @@ pub mod papers;
 pub mod papers_metadata;
 pub mod passages;
 pub mod pipeline;
+pub mod reference;
 pub mod search;
 pub mod vectors;
 

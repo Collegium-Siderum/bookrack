@@ -3,16 +3,18 @@
 //! Reference-book MCP surface.
 //!
 //! Backs the `reference.lookup` and `reference.overlay_set` tools.
-//! The two `pub(super)` logic helpers run the actual queries against
-//! an open [`Refs`] handle; the
-//! [`crate::BookrackServer`] tool methods are thin shims that open
-//! [`Refs`], read [`Catalogs`] from the process-wide cache, dispatch
-//! to one of these helpers, and serialize the result.
+//! The lookup's validation and projection live in
+//! [`bookrack_ops::reads::reference`]; this module holds the MCP
+//! argument shapes, the overlay logic, and the forwarding shims the
+//! [`crate::BookrackServer`] tool methods call after opening
+//! [`Refs`] and reading [`Catalogs`] from the process-wide cache.
 
-use std::sync::OnceLock;
+use std::io;
+use std::path::PathBuf;
 
 use bookrack_distill::Catalogs;
-use bookrack_refs::{LookupResult, NewOverlay, Refs, ResolvedEntry};
+use bookrack_ops::reads::reference::{self as lookup, ReferenceLookup, ReferenceLookupError};
+use bookrack_refs::{LookupResult, NewOverlay, Refs};
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -44,6 +46,20 @@ pub struct ReferenceLookupArgs {
     /// rather than a no-op. An excluded book is also skipped as a
     /// redirect target, so it cannot re-enter the result that way.
     pub exclude_books: Option<Vec<String>>,
+}
+
+impl ReferenceLookupArgs {
+    /// The request without the library selector, in the shape the
+    /// ops layer runs.
+    pub fn to_lookup(&self) -> ReferenceLookup {
+        ReferenceLookup {
+            book: self.book.clone(),
+            entry_key: self.entry_key.clone(),
+            fields: self.fields.clone(),
+            min_severity: self.min_severity.clone(),
+            exclude_books: self.exclude_books.clone(),
+        }
+    }
 }
 
 /// Argument shape for the `reference.overlay_set` tool. `library` is
@@ -80,6 +96,15 @@ pub enum ReferenceError {
     #[error("catalog error: {0}")]
     Catalog(#[from] bookrack_distill::ParseError),
 
+    /// Looking for the reference store failed for a reason other than
+    /// its absence.
+    #[error("cannot inspect the reference store at {path}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
@@ -87,101 +112,34 @@ pub enum ReferenceError {
     UnknownOverlayProperty { key: String },
 }
 
-/// The process-wide controlled vocabulary triad. Loaded lazily on
-/// first MCP request that needs it. A load failure is returned as
-/// `ReferenceError::Catalog` rather than panicking, and is not
-/// cached: a subsequent request retries the load so a corrected
-/// `property_catalog.toml` can recover without a daemon restart.
-pub(crate) fn catalogs() -> Result<&'static Catalogs, ReferenceError> {
-    static CELL: OnceLock<Catalogs> = OnceLock::new();
-    if let Some(c) = CELL.get() {
-        return Ok(c);
+impl From<ReferenceLookupError> for ReferenceError {
+    fn from(e: ReferenceLookupError) -> Self {
+        match e {
+            ReferenceLookupError::InvalidArgument(m) => ReferenceError::InvalidArgument(m),
+            ReferenceLookupError::Store(e) => ReferenceError::Refs(e),
+            ReferenceLookupError::Io { path, source } => ReferenceError::Io { path, source },
+            ReferenceLookupError::Catalog(e) => ReferenceError::Catalog(e),
+        }
     }
-    let loaded = Catalogs::load_all()?;
-    Ok(CELL.get_or_init(|| loaded))
+}
+
+/// The process-wide controlled vocabulary triad, shared with the ops
+/// layer's lookup.
+pub(crate) fn catalogs() -> Result<&'static Catalogs, ReferenceError> {
+    Ok(lookup::catalogs()?)
 }
 
 // ---------------------------------------------------------------------------
 // reference.lookup
 // ---------------------------------------------------------------------------
 
-/// Run `Refs::lookup` and project the result through the `fields`
-/// whitelist and the `min_severity` filter declared on `args`.
+/// Run the ops-layer lookup for `args` against an open store.
 pub(crate) fn reference_lookup_logic(
     refs: &Refs,
     catalogs: &Catalogs,
     args: &ReferenceLookupArgs,
 ) -> Result<LookupResult, ReferenceError> {
-    let book = if args.book == "*" {
-        None
-    } else if args.book.is_empty() {
-        return Err(ReferenceError::InvalidArgument(
-            "`book` must be a slug or `*`; got empty string".to_string(),
-        ));
-    } else {
-        Some(args.book.as_str())
-    };
-
-    let exclude = args.exclude_books.as_deref().unwrap_or(&[]);
-    if !exclude.is_empty() && book.is_some() {
-        return Err(ReferenceError::InvalidArgument(format!(
-            "`exclude_books` only applies with book=\"*\"; got book={:?}",
-            args.book
-        )));
-    }
-
-    let mut result = refs.lookup(book, &args.entry_key, exclude)?;
-
-    if let Some(min_severity) = args.min_severity.as_deref() {
-        let min = severity_level(min_severity).ok_or_else(|| {
-            ReferenceError::InvalidArgument(format!(
-                "unknown min_severity {min_severity:?}; \
-                 expected ok | info | warn | error"
-            ))
-        })?;
-        result
-            .hits
-            .retain(|hit| passes_severity(hit, catalogs, min));
-        result.primary_by_authority = (!result.hits.is_empty()).then_some(0);
-    }
-
-    if let Some(fields) = args.fields.as_deref() {
-        let allowed: std::collections::BTreeSet<&str> = fields.iter().map(String::as_str).collect();
-        for hit in &mut result.hits {
-            if let Some(obj) = hit.payload.as_object_mut() {
-                obj.retain(|k, _| allowed.contains(k.as_str()));
-            }
-        }
-    }
-
-    Ok(result)
-}
-
-fn passes_severity(hit: &ResolvedEntry, catalogs: &Catalogs, min: u8) -> bool {
-    if hit.quality_flags.is_empty() {
-        // Unflagged hits carry no concerns; they survive every
-        // severity floor because there is nothing to filter against.
-        return true;
-    }
-    hit.quality_flags.iter().any(|flag| {
-        catalogs
-            .quality_flags
-            .entries
-            .get(flag)
-            .map(|spec| severity_level(&spec.severity).unwrap_or(0))
-            .unwrap_or(0)
-            >= min
-    })
-}
-
-fn severity_level(s: &str) -> Option<u8> {
-    match s {
-        "ok" => Some(0),
-        "info" => Some(1),
-        "warn" => Some(2),
-        "error" => Some(3),
-        _ => None,
-    }
+    Ok(lookup::lookup(refs, catalogs, &args.to_lookup())?)
 }
 
 // ---------------------------------------------------------------------------
