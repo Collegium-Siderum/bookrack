@@ -879,6 +879,15 @@ pub struct CreateOpts {
     pub workspace: Option<PathBuf>,
 }
 
+/// Points in a build at which a test may step in.
+#[derive(Default)]
+pub struct CreateHooks {
+    /// Runs on the inputs directory after the preset's inputs are
+    /// written and before the first step reads them, so a test can hand
+    /// the build inputs that disagree with their manifest.
+    pub on_inputs: Option<Box<dyn FnOnce(&Path) -> io::Result<()>>>,
+}
+
 /// A sandbox opened in this process: one command at a time, each under
 /// the session lock, each leaving a record.
 pub struct Session {
@@ -897,6 +906,20 @@ impl Session {
         preset: Preset,
         create: CreateOpts,
         opts: SessionOpts,
+    ) -> ToolResult<Session> {
+        Self::create_with(dir, source, preset, create, opts, CreateHooks::default()).await
+    }
+
+    /// [`create`](Self::create) with `hooks` run at the points they
+    /// name, for a test to build a sandbox from inputs it rewrote.
+    #[doc(hidden)]
+    pub async fn create_with(
+        dir: &Path,
+        source: Source,
+        preset: Preset,
+        create: CreateOpts,
+        opts: SessionOpts,
+        mut hooks: CreateHooks,
     ) -> ToolResult<Session> {
         let abs = if dir.is_absolute() {
             dir.to_path_buf()
@@ -959,7 +982,14 @@ impl Session {
             cell: None,
         };
         let result = session
-            .create_inner(&mut call, source, preset, create.replace, &workspace)
+            .create_inner(
+                &mut call,
+                source,
+                preset,
+                create.replace,
+                &workspace,
+                &mut hooks,
+            )
             .await;
         session.end(call, result)?;
         Ok(session)
@@ -972,6 +1002,7 @@ impl Session {
         preset: Preset,
         replace: bool,
         workspace: &Path,
+        hooks: &mut CreateHooks,
     ) -> ToolResult<Outcome> {
         let paths = self.paths.clone();
         if replace {
@@ -1069,7 +1100,7 @@ impl Session {
                     .map_err(|e| Outcome::io(STAGE_PATHS, "lay out the preset", e))?;
                 snapshot::switch(&paths, snapshot::Direction::Snapshot, &mut |_| Ok(()))?;
             }
-            Preset::Rich => self.build_rich(call).await?,
+            Preset::Rich => self.build_rich(call, hooks).await?,
         }
         marker.ready = true;
         write_json(&paths.marker(), &marker)

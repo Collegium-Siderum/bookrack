@@ -570,7 +570,7 @@ fn vector(input: &str, spec: &StubSpec) -> Vec<f32> {
 }
 
 /// The topic numbers `input` carries, each once; see [`Vectors::Topic`].
-fn topic_marks(input: &str) -> BTreeSet<usize> {
+pub(crate) fn topic_marks(input: &str) -> BTreeSet<usize> {
     let mut marks = BTreeSet::new();
     for (at, _) in input.match_indices(TOPIC_MARK) {
         let rest = &input[at + TOPIC_MARK.len()..];

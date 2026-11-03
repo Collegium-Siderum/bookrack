@@ -12,6 +12,7 @@ mod unix {
     use std::path::PathBuf;
     use std::time::Duration;
 
+    use bookrack_core::Problem;
     use bookrack_test_support::Vectors;
     use bookrack_test_support::tool::exec::{
         Capture, DEFAULT_DAEMON_TIMEOUT, DaemonStart, ExecOpts,
@@ -185,6 +186,13 @@ mod unix {
         Sig { path: PathBuf },
         /// Print the difference between two trees' signatures.
         Diff { before: PathBuf, after: PathBuf },
+        /// Check golden/ against its inputs; with --shape, against the
+        /// preset's shape as well.
+        Check {
+            dir: PathBuf,
+            #[arg(long)]
+            shape: bool,
+        },
         /// Copy host/ to golden/.
         Snapshot { dir: PathBuf },
         /// Copy golden/ back over host/.
@@ -356,6 +364,28 @@ mod unix {
                     }
                 }
             }
+            Command::Check { dir, shape } => match Session::open(&dir, opts) {
+                Ok(mut session) => match session.check(shape).await {
+                    Ok(findings) if findings.is_empty() => finish(Ok(Outcome::ok())),
+                    Ok(findings) => {
+                        for finding in &findings {
+                            println!(
+                                "{}",
+                                serde_json::to_string(finding).expect("a finding serialises")
+                            );
+                        }
+                        finish(Ok(Outcome::refused(
+                            bookrack_test_support::tool::STAGE_PRESET,
+                            Problem::new(format!(
+                                "the golden does not match its inputs: {} findings",
+                                findings.len()
+                            )),
+                        )))
+                    }
+                    Err(outcome) => finish(Err(outcome)),
+                },
+                Err(outcome) => finish(Err(outcome)),
+            },
             Command::Snapshot { dir } => match Session::open(&dir, opts) {
                 Ok(mut session) => finish(session.snapshot().await),
                 Err(outcome) => finish(Err(outcome)),

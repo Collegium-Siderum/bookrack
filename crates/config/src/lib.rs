@@ -47,8 +47,7 @@ pub use profile_ref::{
     ProfileRefDrift, ProfileRefOrigin, effective_profile_reference, profile_reference_drift,
     registry_profile_ref_in,
 };
-pub use registry::LibraryKind;
-use registry::{Registry, parse_registry};
+pub use registry::{LibraryKind, RawRegistryEntry, Registry, RegistryEntryTable, parse_registry};
 
 bookrack_core::fixed_settings! {
     owner = "config";
