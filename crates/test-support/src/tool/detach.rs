@@ -10,6 +10,10 @@
 //! closes the pipe, and the background process reads EOF and leaves
 //! without starting anything. There is never a service running with no
 //! record of it.
+//!
+//! Once running, a background process watches its sandbox and ends
+//! unasked when the sandbox has gone its idle limit without a call, or
+//! as soon as its instance directory is gone.
 
 use std::ffi::OsString;
 use std::fs::OpenOptions;
@@ -17,7 +21,7 @@ use std::io::{self, BufRead, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use bookrack_core::Problem;
 use rustix::process::{Pid, Signal};
@@ -38,6 +42,15 @@ pub(crate) const HANDOFF_DEADLINE: Duration = Duration::from_secs(10);
 /// How often a waiting side looks at the instance's files.
 // setting: internal -- the tool's state-file poll interval, not a value to tune
 pub(crate) const STATE_POLL: Duration = Duration::from_millis(50);
+
+/// How long a background process lets its sandbox go without a call
+/// before it ends unasked, unless the start says otherwise.
+// setting: internal -- the sandbox tool's default idle limit, overridden by --idle
+pub const DEFAULT_IDLE: Duration = Duration::from_secs(15 * 60);
+
+/// How often a running background process looks at its sandbox.
+// setting: internal -- the idle watch's poll interval, not a value to tune
+pub(crate) const WATCH_POLL: Duration = Duration::from_millis(250);
 
 /// What a background process records once its endpoint is up.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +133,76 @@ impl InstanceKind {
             InstanceKind::Daemon => "supervisor.log",
             InstanceKind::Stub => "stub.log",
         }
+    }
+}
+
+/// What a running background process makes of its sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Watch {
+    /// In use, or not quiet for long enough yet.
+    Stay,
+    /// No call for the idle limit, none running, and nothing left to
+    /// outlast.
+    Idle,
+    /// The instance's directory is no longer where the process began.
+    Removed,
+}
+
+impl Watch {
+    /// The `cause` an `exit.json` records for an end the watch chose.
+    pub(crate) fn cause(self) -> Option<&'static str> {
+        match self {
+            Watch::Stay => None,
+            Watch::Idle => Some("idle"),
+            Watch::Removed => Some("removed"),
+        }
+    }
+}
+
+/// Look at the sandbox from the background process of `instance`,
+/// which began at `began`.
+///
+/// An instance directory that is gone is [`Watch::Removed`], whatever
+/// the limit. Otherwise, with a `limit`, the sandbox is idle once the
+/// later of its last call's end and `began` lies `limit` back, no call
+/// holds the session lock, and `outlast` reports nothing left to wait
+/// for. The lock and `outlast` are consulted only once the time is up,
+/// so a look at a sandbox in use costs one `stat`.
+pub(crate) fn watch(
+    paths: &ToolPaths,
+    instance: &Path,
+    began: SystemTime,
+    limit: Option<Duration>,
+    outlast: impl FnOnce() -> bool,
+) -> Watch {
+    if let Err(e) = std::fs::symlink_metadata(instance)
+        && e.kind() == io::ErrorKind::NotFound
+    {
+        return Watch::Removed;
+    }
+    let Some(limit) = limit else {
+        return Watch::Stay;
+    };
+    let last_call = std::fs::metadata(paths.calls().join("last"))
+        .and_then(|meta| meta.modified())
+        .ok();
+    let since = last_call.map_or(began, |at| at.max(began));
+    let quiet = SystemTime::now()
+        .duration_since(since)
+        .unwrap_or(Duration::ZERO);
+    if quiet < limit || call_running(paths) || outlast() {
+        return Watch::Stay;
+    }
+    Watch::Idle
+}
+
+/// Whether a call holds the sandbox's session lock. A lock file that is
+/// not there has no holder; one that cannot be opened or probed counts
+/// as held, so a doubt keeps the process.
+fn call_running(paths: &ToolPaths) -> bool {
+    match std::fs::File::open(paths.lock()) {
+        Ok(file) => file.try_lock().is_err(),
+        Err(e) => e.kind() != io::ErrorKind::NotFound,
     }
 }
 

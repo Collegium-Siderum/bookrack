@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use super::build::{self, BinaryRecord};
+use super::detach::DEFAULT_IDLE;
 use super::snapshot::{self, Direction};
 use super::tripwire::{self, BinaryView, Finding, Input, PlacedDotenv};
 use super::{
@@ -115,6 +116,7 @@ pub struct DaemonStart {
     library: Option<String>,
     dotenv: Option<PathBuf>,
     timeout: Duration,
+    idle: Option<Duration>,
 }
 
 impl Default for DaemonStart {
@@ -123,6 +125,7 @@ impl Default for DaemonStart {
             library: None,
             dotenv: None,
             timeout: DEFAULT_DAEMON_TIMEOUT,
+            idle: Some(DEFAULT_IDLE),
         }
     }
 }
@@ -149,6 +152,18 @@ impl DaemonStart {
 
     pub(crate) fn timeout_value(&self) -> Duration {
         self.timeout
+    }
+
+    /// How long the sandbox may go without a call before the daemon's
+    /// supervisor stops it unasked; `None` never does. Only a detached
+    /// start has a supervisor to watch.
+    pub fn idle(mut self, limit: Option<Duration>) -> DaemonStart {
+        self.idle = limit;
+        self
+    }
+
+    pub(crate) fn idle_value(&self) -> Option<Duration> {
+        self.idle
     }
 
     pub(crate) fn dotenv_path(&self) -> Option<&Path> {
@@ -193,6 +208,10 @@ pub struct StartRecord {
     pub stub_url: Option<String>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// How long the sandbox may go without a call before the supervisor
+    /// stops the daemon unasked. Absent when nothing watches.
+    #[serde(default)]
+    pub idle_ms: Option<u64>,
 }
 
 /// What a daemon instance records around its spawn: `spawning` alone
@@ -248,6 +267,11 @@ pub struct ExitRecord {
     /// start that ended by itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    /// Why a background process ended its instance unasked: `idle` once
+    /// the sandbox went its idle limit without a call, `removed` once
+    /// the instance's directory was gone. Absent for every other end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
     pub finished: f64,
 }
 
@@ -261,12 +285,18 @@ impl ExitRecord {
             summary: outcome.problem.as_ref().map(|p| p.summary.clone()),
             detail: outcome.problem.as_ref().and_then(|p| p.data.detail.clone()),
             phase: None,
+            cause: None,
             finished: now(),
         }
     }
 
     pub fn with_phase(mut self, phase: &str) -> ExitRecord {
         self.phase = Some(phase.to_string());
+        self
+    }
+
+    pub fn with_cause(mut self, cause: &str) -> ExitRecord {
+        self.cause = Some(cause.to_string());
         self
     }
 
@@ -864,6 +894,7 @@ impl Session {
                 hosting: Hosting::InProcess,
                 stub_url: stub.clone(),
                 timeout_ms: Some(start.timeout.as_millis() as u64),
+                idle_ms: None,
             },
         )
         .map_err(|e| Outcome::io(STAGE_INSTANCE, "write start.json", e))?;

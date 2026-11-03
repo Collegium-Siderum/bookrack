@@ -196,7 +196,14 @@ fn stub_start(world: &World, extra: &[&str]) -> String {
 }
 
 fn daemon_start(world: &World) {
-    let out = world.tool(&["daemon", "start", &world.dir_s(), "--library", "alpha"]);
+    daemon_start_with(world, &[]);
+}
+
+fn daemon_start_with(world: &World, extra: &[&str]) {
+    let dir = world.dir_s();
+    let mut args = vec!["daemon", "start", dir.as_str(), "--library", "alpha"];
+    args.extend_from_slice(extra);
+    let out = world.tool(&args);
     assert_eq!(code(&out), 0, "daemon start: {}", stderr(&out));
     assert!(
         stdout(&out).starts_with("bookrack daemon running: "),
@@ -1366,4 +1373,161 @@ fn a_dropped_world_takes_its_running_instances_down() {
         Duration::from_secs(10),
         || [stub, supervisor, daemon].iter().all(|pid| !alive(*pid)),
     );
+}
+
+// Ending without a command
+
+/// The pids of instance 1's supervisor, its daemon, and its stub's
+/// background process.
+fn background_pids(world: &World) -> [u32; 3] {
+    let ready = instance(world, "daemon", 1).join("daemon.json");
+    wait_for_file(&ready);
+    [
+        registered_pid(world, "daemon", "supervisor.json"),
+        read_json(&ready)["pid"].as_u64().expect("a daemon pid") as u32,
+        registered_pid(world, "stub", "serve.json"),
+    ]
+}
+
+/// The `exit.json` instance 1 of `kind` writes once it ends on its own.
+fn own_exit(world: &World, kind: &str) -> Value {
+    let path = instance(world, kind, 1).join("exit.json");
+    wait_until(
+        &format!("the {kind} ending on its own"),
+        Duration::from_secs(20),
+        || path.exists(),
+    );
+    read_json(&path)
+}
+
+/// I1: a sandbox with no call for its idle limit ends its daemon, then
+/// its stub; each record says why, and no process is left.
+#[test]
+fn an_idle_sandbox_ends_its_daemon_then_its_stub() {
+    let (world, _accepted) = ready_world();
+    stub_start(&world, &["--idle", "1"]);
+    daemon_start_with(&world, &["--idle", "1"]);
+    let pids = background_pids(&world);
+    let daemon_status = status(&world, "daemon");
+    assert_eq!(
+        daemon_status["unfinished"][0]["idle_ms"], 1000,
+        "{daemon_status}"
+    );
+    let stub_status = status(&world, "stub");
+    assert_eq!(
+        stub_status["unfinished"][0]["idle_ms"], 1000,
+        "{stub_status}"
+    );
+
+    let daemon = own_exit(&world, "daemon");
+    assert_eq!(
+        (
+            daemon["class"].as_str(),
+            daemon["phase"].as_str(),
+            daemon["cause"].as_str()
+        ),
+        (Some("exited"), Some("running"), Some("idle")),
+        "{daemon}"
+    );
+    let stub = own_exit(&world, "stub");
+    assert_eq!(stub["cause"], "idle", "{stub}");
+    let finished = |record: &Value| record["finished"].as_f64().expect("finished");
+    assert!(
+        finished(&stub) >= finished(&daemon),
+        "the stub left before the daemon: {stub} {daemon}"
+    );
+    wait_until("every process leaving", Duration::from_secs(10), || {
+        pids.iter().all(|&p| !alive(p))
+    });
+    let state = status(&world, "daemon");
+    assert_eq!(state["last_ended"]["exit"]["cause"], "idle", "{state}");
+}
+
+/// I2: a call that holds the session lock keeps the sandbox in use past
+/// the idle limit.
+#[test]
+fn a_call_in_flight_keeps_an_idle_sandbox() {
+    let (world, _accepted) = ready_world();
+    daemon_start_with(&world, &["--idle", "1"]);
+    let exit = instance(&world, "daemon", 1).join("exit.json");
+    let lock = std::fs::File::open(world.session_lock()).expect("open the session lock");
+    lock.lock().expect("hold the session lock");
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        !exit.exists(),
+        "the daemon ended while a call held the session lock: {}",
+        read_json(&exit)
+    );
+    drop(lock);
+    assert_eq!(own_exit(&world, "daemon")["cause"], "idle");
+}
+
+/// I3: every call starts the idle limit over.
+#[test]
+fn each_call_starts_the_idle_limit_over() {
+    let (world, _accepted) = ready_world();
+    daemon_start_with(&world, &["--idle", "2"]);
+    let exit = instance(&world, "daemon", 1).join("exit.json");
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until {
+        status(&world, "daemon");
+        assert!(
+            !exit.exists(),
+            "the daemon ended between calls: {}",
+            read_json(&exit)
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    assert_eq!(own_exit(&world, "daemon")["cause"], "idle");
+}
+
+/// I4: `--idle 0` never ends on its own, and an idle stub stays while a
+/// daemon start is unfinished.
+#[test]
+fn the_stub_outlives_a_daemon_without_an_idle_limit() {
+    let (world, _accepted) = ready_world();
+    stub_start(&world, &["--idle", "1"]);
+    daemon_start_with(&world, &["--idle", "0"]);
+    let state = status(&world, "daemon");
+    assert_eq!(state["unfinished"][0]["idle_ms"], Value::Null, "{state}");
+    std::thread::sleep(Duration::from_secs(3));
+    for kind in ["daemon", "stub"] {
+        let exit = instance(&world, kind, 1).join("exit.json");
+        assert!(
+            !exit.exists(),
+            "the {kind} ended on its own: {}",
+            read_json(&exit)
+        );
+    }
+    let out = world.tool(&["daemon", "stop", &world.dir_s()]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(own_exit(&world, "stub")["cause"], "idle");
+}
+
+/// I5: background processes whose sandbox is no longer where they were
+/// started end, idle limit or not. A move stands in for the removal, so
+/// a failure can put the tree back for the world's teardown.
+#[test]
+fn a_sandbox_gone_from_its_path_ends_its_background_processes() {
+    let (world, _accepted) = ready_world();
+    stub_start(&world, &["--idle", "0"]);
+    daemon_start_with(&world, &["--idle", "0"]);
+    let pids = background_pids(&world);
+    let moved = world.root.path().join("moved");
+    std::fs::rename(&world.dir, &moved).expect("move the sandbox away");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let left = loop {
+        if pids.iter().all(|&p| !alive(p)) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    if !left {
+        std::fs::rename(&moved, &world.dir).expect("move the sandbox back");
+    }
+    let alive_now: Vec<u32> = pids.iter().copied().filter(|&p| alive(p)).collect();
+    assert!(left, "processes outlived their sandbox: {alive_now:?}");
 }

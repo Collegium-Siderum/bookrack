@@ -5,8 +5,9 @@
 //!
 //! The supervisor is the daemon's parent and its only observer: it
 //! spawns the daemon from the plan the start judged, probes it ready,
-//! watches it, and stops it on request. Every way a start ends, the
-//! supervisor writes `exit.json` as its last write. It answers requests
+//! watches it, and stops it on request, or unasked once the sandbox is
+//! idle or gone. Every way a start ends, the supervisor writes
+//! `exit.json` as its last write. It answers requests
 //! on `supervisor.sock` in its instance directory, one request and one
 //! answer per connection, each a line of JSON.
 
@@ -15,7 +16,7 @@ use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use bookrack_core::Problem;
 use serde::{Deserialize, Serialize};
@@ -27,13 +28,14 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use super::detach::{
-    self, HANDOFF_DEADLINE, Reason, STATE_POLL, go_refusal, handoff_exit, read_state,
-    read_state_opt, register, write_recovered,
+    self, HANDOFF_DEADLINE, Reason, STATE_POLL, WATCH_POLL, go_refusal, handoff_exit, read_state,
+    read_state_opt, register, watch, write_recovered,
 };
 use super::exec::{
     DaemonStart, ExitRecord, Hosting, ReadyRecord, SpawnRecord, StartRecord, finish_spawn,
     record_spawn, stop_outcome,
 };
+use super::recover::DEFAULT_STOP_TIMEOUT;
 use super::{
     Call, InstanceKind, Outcome, PAUSE_START_AFTER_INTENT, PAUSE_SUPERVISE_AFTER_SPAWN,
     STAGE_INSTANCE, STAGE_SPAWN, STAGE_SUPERVISOR, Session, SessionOpts, ToolResult, build, now,
@@ -336,6 +338,7 @@ impl Session {
                 hosting: Hosting::Detached,
                 stub_url: stub.clone(),
                 timeout_ms: Some(timeout.as_millis() as u64),
+                idle_ms: start.idle_value().map(|limit| limit.as_millis() as u64),
             },
         )
         .and_then(|()| {
@@ -658,7 +661,12 @@ pub async fn supervise(dir: &Path, n: u32, opts: SessionOpts) -> i32 {
         Err(_) => return finish(&sock),
     };
 
-    // Running: watch the daemon, stop it on request.
+    // Running: watch the daemon and the sandbox; stop the daemon on
+    // request, or unasked once the sandbox is idle or gone.
+    let idle = start.idle_ms.map(Duration::from_millis);
+    let began = SystemTime::now();
+    let mut looks = tokio::time::interval(WATCH_POLL);
+    looks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             incoming = requests.recv() => {
@@ -692,6 +700,16 @@ pub async fn supervise(dir: &Path, n: u32, opts: SessionOpts) -> i32 {
                     Action::AbortHandoff | Action::CancelStart => {
                         unreachable!("a running supervisor neither hands off nor starts")
                     }
+                }
+            }
+            _ = looks.tick() => {
+                if let Some(cause) = watch(&paths, &instance, began, idle, || false).cause() {
+                    let record =
+                        ExitRecord::from(&stop_outcome(daemon.stop(DEFAULT_STOP_TIMEOUT).await))
+                            .with_phase("running")
+                            .with_cause(cause);
+                    exit(&record);
+                    return finish(&sock);
                 }
             }
             () = tokio::time::sleep(STATE_POLL) => {

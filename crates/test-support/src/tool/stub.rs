@@ -9,11 +9,12 @@
 //! test asks [`Session::refresh_stub`] for the address of this call: a
 //! stub that does not answer with its own identity is refused, never
 //! skipped. The stub cannot change while a daemon start has not ended,
-//! since the daemon took the address when it started.
+//! since the daemon took the address when it started; for the same
+//! reason an idle stub stays until no daemon start is left unfinished.
 
 use std::io;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use bookrack_config::DEFAULT_EMBED_MODEL;
 use bookrack_core::Problem;
@@ -23,8 +24,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 use super::detach::{
-    self, HANDOFF_DEADLINE, Reason, Registration, STATE_POLL, go_refusal, handoff_exit, read_state,
-    read_state_opt, register, write_recovered,
+    self, HANDOFF_DEADLINE, Reason, Registration, STATE_POLL, WATCH_POLL, go_refusal, handoff_exit,
+    read_state, read_state_opt, register, watch, write_recovered,
 };
 use super::exec::ExitRecord;
 use super::recover::{EXIT_POLL, Report, StubFiles, StubProbes, StubState, judge_stub, last_ended};
@@ -63,6 +64,10 @@ pub struct StubStartRecord {
     pub identity: String,
     pub started: f64,
     pub parent_pid: u32,
+    /// How long the sandbox may go without a call before the stub ends
+    /// unasked. Absent when it never does.
+    #[serde(default)]
+    pub idle_ms: Option<u64>,
 }
 
 /// The word for a fill, as the command line and the records spell it.
@@ -295,17 +300,19 @@ impl Session {
     }
 
     /// `stub start`: a stub in a background process, `dimension` wide,
-    /// filled as `vectors` says. Its URL is handed back.
+    /// filled as `vectors` says, that ends unasked once the sandbox has
+    /// gone `idle` without a call. Its URL is handed back.
     pub async fn detached_stub_start(
         &mut self,
         dimension: usize,
         vectors: Vectors,
+        idle: Option<Duration>,
     ) -> ToolResult<String> {
         let args = vec![dimension.to_string(), vectors_word(vectors).to_string()];
         let mut call = self.begin("stub start", args, true).await?;
         let mut url = None;
         let result = self
-            .stub_start_inner(&mut call, dimension, vectors, &mut url)
+            .stub_start_inner(&mut call, dimension, vectors, idle, &mut url)
             .await;
         let outcome = self.end(call, result)?;
         url.ok_or(outcome)
@@ -316,6 +323,7 @@ impl Session {
         call: &mut Call,
         dimension: usize,
         vectors: Vectors,
+        idle: Option<Duration>,
         url_out: &mut Option<String>,
     ) -> ToolResult<Outcome> {
         let list = |kind| {
@@ -354,6 +362,7 @@ impl Session {
                 identity: nonce.clone(),
                 started: now(),
                 parent_pid: std::process::id(),
+                idle_ms: idle.map(|limit| limit.as_millis() as u64),
             },
         ) {
             let _ = write_recovered(
@@ -605,11 +614,19 @@ impl Session {
                     StubState::Held { detail } => ("held", Some(detail.clone())),
                     other => (other.as_str(), None),
                 };
+                let idle_ms = read_state_opt::<StubStartRecord>(
+                    &paths,
+                    &paths.stub_instance(n).join("start.json"),
+                )
+                .ok()
+                .flatten()
+                .and_then(|start| start.idle_ms);
                 entries.push(json!({
                     "n": n,
                     "state": word,
                     "url": view.url,
                     "pids": { "serve": view.registration.as_ref().map(|r| r.pid) },
+                    "idle_ms": idle_ms,
                     "detail": detail,
                 }));
             }
@@ -735,10 +752,13 @@ pub async fn serve(
     let exit = |record: &ExitRecord| {
         let _ = write_json(&instance.join("exit.json"), record);
     };
-    if let Err(why) = read_state::<StubStartRecord>(&paths, &instance.join("start.json")) {
-        exit(&handoff_exit(&why));
-        return super::EXIT_TOOL;
-    }
+    let start = match read_state::<StubStartRecord>(&paths, &instance.join("start.json")) {
+        Ok(start) => start,
+        Err(why) => {
+            exit(&handoff_exit(&why));
+            return super::EXIT_TOOL;
+        }
+    };
     if let Err(e) = register(&instance, InstanceKind::Stub, &identity) {
         exit(&handoff_exit(&format!("registering failed: {e}")));
         return super::EXIT_TOOL;
@@ -788,12 +808,27 @@ pub async fn serve(
             return super::EXIT_TOOL;
         }
     };
-    let why = loop {
+    let idle = start.idle_ms.map(Duration::from_millis);
+    let began = SystemTime::now();
+    let mut looks = tokio::time::interval(WATCH_POLL);
+    looks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let daemon_unfinished = || {
+        !matches!(
+            session.unfinished_instances(InstanceKind::Daemon),
+            Ok(unfinished) if unfinished.is_empty()
+        )
+    };
+    let (why, cause) = loop {
         tokio::select! {
-            _ = term.recv() => break "terminated",
+            _ = term.recv() => break ("terminated", None),
+            _ = looks.tick() => {
+                if let Some(cause) = watch(&paths, &instance, began, idle, daemon_unfinished).cause() {
+                    break (cause, Some(cause));
+                }
+            }
             () = tokio::time::sleep(STATE_POLL) => {
                 if stub.wait_shutdown(Duration::ZERO) {
-                    break "shutdown";
+                    break ("shutdown", None);
                 }
             }
         }
@@ -806,6 +841,7 @@ pub async fn serve(
         summary: None,
         detail: Some(why.to_string()),
         phase: None,
+        cause: cause.map(str::to_string),
         finished: now(),
     });
     0

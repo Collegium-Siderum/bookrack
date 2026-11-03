@@ -531,6 +531,7 @@ impl Session {
                         },
                     },
                     "lock_held": probes.lock_held.ok(),
+                    "idle_ms": view.start.as_ref().and_then(|s| s.idle_ms),
                     "detail": detail,
                 }));
             }

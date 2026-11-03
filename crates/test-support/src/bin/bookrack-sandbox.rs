@@ -20,7 +20,8 @@ mod unix {
     use bookrack_test_support::tool::recover::{DEFAULT_STOP_TIMEOUT, Report};
     use bookrack_test_support::tool::stub::DEFAULT_STUB_DIM;
     use bookrack_test_support::tool::{
-        CreateOpts, Outcome, Preset, Session, SessionOpts, Source, sig, stub, supervise,
+        CreateOpts, DEFAULT_IDLE, Outcome, Preset, Session, SessionOpts, Source, sig, stub,
+        supervise,
     };
     use clap::{Parser, Subcommand, ValueEnum};
 
@@ -91,6 +92,11 @@ mod unix {
             dim: usize,
             #[arg(long, value_enum, default_value_t)]
             vectors: VectorsArg,
+            /// End the stub unasked once the sandbox has gone this long
+            /// without a call and no daemon start is unfinished, in
+            /// seconds; 0 never does.
+            #[arg(long, value_name = "SECS", default_value_t = DEFAULT_IDLE.as_secs())]
+            idle: u64,
         },
         /// Stop the stub, or close an instance whose process is gone.
         Stop {
@@ -131,6 +137,10 @@ mod unix {
             /// How long the daemon may take to be ready, in seconds.
             #[arg(long, value_name = "SECS", default_value_t = DEFAULT_DAEMON_TIMEOUT.as_secs())]
             timeout: u64,
+            /// Stop the daemon unasked once the sandbox has gone this long
+            /// without a call, in seconds; 0 never does.
+            #[arg(long, value_name = "SECS", default_value_t = DEFAULT_IDLE.as_secs())]
+            idle: u64,
         },
         /// Stop the daemon, or close an instance whose processes are gone.
         Stop {
@@ -447,6 +457,11 @@ mod unix {
         }
     }
 
+    /// An `--idle` value as a limit: 0 is none.
+    fn idle_limit(secs: u64) -> Option<Duration> {
+        (secs > 0).then(|| Duration::from_secs(secs))
+    }
+
     async fn run_stub(command: StubCommand, opts: SessionOpts) -> i32 {
         if let StubCommand::Serve {
             dir,
@@ -470,9 +485,13 @@ mod unix {
             Err(outcome) => return finish(Err(outcome)),
         };
         match command {
-            StubCommand::Start { dim, vectors, .. } => {
-                finish_line(session.detached_stub_start(dim, vectors.vectors()).await)
-            }
+            StubCommand::Start {
+                dim, vectors, idle, ..
+            } => finish_line(
+                session
+                    .detached_stub_start(dim, vectors.vectors(), idle_limit(idle))
+                    .await,
+            ),
             StubCommand::Stop { forget, .. } => finish_report(session.stub_stop(forget).await),
             StubCommand::Fail { mode, .. } => finish(session.stub_fail(&mode).await),
             StubCommand::Status { .. } => {
@@ -501,6 +520,7 @@ mod unix {
                 library,
                 dotenv,
                 timeout,
+                idle,
                 ..
             } => {
                 let mut start = match &library {
@@ -510,7 +530,9 @@ mod unix {
                 if let Some(path) = &dotenv {
                     start = start.dotenv(path);
                 }
-                start = start.timeout(Duration::from_secs(timeout));
+                start = start
+                    .timeout(Duration::from_secs(timeout))
+                    .idle(idle_limit(idle));
                 finish_line(session.detached_daemon_start(start).await)
             }
             DaemonCommand::Stop {

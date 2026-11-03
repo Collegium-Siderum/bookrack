@@ -40,6 +40,8 @@ pub mod stub;
 pub mod supervise;
 pub mod tripwire;
 
+pub use detach::DEFAULT_IDLE;
+
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
