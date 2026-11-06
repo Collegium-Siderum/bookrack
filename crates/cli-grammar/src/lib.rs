@@ -971,17 +971,6 @@ fn book_intake_id(raw: &str) -> Result<i64, String> {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum PapersAction {
-    /// Deprecated: use `bookrack glean`, which takes the same arguments.
-    ///
-    /// Submits a paper file to the glean pipeline exactly as `glean`
-    /// does, after a deprecation warning on stderr; it is removed in the
-    /// next minor release. With `--recursive`, every supported file
-    /// under a directory is enqueued.
-    #[command(after_long_help = crate::examples![
-        "papers ingest /path/to/paper.pdf",
-        "papers ingest /path/to/papers-dir/ --recursive",
-    ])]
-    Ingest(PapersIngestArgs),
     /// List papers in catalog order, paginated.
     #[command(after_long_help = crate::examples![
         "papers list",
@@ -1462,8 +1451,8 @@ pub struct PapersDryrunArgs {
     pub no_chunk: bool,
 }
 
-/// Positional + flag bundle for `glean` and its deprecated form
-/// `papers ingest`. Mirrors [`IngestArgs`] for the paper pipeline.
+/// Positional + flag bundle for `glean`. Mirrors [`IngestArgs`] for the
+/// paper pipeline.
 /// `--priority` controls the queue priority of the resulting job.
 #[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
 pub struct PapersIngestArgs {
@@ -2239,27 +2228,6 @@ mod tests {
                 assert!(priority.is_none());
             }
             other => panic!("expected ocr action, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn papers_ingest_carries_path_and_flags() {
-        let cmd = parse(&[
-            "papers",
-            "ingest",
-            "/tmp/p.pdf",
-            "--force",
-            "--priority",
-            "high",
-        ]);
-        match cmd {
-            PapersAction::Ingest(args) => {
-                assert_eq!(args.path.to_string_lossy(), "/tmp/p.pdf");
-                assert!(args.force);
-                assert_eq!(args.priority.as_deref(), Some("high"));
-                assert!(!args.recursive);
-            }
-            other => panic!("expected papers ingest, got {other:?}"),
         }
     }
 

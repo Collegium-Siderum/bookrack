@@ -353,9 +353,8 @@ enum Command {
     /// Submit one or more papers for ingest.
     ///
     /// The paper-side pipeline verb, symmetric with the book-side
-    /// `ingest`; `papers ingest` is its deprecated form. Requires a
-    /// running bookrack daemon; the command exits with code 2 if no
-    /// daemon is found.
+    /// `ingest`. Requires a running bookrack daemon; the command exits
+    /// with code 2 if no daemon is found.
     #[command(after_long_help = bookrack_cli_grammar::examples![
         "glean /path/to/paper.pdf",
         "glean /path/to/papers-dir/ --recursive",
@@ -1513,9 +1512,7 @@ async fn run() -> Result<()> {
         Command::List(args) => cmd::cli_client::listing::list(args, None).await,
         Command::Search(args) => cmd::cli_client::listing::search(args, None).await,
         Command::Show { id } => cmd::cli_client::show::run(id, None).await,
-        Command::Glean(args) => {
-            cmd::cli_client::papers::run(PapersAction::Ingest(args), None, audit_profile).await
-        }
+        Command::Glean(args) => cmd::cli_client::papers::glean(args, None).await,
         Command::Dryrun(args) => cmd::cli_client::dryrun::run(args, None, audit_profile).await,
         Command::Distill { action } => bookrack_cli::distill_cmd::run(&selection, action).await,
         Command::Runs { action } => bookrack_cli::runs_cmd::run(&selection, action),
@@ -1587,16 +1584,10 @@ fn accepts_audit_profile(command: &Command) -> bool {
 
 /// The warning a deprecated command prints on stderr before it runs,
 /// naming the command that replaces it; `None` for every other command.
-fn deprecation_notice(command: &Command) -> Option<&'static str> {
-    match command {
-        Command::Papers {
-            action: PapersAction::Ingest(_),
-        } => Some(
-            "warning: `bookrack papers ingest` is deprecated and is removed in the next minor \
-             release; use `bookrack glean`, which takes the same arguments",
-        ),
-        _ => None,
-    }
+/// No command is in its deprecation period, so every command gets
+/// `None`.
+fn deprecation_notice(_command: &Command) -> Option<&'static str> {
+    None
 }
 
 /// Whether a set `BOOKRACK_DATA_DIR` will shadow a freshly written
@@ -2357,34 +2348,42 @@ mod tests {
         assert!(rendered.contains("list"), "{rendered}");
     }
 
-    /// The top-level alias is the same grammar as the namespaced verb,
-    /// so the two parse into equal argument bundles. Comparing the
-    /// parse products — rather than asserting both dispatch to the same
-    /// function — is what keeps the flags from drifting apart.
+    /// The `papers` namespace has no `ingest` leaf: clap refuses
+    /// `papers ingest` as an unknown subcommand rather than routing it
+    /// anywhere.
     #[test]
-    fn glean_parses_into_the_same_args_as_papers_ingest() {
-        let Command::Glean(direct) =
-            Cli::try_parse_from(["bookrack", "glean", "/x/paper.pdf", "--recursive"])
-                .expect("the alias parses")
-                .command
-        else {
-            panic!("`glean` must parse into Command::Glean");
+    fn papers_ingest_does_not_parse() {
+        let argv = ["bookrack", "papers", "ingest", "/x/paper.pdf"];
+        let Err(err) = Cli::try_parse_from(argv) else {
+            panic!("`papers ingest` must not parse: {argv:?}");
         };
-        let Command::Papers {
-            action: PapersAction::Ingest(namespaced),
-        } = Cli::try_parse_from([
-            "bookrack",
-            "papers",
-            "ingest",
-            "/x/paper.pdf",
-            "--recursive",
-        ])
-        .expect("the namespaced verb parses")
-        .command
-        else {
-            panic!("`papers ingest` must parse into PapersAction::Ingest");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
+
+    /// Each `glean` flag lands in its own field of the argument bundle,
+    /// and an unpassed flag stays off.
+    #[test]
+    fn glean_carries_path_and_flags() {
+        let glean = |argv: &[&str]| {
+            let full: Vec<&str> = ["bookrack", "glean"].iter().chain(argv).copied().collect();
+            match Cli::try_parse_from(&full).expect("glean parses").command {
+                Command::Glean(args) => args,
+                _ => panic!("`glean` must parse into Command::Glean: {full:?}"),
+            }
         };
-        assert_eq!(direct, namespaced);
+
+        let args = glean(&["/x/paper.pdf", "--force", "--priority", "high"]);
+        assert_eq!(args.path, Path::new("/x/paper.pdf"));
+        assert!(args.force);
+        assert_eq!(args.priority.as_deref(), Some("high"));
+        assert!(!args.recursive);
+        assert!(!args.no_wait);
+
+        let args = glean(&["/x/papers/", "--recursive", "--no-wait"]);
+        assert_eq!(args.path, Path::new("/x/papers/"));
+        assert!(args.recursive && args.no_wait);
+        assert!(!args.force);
+        assert_eq!(args.priority, None);
     }
 
     #[test]
@@ -2617,7 +2616,7 @@ mod tests {
         ("bookrack intake", 2),
         ("bookrack libraries", 12),
         ("bookrack metadata", 10),
-        ("bookrack papers", 13),
+        ("bookrack papers", 12),
         ("bookrack papers corpus", 1),
         ("bookrack papers metadata", 10),
         ("bookrack papers stamps", 1),
@@ -2699,7 +2698,7 @@ mod tests {
     /// invocation path, the command that replaces it, and arguments both
     /// accept. Each is removed in the minor release after the one that
     /// deprecates it.
-    const DEPRECATED: &[(&str, &str, &[&str])] = &[("papers ingest", "glean", &["/tmp/paper.pdf"])];
+    const DEPRECATED: &[(&str, &str, &[&str])] = &[];
 
     /// Collects `(invocation path, summary)` for every command in the
     /// tree, clap's generated `help` pseudo-subcommand excepted.

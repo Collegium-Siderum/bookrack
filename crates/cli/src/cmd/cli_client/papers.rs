@@ -1,6 +1,7 @@
-//! `bookrack papers <action>` — paper-side surface implemented as
-//! thin control-plane clients. Ingest submits to the glean queue
-//! (`glean.submit`, the paper-side peer of `ingest.submit`); list /
+//! `bookrack papers <action>` and `bookrack glean` — paper-side surface
+//! implemented as thin control-plane clients. `glean` submits to the
+//! glean queue (`glean.submit`, the paper-side peer of
+//! `ingest.submit`); list /
 //! find / show / toc route to the read-side `library.*` reads added
 //! alongside the book-side surface; `export-csl` calls the
 //! `papers.export_csl` read; `remove` calls the `papers.remove`
@@ -35,7 +36,6 @@ pub async fn run(
     default_audit_profile: Option<String>,
 ) -> Result<()> {
     match action {
-        PapersAction::Ingest(args) => ingest(args, runtime_dir).await,
         PapersAction::List(args) => list(args, runtime_dir).await,
         PapersAction::Find(args) => find(args, runtime_dir).await,
         PapersAction::Show { intake_id } => show(intake_id, runtime_dir).await,
@@ -481,7 +481,7 @@ async fn remove(args: PapersRemoveArgs, runtime_dir: Option<PathBuf>) -> Result<
     .await
 }
 
-async fn ingest(args: PapersIngestArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
+pub async fn glean(args: PapersIngestArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
     let label_owned = args
         .path
         .file_name()

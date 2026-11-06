@@ -9,7 +9,6 @@ bookrack_test_support::test_group!("cmd", spec = None);
 
 mod config_effective;
 mod config_knobs;
-mod deprecated_commands;
 mod distill_run_lifecycle;
 mod dotenv_entry_point;
 mod error_rendering;
@@ -40,6 +39,7 @@ mod queue_short_id;
 mod queue_wait;
 mod quit_e2e;
 mod registry_absolute_roots;
+mod removed_commands;
 mod retrieval_weak_advisory;
 mod root_identity_gate;
 mod rpc_e2e;

@@ -84,9 +84,7 @@ snapshots its log ring (see [Observability](#observability)).
 with `--recursive`) to the daemon and streams the queue worker's
 progress until the batch reaches a terminal state. `bookrack glean
 <path>` is the parallel entry point for academic papers, which live in
-a second cluster under the same data root. `bookrack papers ingest` is
-its deprecated form — same arguments, same pipeline, plus a warning on
-stderr — and is removed in the next minor release.
+a second cluster under the same data root.
 
 ```
 bookrack ingest /path/to/book.epub

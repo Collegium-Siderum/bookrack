@@ -8,6 +8,14 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Removed
+
+- **`bookrack papers ingest`; use `bookrack glean`.** Deprecated in
+  0.14.0, the command is no longer part of the `papers` namespace:
+  invoking it is now a usage error (exit `2`) that names the unknown
+  subcommand, and nothing is submitted. `glean` takes the same
+  arguments and runs the same pipeline.
+
 ## [0.14.0] - 2026-11-07
 
 ### Known issues
