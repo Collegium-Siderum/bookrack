@@ -36,7 +36,11 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            runs-on: macos-14
+            # Pinned image, so a tag-time build does not move when
+            # `macos-latest` is redirected. rustc's default deployment
+            # target for this triple (11.0) keeps the binary's minimum
+            # macOS at LSMinimumSystemVersion whatever SDK the image has.
+            runs-on: macos-26
             pdfium_archive: pdfium-mac-arm64.tgz
             pdfium_sha: 4939bd935ac83ddc09a3a4f038bc43a19cea1660316a3667f26cb07a070e139d
             pdfium_path_in_archive: lib/libpdfium.dylib
