@@ -2394,17 +2394,20 @@ pub(crate) fn unrooted_backup_dir_knob(
 ///
 /// Derived from the source the resolution already recorded rather than
 /// re-walking the ladder, so this row and `bookrack info` cannot
-/// disagree about which rung won.
+/// disagree about which rung won. `env` is what the data-root variable
+/// holds; when a flag outranked it, the row reports it as a losing
+/// layer.
 pub(crate) fn data_dir_knob(
     data_dir: &Path,
     source: ResolutionSource,
+    env: Option<String>,
     dotenv: Option<DotenvSupply<'_>>,
 ) -> KnobOrigin {
     resolve_knob(
         "data_dir",
         KnobReach::Process,
         ReadAt::DuringResolution,
-        data_dir_candidates(Some((data_dir, source)), None, dotenv),
+        data_dir_candidates(Some((data_dir, source)), env_trimmed(env), dotenv),
     )
 }
 
@@ -2431,33 +2434,33 @@ pub(crate) fn unresolved_data_dir_knob(
 /// one that won.
 ///
 /// The whole ladder rather than just the winner, so the row names the
-/// places a root can be selected from even when one already was. The
-/// rungs below the winner offer nothing: resolution short-circuits, so
-/// what they would have produced was never computed and must not be
-/// guessed at here.
+/// places a root can be selected from even when one already was. A
+/// rung below the winner whose value would have to be computed — the
+/// directory beside the executable, a registry's default — offers
+/// nothing: resolution short-circuits, so what it would have produced
+/// was never computed and must not be guessed at here.
 ///
-/// One rung of that ladder is an environment variable, and a variable
-/// the dotenv file supplied is the file's value wearing the
-/// environment's clothes — indistinguishable to whoever reads it. That
+/// The environment rung is read, not computed: the variable holds what
+/// it holds whichever rung won. `env_read` carries that text, trimmed,
+/// on every path, so a root a flag outranked is reported as the losing
+/// layer it is; with the variable itself the winner, the resolved root
+/// is the rung's value instead.
+///
+/// A variable the dotenv file supplied is the file's value wearing the
+/// environment's clothes — the loader wrote it into the process
+/// environment, so it is indistinguishable to whoever reads it. The
 /// rung therefore draws its layers through [`env_layers`], the same
 /// call every other variable's row goes through, so a root set in the
-/// file is credited to the file and a file line the real environment
-/// beat is reported as the losing layer it is. `env_read` carries what
-/// the variable held when resolution reached no root at all; with a
-/// root resolved the winning rung already carries it.
+/// file is credited to the file whether it won or lost, and a file
+/// line the real environment beat is reported as the losing layer it
+/// is.
 ///
-/// The layering applies only to a rung that speaks. A variable that
-/// lost to a flag offers nothing for the file to have supplied, and
-/// splitting silence into two silent layers would name a file that
-/// decided nothing.
-///
-/// A line the file wrote and the real environment eclipsed is the one
-/// exception. The loader recorded that discard when it read the file,
-/// and it holds whichever rung the ladder stopped at, so a silent rung
-/// still carries it — as a [`Candidate::discarded`], which is reported
-/// and can never be taken. What the file *supplied* has no such
-/// record: a load keeps the key, not the value, so a supplied root
-/// some rung above outranked stays unreported.
+/// A rung whose variable is unset or blank offers nothing, and is not
+/// split into two silent layers that would name a file that decided
+/// nothing. A line the file wrote and the real environment eclipsed is
+/// still reported there: the loader recorded that discard when it read
+/// the file, so the silent rung carries it as a
+/// [`Candidate::discarded`], which is reported and can never be taken.
 fn data_dir_candidates(
     resolved: Option<(&Path, ResolutionSource)>,
     env_read: Option<String>,

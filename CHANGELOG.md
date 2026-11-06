@@ -198,6 +198,12 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **`config effective` shows the `BOOKRACK_DATA_DIR` a flag outranked.**
+  With `--data-dir` or `--library` deciding the root, the `data_dir` row
+  said nothing about the variable, whether the shell or `.env` set it,
+  so a root an operator had configured looked unset. The row now lists
+  it as a layer that lost, with the value it held and the environment or
+  the `.env` file as its site. The resolved root is unchanged.
 - **`libraries mount` of a library that is still broken explains
   itself.** A registered library whose data root is not there, or
   whose stores this build cannot read, used to be refused with an

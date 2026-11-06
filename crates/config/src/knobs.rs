@@ -241,9 +241,10 @@ fn data_dir_row(
     dotenv: Option<DotenvSupply<'_>>,
     root: Option<&Config>,
 ) -> KnobOrigin {
+    let env = get(crate::DATA_DIR_ENV);
     match root {
-        Some(cfg) => crate::data_dir_knob(cfg.data_dir(), cfg.source(), dotenv),
-        None => crate::unresolved_data_dir_knob(get(crate::DATA_DIR_ENV), dotenv),
+        Some(cfg) => crate::data_dir_knob(cfg.data_dir(), cfg.source(), env, dotenv),
+        None => crate::unresolved_data_dir_knob(env, dotenv),
     }
 }
 
@@ -382,7 +383,7 @@ mod tests {
 
         let mut sites = Vec::new();
         for source in all {
-            let knob = crate::data_dir_knob(std::path::Path::new("/somewhere"), source, None);
+            let knob = crate::data_dir_knob(std::path::Path::new("/somewhere"), source, None, None);
             assert_eq!(knob.key, "data_dir");
             assert_eq!(
                 knob.value.as_deref(),
@@ -725,6 +726,7 @@ mod tests {
             std::path::Path::new("/somewhere"),
             crate::ResolutionSource::DataDirFlag,
             None,
+            None,
         );
 
         let sites: Vec<&str> = knob.chain.iter().map(|s| s.site.as_str()).collect();
@@ -869,6 +871,81 @@ mod tests {
                 .iter()
                 .any(|s| s.layer == Layer::Dotenv && s.value == "/sandbox/from-file"),
             "the file's own root vanished from the row: {:?}",
+            data_dir.shadowed
+        );
+    }
+
+    /// A data-root variable a flag outranked is a losing layer, not an
+    /// absent one, on either flag. The variable is read, not computed,
+    /// so what it held is known whichever rung won.
+    #[test]
+    fn a_data_root_variable_a_flag_outranked_is_reported_as_shadowed() {
+        for source in [
+            crate::ResolutionSource::DataDirFlag,
+            crate::ResolutionSource::LibraryFlag,
+        ] {
+            let root = root_resolved_by(source, "/sandbox/flag");
+            let rows = knob_origins_from(
+                only(crate::DATA_DIR_ENV, "/sandbox/from-shell"),
+                None,
+                Some(&root),
+            );
+            let data_dir = row(&rows, "data_dir");
+
+            assert_eq!(data_dir.value.as_deref(), Some("/sandbox/flag"));
+            assert_eq!(data_dir.layer, Layer::Flag, "{source:?}");
+            assert!(
+                data_dir
+                    .shadowed
+                    .iter()
+                    .any(|s| s.layer == Layer::Environment
+                        && s.site == crate::DATA_DIR_ENV
+                        && s.value == "/sandbox/from-shell"),
+                "{source:?}: the variable's own root vanished from the row: {:?}",
+                data_dir.shadowed
+            );
+        }
+    }
+
+    /// A data root the file supplied and a flag outranked is credited to
+    /// the file, not to a shell that set nothing. The loader wrote the
+    /// file's value into the environment, which is where `get` finds it.
+    #[test]
+    fn a_data_root_the_dotenv_file_supplied_is_reported_when_a_flag_won() {
+        let load = dotenv_load("/sandbox/.env", &[crate::DATA_DIR_ENV]);
+        let root = root_resolved_by(crate::ResolutionSource::LibraryFlag, "/sandbox/flag");
+        let rows = knob_origins_from(
+            only(crate::DATA_DIR_ENV, "/sandbox/from-file"),
+            Some(load.supply()),
+            Some(&root),
+        );
+        let data_dir = row(&rows, "data_dir");
+
+        assert_eq!(data_dir.value.as_deref(), Some("/sandbox/flag"));
+        assert_eq!(data_dir.layer, Layer::Flag);
+        assert_eq!(
+            data_dir
+                .shadowed
+                .iter()
+                .map(|s| (s.layer, s.site.as_str(), s.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(Layer::Dotenv, "/sandbox/.env", "/sandbox/from-file")],
+            "the file's root is missing, or is credited to the shell"
+        );
+    }
+
+    /// A blank data-root variable offers nothing whichever rung won, so
+    /// reading it on every path adds no losing layer.
+    #[test]
+    fn a_blank_data_root_variable_a_flag_outranked_adds_no_layer() {
+        let root = root_resolved_by(crate::ResolutionSource::DataDirFlag, "/sandbox/flag");
+        let rows = knob_origins_from(only(crate::DATA_DIR_ENV, "  "), None, Some(&root));
+        let data_dir = row(&rows, "data_dir");
+
+        assert_eq!(data_dir.layer, Layer::Flag);
+        assert!(
+            data_dir.shadowed.is_empty(),
+            "a blank variable was reported as a value: {:?}",
             data_dir.shadowed
         );
     }

@@ -334,13 +334,15 @@ file's line its chance back. The value in that case comes from
 line beneath it. This holds for the data root as well, on both halves:
 a `BOOKRACK_DATA_DIR` written into `.env` wins rung 3 of the ladder
 above and is credited to the file, and one the real environment already
-carried leaves the file's line reported as a layer that lost. The
-second holds whichever rung the root came from — including a
-`--data-dir` flag that stopped the walk above rung 3, which decides
-where the root comes from and not what the file says. What the file
-*supplied* is the one thing a losing rung cannot report: the loader
-records which keys it filled in, not the values, so a root the file
-supplied and a higher rung outranked is absent from the row.
+carried leaves the file's line reported as a layer that lost. Both
+hold whichever rung the root came from. A `--data-dir` or `--library`
+flag stops the walk above rung 3, which decides where the root comes
+from and not what the variable holds: a `BOOKRACK_DATA_DIR` the flag
+outranked is shown as a layer that offered a value and lost, credited
+to the environment when the shell set it and to the file when `.env`
+did. The rungs below rung 3 — the portable layout and the two registry
+defaults — are not shown once a higher rung has won: resolution never
+computed what they would have produced.
 
 ### How far `.env` reaches
 

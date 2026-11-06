@@ -172,6 +172,76 @@ async fn a_prefixed_variable_no_knob_reads_is_listed_with_its_source() -> Result
     Ok(())
 }
 
+/// A data root that `--library` outranked is reported as a losing layer
+/// holding what it named, credited to whichever of the environment and
+/// `.env` set it. Run through the binary because the `.env` half rests
+/// on the loader having written the file's value into the process
+/// environment, which only a real load shows.
+#[tokio::test]
+async fn a_data_root_a_flag_outranked_is_reported_where_it_was_set() -> Result<()> {
+    for from_file in [false, true] {
+        let sandbox = Sandbox::new();
+        let a = sandbox.data_root("a");
+        let b = sandbox.data_root("b");
+        sandbox.write_registry_entries(None, &[("a", &a), ("b", &b)]);
+        let outranked = a.display().to_string();
+        let env: Vec<(&str, &str)> = if from_file {
+            std::fs::write(
+                sandbox.cwd().join(".env"),
+                format!("BOOKRACK_DATA_DIR={outranked}\n"),
+            )?;
+            Vec::new()
+        } else {
+            vec![("BOOKRACK_DATA_DIR", outranked.as_str())]
+        };
+        let (layer, site_suffix) = if from_file {
+            ("dotenv", "/.env")
+        } else {
+            ("environment", "BOOKRACK_DATA_DIR")
+        };
+
+        let report = report(&run(&sandbox, &["--json", "--library", "b"], &env).await?)?;
+        let data_dir = row(&report, "data_dir").expect("no data_dir row");
+        assert_eq!(data_dir["layer"], "flag", "{data_dir}");
+        assert!(
+            data_dir["value"]
+                .as_str()
+                .is_some_and(|v| v == b.display().to_string()),
+            "the flag's root did not win: {data_dir}"
+        );
+        let shadowed: Vec<(String, bool, String)> = data_dir["shadowed"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|s| {
+                (
+                    s["layer"].as_str().unwrap_or_default().to_string(),
+                    s["site"].as_str().is_some_and(|x| x.ends_with(site_suffix)),
+                    s["value"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shadowed,
+            vec![(layer.to_string(), true, outranked.clone())],
+            "set in the {layer} layer, the outranked root is missing or misplaced: {data_dir}"
+        );
+
+        let human = run(&sandbox, &["--library", "b"], &env).await?;
+        let text = String::from_utf8_lossy(&human.stdout);
+        assert!(
+            text.lines().any(|l| l.contains("data_dir")
+                && l.contains("<-")
+                && l.contains(layer)
+                && l.contains(&outranked)),
+            "the human report omits what the JSON one carries:\n{text}"
+        );
+    }
+
+    Ok(())
+}
+
 /// A variable outside the admitted set is read out of the file and
 /// then dropped, rather than installed in the process.
 ///
