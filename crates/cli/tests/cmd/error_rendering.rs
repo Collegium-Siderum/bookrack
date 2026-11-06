@@ -294,13 +294,15 @@ async fn an_overloaded_backend_exits_four_and_keeps_its_hint() {
 }
 
 /// A classified failure with no `data` prints exactly what it printed
-/// before the split — one line, no empty continuation.
+/// before the split — one line, no empty continuation. The case is a
+/// global `--audit-profile` on a subcommand that does not consume it,
+/// a local user error refused before any daemon is looked for.
 #[tokio::test]
 async fn a_failure_without_a_diagnostic_stays_a_single_line() {
     let sandbox = Sandbox::new();
 
     let output = Command::from(bookrack_cmd!(&sandbox).build())
-        .args(["rpc", "call", "library.info", "{}"])
+        .args(["--audit-profile", "strict", "status"])
         .output()
         .await
         .expect("run bookrack rpc call");

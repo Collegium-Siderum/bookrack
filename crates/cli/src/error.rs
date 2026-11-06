@@ -29,8 +29,9 @@ use serde_json::Value;
 /// Predictable, operator-facing failures the CLI emits.
 #[derive(Debug, thiserror::Error)]
 pub enum BookrackCliError {
-    /// No daemon is listening at the resolved runtime directory.
-    #[error("bookrack daemon not running; start it with: bookrack run")]
+    /// No daemon is listening at the resolved runtime directory. The
+    /// hint names the command that starts one.
+    #[error("no daemon is running")]
     DaemonNotRunning,
 
     /// The runtime directory or socket exists but the connect failed
@@ -394,6 +395,17 @@ impl BookrackCliError {
             | Self::RootIdentityRefused { problem } => {
                 return Some(problem.data.clone());
             }
+            Self::DaemonNotRunning => {
+                return Some(ProblemData {
+                    detail: None,
+                    hint: Some(
+                        "Start one with `bookrack run` in another terminal, then run this \
+                         command again."
+                            .to_string(),
+                    ),
+                    retryable: false,
+                });
+            }
             Self::RpcParamsInvalid { detail, .. } => {
                 return Some(ProblemData {
                     detail: Some(detail.clone()),
@@ -654,10 +666,17 @@ mod tests {
         );
     }
 
+    /// The summary states the fact alone; starting the daemon is the
+    /// hint's to say. Resending the same command changes nothing until
+    /// someone starts one, so the failure is not retryable.
     #[test]
-    fn daemon_not_running_message_is_actionable() {
-        let s = BookrackCliError::DaemonNotRunning.to_string();
-        assert!(s.contains("bookrack run"));
+    fn daemon_not_running_states_the_fact_and_hints_the_remedy() {
+        let err = BookrackCliError::DaemonNotRunning;
+        assert_eq!(err.to_string(), "no daemon is running");
+        let data = err.problem_data().expect("no daemon is explained");
+        let hint = data.hint.expect("the hint names the remedy");
+        assert!(hint.contains("`bookrack run`"), "{hint}");
+        assert!(!data.retryable, "nothing clears without an operator");
     }
 
     #[test]

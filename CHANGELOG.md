@@ -162,6 +162,11 @@ release workflow extracts the matching section verbatim from this file.
   `html5ever`, `markup5ever`, `tendril`, `web_atoms`, `selectors`,
   `cssparser`) and with the PDFium binary, by release tag and archive
   digest.
+- **A command that needs the daemon, run while none is, says so in
+  three parts.** The summary is `no daemon is running` and a `hint:`
+  line names `bookrack run`, where a single line used to fold the
+  remedy into the summary; `--json` carries the hint in the problem
+  object. The exit code is still `2`.
 
 ### Deprecated
 

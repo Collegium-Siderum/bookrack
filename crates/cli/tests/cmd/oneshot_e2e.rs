@@ -23,6 +23,15 @@ use bookrack_session::RootLock;
 use bookrack_test_support::{Sandbox, bookrack_cmd};
 use eyre::Result;
 
+/// The summary line a command that needed the daemon prints when none
+/// is running. Its absence is how the tests below tell that a refusal
+/// came before the daemon was looked for.
+const NOT_RUNNING: &str = "bookrack: no daemon is running\n";
+
+/// The hint line under [`NOT_RUNNING`], naming the command that starts
+/// a daemon.
+const NOT_RUNNING_HINT: &str = "  hint: Start one with `bookrack run`";
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
     let sandbox = Sandbox::new();
@@ -80,15 +89,21 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
                 assert_eq!(
                     output.status.code(),
                     Some(2),
-                    "{:?} expected exit 2 (daemon not running), got stdout={:?} stderr={:?}",
+                    "{:?} expected exit 2 (no daemon is running), got stdout={:?} stderr={:?}",
                     argv,
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr),
                 );
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 assert!(
-                    stderr.contains("bookrack daemon not running"),
-                    "{:?} stderr missing daemon-not-running tip: {}",
+                    stderr.contains(NOT_RUNNING),
+                    "{:?} stderr missing the no-daemon summary: {}",
+                    argv,
+                    stderr,
+                );
+                assert!(
+                    stderr.contains(NOT_RUNNING_HINT),
+                    "{:?} stderr missing the hint that starts a daemon: {}",
                     argv,
                     stderr,
                 );
@@ -176,7 +191,7 @@ async fn audit_profile_is_refused_before_the_early_dispatches() -> Result<()> {
             "{argv:?} should name the flag it refused: {stderr}",
         );
         assert!(
-            !stderr.contains("bookrack daemon not running"),
+            !stderr.contains(NOT_RUNNING),
             "{argv:?} must be refused before a daemon is looked for: {stderr}",
         );
     }
@@ -828,7 +843,7 @@ async fn a_typed_paper_id_reaches_the_control_plane_client() -> Result<()> {
         match reached {
             Reached::Dispatch => {
                 assert!(
-                    stderr.contains("bookrack daemon not running"),
+                    stderr.contains(NOT_RUNNING),
                     "{id:?} should have reached the daemon client: {stderr}",
                 );
                 assert!(
@@ -847,7 +862,7 @@ async fn a_typed_paper_id_reaches_the_control_plane_client() -> Result<()> {
                     "{id:?} should be refused for naming another catalog: {stderr}",
                 );
                 assert!(
-                    !stderr.contains("bookrack daemon not running"),
+                    !stderr.contains(NOT_RUNNING),
                     "{id:?} should not have reached the daemon client: {stderr}",
                 );
             }
@@ -898,7 +913,7 @@ async fn a_bare_id_at_the_top_level_is_refused_with_a_hint() -> Result<()> {
 ///
 /// The negative assertion carries the discrimination. An
 /// implementation that dispatched the id like any other would fail
-/// too — with "daemon not running", which says nothing about the
+/// too — with "no daemon is running", which says nothing about the
 /// boundary and would send the operator off to start a daemon that
 /// could not answer either.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -922,7 +937,7 @@ async fn a_reference_id_is_refused_before_a_daemon_is_looked_for() -> Result<()>
         "the refusal should carry its detail and the readable form in its hint: {stderr}",
     );
     assert!(
-        !stderr.contains("bookrack daemon not running"),
+        !stderr.contains(NOT_RUNNING),
         "the refusal should not depend on a daemon: {stderr}",
     );
     Ok(())
@@ -952,7 +967,7 @@ async fn every_readable_kind_reaches_the_control_plane_client() -> Result<()> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(2), "{id:?} stderr={stderr}");
         assert!(
-            stderr.contains("bookrack daemon not running"),
+            stderr.contains(NOT_RUNNING),
             "{id:?} should have reached the daemon client: {stderr}",
         );
         assert!(
@@ -2118,7 +2133,7 @@ async fn a_root_config_with_a_process_level_key_is_refused_and_annotated() -> Re
 ///
 /// Exit code cannot tell this apart from anything else the verb does
 /// wrong — every failure path here exits 2. What discriminates is the
-/// wording, and specifically the *negative* half: `daemon not running`
+/// wording, and specifically the *negative* half: `no daemon is running`
 /// is the only trace an invocation leaves when it went out on the wire,
 /// so its absence is what proves the refusal happened first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2147,7 +2162,7 @@ async fn a_paper_filter_is_refused_before_the_call_goes_out() -> Result<()> {
             "the hint should name the scope that works: {stderr}",
         );
         assert!(
-            !stderr.contains("bookrack daemon not running"),
+            !stderr.contains(NOT_RUNNING),
             "--scope {scope} reached the daemon client before being refused: {stderr}",
         );
     }
@@ -2186,7 +2201,7 @@ async fn a_side_specific_filter_requires_a_scope() -> Result<()> {
             "{flag} was refused in the verb body, so the grammar let it through: {stderr}",
         );
         assert!(
-            !stderr.contains("bookrack daemon not running"),
+            !stderr.contains(NOT_RUNNING),
             "{flag} reached the daemon client: {stderr}",
         );
     }
