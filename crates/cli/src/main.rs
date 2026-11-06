@@ -3030,6 +3030,27 @@ mod tests {
         );
     }
 
+    /// The README's install walkthrough cannot render the list, so it
+    /// carries a copy: every first step, as `./bookrack <invocation>`,
+    /// in the order the list gives.
+    #[test]
+    fn the_readme_walkthrough_carries_every_first_step_in_order() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
+        let readme = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let mut rest = readme.as_str();
+        for step in bookrack_cli_grammar::FIRST_STEPS {
+            let line = format!("./bookrack {}", step.invocation);
+            let at = rest.find(&line).unwrap_or_else(|| {
+                panic!(
+                    "README.md has no `{line}` after the steps before it; \
+                     the walkthrough has drifted from FIRST_STEPS"
+                )
+            });
+            rest = &rest[at + line.len()..];
+        }
+    }
+
     /// The root trailer is where an operator with nothing set up reads
     /// what to do first. It names `bookrack init` and then the same
     /// first-run sequence the wizard closes on, from the same list.

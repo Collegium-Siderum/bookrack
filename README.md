@@ -112,18 +112,21 @@ are still being hardened for production use.
    Unblock-File bookrack-*.zip
    ```
 
-5. **Start the daemon and ingest a book.** Run these from the same
-   directory as step 3. `bookrack run` starts a foreground daemon: it
-   serves MCP over streamable-HTTP at `127.0.0.1:8765/mcp` and a local
-   control socket where the write commands arrive. From a second
-   shell, submit work with the one-shot subcommands — `bookrack
-   ingest` streams the queue worker's progress until the job lands.
+5. **Start the daemon, ingest a book, and search it.** Run these from
+   the same directory as step 3. `bookrack run` starts a foreground
+   daemon: it serves MCP over streamable-HTTP at `127.0.0.1:8765/mcp`
+   and a local control socket where the write commands arrive. From a
+   second shell, submit work with the one-shot subcommands — `bookrack
+   ingest` streams the queue worker's progress until the job lands,
+   and `bookrack search` then ranks passages against a question and
+   prints each one cited by the item it came from.
 
    macOS / Linux:
 
    ```
    ./bookrack run                          # terminal 1: the daemon
    ./bookrack ingest /path/to/book.epub    # terminal 2
+   ./bookrack search "your question"
    ```
 
    Windows (PowerShell):
@@ -131,6 +134,7 @@ are still being hardened for production use.
    ```
    .\bookrack.exe run
    .\bookrack.exe ingest path\to\book.epub
+   .\bookrack.exe search "your question"
    ```
 
    Submit a paper with `glean`, the paper-side counterpart of `ingest`;
