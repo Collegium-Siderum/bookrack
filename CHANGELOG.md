@@ -223,6 +223,14 @@ release workflow extracts the matching section verbatim from this file.
 - **`bookrack logs` stops following once the daemon goes away**, after
   printing the events that arrived before it did, and exits `0`. It
   used to keep waiting on a connection nothing would write to again.
+- **A wait whose daemon goes away says so, at once.** `bookrack
+  ingest`, `glean` and `intake ocr` while they wait, and `bookrack
+  queue wait`, print what the wait had seen — the jobs that had ended,
+  and the rest as still queued — then `the daemon disconnected while N
+  jobs were still awaited`, with the cause in the detail and a hint to
+  start the daemon again and run `bookrack queue wait`; the exit code
+  is `2`. The wait used to sit until its stall timeout ran out and then
+  print an unclassified cause chain, exiting `1`.
 
 ### Security
 

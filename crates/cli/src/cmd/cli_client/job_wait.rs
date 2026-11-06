@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::render::job_report::{JobOutcomeRecord, JobOutcomeReport, JobOutcomeState};
 use bookrack_cli::render::progress::Surface;
-use bookrack_control_client::{ControlClient, Event};
+use bookrack_control_client::{ControlClient, ControlError, Event};
 use bookrack_core::Problem;
 use bookrack_core::queue::{JobState, QueueJob};
 use eyre::{Context, Result, eyre};
@@ -299,8 +299,10 @@ fn paused(pending: usize) -> Problem {
 /// side of the stream, or the daemon reporting itself degraded all make
 /// the wait read the queue: awaited rows that have ended there are
 /// settled from the listing, and pending rows on a paused queue end the
-/// wait with the same refusal the attach makes. Only a `queue.list` that
-/// fails ends the wait as an error. The deadline is compared before
+/// wait with the same refusal the attach makes. A stream that closes,
+/// or a `queue.list` that finds the connection gone, ends the wait
+/// refused as [`disconnected`]; any other failing `queue.list` ends it
+/// as an error. The deadline is compared before
 /// every turn on the receiver, so a receiver that is never empty cannot
 /// starve a deadline that has passed; the timer runs with the
 /// runtime's millisecond granularity, which is why the comparison is
@@ -334,9 +336,12 @@ pub(super) async fn await_jobs_reconciling<S: WaitSource>(
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => true,
                     Err(broadcast::error::RecvError::Closed) => {
-                        return Err(eyre!(
-                            "control event stream closed before {} job(s) finished",
-                            view.pending()
+                        return Ok(disconnected_end(
+                            jobs,
+                            &live,
+                            &view,
+                            started,
+                            "The control-plane event stream closed.".to_string(),
                         ));
                     }
                 },
@@ -345,9 +350,17 @@ pub(super) async fn await_jobs_reconciling<S: WaitSource>(
             continue;
         }
         let awaited = view.pending();
-        let reply = source.list().await.wrap_err_with(|| {
-            format!("queue.list did not answer with {awaited} job(s) still awaited")
-        })?;
+        let reply = match source.list().await {
+            Ok(reply) => reply,
+            Err(err) => {
+                if let Some(detail) = lost_connection(&err) {
+                    return Ok(disconnected_end(jobs, &live, &view, started, detail));
+                }
+                return Err(err.wrap_err(format!(
+                    "queue.list did not answer with {awaited} job(s) still awaited"
+                )));
+            }
+        };
         let listing = Listing::parse(&reply)?;
         for id in &live {
             if !view.awaits(id) {
@@ -383,6 +396,55 @@ pub(super) async fn await_jobs_reconciling<S: WaitSource>(
         jobs,
         started.elapsed(),
     )))
+}
+
+/// The end of a wait whose daemon has gone: the outcomes collected so
+/// far as records, the ids `view` still awaits as unfinished, and
+/// [`disconnected`] as the problem, with `detail` as its evidence.
+fn disconnected_end(
+    jobs: Vec<JobOutcomeRecord>,
+    live: &[String],
+    view: &ProgressView,
+    started: Instant,
+    detail: String,
+) -> WaitEnd {
+    let unfinished: Vec<String> = live.iter().filter(|id| view.awaits(id)).cloned().collect();
+    let problem = disconnected(unfinished.len(), detail);
+    WaitEnd::Refused {
+        report: JobOutcomeReport::new(jobs, started.elapsed()).with_unfinished(unfinished),
+        problem,
+    }
+}
+
+/// The evidence, as a sentence, when `err` says the connection to the
+/// daemon is gone: the client found it closed, or the socket failed
+/// under the call. Any other failure is not a disconnection.
+fn lost_connection(err: &eyre::Report) -> Option<String> {
+    err.chain()
+        .find_map(|cause| match cause.downcast_ref::<ControlError>()? {
+            ControlError::Closed => Some("The control-plane connection closed.".to_string()),
+            ControlError::Transport(io) => Some(format!("The control-plane socket failed: {io}.")),
+            _ => None,
+        })
+}
+
+/// The daemon went away with `awaited` jobs not yet ended. The queue
+/// document keeps them, and a restarted daemon puts a running row back
+/// to pending, so the hint is a restart and a fresh wait.
+fn disconnected(awaited: usize, detail: String) -> Problem {
+    let awaited = if awaited == 1 {
+        "1 job was".to_string()
+    } else {
+        format!("{awaited} jobs were")
+    };
+    Problem::new(format!(
+        "the daemon disconnected while {awaited} still awaited"
+    ))
+    .detail(detail)
+    .hint(
+        "The queue keeps them: start the daemon again with `bookrack run`, then run \
+         `bookrack queue wait` to follow them.",
+    )
 }
 
 /// A `daemon.state` event reporting the daemon degraded: the state a
@@ -720,16 +782,20 @@ mod tests {
         assert_eq!(source.lists(), 0, "a stream that delivers needs no listing");
     }
 
+    /// A closed stream ends the wait refused, with the progress line
+    /// cleared before the report and the problem are printed.
     #[tokio::test]
-    async fn a_closed_stream_ends_the_wait_as_an_error() {
+    async fn a_closed_stream_ends_the_wait_refused_and_clears_the_progress_line() {
         let source = FakeSource::new(Vec::new(), false, Vec::new());
         let (tx, rx) = broadcast::channel::<Event>(4);
         drop(tx);
         let log = Arc::new(Mutex::new(Vec::new()));
-        let err = reconciling(&source, rx, logged_view(&[A], &log), &[A])
+        let end = reconciling(&source, rx, logged_view(&[A], &log), &[A])
             .await
-            .unwrap_err();
-        assert!(err.to_string().contains("1 job"), "{err}");
+            .unwrap_or_else(|err| panic!("the wait ended as an error: {err:#}"));
+        let (report, problem) = refusal(&end);
+        assert_eq!(report.unfinished, ids(&[A]));
+        assert!(problem.summary.contains("1 job"), "{}", problem.summary);
         assert_eq!(
             log.lock().unwrap().last().map(String::as_str),
             Some("clear"),
@@ -924,15 +990,11 @@ mod tests {
         assert_eq!(source.lists(), 1);
     }
 
-    /// B.5 #7: a listing that fails ends the wait as that failure,
-    /// classified as the failure itself is.
+    /// B.5 #7: a listing that fails on a daemon still connected ends
+    /// the wait as that failure, classified as the failure itself is.
     #[tokio::test]
     async fn a_listing_that_fails_ends_the_wait_as_that_failure() {
         let failures = [
-            (
-                ControlError::Transport(std::io::Error::other("connection reset")),
-                None,
-            ),
             (
                 ControlError::Timeout {
                     method: "queue.list".to_string(),
@@ -968,6 +1030,87 @@ mod tests {
                 "{label}: {err:?}"
             );
         }
+    }
+
+    /// A listing that finds the connection gone ends the wait refused
+    /// rather than as an unclassified error: the jobs that ended as
+    /// records, the rest by id, and a problem that says the queue keeps
+    /// them, with the exit every refused wait takes.
+    #[tokio::test]
+    async fn a_listing_that_finds_the_daemon_gone_ends_the_wait_refused() {
+        let failures = [
+            (ControlError::Closed, "connection closed"),
+            (
+                ControlError::Transport(std::io::Error::other("connection reset")),
+                "connection reset",
+            ),
+        ];
+        for (failure, cause) in failures {
+            let label = failure.to_string();
+            let source =
+                FakeSource::new(vec![row(P, "pending")], false, Vec::new()).failing_list(failure);
+            let rx = source.tx.subscribe();
+            source.tx.send(finished(A, "done", "book", None)).unwrap();
+            let end = reconciling(&source, rx, quiet_view(&[A, P]), &[A, P])
+                .await
+                .unwrap_or_else(|err| panic!("{label}: the wait ended as an error: {err:#}"));
+            let (report, problem) = refusal(&end);
+            assert_eq!(
+                states(report),
+                [(A.to_string(), JobOutcomeState::Done)],
+                "{label}"
+            );
+            assert_eq!(report.unfinished, ids(&[P]), "{label}");
+            assert_eq!(
+                problem.summary, "the daemon disconnected while 1 job was still awaited",
+                "{label}"
+            );
+            let detail = problem.data.detail.as_deref().unwrap_or_default();
+            assert!(detail.contains(cause), "{label}: {detail}");
+            let hint = problem.data.hint.as_deref().unwrap_or_default();
+            assert!(
+                hint.contains("`bookrack run`") && hint.contains("`bookrack queue wait`"),
+                "{label}: {hint}"
+            );
+            assert!(!problem.data.retryable, "{label}");
+            let err = finalize(end, "ingest", "Ingested", "books").unwrap_err();
+            assert_eq!(
+                classify_eyre(&err).map(|cause| cause.as_cli().exit_code()),
+                Some(2),
+                "{label}: {err:?}"
+            );
+        }
+    }
+
+    /// A stream that closes, as the client's does once its connection
+    /// ends, ends the wait the same way at once, without waiting out the
+    /// stall or listing a queue that can no longer answer, and keeps the
+    /// outcomes that arrived before the close.
+    #[tokio::test]
+    async fn a_closed_event_stream_ends_the_wait_refused_at_once() {
+        let source = FakeSource::new(vec![row(P, "pending")], false, Vec::new());
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(finished(A, "done", "book", None)).unwrap();
+        drop(tx);
+        let started = Instant::now();
+        let end = reconciling(&source, rx, quiet_view(&[A, P]), &[A, P])
+            .await
+            .unwrap_or_else(|err| panic!("the wait ended as an error: {err:#}"));
+        assert!(
+            started.elapsed() < STALL / 2,
+            "the closed stream waited for the stall: {:?}",
+            started.elapsed()
+        );
+        let (report, problem) = refusal(&end);
+        assert_eq!(states(report), [(A.to_string(), JobOutcomeState::Done)]);
+        assert_eq!(report.unfinished, ids(&[P]));
+        assert_eq!(
+            problem.summary,
+            "the daemon disconnected while 1 job was still awaited"
+        );
+        let detail = problem.data.detail.as_deref().unwrap_or_default();
+        assert!(detail.contains("event stream"), "{detail}");
+        assert_eq!(source.lists(), 0, "a closed stream ends the wait unlisted");
     }
 
     /// B.5 #8: the local receiver falling behind reconciles at once.
