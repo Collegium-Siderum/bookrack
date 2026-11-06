@@ -87,7 +87,7 @@ pub async fn run(
             let job_ids = helpers::extract_job_ids(&response);
 
             if no_wait || job_ids.is_empty() {
-                helpers::print_value(&response);
+                helpers::emit_outcome(&response, helpers::queued_sentence(&job_ids, &label));
                 return Ok(());
             }
 

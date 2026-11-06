@@ -530,7 +530,7 @@ async fn ingest(args: PapersIngestArgs, runtime_dir: Option<PathBuf>) -> Result<
     let job_ids = helpers::extract_job_ids(&response);
 
     if args.no_wait || job_ids.is_empty() {
-        helpers::print_value(&response);
+        helpers::emit_outcome(&response, helpers::queued_sentence(&job_ids, &label_owned));
         return Ok(());
     }
 

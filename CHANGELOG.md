@@ -167,6 +167,12 @@ release workflow extracts the matching section verbatim from this file.
   line names `bookrack run`, where a single line used to fold the
   remedy into the summary; `--json` carries the hint in the problem
   object. The exit code is still `2`.
+- **`--no-wait` reports the submission in one line.** `bookrack
+  ingest`, `glean` and `intake ocr` print `Queued <file> as <id>` for
+  one job, with the short id the `queue` commands accept, or `Queued <n>
+  jobs for <name>` for several, where they used to print the daemon's
+  JSON reply. `--json` still prints the reply, and `--quiet` prints
+  nothing.
 
 ### Deprecated
 

@@ -20,6 +20,7 @@ mod index_profile_apply_selection;
 mod index_profile_apply_self_check;
 mod index_profile_resolution;
 mod index_profile_unlisted_models;
+mod ingest_no_wait;
 mod init_refusal;
 mod isolation;
 mod knob_inventory_gate;

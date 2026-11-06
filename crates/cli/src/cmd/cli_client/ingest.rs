@@ -45,9 +45,10 @@ pub async fn run(
     }
     let response = helpers::dispatch(&client, "ingest.submit", params).await?;
     let job_ids = helpers::extract_job_ids(&response);
+    let label = basename_or_dash(args.path.to_str());
 
     if args.no_wait || job_ids.is_empty() {
-        helpers::print_value(&response);
+        helpers::emit_outcome(&response, helpers::queued_sentence(&job_ids, label));
         return Ok(());
     }
 
@@ -59,6 +60,5 @@ pub async fn run(
         DEFAULT_AWAIT_STALL_TIMEOUT,
     )
     .await?;
-    let label = basename_or_dash(args.path.to_str());
     job_wait::finalize(end, "ingest", "Ingested", label)
 }

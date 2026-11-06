@@ -10,6 +10,7 @@ use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::library_param::{self, Selected};
 use bookrack_cli::path_sugar::{self, Routing};
 use bookrack_cli::render::confirm::{ConfirmMode, Confirmation};
+use bookrack_cli::render::human::short_id;
 use bookrack_cli::render::job_report::JobOutcomeReport;
 use bookrack_cli::render::{OutputMode, ctx};
 use bookrack_control_client::{ControlClient, ControlError};
@@ -415,6 +416,18 @@ pub fn print_value(value: &Value) {
 
 fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+/// The human sentence for a submission the caller does not wait on:
+/// one job by `label` and the short id `queue` commands accept, several
+/// by count. `None` when the reply names no job, so [`emit_outcome`]
+/// prints the reply as it came.
+pub fn queued_sentence(job_ids: &[String], label: &str) -> Option<String> {
+    match job_ids {
+        [] => None,
+        [only] => Some(format!("Queued {label} as {}", short_id(only))),
+        many => Some(format!("Queued {} jobs for {label}", many.len())),
+    }
 }
 
 /// Print the outcome of one write in the mode the operator asked for.
@@ -886,6 +899,21 @@ mod tests {
             problem: None,
             finished_at: "2026-01-01T00:00:00Z".into(),
         }
+    }
+
+    /// A reply that names no job has no sentence, so the human mode
+    /// prints the reply itself rather than claiming nothing was queued.
+    #[test]
+    fn a_submission_reply_without_jobs_has_no_queued_sentence() {
+        assert_eq!(queued_sentence(&[], "alpha.epub"), None);
+        assert_eq!(
+            outcome_line(
+                OutputMode::Human,
+                &serde_json::json!({}),
+                queued_sentence(&[], "alpha.epub"),
+            ),
+            Some("{}".to_string())
+        );
     }
 
     #[test]
