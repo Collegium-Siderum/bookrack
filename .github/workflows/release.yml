@@ -212,6 +212,20 @@ jobs:
             $sha_cmd "${stage}.tar.gz" > "${stage}.tar.gz.sha256"
           fi
 
+      # Unpacks the archive just built into an empty directory and runs
+      # the bundled binary there, with no BOOKRACK_* variable and an
+      # empty home: the version must match the tag and the bundled
+      # PDFium must be the library the binary finds. A failure here
+      # stops the upload, so no release is created from this archive.
+      - name: Smoke-test the release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          stage="bookrack-${version}-${{ matrix.target }}"
+          ./scripts/release-smoke.sh "dist/${stage}.${{ matrix.archive_kind }}" \
+            "${version}" "${{ matrix.pdfium_lib_name }}"
+
       - uses: actions/upload-artifact@v7
         with:
           name: bookrack-${{ matrix.target }}
