@@ -56,14 +56,18 @@ release workflow extracts the matching section verbatim from this file.
 - **An unnamed call reaches the registry default only when it is
   mounted.** A call that names no library used to go to the daemon's
   default pointer, which was seeded from the library the daemon came
-  up under when the registry declared none. It now goes to the
-  registry default when that library is mounted, to the only mounted
+  up under when the registry declared none. On a daemon serving the
+  registry, it now goes to the registry default when that library is
+  mounted, to the only mounted
   library when the registry declares no default, and is otherwise
   refused — `-32010` on the control socket, invalid params (`-32602`)
   from the MCP tools — with the mounted names in the detail and how to
   name one (`--library <name>` or the `library` argument) in the hint.
   A registry default that names no registered library counts as
-  declared, so it refuses rather than falling back. `served[].default`,
+  declared, so it refuses rather than falling back. A daemon started on
+  a data root no registry entry claims comes up with no default: an
+  unnamed call reaches that root while it is the only library mounted,
+  and is refused once another is mounted beside it. `served[].default`,
   `library.list`, and `session.info` mark the library an unnamed call
   reaches, and mark none when it is refused.
 - **`libraries unmount` takes the registry default and refuses the last
@@ -105,7 +109,8 @@ release workflow extracts the matching section verbatim from this file.
   there is one, and the hint gives the mount and the retry to run.
 - **`extractor_version` moves from 6 to 8.** The PDF, EPUB, and text
   adapters move to PDFium `chromium/8125` with `pdfium-render` 0.9.5,
-  `rbook` 0.7.12, and `encoding_rs` 0.8.44 (see Security).
+  `rbook` 0.7.12, and `encoding_rs` 0.8.44; the PDFium and `rbook`
+  moves are listed under Security.
   `chromium/8125` reads the weight a font descriptor declares
   (`/FontWeight`), where earlier builds estimated it from the stem
   width, so a PDF whose fonts declare a weight can carry different bold
@@ -198,6 +203,11 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **`daemon.status` marks the root a daemon was started on by path as
+  `primary`.** A daemon brought up on a data root no registry entry
+  claims serves it as `default`, and that row of `served` carried
+  `primary: false`, so no row named the library the daemon came up
+  under.
 - **`config effective` shows the `BOOKRACK_DATA_DIR` a flag outranked.**
   With `--data-dir` or `--library` deciding the root, the `data_dir` row
   said nothing about the variable, whether the shell or `.env` set it,
@@ -262,8 +272,7 @@ release workflow extracts the matching section verbatim from this file.
   PDF parsed after the upgrade, without re-ingesting. Chromium rates
   CVE-2026-17875 Medium, counting on the sandbox Chrome runs PDFium
   in; bookrack parses PDFs with no sandbox around them. The same move
-  clears ten more advisories published since `chromium/7881`, none of
-  which bookrack reaches. CVE-2026-18012, CVE-2026-121166, and
+  clears eleven more advisories, none of which bookrack reaches. CVE-2026-18012, CVE-2026-121166, and
   CVE-2026-113022 belong to the JavaScript and XFA layers, which the
   non-V8 archives do not compile or leave as empty stubs, as does
   CVE-2026-10002 (`cjs_field`). CVE-2026-87585, CVE-2026-93381,
@@ -276,6 +285,15 @@ release workflow extracts the matching section verbatim from this file.
   RUSTSEC-2026-0195, in the `NsReader` that rbook never constructs, and
   `zip` 9 clears RUSTSEC-2026-0367, -0368, and -0369, in archive
   extraction APIs that rbook never calls.
+- **deps: `zstd-sys` moves from 2.0.16 to 2.1.2, clearing
+  RUSTSEC-2026-0410.** The advisory covers the allocator shim on
+  `wasm32`, a target bookrack does not build, so this clears a lockfile
+  advisory rather than fixing anything that reaches a binary. The
+  lockfile moves alone. Three advisories against `zstd` 0.13 and
+  `zstd-safe` 7, which LanceDB's Arrow IPC and Lance encoding paths
+  pull in, stay excepted in `deny.toml`: none of the affected APIs is
+  called or compiled, and the fixed releases arrive only with a LanceDB
+  on Arrow 60.
 
 ## [0.13.0] - 2026-10-24
 

@@ -52,8 +52,10 @@ directory it searched.
   one. Run `bookrack doctor --install-pdfium` from the new build: it
   installs beside the previous build's copy instead of replacing it, so
   a binary of the previous build still on the machine keeps loading its
-  own. Builds before 0.14.0 installed into `bookrack/pdfium/` itself;
-  only they read that copy, and it can be deleted once none is left.
+  own. Builds before 0.14.0 installed the library file directly into
+  `bookrack/pdfium/`; only they read that file, and it can be deleted
+  once none is left. Delete the file alone, not the directory: the
+  directories the newer builds install into sit inside it.
 - **`BOOKRACK_PDFIUM_LIB`.** When set, it is the only directory
   searched: point it at a directory holding the pinned build. Unsetting
   it sends the search to the executable's directory and then to the
@@ -205,25 +207,30 @@ Re-ingesting a source file — the only path that refreshes
 file. No `--force` is needed and no catalog state has to be cleared
 first: ingest skips a source already on file only when it is
 `Embedded` and its stored stamps match this binary's, so a row whose
-`extractor_version` is behind is extracted again. For a book, the new
-extraction is then compared with the envelope in the intake store.
-When the two match apart from the version, the envelope is rewritten
-and the stamp advances, and the corpus tree, chunks, and vectors stay
-as they are: the refresh costs the extraction alone. When they differ,
-or the envelope is missing, unreadable, older than the stamp, or
-cannot be rewritten, the full pipeline runs and the corpus tree,
-chunks, and vectors are derived afresh. A paper always runs the full
-pipeline. Pointing `--recursive` at the original source directory
+`extractor_version` is behind is extracted again. The new extraction
+is compared with the envelope in the intake store when the extractor
+stamp is the only thing out of date: a book whose intake is `Embedded`,
+not from an OCR directory, and whose embed model, `chunk_version`, and
+`normalize_version` are current. When the two match apart from the
+version, the envelope is rewritten and the stamp advances, and the
+corpus tree, chunks, and vectors stay as they are: the refresh costs
+the extraction alone. When they differ, or the envelope is missing,
+unreadable, recorded for another source or intake, older than the
+stamp, or cannot be rewritten, the full pipeline runs and the corpus
+tree, chunks, and vectors are derived afresh. Any other stale row — a
+book in another state or with another stamp behind as well, or a
+paper — runs the full pipeline without the comparison. Pointing `--recursive` at the original source directory
 therefore refreshes every stale file under it: the files whose stamps
 are current finish as `skipped_duplicate` jobs without doing any work.
 `--force` runs the full pipeline for every file, current or stale,
 without the comparison.
 
 A stale book's job ends `done` whether the run only advanced the stamp
-or went through the full pipeline; the book's pipeline trail carries
-an `extract` / `compare` row naming which.
+or went through the full pipeline; when the comparison ran, the book's
+pipeline trail carries an `extract` / `compare` row naming which.
 `rpc` does not read the global `--library`, so the library goes in the
-params, and an omitted one is the registry default:
+params; an omitted one is routed like any call that names no library
+(see *Unnamed calls* in [control-plane.md](control-plane.md)):
 `bookrack rpc call library.show_pipeline_trail '{"intake_id":<id>,"library":"<name>"}'`.
 
 The intake is keyed on the file's SHA-256, so the refresh needs the
