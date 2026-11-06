@@ -220,6 +220,9 @@ release workflow extracts the matching section verbatim from this file.
   root, `libraries config` no longer creates a missing one, and setting
   an index profile no longer mints a new identity for a library the
   registry already knows.
+- **`bookrack logs` stops following once the daemon goes away**, after
+  printing the events that arrived before it did, and exits `0`. It
+  used to keep waiting on a connection nothing would write to again.
 
 ### Security
 

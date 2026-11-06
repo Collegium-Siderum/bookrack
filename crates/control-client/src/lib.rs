@@ -177,7 +177,10 @@ type PendingMap = Mutex<HashMap<u64, oneshot::Sender<Result<Value, ControlError>
 struct Inner<W> {
     writer: Mutex<W>,
     pending: Arc<PendingMap>,
-    event_tx: broadcast::Sender<Event>,
+    /// The reader task holds the only strong sender, so every receiver
+    /// reads `Closed` once the connection ends; subscribing upgrades
+    /// this handle, and fails once the reader has gone.
+    event_tx: broadcast::WeakSender<Event>,
     next_id: AtomicU64,
     /// Serializes the server-side `events.subscribe` request so a
     /// failing first attempt cannot leave concurrent subscribers
@@ -219,7 +222,7 @@ impl ControlClient {
         let inner = Arc::new(Inner {
             writer: Mutex::new(Box::new(write_half) as Box<dyn AsyncWriter>),
             pending: pending.clone(),
-            event_tx: event_tx.clone(),
+            event_tx: event_tx.downgrade(),
             next_id: AtomicU64::new(1),
             subscribed: tokio::sync::Mutex::new(false),
             closed: closed.clone(),
@@ -326,9 +329,19 @@ impl ControlClient {
     /// A failed first attempt leaves the state at `false` so the next
     /// caller re-issues the RPC instead of inheriting a phantom
     /// subscription; its receiver is dropped with the error.
+    ///
+    /// Every receiver's stream ends with the connection: once the
+    /// reader task has forwarded the last event it read, `recv` returns
+    /// `Closed`, and a call made after that fails with
+    /// [`ControlError::Closed`].
     pub async fn subscribe(&self) -> Result<broadcast::Receiver<Event>, ControlError> {
         let mut subscribed = self.inner.subscribed.lock().await;
-        let rx = self.inner.event_tx.subscribe();
+        let rx = self
+            .inner
+            .event_tx
+            .upgrade()
+            .ok_or(ControlError::Closed)?
+            .subscribe();
         if !*subscribed {
             self.call_raw("events.subscribe", json!({"channels": ["*"]}))
                 .await?;
@@ -913,5 +926,60 @@ mod tests {
         assert_eq!(event.value, json!({"state": "idle"}));
 
         server.abort();
+    }
+
+    /// A subscriber's stream ends with the connection: an event the
+    /// reader forwarded before the peer went away is still delivered,
+    /// then `recv` reports `Closed`, and a later `subscribe` is refused
+    /// with `ControlError::Closed` rather than handed a receiver that no
+    /// reader feeds.
+    #[tokio::test]
+    async fn a_subscriber_stream_ends_when_the_connection_closes() {
+        let (client, remote) = paired_client();
+        client.set_default_timeout(Some(std::time::Duration::from_secs(5)));
+        let (read, mut write) = tokio::io::split(remote);
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(read).lines();
+            let line = reader
+                .next_line()
+                .await
+                .expect("read request")
+                .expect("request line");
+            let frame: Value = serde_json::from_str(line.trim()).expect("request json");
+            let id = frame.get("id").and_then(Value::as_u64).expect("request id");
+            let burst = format!(
+                "{}\n{}\n",
+                json!({"jsonrpc": "2.0", "id": id, "result": Value::Null}),
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "event",
+                    "params": {"channel": "queue.tick", "value": {"pending": 1}},
+                }),
+            );
+            write
+                .write_all(burst.as_bytes())
+                .await
+                .expect("write burst");
+            // Returning drops both halves of the peer's end, so the
+            // client's reader reads end of file.
+        });
+
+        let mut rx = client.subscribe().await.expect("subscribe");
+        server.await.expect("server task");
+        let within = std::time::Duration::from_secs(2);
+        let event = tokio::time::timeout(within, rx.recv())
+            .await
+            .expect("the event sent before the close arrives")
+            .expect("event payload");
+        assert_eq!(event.channel, "queue.tick");
+        let end = tokio::time::timeout(within, rx.recv())
+            .await
+            .expect("the stream ends within 2s of the connection closing");
+        assert!(
+            matches!(end, Err(broadcast::error::RecvError::Closed)),
+            "{end:?}"
+        );
+        let again = client.subscribe().await;
+        assert!(matches!(again, Err(ControlError::Closed)), "{again:?}");
     }
 }
