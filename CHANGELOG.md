@@ -97,16 +97,21 @@ release workflow extracts the matching section verbatim from this file.
   `--job` naming such a row is refused with `-32010`: the message names
   the job and the library, the detail carries the bring-up reason when
   there is one, and the hint gives the mount and the retry to run.
-- **`extractor_version` moves from 6 to 7.** The PDF, EPUB, and text
-  adapters move to PDFium `chromium/7881` with `pdfium-render` 0.9.4,
-  `rbook` 0.7.12, and `encoding_rs` 0.8.44 (see Security). Books
-  extracted at version 6 stay searchable with the content they already
-  have; re-ingesting a book's original file refreshes it, so a library
-  can be brought up to date a few sources at a time. Run with
-  `--stale-only --dry-run`, `bookrack corpus rebuild` and
-  `bookrack vectors reembed` each list the version-6 intakes within
-  their own target set, as *Re-ingesting a source file* in
-  `docs/UPGRADE.md` describes.
+- **`extractor_version` moves from 6 to 8.** The PDF, EPUB, and text
+  adapters move to PDFium `chromium/8125` with `pdfium-render` 0.9.5,
+  `rbook` 0.7.12, and `encoding_rs` 0.8.44 (see Security).
+  `chromium/8125` reads the weight a font descriptor declares
+  (`/FontWeight`), where earlier builds estimated it from the stem
+  width, so a PDF whose fonts declare a weight can carry different bold
+  flags on its paragraphs. Re-ingesting such a book runs the full
+  pipeline and re-embeds its chunks, although their text is unchanged.
+  Books extracted at version 6 or 7 stay searchable with the content
+  they already have; re-ingesting a book's original file refreshes it,
+  so a library can be brought up to date a few sources at a time. Run
+  with `--stale-only --dry-run`, `bookrack corpus rebuild` and
+  `bookrack vectors reembed` each list the intakes behind version 8,
+  at version 6 or 7, within their own target set, as *Re-ingesting a
+  source file* in `docs/UPGRADE.md` describes.
 - **Re-ingesting a book whose extraction has not changed only advances
   its stamp.** A book whose `extractor_version` is behind ran the whole
   pipeline when its original file was ingested again, re-embedding
@@ -140,10 +145,10 @@ release workflow extracts the matching section verbatim from this file.
   package. Both used to be read as they were.
 - **A PDFium library of the previous build no longer loads, and each
   build keeps its own managed copy.** The binaries bind the
-  `chromium/7881` API. The release archives ship the matching library
+  `chromium/8125` API. The release archives ship the matching library
   beside the executables, which is searched first.
   `bookrack doctor --install-pdfium` now installs into a directory named
-  for the pinned build, `<platform data dir>/bookrack/pdfium/chromium/7881/`,
+  for the pinned build, `<platform data dir>/bookrack/pdfium/chromium/8125/`,
   and the search reads that directory only, so two builds on one
   machine no longer replace each other's library. The copy an earlier
   release installed is not read: run `doctor --install-pdfium` once
@@ -213,16 +218,24 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Security
 
-- **PDFium moves from `chromium/7763` to `chromium/7881`, fixing
+- **PDFium moves from `chromium/7763` to `chromium/8125`, fixing
   CVE-2026-9957 and CVE-2026-9958 (High, use-after-free in the page
-  tree and the name tree).** PDFium parses every PDF source, book or
-  paper, inside the ingesting process, so any PDF could reach both. The
-  fix applies to every PDF parsed after the upgrade, without
-  re-ingesting. CVE-2026-10002 (`cjs_field`) belongs to the JavaScript
-  layer, which the non-V8 archives do not compile. CVE-2026-17875
-  (Medium, use-after-free in the name tree) stays open: its fix is in a
-  build newer than the newest API `pdfium-render` binds, so ingest PDF
-  files only from sources you trust while it does.
+  tree and the name tree), CVE-2026-121113 (High, buffer overflow in
+  the JPEG scanline decoder, reached while a page's content stream is
+  parsed), and CVE-2026-17875 (use-after-free in the name tree).**
+  PDFium parses every PDF source, book or paper, inside the ingesting
+  process, so any PDF could reach all four. The fixes apply to every
+  PDF parsed after the upgrade, without re-ingesting. Chromium rates
+  CVE-2026-17875 Medium, counting on the sandbox Chrome runs PDFium
+  in; bookrack parses PDFs with no sandbox around them. The same move
+  clears ten more advisories published since `chromium/7881`, none of
+  which bookrack reaches. CVE-2026-18012, CVE-2026-121166, and
+  CVE-2026-113022 belong to the JavaScript and XFA layers, which the
+  non-V8 archives do not compile or leave as empty stubs, as does
+  CVE-2026-10002 (`cjs_field`). CVE-2026-87585, CVE-2026-93381,
+  CVE-2026-93382, CVE-2026-95338, CVE-2026-110155, CVE-2026-118345, and
+  CVE-2026-121179 sit on the rendering, bitmap, printing, and
+  form-event paths, which bookrack does not drive.
 - **deps: `rbook` 0.7.12 brings `quick-xml` 0.42, clearing
   RUSTSEC-2026-0194.** rbook iterates start-tag attributes, so a crafted
   EPUB could slow its own ingest. The same move clears

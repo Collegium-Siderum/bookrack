@@ -79,7 +79,7 @@ encoding_rs = "0.8"
 # binary release, or symbol resolution fails at runtime. `thread_safe`
 # serializes PDFium's non-reentrant C API behind a global mutex.
 pdfium-render = { version = "0.9", default-features = false, features = [
-    "pdfium_7881",
+    "pdfium_8125",
     "thread_safe",
 ] }
 text-splitter = "0.30"

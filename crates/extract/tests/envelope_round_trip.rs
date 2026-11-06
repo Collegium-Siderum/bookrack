@@ -91,6 +91,7 @@ fn pdf_fixtures_extract_alike_and_survive_their_envelope() {
         "two_column.pdf",
         "biblio_garbage.pdf",
         "paper_cn.pdf",
+        "font_weight.pdf",
     ] {
         assert_alike_and_round_trips(name, &pdf_fixture(name));
     }

@@ -11,30 +11,29 @@ for that pinned pair.
 
 | What | Value |
 | --- | --- |
-| `pdfium-render` crate | `0.9` (resolves to 0.9.4) |
-| Cargo feature | `pdfium_7881` |
-| Native binary release | `chromium/7881` (PDFium 151.0.7881.0) |
+| `pdfium-render` crate | `0.9` (resolves to 0.9.5) |
+| Cargo feature | `pdfium_8125` |
+| Native binary release | `chromium/8125` (PDFium 158.0.8125.0) |
 | Binary source | <https://github.com/bblanchon/pdfium-binaries> |
 
-The feature build number and the release build number are both `7881`
-— they must stay equal. In `pdfium-render` 0.9.4, `pdfium_7881` is the
+The feature build number and the release build number are both `8125`
+— they must stay equal. In `pdfium-render` 0.9.5, `pdfium_8125` is the
 newest concrete API version (`pdfium_latest` aliases it); pinning the
 concrete feature rather than `pdfium_latest` keeps the build
 reproducible when a later crate release moves `pdfium_latest` forward.
 
 ## Known issues
 
-Advisories open against the pinned build. Treat each row as reachable
-from any PDF source; the operator-facing consequence is the note on
-trusted sources under *Ingesting* in `docs/operating.md`.
+Advisories open against the pinned build are listed here, one row
+each, with the advisory, its severity, the component, and the build
+carrying the fix. Treat each row as reachable from any PDF source; the
+operator-facing consequence is the note on trusted sources under
+*Ingesting* in `docs/operating.md`.
 
-| Advisory | Severity | Component | Build carrying the fix |
-| --- | --- | --- | --- |
-| CVE-2026-17875 | Medium | name tree, use-after-free | `chromium/8100`, newer than the `pdfium_7881` API that `pdfium-render` 0.9.4 binds at most |
+No advisory is open against the pinned build at present.
 
-CVE-2026-10002 (`cjs_field`, High) is not in the table: the field code
-belongs to the JavaScript layer, which the non-V8 archives do not
-compile.
+Advisories against PDFium's JavaScript and XFA layers are not listed:
+the non-V8 archives compile neither layer.
 
 ## Binary archives
 
@@ -45,15 +44,15 @@ or a silently re-cut upstream asset then fails loudly.
 
 | Asset | SHA-256 |
 | --- | --- |
-| `pdfium-win-x64.tgz` | `73cc0de638ac2095e7445bf56a38200a5b7c7ca0e9f4ba144598f2457377ac08` |
-| `pdfium-linux-x64.tgz` | `1470e21b8b4a3b4ad7f85684e2da11d94f3b69a86d81dee11b9b6709d927ac1d` |
-| `pdfium-mac-arm64.tgz` | `52e94ca5aa8847934330daf3f8150c190682c5ca93831468794f8b90d4392e40` |
-| `pdfium-mac-x64.tgz` | `6dedf83990e0e3d6b7c93c9e7589c5a126b0ae14b7464d76120cff7a26afb18b` |
+| `pdfium-win-x64.tgz` | `9a964261760cff52570aabf038ab346d3a5034dd8b30d0d5fe8861235d356b8b` |
+| `pdfium-linux-x64.tgz` | `e1c3ce6e270cb5e0c20816b379ad9f2c1309972697c505f508de92bf5e7d6659` |
+| `pdfium-mac-arm64.tgz` | `4939bd935ac83ddc09a3a4f038bc43a19cea1660316a3667f26cb07a070e139d` |
+| `pdfium-mac-x64.tgz` | `8a5193535b80c7215d8932f6647ae5097465b6dba2811602c21e120c2af112b0` |
 
 Download URL template:
 
 ```
-https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7881/pdfium-<platform>.tgz
+https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8125/pdfium-<platform>.tgz
 ```
 
 The Windows archive holds the library at `bin/pdfium.dll`; the Linux

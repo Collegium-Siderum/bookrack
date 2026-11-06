@@ -71,7 +71,7 @@ bookrack_core::fixed_settings! {
 /// and a test in [`pdfium_pin`] fails until the pin is restated beside
 /// this value, forcing a deliberate bump.
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
-pub const EXTRACTOR_VERSION: u32 = 7;
+pub const EXTRACTOR_VERSION: u32 = 8;
 
 /// Monotonic version of the OCR adapter's output. Stored on the OCR
 /// intake's `intake.extractor_version`, decoupled from
@@ -92,7 +92,7 @@ pub const OCR_INTAKE_VERSION: u32 = 1;
 /// Refreshed in lockstep with [`EXTRACTOR_VERSION`]. See `tests/dep_hash.rs` for the
 /// input list and computation.
 pub const FROZEN_DEPS_HASH: &str =
-    "fb262cbda0087d803736b5a638d5b2f1a28cfb59db0d40ba57d2f8351e0cb469";
+    "17c102e7cd6df8f5b7f7218c81f81569f17b66f5ffd440154bdfca6b17dfa6c0";
 
 /// Extract one source file into an [`ExtractOutcome`].
 ///

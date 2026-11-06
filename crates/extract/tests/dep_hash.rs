@@ -42,8 +42,8 @@ fn extractor_version_and_frozen_deps_hash_are_pinned_as_a_pair() {
     assert_eq!(
         (EXTRACTOR_VERSION, FROZEN_DEPS_HASH),
         (
-            7,
-            "fb262cbda0087d803736b5a638d5b2f1a28cfb59db0d40ba57d2f8351e0cb469"
+            8,
+            "17c102e7cd6df8f5b7f7218c81f81569f17b66f5ffd440154bdfca6b17dfa6c0"
         ),
         "EXTRACTOR_VERSION and FROZEN_DEPS_HASH bump together; restate the pair here"
     );

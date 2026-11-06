@@ -9,7 +9,7 @@
 //! expose; all three places bump together.
 
 /// Upstream release tag the archives are published under.
-pub const PDFIUM_RELEASE_TAG: &str = "chromium/7881";
+pub const PDFIUM_RELEASE_TAG: &str = "chromium/8125";
 
 /// One platform's pinned archive: the asset name under the release
 /// tag, the SHA-256 of the archive, and where the dynamic library
@@ -31,7 +31,7 @@ const PINNED_BINARIES: &[(&str, &str, PdfiumBinaryPin)] = &[
         "x86_64",
         PdfiumBinaryPin {
             asset: "pdfium-win-x64.tgz",
-            sha256: "73cc0de638ac2095e7445bf56a38200a5b7c7ca0e9f4ba144598f2457377ac08",
+            sha256: "9a964261760cff52570aabf038ab346d3a5034dd8b30d0d5fe8861235d356b8b",
             path_in_archive: "bin/pdfium.dll",
         },
     ),
@@ -40,7 +40,7 @@ const PINNED_BINARIES: &[(&str, &str, PdfiumBinaryPin)] = &[
         "x86_64",
         PdfiumBinaryPin {
             asset: "pdfium-linux-x64.tgz",
-            sha256: "1470e21b8b4a3b4ad7f85684e2da11d94f3b69a86d81dee11b9b6709d927ac1d",
+            sha256: "e1c3ce6e270cb5e0c20816b379ad9f2c1309972697c505f508de92bf5e7d6659",
             path_in_archive: "lib/libpdfium.so",
         },
     ),
@@ -49,7 +49,7 @@ const PINNED_BINARIES: &[(&str, &str, PdfiumBinaryPin)] = &[
         "aarch64",
         PdfiumBinaryPin {
             asset: "pdfium-mac-arm64.tgz",
-            sha256: "52e94ca5aa8847934330daf3f8150c190682c5ca93831468794f8b90d4392e40",
+            sha256: "4939bd935ac83ddc09a3a4f038bc43a19cea1660316a3667f26cb07a070e139d",
             path_in_archive: "lib/libpdfium.dylib",
         },
     ),
@@ -58,7 +58,7 @@ const PINNED_BINARIES: &[(&str, &str, PdfiumBinaryPin)] = &[
         "x86_64",
         PdfiumBinaryPin {
             asset: "pdfium-mac-x64.tgz",
-            sha256: "6dedf83990e0e3d6b7c93c9e7589c5a126b0ae14b7464d76120cff7a26afb18b",
+            sha256: "8a5193535b80c7215d8932f6647ae5097465b6dba2811602c21e120c2af112b0",
             path_in_archive: "lib/libpdfium.dylib",
         },
     ),
@@ -117,7 +117,7 @@ mod tests {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
     }
 
-    /// The build number the release tag pins, e.g. `7881`.
+    /// The build number the release tag pins, e.g. `8125`.
     fn pinned_build() -> &'static str {
         PDFIUM_RELEASE_TAG
             .rsplit('/')
@@ -264,24 +264,24 @@ mod tests {
         assert_eq!(
             (crate::EXTRACTOR_VERSION, PDFIUM_RELEASE_TAG, assets),
             (
-                7,
-                "chromium/7881",
+                8,
+                "chromium/8125",
                 vec![
                     (
                         "pdfium-linux-x64.tgz",
-                        "1470e21b8b4a3b4ad7f85684e2da11d94f3b69a86d81dee11b9b6709d927ac1d",
+                        "e1c3ce6e270cb5e0c20816b379ad9f2c1309972697c505f508de92bf5e7d6659",
                     ),
                     (
                         "pdfium-mac-arm64.tgz",
-                        "52e94ca5aa8847934330daf3f8150c190682c5ca93831468794f8b90d4392e40",
+                        "4939bd935ac83ddc09a3a4f038bc43a19cea1660316a3667f26cb07a070e139d",
                     ),
                     (
                         "pdfium-mac-x64.tgz",
-                        "6dedf83990e0e3d6b7c93c9e7589c5a126b0ae14b7464d76120cff7a26afb18b",
+                        "8a5193535b80c7215d8932f6647ae5097465b6dba2811602c21e120c2af112b0",
                     ),
                     (
                         "pdfium-win-x64.tgz",
-                        "73cc0de638ac2095e7445bf56a38200a5b7c7ca0e9f4ba144598f2457377ac08",
+                        "9a964261760cff52570aabf038ab346d3a5034dd8b30d0d5fe8861235d356b8b",
                     ),
                 ],
             ),
@@ -298,7 +298,7 @@ mod tests {
             path_in_archive: "lib/libpdfium.so",
         };
         let url = pdfium_download_url(&pin);
-        assert!(url.contains("chromium%2F7881/pdfium-test.tgz"), "{url}");
-        assert!(!url.contains("chromium/7881"), "{url}");
+        assert!(url.contains("chromium%2F8125/pdfium-test.tgz"), "{url}");
+        assert!(!url.contains("chromium/8125"), "{url}");
     }
 }

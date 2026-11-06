@@ -38,14 +38,14 @@ jobs:
           - target: aarch64-apple-darwin
             runs-on: macos-14
             pdfium_archive: pdfium-mac-arm64.tgz
-            pdfium_sha: 52e94ca5aa8847934330daf3f8150c190682c5ca93831468794f8b90d4392e40
+            pdfium_sha: 4939bd935ac83ddc09a3a4f038bc43a19cea1660316a3667f26cb07a070e139d
             pdfium_path_in_archive: lib/libpdfium.dylib
             pdfium_lib_name: libpdfium.dylib
             archive_kind: tar.gz
           - target: x86_64-unknown-linux-gnu
             runs-on: ubuntu-latest
             pdfium_archive: pdfium-linux-x64.tgz
-            pdfium_sha: 1470e21b8b4a3b4ad7f85684e2da11d94f3b69a86d81dee11b9b6709d927ac1d
+            pdfium_sha: e1c3ce6e270cb5e0c20816b379ad9f2c1309972697c505f508de92bf5e7d6659
             pdfium_path_in_archive: lib/libpdfium.so
             pdfium_lib_name: libpdfium.so
             archive_kind: tar.gz
@@ -55,7 +55,7 @@ jobs:
             # keeps tag-time builds reproducible across that transition.
             runs-on: windows-2025-vs2026
             pdfium_archive: pdfium-win-x64.tgz
-            pdfium_sha: 73cc0de638ac2095e7445bf56a38200a5b7c7ca0e9f4ba144598f2457377ac08
+            pdfium_sha: 9a964261760cff52570aabf038ab346d3a5034dd8b30d0d5fe8861235d356b8b
             pdfium_path_in_archive: bin/pdfium.dll
             pdfium_lib_name: pdfium.dll
             archive_kind: zip
@@ -104,14 +104,14 @@ jobs:
         uses: actions/cache@v5
         with:
           path: pdfium-extracted
-          key: pdfium-chromium-7881-${{ matrix.target }}
+          key: pdfium-chromium-8125-${{ matrix.target }}
 
       - name: Fetch and verify PDFium
         if: steps.pdfium-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           curl -L -o pdfium.tgz \
-            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7881/${{ matrix.pdfium_archive }}"
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8125/${{ matrix.pdfium_archive }}"
           # macOS ships shasum (Perl); Linux and Git Bash on Windows ship
           # sha256sum (coreutils). Pick whichever is on PATH.
           if command -v sha256sum >/dev/null 2>&1; then

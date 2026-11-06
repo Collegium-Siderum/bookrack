@@ -10,8 +10,8 @@ forbids it, and synthetic fixtures keep every expectation auditable.
 A PDF is an opaque binary, so each text-bearing fixture is kept as a
 **pair**:
 
-- a `.typ` (or, for the encrypted and image fixtures, a generating
-  script) — the human-auditable source a reviewer reads;
+- a `.typ` (or, for the encrypted, image, and font-weight fixtures, a
+  generating script) — the human-auditable source a reviewer reads;
 - the compiled `.pdf` — the binary a test actually loads.
 
 The source is the auditable form; the PDF is a build artifact checked
@@ -40,13 +40,15 @@ typst compile prose_en.typ          # and prose_cjk, two_column,
 python make_encrypted.py            # derives the two encrypted PDFs
                                     # from prose_en.pdf
 python make_image_pdf.py            # draws the image-only PDF
+python make_font_weight_pdf.py      # writes the font-weight PDF
+                                    # (standard library only)
 ```
 
 `corrupt.pdf` is written by hand, not generated — see its row below.
 
-Document dates are pinned in every `.typ` source, so `/Info`
-CreationDate is a known value a test can assert on and regeneration
-stays stable.
+Document dates are pinned in every `.typ` source and in
+`make_font_weight_pdf.py`, so `/Info` CreationDate is a known value a
+test can assert on and regeneration stays stable.
 
 ## The fixtures
 
@@ -60,6 +62,7 @@ stays stable.
 | `biblio_garbage` | 2 | Deliberately unreliable `/Info`: a Word working-file name as title, an account name as author, a production date unrelated to the publication year. The trustworthy bibliography is on a faux title page in the body. |
 | `encrypted_userpw` | — | A user (open) password is set; the file cannot be opened without it. Expect `ExtractError::DrmProtected`. |
 | `encrypted_restricted` | 3 | Owner password only (opens with no password) at revision 6 / AES-256. It is `prose_en.pdf` re-saved with encryption, so its extracted content is identical to `prose_en`. |
+| `font_weight` | 1 | Three paragraphs, each in its own non-embedded TrueType font: one declaring `/FontWeight` 700 over `/StemV` 0, one declaring 400 over `/StemV` 140, one declaring none over `/StemV` 140. Pins the weight PDFium reports, and so `is_bold_majority`: a declared weight is taken over the stem-width estimate, which still applies when none is declared. |
 | `image_only` | 1 | A single raster page with no text layer at all. There is nothing to extract, so the adapter must route it to OCR — `ExtractOutcome::NeedsOcr`. |
 | `corrupt` | — | The `%PDF` header followed by a trailer whose `/Root` names a non-existent object, a `startxref` offset past end-of-file, and no object bodies at all. PDFium's cross-reference recovery finds nothing to build a document from, so the load fails: `ExtractError::CorruptFile`. |
 

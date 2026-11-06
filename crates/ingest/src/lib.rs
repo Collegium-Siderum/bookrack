@@ -3114,6 +3114,68 @@ mod book_pipeline_tests {
         );
     }
 
+    /// A stale book whose envelope differs from a fresh extraction only
+    /// in a block's style, its text untouched, runs every stage and
+    /// leaves the fresh style in the envelope.
+    #[tokio::test]
+    async fn a_stale_book_whose_block_style_alone_differs_runs_the_full_pipeline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let (first, stale) =
+            ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
+        let envelope_path = dir
+            .path()
+            .join(envelope_filename(ItemKind::Book, first.intake_id));
+        let before = read_envelope(&envelope_path).expect("envelope");
+        assert_eq!(
+            before.extraction.blocks[0].style, None,
+            "the TXT sample carries no style"
+        );
+        rewrite_envelope(&envelope_path, |envelope| {
+            envelope.extraction.blocks[0].style = Some(bookrack_extract::BlockStyle {
+                font_size_median: 11.0,
+                font_size_p90: 11.0,
+                is_bold_majority: true,
+                line_count: 1,
+                x0_first_line: 72.0,
+                above_gap_ratio: 0.0,
+            });
+        });
+
+        let again = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("re-ingest");
+        assert_compared(
+            &catalog,
+            first.book_root_id,
+            "ok",
+            "changed",
+            stale,
+            "style drifted",
+        );
+        assert!(!again.restamped);
+        assert!(again.chunks_written > 0, "the chunks must be re-derived");
+        let after = read_envelope(&envelope_path).expect("envelope");
+        assert_eq!(
+            after.extraction.blocks[0].style, None,
+            "the envelope must hold the fresh style"
+        );
+        assert_eq!(
+            after.extraction.blocks[0].text, before.extraction.blocks[0].text,
+            "the text was never part of the drift"
+        );
+    }
+
     /// Delete the envelope at `path`.
     fn remove_envelope(path: &Path) {
         std::fs::remove_file(path).expect("remove envelope");

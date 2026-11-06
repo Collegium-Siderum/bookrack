@@ -60,6 +60,7 @@ fn clean_pdfs_extract_a_usable_text_layer() {
         "toc_deep.pdf",
         "biblio_garbage.pdf",
         "encrypted_restricted.pdf",
+        "font_weight.pdf",
     ] {
         let ex = extracted(name);
         assert_eq!(ex.provenance.adapter, "pdf", "{name}");
@@ -376,6 +377,49 @@ fn two_column_reads_left_column_then_right_and_across_the_page_break() {
 }
 
 #[test]
+fn a_declared_font_weight_outranks_the_stem_width_estimate() {
+    if !pdfium_available() {
+        return;
+    }
+    // Three paragraphs, one font each. Alpha declares /FontWeight 700
+    // over a /StemV that estimates 0; Bravo declares 400 over a /StemV
+    // that estimates 700; Charlie declares nothing and is estimated at
+    // 700. Charlie is the control: it reads bold whichever source wins,
+    // so a red Charlie means the descriptors were not read at all.
+    let ex = extracted("font_weight.pdf");
+    assert_eq!(
+        ex.blocks.len(),
+        3,
+        "one block per paragraph: {:?}",
+        ex.blocks
+    );
+    assert!(
+        ex.blocks.iter().all(|b| b.kind == BlockKind::Body),
+        "every block is Body: {:?}",
+        ex.blocks,
+    );
+    let mut bold: Vec<(&str, bool)> = ex
+        .blocks
+        .iter()
+        .map(|b| {
+            let marker = b.text.split_whitespace().next().unwrap_or_default();
+            let style = b
+                .style
+                .as_ref()
+                .unwrap_or_else(|| panic!("the {marker} block carries a style"));
+            (marker, style.is_bold_majority)
+        })
+        .collect();
+    bold.sort_unstable();
+    assert_eq!(
+        bold,
+        [("Alpha", true), ("Bravo", false), ("Charlie", true)],
+        "the pinned PDFium reports a descriptor's /FontWeight before estimating the weight \
+         from /StemV",
+    );
+}
+
+#[test]
 fn pdf_extraction_is_deterministic() {
     if !pdfium_available() {
         return;
@@ -390,6 +434,7 @@ fn pdf_extraction_is_deterministic() {
         "biblio_garbage.pdf",
         "encrypted_restricted.pdf",
         "image_only.pdf",
+        "font_weight.pdf",
     ] {
         let path = pdf_fixture(name);
         let first = extract(
