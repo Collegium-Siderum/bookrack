@@ -26,7 +26,6 @@ use super::NO_STUB_URL;
 use super::argv::{self, Stripped};
 use crate::child::{DaemonProcess, Output, SpawnOpts, endpoint_matches, endpoint_path_matches};
 use crate::sandbox::Sandbox;
-use crate::spawn::PASSTHROUGH_ENV;
 
 /// File name of the control socket the daemon binds beside the session
 /// lock.
@@ -303,10 +302,7 @@ fn check_environment(input: &Input<'_>) -> Vec<Finding> {
     }
     for key in env.keys() {
         let Some(name) = key.to_str() else { continue };
-        if name.starts_with("BOOKRACK_")
-            && !allowed.contains(&name)
-            && !PASSTHROUGH_ENV.contains(&name)
-        {
+        if name.starts_with("BOOKRACK_") && !allowed.contains(&name) {
             finding(format!(
                 "{name} reaches the child but is not part of the plan"
             ));
@@ -763,6 +759,7 @@ mod tests {
             ("BOOKRACK_BACKUP_DIR", "/host/backup"),
             ("BOOKRACK_NO_DOTENV", "1"),
             ("BOOKRACK_PDFIUM_LIB", "/host/pdfium"),
+            ("BOOKRACK_REQUIRE_PDFIUM", "1"),
         ]
         .into_iter()
         .map(|(k, v)| (OsString::from(k), OsString::from(v)))
@@ -1080,6 +1077,38 @@ mod tests {
             Rule::T1Environment,
             "BOOKRACK_SOMETHING_NEW",
         );
+    }
+
+    /// The PDFium variables a test binary inherits stop at the tool: a
+    /// sandbox child finds the library beside its binary or in its own
+    /// managed directory, as on an operator's machine, never through a
+    /// pointer the host carries.
+    #[test]
+    fn the_host_pdfium_variables_do_not_reach_the_child() {
+        let host: Vec<OsString> = hostile_host().into_iter().map(|(k, _)| k).collect();
+        let fixture = Fixture::new();
+        for key in crate::spawn::PASSTHROUGH_ENV {
+            assert!(
+                host.iter().any(|k| k == key),
+                "premise: the hostile host carries {key}"
+            );
+            let leaked = fixture.env.iter().find(|(k, _)| k == key);
+            assert!(
+                leaked.is_none(),
+                "{key} reaches the sandbox child as {leaked:?}"
+            );
+        }
+    }
+
+    /// T1 makes no exception for the PDFium variables: one that reaches
+    /// a child is a host value in the sandbox like any other.
+    #[test]
+    fn a_pdfium_variable_on_the_child_trips() {
+        for key in crate::spawn::PASSTHROUGH_ENV {
+            let mut fixture = Fixture::new();
+            set(&mut fixture.env, key, "/host/pdfium");
+            assert_trips(&fixture.check(), Rule::T1Environment, key);
+        }
     }
 
     /// In a dotenv run the switch must be absent: a `1` that leaked in

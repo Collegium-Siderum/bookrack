@@ -30,6 +30,9 @@ const BOOKRACK_PREFIX: &str = "BOOKRACK_";
 /// away would turn that loud failure back into a silent skip. The
 /// second name is spelled out rather than imported because
 /// `bookrack-extract` pulls the whole PDF stack in with it.
+///
+/// The list serves tests only: the sandbox tool's preset removes both
+/// names from every child it runs.
 pub const PASSTHROUGH_ENV: [&str; 2] = ["BOOKRACK_PDFIUM_LIB", "BOOKRACK_REQUIRE_PDFIUM"];
 
 /// Name the `bookrack` binary under test and start an isolated
@@ -90,9 +93,15 @@ impl Spawn {
 
     /// The sandbox tool's preset: the same isolation as a test's, routed
     /// through the registry rather than a data root, so a sandbox can
-    /// serve several libraries.
+    /// serve several libraries, and with [`PASSTHROUGH_ENV`] removed
+    /// rather than inherited, so a sandbox child finds PDFium the way a
+    /// binary on an operator's machine does: beside the executable or in
+    /// the managed directory under the sandbox's own home.
     pub(crate) fn for_tool(bin: &Path, sandbox: &Sandbox) -> Spawn {
-        Spawn::__with_bin(bin, sandbox).without_data_dir()
+        PASSTHROUGH_ENV.iter().fold(
+            Spawn::__with_bin(bin, sandbox).without_data_dir(),
+            |spawn, key| spawn.without_env(key),
+        )
     }
 
     /// Leave the data root unset, so the child resolves one through the

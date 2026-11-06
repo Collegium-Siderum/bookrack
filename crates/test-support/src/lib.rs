@@ -43,7 +43,10 @@
 //! What this crate does **not** do is start from an empty environment:
 //! it isolates relative to the parent process, keeping `PATH`, `CI`,
 //! and the PDFium pointer that turn a missing native library into a
-//! loud failure. Starting from nothing is `scripts/test-clean.sh`.
+//! loud failure. Starting from nothing is `scripts/test-clean.sh`. The
+//! sandbox tool's children do not get the PDFium pointer: a sandbox
+//! stands in for an operator's machine, which finds the library by its
+//! own search.
 
 mod child;
 mod embed_stub;
