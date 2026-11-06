@@ -125,6 +125,53 @@ async fn the_report_names_the_process_variables_dotenv_set_outside_the_prefix() 
     Ok(())
 }
 
+/// A `BOOKRACK_` variable no knob of this build reads is listed with
+/// where the process got it, rather than accepted in silence: a
+/// misspelt name and a knob only another build has both look like
+/// this. The list is compared whole, so every variable a knob does
+/// read — the sandbox's own included — is shown absent from it, and
+/// the report still exits 0: the variable is reported, not refused.
+/// A name the file also writes but the environment already carried is
+/// credited to the environment, which is where the value came from.
+#[tokio::test]
+async fn a_prefixed_variable_no_knob_reads_is_listed_with_its_source() -> Result<()> {
+    let sandbox = Sandbox::new();
+    let root = sandbox.data_root("main");
+    std::fs::write(
+        sandbox.cwd().join(".env"),
+        format!(
+            "BOOKRACK_DATA_DIR={}\nBOOKRACK_FROM_THE_FILE=1\nBOOKRACK_SERACH_TOP_K=9\n",
+            root.display()
+        ),
+    )?;
+    let env = [("BOOKRACK_SERACH_TOP_K", "7")];
+
+    let out = run(&sandbox, &["--json"], &env).await?;
+    let report = report(&out)?;
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "an unclaimed variable is reported, not refused: {report}"
+    );
+    assert_eq!(
+        report["unclaimed_variables"],
+        serde_json::json!([
+            { "key": "BOOKRACK_FROM_THE_FILE", "source": "dotenv" },
+            { "key": "BOOKRACK_SERACH_TOP_K", "source": "environment" },
+        ]),
+        "{report}"
+    );
+
+    let human = run(&sandbox, &[], &env).await?;
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        text.contains("BOOKRACK_SERACH_TOP_K") && text.contains("BOOKRACK_FROM_THE_FILE"),
+        "the human report omits what the JSON one carries:\n{text}"
+    );
+
+    Ok(())
+}
+
 /// A variable outside the admitted set is read out of the file and
 /// then dropped, rather than installed in the process.
 ///

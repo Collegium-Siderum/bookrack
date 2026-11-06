@@ -9,6 +9,8 @@
 //! resolve produces a report with the failure at its head, not an
 //! error instead of a report.
 
+use std::collections::BTreeSet;
+
 use bookrack_config::{Config, ForeignStatus, LibrarySelection};
 use bookrack_core::Problem;
 use bookrack_core::knob::{DotenvSupply, KnobOrigin, KnobReach};
@@ -67,6 +69,29 @@ struct ForeignOut<'a> {
     status: ForeignStatus,
 }
 
+/// One `BOOKRACK_…` variable this process carries that no knob of this
+/// build reads.
+///
+/// `key` and `source` are a contract like the row fields. The value is
+/// left out for the reason the foreign section leaves it out: nothing
+/// in this build knows what the variable holds, so nothing can say it
+/// is safe to print.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct UnclaimedOut {
+    key: String,
+    source: UnclaimedSource,
+}
+
+/// Where the process got an unclaimed variable, serialized as its token.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum UnclaimedSource {
+    /// The process started with it.
+    Environment,
+    /// This process's `.env` supplied it.
+    Dotenv,
+}
+
 /// The whole report.
 #[derive(Serialize)]
 struct ReportOut<'a> {
@@ -87,6 +112,10 @@ struct ReportOut<'a> {
     /// report does not know", and on a run with no dotenv layer at all
     /// the report knows there was nothing.
     dotenv_foreign: Vec<ForeignOut<'a>>,
+    /// The prefixed variables no knob of this build reads, sorted by
+    /// name. Always present, empty included, for the reason
+    /// `dotenv_foreign` is.
+    unclaimed_variables: Vec<UnclaimedOut>,
     native_dependencies: Vec<bookrack_config::NativeDependencyOrigin>,
 }
 
@@ -105,6 +134,11 @@ pub fn run(selection: &LibrarySelection) -> Result<()> {
     let scope_instance = cfg.map(|c| c.data_dir().display().to_string());
     let out: Vec<RowOut<'_>> = rows.iter().map(|r| row_out(r, &scope_instance)).collect();
     let foreign = foreign_out();
+    let unclaimed = unclaimed_out(
+        std::env::vars_os().filter_map(|(key, _)| key.into_string().ok()),
+        &crate::config_knobs::claimed_variables(),
+        bookrack_config::dotenv_load().map_or(&[], |load| load.supplied.as_slice()),
+    );
     let dotenv_path = bookrack_config::dotenv_load().map(|load| load.supply().path);
     let native = bookrack_config::native_dependency_origins(
         bookrack_extract::pdfium_pin::PDFIUM_RELEASE_TAG,
@@ -119,11 +153,19 @@ pub fn run(selection: &LibrarySelection) -> Result<()> {
                 rows: out,
                 dotenv_path,
                 dotenv_foreign: foreign,
+                unclaimed_variables: unclaimed,
                 native_dependencies: native,
             };
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
-            print_human(problem.as_ref(), &out, dotenv_path, &foreign, &native);
+            print_human(
+                problem.as_ref(),
+                &out,
+                dotenv_path,
+                &foreign,
+                &unclaimed,
+                &native,
+            );
         }
     }
 
@@ -225,6 +267,33 @@ fn foreign_out() -> Vec<ForeignOut<'static>> {
         .unwrap_or_default()
 }
 
+/// The prefixed variables among `present` that no name in `claimed`
+/// accounts for, sorted by name, each credited to `.env` when the load
+/// supplied it and to the environment otherwise.
+///
+/// A name the file also wrote but the environment already carried is
+/// the environment's: the load discarded the file's line, so the value
+/// the process holds is the one it started with.
+fn unclaimed_out(
+    present: impl Iterator<Item = String>,
+    claimed: &BTreeSet<String>,
+    supplied: &[String],
+) -> Vec<UnclaimedOut> {
+    let mut out: Vec<UnclaimedOut> = present
+        .filter(|key| key.starts_with(bookrack_config::ENV_PREFIX) && !claimed.contains(key))
+        .map(|key| {
+            let source = if supplied.contains(&key) {
+                UnclaimedSource::Dotenv
+            } else {
+                UnclaimedSource::Environment
+            };
+            UnclaimedOut { key, source }
+        })
+        .collect();
+    out.sort_by(|a, b| a.key.cmp(&b.key));
+    out
+}
+
 /// The reranker model tag the native-dependency search looks for.
 fn reranker_tag(_cfg: Option<&Config>) -> &'static str {
     bookrack_config::reranker_model_pin::RERANKER_MODEL_PINS
@@ -275,6 +344,7 @@ fn print_human(
     rows: &[RowOut<'_>],
     dotenv_path: Option<&str>,
     foreign: &[ForeignOut<'_>],
+    unclaimed: &[UnclaimedOut],
     native: &[bookrack_config::NativeDependencyOrigin],
 ) {
     if let Some(problem) = problem {
@@ -359,6 +429,27 @@ fn print_human(
             ]);
         }
         println!("{}", table.render());
+    }
+
+    // A section for the same reason as the one above: no knob owns these
+    // names, so no row can carry them, and without the list a misspelt
+    // variable or one only another build reads looks exactly like one
+    // that took effect.
+    if !unclaimed.is_empty() {
+        println!();
+        println!("No knob in this build reads these variables, so they change nothing:");
+        let mut table = RowTable::new(["variable", "set by"]);
+        for var in unclaimed {
+            table.push_row([
+                var.key.as_str(),
+                match var.source {
+                    UnclaimedSource::Dotenv => dotenv_path.unwrap_or(".env"),
+                    UnclaimedSource::Environment => "the environment",
+                },
+            ]);
+        }
+        println!("{}", table.render());
+        println!("`bookrack config knobs` lists the variables this build reads.");
     }
 
     println!();

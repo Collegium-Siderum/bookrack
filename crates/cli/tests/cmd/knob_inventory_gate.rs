@@ -57,19 +57,11 @@ fn declared_in_env_example(text: &str) -> BTreeSet<String> {
 }
 
 /// The variables the inventory names, from every knob's settable sites
-/// and every native dependency's override.
+/// and every native dependency's override: the set `config effective`
+/// treats as claimed, so a variable it reports as unclaimed is one this
+/// gate has also seen missing from `.env.example`.
 fn named_by_the_inventory() -> BTreeSet<String> {
-    let mut names: BTreeSet<String> = bookrack_cli::config_knobs::catalog()
-        .iter()
-        .flat_map(|row| row.chain.iter().map(|site| site.site.clone()))
-        .filter(|site| site.starts_with("BOOKRACK_"))
-        .collect();
-    names.extend(
-        bookrack_config::NATIVE_DEPENDENCY_KNOBS
-            .iter()
-            .map(|dep| dep.override_site.to_string()),
-    );
-    names
+    bookrack_cli::config_knobs::claimed_variables()
 }
 
 /// Every variable the binary reads is documented, and every stanza in

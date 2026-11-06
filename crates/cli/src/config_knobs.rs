@@ -14,6 +14,8 @@
 //! here because the binary can resolve it, which is what makes the
 //! output a property of the build rather than of the host.
 
+use std::collections::BTreeSet;
+
 use bookrack_core::knob::{KnobOrigin, Layer};
 use eyre::Result;
 use serde::Serialize;
@@ -106,6 +108,27 @@ pub fn catalog() -> Vec<KnobOrigin> {
         rows.extend((contributor.catalog)());
     }
     rows
+}
+
+/// Every `BOOKRACK_…` variable this build reads: each knob's
+/// environment sites, and each native dependency's override.
+///
+/// A prefixed variable outside this set moves nothing in this build,
+/// which is what `config effective` reports it as. `.env.example`
+/// documents exactly this set, and the inventory gate holds the two
+/// together.
+pub fn claimed_variables() -> BTreeSet<String> {
+    let mut names: BTreeSet<String> = catalog()
+        .iter()
+        .flat_map(|row| row.chain.iter().map(|site| site.site.clone()))
+        .filter(|site| site.starts_with(bookrack_config::ENV_PREFIX))
+        .collect();
+    names.extend(
+        bookrack_config::NATIVE_DEPENDENCY_KNOBS
+            .iter()
+            .map(|dep| dep.override_site.to_string()),
+    );
+    names
 }
 
 /// Convert one row to its wire shape.

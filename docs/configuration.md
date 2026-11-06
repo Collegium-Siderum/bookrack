@@ -395,6 +395,17 @@ credential as it is to be `NO_COLOR`, and a report that prints one is a
 report an operator cannot paste into an issue. `--json` carries the
 same list as `dotenv_foreign`, alongside `dotenv_path`.
 
+A `BOOKRACK_` name is admitted whatever follows the prefix, so a
+misspelt variable, or a knob only another build of bookrack reads,
+reaches the process and changes nothing. `config effective` lists
+every such variable the process carries, after the section above and
+again by name only, saying whether the environment or `.env` set it;
+`--json` carries the list as `unclaimed_variables`, each entry with a
+`source` of `environment` or `dotenv`. The list is a report, not a
+refusal, and leaves the exit status alone. The variables a build does
+read are the ones `bookrack config knobs` lists, which is also the set
+`.env.example` documents.
+
 `BOOKRACK_NO_DOTENV` turns the load off. It has to come from the real
 environment, since a value written inside `.env` is only read if the
 file is loaded. `scripts/test-clean.sh` is why it exists: that script

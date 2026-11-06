@@ -28,6 +28,12 @@ release workflow extracts the matching section verbatim from this file.
   reasons under the table, `unmounted` on the JSON entry), and the
   `bookrack run` ready output show them. A successful
   `bookrack libraries mount` takes the library off the list.
+- **`config effective` lists the `BOOKRACK_` variables no knob reads.**
+  A misspelt variable, or one only another build reads, used to pass
+  without a trace. The report now names each one the process carries,
+  by name only, with whether the environment or `.env` set it — in a
+  section after the `.env` one, and as `unclaimed_variables` under
+  `--json`. The exit status is unchanged.
 
 ### Changed
 
