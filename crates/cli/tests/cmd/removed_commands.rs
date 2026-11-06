@@ -4,8 +4,10 @@
 //!
 //! The `papers` namespace has no `ingest` leaf; the paper-side
 //! submission verb is `glean`. `papers ingest` exits 2 with clap naming
-//! the unknown subcommand, prints nothing on stdout, and carries no
-//! deprecation warning. `glean`, given the same arguments, gets past
+//! the unknown subcommand, opens stderr with a tip naming the two
+//! top-level submission verbs ahead of clap's own similarity guess,
+//! prints nothing on stdout, and carries no deprecation warning.
+//! `glean`, given the same arguments, gets past
 //! the parser: with no daemon running it also exits 2, but for the
 //! missing daemon, so the two refusals are told apart by what stderr
 //! says rather than by the exit code.
@@ -45,6 +47,11 @@ async fn papers_ingest_is_a_usage_error_and_glean_is_not() -> Result<()> {
     assert!(
         stderr.contains("unrecognized subcommand 'ingest'"),
         "clap names the unknown subcommand: {stderr}"
+    );
+    assert_eq!(
+        stderr.lines().next(),
+        Some("tip: did you mean `bookrack glean` or `bookrack ingest`?"),
+        "the first stderr line points at the submission verbs: {stderr}"
     );
     assert!(
         !stderr.contains("deprecated"),

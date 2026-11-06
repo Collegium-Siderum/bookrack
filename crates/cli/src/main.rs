@@ -967,6 +967,10 @@ fn natural_name_hint(typed: &str) -> Option<String> {
             "`bookrack list --scope book`",
             "`bookrack search --scope book`",
         ],
+        // Submission is top-level on both sides: a paper goes through
+        // `glean`, a book through `ingest`. Only a namespaced `ingest`
+        // reaches this table, since the top-level one parses.
+        "ingest" => &["`bookrack glean`", "`bookrack ingest`"],
         _ => return None,
     };
     Some(suggestions.join(" or "))
@@ -2292,6 +2296,8 @@ mod tests {
                 "books",
                 "`bookrack list --scope book` or `bookrack search --scope book`",
             ),
+            // A namespaced `ingest`: both submission verbs are top-level.
+            ("ingest", "`bookrack glean` or `bookrack ingest`"),
         ] {
             assert_eq!(natural_name_hint(typed).as_deref(), Some(expected));
         }
