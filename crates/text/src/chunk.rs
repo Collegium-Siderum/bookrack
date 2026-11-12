@@ -347,6 +347,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_position_in_a_separator_gap_snaps_to_the_adjacent_leaf() {
+        // Two leaves, "ab" and "cd", joined as "ab\n\ncd": the first
+        // covers bytes 0..2, the gap 2..4, the second 4..6.
+        let (first, second) = (NodeId::new(1), NodeId::new(2));
+        let segments = [
+            Segment {
+                node_id: first,
+                byte_start: 0,
+                text: "ab",
+                char_len: 2,
+            },
+            Segment {
+                node_id: second,
+                byte_start: 4,
+                text: "cd",
+                char_len: 2,
+            },
+        ];
+        // A chunk start at a leaf's end or inside the gap moves forward
+        // to the next leaf's first character.
+        assert_eq!(locate(&segments, 2, Snap::Start), (second, 0));
+        assert_eq!(locate(&segments, 3, Snap::Start), (second, 0));
+        assert_eq!(locate(&segments, 4, Snap::Start), (second, 0));
+        // A chunk end at a leaf's end stays there, inside the gap moves
+        // back to it, and at the next leaf's start belongs to that leaf.
+        assert_eq!(locate(&segments, 2, Snap::End), (first, 2));
+        assert_eq!(locate(&segments, 3, Snap::End), (first, 2));
+        assert_eq!(locate(&segments, 4, Snap::End), (second, 0));
+    }
+
     /// Configurations the golden fixture runs under: the production pair,
     /// then two small targets that cut every case many times, so a change
     /// in sentence, word, or grapheme segmentation moves a boundary.
