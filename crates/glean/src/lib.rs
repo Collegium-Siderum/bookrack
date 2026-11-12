@@ -2268,4 +2268,96 @@ mod tests {
              bump CHUNK_VERSION and restate GOLDEN as\n{restated}"
         );
     }
+
+    /// The text crate's chunker, given a paper's abstract as a lone
+    /// leaf, plans the same chunks as [`plan_chunks`]: the golden cases
+    /// and a set of inputs they leave out, under every golden
+    /// configuration, field by field.
+    #[test]
+    fn the_shared_chunker_plans_a_lone_leaf_as_the_paper_chunker_does() {
+        let mut inputs: Vec<(String, String)> =
+            golden_cases(include_str!("../../text/tests/fixtures/chunk/golden.txt"))
+                .into_iter()
+                .map(|(label, text)| (label.to_string(), text))
+                .collect();
+        for (label, text) in [
+            ("empty", String::new()),
+            ("blank", "   \n\t  \n ".to_string()),
+            (
+                "padded",
+                format!("  \n {}  \n\n ", "Padded sentence here. ".repeat(80)),
+            ),
+            ("unbroken", "x".repeat(3000)),
+            (
+                "blank-lines",
+                "First part.\n\nSecond part.\n\n\n\nThird part. ".repeat(60),
+            ),
+            (
+                "cjk",
+                "\u{4f60}\u{597d}\u{4e16}\u{754c}\u{3002}".repeat(400),
+            ),
+            (
+                "marks",
+                "e\u{301}galite\u{301} \u{1f469}\u{200d}\u{1f52c} fin. ".repeat(120),
+            ),
+        ] {
+            inputs.push((label.to_string(), text));
+        }
+        let leaf = NodeId::new(7);
+        let mut compared = 0;
+        for &(target_chars, overlap_chars) in GOLDEN_CONFIGS {
+            let params = ChunkParams {
+                target_chars,
+                overlap_chars,
+            };
+            let shared_params = bookrack_text::ChunkParams {
+                target_chars,
+                overlap_chars,
+            };
+            for (label, text) in &inputs {
+                let paper = plan_chunks(leaf, text, &params);
+                let shared = bookrack_text::plan_chunks(
+                    &[bookrack_text::ChunkLeaf {
+                        node_id: leaf,
+                        parent_id: None,
+                        text,
+                    }],
+                    &shared_params,
+                );
+                let paper: Vec<_> = paper
+                    .iter()
+                    .map(|p| {
+                        (
+                            p.start_node_id,
+                            p.start_char_offset,
+                            p.end_node_id,
+                            p.end_char_offset,
+                            p.text.as_str(),
+                            p.norm_chunk_sha256.as_str(),
+                        )
+                    })
+                    .collect();
+                let shared: Vec<_> = shared
+                    .iter()
+                    .map(|p| {
+                        (
+                            p.start_node_id,
+                            p.start_char_offset,
+                            p.end_node_id,
+                            p.end_char_offset,
+                            p.text.as_str(),
+                            p.norm_chunk_sha256.as_str(),
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    shared, paper,
+                    "{target_chars}/{overlap_chars}/{label}: the shared chunker plans a lone \
+                     leaf differently from the paper chunker"
+                );
+                compared += paper.len();
+            }
+        }
+        assert!(compared > 1000, "only {compared} chunks were compared");
+    }
 }
