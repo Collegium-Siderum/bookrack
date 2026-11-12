@@ -92,10 +92,9 @@ impl From<&EmbedRunReport> for ResumeCounts {
     }
 }
 
-/// REPL-side dispatch for the write actions. Triggers a pending
-/// migration once via `open_for_write` before each write so the
-/// per-call handles inside the ops layer only see the migrated
-/// database. Returns what the write did.
+/// REPL-side dispatch for the write actions. Opens no store itself:
+/// each write takes the catalog's write door inside the ops layer,
+/// after its own argument checks. Returns what the write did.
 pub async fn run_write(
     cfg: &Config,
     action: WriteMetadataAction,
@@ -109,8 +108,6 @@ pub async fn run_write(
             resume: ResumeCounts::from(&report),
         });
     }
-    let _migrate =
-        Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let ops = catalog_only_ops(cfg);
     let edit =
         |book: i64, field: Option<String>, outcome: WriteOutcome| MetadataWriteReport::Edit {
@@ -199,10 +196,13 @@ pub async fn run_write(
 /// Read the book's pipeline stage and return `true` when the book is
 /// parked at the metadata gate (the state `ingest_book` writes when an
 /// audit verdict of `needs_work` lands with `hold_for_metadata` set).
+/// A read: a root with no catalog has no parked book, and none is
+/// created to say so.
 fn book_is_parked_at_metadata(cfg: &Config, book: i64) -> Result<bool> {
     use bookrack_corpus::PartitionIdx;
-    let catalog =
-        Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    let Some(catalog) = Catalog::open(&cfg.catalog_db()).context("open catalog")? else {
+        return Ok(false);
+    };
     let book_root_id = PartitionIdx::new(book).root();
     let Some(state) = catalog
         .book_state(book_root_id.get())
@@ -756,6 +756,58 @@ mod tests {
             rpc.message.contains("4242"),
             "the offending contributor id survives into the message: {}",
             rpc.message
+        );
+    }
+
+    #[test]
+    fn reading_the_metadata_gate_does_not_migrate_a_behind_catalog() {
+        use bookrack_catalog::fixtures;
+
+        let (_tmp, cfg) = crate::cmd::test_fixtures::temp_cfg();
+        let behind = fixtures::CURRENT_VERSION - 1;
+        fixtures::create_at_version(&cfg.catalog_db(), behind);
+
+        // Whether a behind catalog answers the question is not under test.
+        let _ = book_is_parked_at_metadata(&cfg, 1);
+
+        assert_eq!(
+            fixtures::user_version(&cfg.catalog_db()),
+            behind,
+            "reading a book's stage migrated the catalog",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_write_naming_an_unknown_field_on_an_empty_root_creates_no_store() {
+        use crate::cmd::test_fixtures::{store_files, temp_cfg};
+
+        let (tmp, cfg) = temp_cfg();
+
+        let err = run_write(
+            &cfg,
+            WriteMetadataAction::Set {
+                book: 1,
+                field: "no_such_field".to_string(),
+                value: "x".to_string(),
+                reason: None,
+                confirmed: false,
+            },
+            None,
+        )
+        .await
+        .expect_err("the field is not editable");
+
+        assert!(
+            err.chain().any(|cause| matches!(
+                cause.downcast_ref::<bookrack_ops::OpsError>(),
+                Some(bookrack_ops::OpsError::UnknownMetadataField { .. })
+            )),
+            "{err:?}",
+        );
+        assert!(
+            store_files(tmp.path()).is_empty(),
+            "a refused write created {:?}",
+            store_files(tmp.path()),
         );
     }
 }

@@ -653,16 +653,21 @@ async fn index_writes_on_a_library_with_no_chunks_are_caller_input() -> Result<(
 }
 
 /// A `kind` outside the accepted set. The fixture carries a
-/// `vector_dim` stamp on both corpora, because the stamp check runs
-/// first: without it the refusal under test is never reached.
+/// `vector_dim` stamp on both corpora and a chunks table beside each,
+/// because the stamp check and the table probe run first: without
+/// them the refusal under test is never reached.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unsupported_ann_kind_is_refused_with_the_accepted_set() -> Result<()> {
     process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
-    for name in ["corpus.db", "papers_corpus.db"] {
-        let corpus = bookrack_corpus::Corpus::open_for_write(&data_root.path().join(name))?;
+    for (corpus_db, lancedb) in [
+        ("corpus.db", "lancedb"),
+        ("papers_corpus.db", "lancedb_papers"),
+    ] {
+        let corpus = bookrack_corpus::Corpus::open_for_write(&data_root.path().join(corpus_db))?;
         corpus.meta_set(bookrack_corpus::VECTOR_DIM_KEY, "8")?;
+        bookrack_vectors::ChunkStore::open_for_write(&data_root.path().join(lancedb), 8).await?;
     }
     let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
         data_root.path().into(),

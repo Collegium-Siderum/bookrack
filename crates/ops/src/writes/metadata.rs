@@ -48,7 +48,7 @@ pub fn set_metadata_field<E: Embedder>(
     });
     record_call_sync!(ops, "library.metadata.set", args, {
         require_editable(&req.field)?;
-        let catalog = Catalog::open_for_write_unbacked(ops.catalog_db())?;
+        let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
         require_intake(&catalog, req.intake_id)?;
 
         let effective = catalog.effective_publication_attrs(req.intake_id, ItemKind::Book)?;
@@ -100,7 +100,7 @@ pub fn clear_metadata_field<E: Embedder>(
         "reason": req.reason,
     });
     record_call_sync!(ops, "library.metadata.clear", args, {
-        let catalog = Catalog::open_for_write_unbacked(ops.catalog_db())?;
+        let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
         require_intake(&catalog, req.intake_id)?;
 
         let effective = catalog.effective_publication_attrs(req.intake_id, ItemKind::Book)?;
@@ -146,7 +146,7 @@ pub fn void_metadata_field<E: Embedder>(
     });
     record_call_sync!(ops, "library.metadata.void", args, {
         require_editable(&req.field)?;
-        let catalog = Catalog::open_for_write_unbacked(ops.catalog_db())?;
+        let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
         require_intake(&catalog, req.intake_id)?;
 
         let effective = catalog.effective_publication_attrs(req.intake_id, ItemKind::Book)?;
@@ -207,7 +207,7 @@ pub fn add_contributor<E: Embedder>(
                 "contributor name must not be empty"
             )));
         }
-        let catalog = Catalog::open_for_write_unbacked(ops.catalog_db())?;
+        let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
         require_intake(&catalog, req.intake_id)?;
 
         let existing = catalog.contributors_for_address(req.intake_id, ItemKind::Book)?;
@@ -266,7 +266,7 @@ pub fn remove_contributor<E: Embedder>(
         "reason": req.reason,
     });
     record_call_sync!(ops, "library.metadata.contributor_remove", args, {
-        let catalog = Catalog::open_for_write_unbacked(ops.catalog_db())?;
+        let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
         require_intake(&catalog, req.intake_id)?;
 
         let existing = catalog.contributors_for_address(req.intake_id, ItemKind::Book)?;
@@ -312,7 +312,7 @@ pub fn reaudit_metadata<E: Embedder>(
 ) -> Result<ReauditOutcome> {
     let args = serde_json::json!({ "intake_id": req.intake_id });
     record_call_sync!(ops, "library.metadata.reaudit", args, {
-        let catalog = Catalog::open_for_write_unbacked(ops.catalog_db())?;
+        let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
         let outcome = bookrack_ingest::reaudit::reaudit_book(
             &catalog,
             req.intake_id,
@@ -346,7 +346,7 @@ pub fn acknowledge_metadata_gap<E: Embedder>(
         "reason": req.reason,
     });
     record_call_sync!(ops, "library.metadata.ack", args, {
-        let catalog = Catalog::open_for_write_unbacked(ops.catalog_db())?;
+        let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
         write_review_status_inner(
             ops,
             &catalog,
@@ -371,7 +371,7 @@ pub fn approve_metadata<E: Embedder>(
         "reason": req.reason,
     });
     record_call_sync!(ops, "library.metadata.approve", args, {
-        let catalog = Catalog::open_for_write_unbacked(ops.catalog_db())?;
+        let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
         write_review_status_inner(
             ops,
             &catalog,
@@ -396,7 +396,7 @@ pub fn reject_metadata<E: Embedder>(
         "reason": req.reason,
     });
     record_call_sync!(ops, "library.metadata.reject", args, {
-        let catalog = Catalog::open_for_write_unbacked(ops.catalog_db())?;
+        let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
         write_review_status_inner(
             ops,
             &catalog,

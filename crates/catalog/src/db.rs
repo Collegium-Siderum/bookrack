@@ -192,8 +192,11 @@ impl Catalog {
     /// Open the `catalog.db` at `path` for writing, creating it if it
     /// does not exist, without taking a pre-migration backup.
     ///
-    /// Use [`Catalog::open_for_write`] for the production path, which
-    /// snapshots an existing database before migrating it.
+    /// For tests that build a database: a migration through this door
+    /// leaves no snapshot behind. Production code takes
+    /// [`Catalog::open_for_write`], which snapshots an existing database
+    /// before migrating it.
+    #[doc(hidden)]
     pub fn open_for_write_unbacked(path: &Path) -> Result<Catalog> {
         Catalog::ready(bookrack_dbkit::open_store(
             &STORE,

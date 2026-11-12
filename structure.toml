@@ -406,7 +406,7 @@ access = "write"
 
 [[write_door]]
 site = "crates/ops/src/recorder.rs::finish_with_retrieval"
-access = "write"
+access = "bookkeeping"
 
 [[write_door]]
 site = "crates/ops/src/registry.rs::glean_paper"
@@ -517,10 +517,6 @@ site = "crates/runtime/src/cmd/corpus.rs::execute_rebuild_from_plan"
 access = "write"
 
 [[write_door]]
-site = "crates/runtime/src/cmd/corpus.rs::plan_rebuild"
-access = "write"
-
-[[write_door]]
 site = "crates/runtime/src/cmd/dryrun.rs::close_dryrun_pipeline_run"
 access = "bookkeeping"
 
@@ -545,19 +541,7 @@ site = "crates/runtime/src/cmd/metadata.rs::advance"
 access = "write"
 
 [[write_door]]
-site = "crates/runtime/src/cmd/metadata.rs::book_is_parked_at_metadata"
-access = "write"
-
-[[write_door]]
-site = "crates/runtime/src/cmd/metadata.rs::run_write"
-access = "write"
-
-[[write_door]]
 site = "crates/runtime/src/cmd/papers_corpus.rs::execute_rebuild_from_plan"
-access = "write"
-
-[[write_door]]
-site = "crates/runtime/src/cmd/papers_corpus.rs::plan_rebuild"
 access = "write"
 
 [[write_door]]
@@ -577,11 +561,11 @@ site = "crates/runtime/src/cmd/papers_vectors.rs::drop"
 access = "write"
 
 [[write_door]]
-site = "crates/runtime/src/cmd/papers_vectors.rs::execute_reembed_from_plan"
+site = "crates/runtime/src/cmd/papers_vectors.rs::open_ann_store_for_write"
 access = "write"
 
 [[write_door]]
-site = "crates/runtime/src/cmd/papers_vectors.rs::plan_reembed"
+site = "crates/runtime/src/cmd/papers_vectors.rs::execute_reembed_from_plan"
 access = "write"
 
 [[write_door]]
@@ -617,11 +601,11 @@ site = "crates/runtime/src/cmd/vectors.rs::drop"
 access = "write"
 
 [[write_door]]
-site = "crates/runtime/src/cmd/vectors.rs::execute_reembed_from_plan"
+site = "crates/runtime/src/cmd/vectors.rs::open_ann_store_for_write"
 access = "write"
 
 [[write_door]]
-site = "crates/runtime/src/cmd/vectors.rs::plan_reembed"
+site = "crates/runtime/src/cmd/vectors.rs::execute_reembed_from_plan"
 access = "write"
 
 [[write_door]]
@@ -642,7 +626,7 @@ access = "write"
 
 [[write_door]]
 site = "crates/runtime/src/open_runs.rs::close_one"
-access = "write"
+access = "bookkeeping"
 
 [[write_door]]
 site = "crates/runtime/src/wizard/runner.rs::smoke_ingest"

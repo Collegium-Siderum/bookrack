@@ -118,6 +118,41 @@ async fn a_run_without_a_record_is_left_alone() {
     );
 }
 
+/// A catalog behind this build is one the repair cannot judge. It is
+/// named with the reason, the pass fails, and nothing in the catalog
+/// moves: no migration, no closed row, the record still in place.
+#[tokio::test]
+async fn a_catalog_behind_this_build_is_reported_and_fails_the_repair() {
+    use bookrack_catalog::fixtures;
+
+    let sandbox = Sandbox::new();
+    let root = sandbox.data_root("lib");
+    std::fs::create_dir_all(&root).expect("create data root");
+    let catalog_db = root.join("catalog.db");
+    let dead = open_run(&root, "ingest");
+    leave_ownerless_record(&root, &dead);
+    fixtures::step_back_one_version(&catalog_db);
+    let behind = fixtures::CURRENT_VERSION - 1;
+
+    for extra in [&["--dry-run"][..], &[]] {
+        let (code, text) = close_abandoned_runs(&sandbox, &root, extra).await;
+        assert_eq!(code, 1, "a pass that judged nothing is not clean: {text}");
+        assert!(
+            text.lines().any(|line| {
+                line.trim_start().starts_with("UNREAD")
+                    && line.contains("catalog.db")
+                    && line.contains("behind this build")
+            }),
+            "the catalog and why it was not read: {text}"
+        );
+        assert!(!text.contains(&dead), "no run of it is claimed: {text}");
+    }
+
+    assert_eq!(fixtures::user_version(&catalog_db), behind);
+    let locks = run_locks_dir(&catalog_db).expect("lock dir");
+    assert!(run_lock_path(&locks, &dead).exists());
+}
+
 /// The dry run prints the same plan and writes none of it.
 #[tokio::test]
 async fn the_dry_run_writes_nothing() {

@@ -970,3 +970,45 @@ fn clear_removes_a_stale_override_with_an_unknown_field_name() {
         .expect("effective");
     assert!(effective.get("tittle").is_none());
 }
+
+#[test]
+fn a_metadata_write_on_a_behind_catalog_backs_it_up_before_migrating() {
+    use bookrack_catalog::fixtures;
+
+    let fx = Fixture::build();
+    let id = fx.seed_intake("sha-behind");
+    fixtures::step_back_one_version(&fx.catalog_db);
+    let behind = fixtures::CURRENT_VERSION - 1;
+
+    set_metadata_field(
+        &fx.ops,
+        SetMetadataFieldRequest {
+            intake_id: id,
+            field: "title".to_string(),
+            value: "A New Title".to_string(),
+            reason: None,
+            confirmed: false,
+        },
+    )
+    .expect("the write migrates the catalog and lands");
+    assert_eq!(
+        fixtures::user_version(&fx.catalog_db),
+        fixtures::CURRENT_VERSION
+    );
+
+    let suffix = format!("-from-v{behind}.bak");
+    let backups: Vec<String> = std::fs::read_dir(&fx.backup_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        backups
+            .iter()
+            .any(|name| name.starts_with("catalog-") && name.ends_with(&suffix)),
+        "a populated catalog was migrated with no snapshot; backup dir holds {backups:?}",
+    );
+}

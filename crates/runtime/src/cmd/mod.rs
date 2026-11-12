@@ -23,6 +23,9 @@ pub mod papers_vectors;
 pub mod remove;
 pub mod remove_paper;
 pub mod stamps;
+pub mod state_error;
+#[cfg(test)]
+pub(crate) mod test_fixtures;
 pub mod vectors;
 pub mod verify;
 

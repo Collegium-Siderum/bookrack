@@ -47,7 +47,10 @@ pub struct ReembedReport {
 }
 
 /// Build a [`ReembedPlan`] for each `Embedded` paper intake, or for
-/// `only` when set. Reads `lancedb_papers` but writes nothing.
+/// `only` when set. Reads `lancedb_papers` but writes nothing. The
+/// target set is resolved before the chunks table is looked at, so an
+/// unknown id is reported whether or not the table exists; with no
+/// table on disk the plan is empty.
 ///
 /// When `stale_only` is true the target set is restricted to intakes
 /// whose stored `extractor_version` does not equal [`EXTRACTOR_VERSION`].
@@ -65,9 +68,6 @@ pub async fn plan_reembed(
     only_ids: Option<&[i64]>,
     stale_only: bool,
 ) -> Result<Vec<ReembedPlan>> {
-    // Passing 0 forces the open path to read dim from the schema for an
-    // existing table.
-    let store = ChunkStore::open_for_write(lancedb_dir, 0).await?;
     let targets = if let Some(ids) = only_ids {
         collect_pinned_targets(catalog, ids)?
     } else {
@@ -82,6 +82,12 @@ pub async fn plan_reembed(
         t
     };
     let mut plans = Vec::new();
+    if targets.is_empty() {
+        return Ok(plans);
+    }
+    let Some(store) = ChunkStore::try_open(lancedb_dir).await? else {
+        return Ok(plans);
+    };
     for intake in targets {
         let intake_id = intake.intake_id;
         let partition = PartitionIdx::new(intake_id);
@@ -237,11 +243,15 @@ fn collect_pinned_targets(catalog: &Catalog, ids: &[i64]) -> Result<Vec<bookrack
         .collect()
 }
 
+/// Scan the partition and drop the vector column. With no chunks table
+/// on disk there is nothing to read and none is created.
 async fn read_chunk_plans(
     lancedb_dir: &Path,
     partition: PartitionIdx,
 ) -> Result<Vec<PlannedChunk>> {
-    let store = ChunkStore::open_for_write(lancedb_dir, 0).await?;
+    let Some(store) = ChunkStore::try_open(lancedb_dir).await? else {
+        return Ok(Vec::new());
+    };
     let rows = store.scan_partition(partition).await?;
     Ok(rows
         .into_iter()
@@ -518,5 +528,42 @@ mod tests {
         assert_eq!(report.skipped_empty, vec![1]);
         assert_eq!(report.intakes.len(), 1);
         assert_eq!(report.intakes[0].intake_id, 2);
+    }
+
+    #[tokio::test]
+    async fn plan_reembed_naming_an_unknown_paper_reports_it_without_creating_the_vector_table() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lancedb_dir = dir.path().join("lancedb");
+        let catalog = Catalog::open_in_memory().expect("catalog");
+
+        let err = plan_reembed(&catalog, &lancedb_dir, Some(9_999_999), None, false)
+            .await
+            .expect_err("an id the catalog does not hold cannot be planned");
+
+        assert!(
+            matches!(err, GleanError::UnknownIntake(9_999_999)),
+            "{err:?}"
+        );
+        assert!(
+            !lancedb_dir.exists(),
+            "planning created the vector table it found missing",
+        );
+    }
+
+    #[tokio::test]
+    async fn reembedding_with_no_vector_table_reports_zero_and_creates_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lancedb_dir = dir.path().join("lancedb");
+        let mut corpus = Corpus::open_for_write(&dir.path().join("corpus.db")).expect("corpus");
+
+        let report = reembed_paper(1, &Offline, &mut corpus, &lancedb_dir, &embed_cfg("fake-1"))
+            .await
+            .expect("nothing to reembed");
+
+        assert_eq!(report, 0, "nothing was there to write");
+        assert!(
+            !lancedb_dir.exists(),
+            "reembedding created the vector table it found missing",
+        );
     }
 }

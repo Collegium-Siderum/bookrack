@@ -174,14 +174,26 @@ pub async fn execute_remove_from_plan(
         .delete_book_derived(intake_id, paper_root_id)
         .context("delete cascaded catalog rows")?;
 
-    let mut corpus =
-        Corpus::open_for_write(&cfg.papers_corpus_db()).context("open papers corpus")?;
-    corpus
-        .drop_partition(partition)
-        .context("drop corpus partition")?;
-    drop(corpus);
+    // A store this intake never reached is left absent: each one is
+    // probed through a door that creates nothing, and the write door
+    // is taken only when there is something to delete from.
+    if Corpus::open(&cfg.papers_corpus_db())
+        .context("open papers corpus")?
+        .is_some()
+    {
+        let mut corpus =
+            Corpus::open_for_write(&cfg.papers_corpus_db()).context("open papers corpus")?;
+        corpus
+            .drop_partition(partition)
+            .context("drop corpus partition")?;
+    }
 
-    if let Some(dim) = corpus_vector_dim(cfg)? {
+    if let Some(dim) = corpus_vector_dim(cfg)?
+        && ChunkStore::try_open(&cfg.papers_lancedb_dir())
+            .await
+            .context("open papers vector store")?
+            .is_some()
+    {
         let store = ChunkStore::open_for_write(&cfg.papers_lancedb_dir(), dim)
             .await
             .context("open papers vector store")?;
@@ -655,6 +667,38 @@ mod tests {
             planned.is_ok(),
             "a current catalog must plan: {:?}",
             planned.err(),
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_an_intake_with_no_corpus_does_not_create_one() {
+        let (_tmp, cfg) = temp_cfg();
+        let intake_id = Catalog::open_for_write_unbacked(&cfg.papers_catalog_db())
+            .expect("catalog")
+            .register_intake(
+                bookrack_core::ItemKind::Paper,
+                &bookrack_catalog::NewIntake::new("sha-intake-only"),
+            )
+            .expect("register intake")
+            .into_intake()
+            .intake_id;
+
+        execute_remove_from_plan(&cfg, intake_id, ExpectedFingerprint::None)
+            .await
+            .expect("an intake with nothing derived from it removes cleanly");
+
+        assert!(
+            Catalog::open_read_only(&cfg.papers_catalog_db())
+                .expect("reopen")
+                .intake_by_id(intake_id)
+                .expect("lookup")
+                .is_none(),
+            "the intake row is gone",
+        );
+        assert!(
+            !cfg.papers_corpus_db().exists(),
+            "removing an intake that never reached the corpus created {:?}",
+            database_files(cfg.data_dir()),
         );
     }
 }

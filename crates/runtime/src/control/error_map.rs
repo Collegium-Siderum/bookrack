@@ -87,6 +87,7 @@ use super::jsonrpc::{
 };
 use super::plan_registry::PlanLookupError;
 use crate::cmd::input_error::CmdInputError;
+use crate::cmd::state_error::CmdStateError;
 use crate::mount::MountRefusal;
 use crate::unmounted::MountOccasion;
 
@@ -180,6 +181,9 @@ fn classify(err: &Report) -> Option<RpcError> {
         }
         if let Some(e) = cause.downcast_ref::<CmdInputError>() {
             return Some(from_cmd_input(e));
+        }
+        if let Some(e) = cause.downcast_ref::<CmdStateError>() {
+            return Some(from_cmd_state(e));
         }
         if let Some(e) = cause.downcast_ref::<EmbedError>() {
             return Some(from_embed(e));
@@ -787,6 +791,17 @@ fn from_cmd_input(e: &CmdInputError) -> RpcError {
         | CmdInputError::NothingToDo { .. }
         | CmdInputError::Refused { .. } => INVALID_PARAMS,
         CmdInputError::TargetDrifted { .. } => PLAN_TARGET_DRIFTED,
+    };
+    rpc_from_problem(code, e.explain())
+}
+
+/// Map a library state a write command refused to act on. Every
+/// variant is the operator's to resolve, so each takes
+/// [`STATE_UNUSABLE`]; the `match` is exhaustive so a new variant is
+/// read against that claim before it ships.
+fn from_cmd_state(e: &CmdStateError) -> RpcError {
+    let code = match e {
+        CmdStateError::VectorTableMissing { .. } => STATE_UNUSABLE,
     };
     rpc_from_problem(code, e.explain())
 }
@@ -1580,6 +1595,14 @@ mod tests {
                 VectorsError::ReaderTooOld {
                     required: 9,
                     current: 3,
+                }
+                .into(),
+            ),
+            (
+                "cmd VectorTableMissing (bare)",
+                CmdStateError::VectorTableMissing {
+                    dim: 1024,
+                    reset_command: "bookrack vectors reset",
                 }
                 .into(),
             ),

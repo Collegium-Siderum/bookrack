@@ -34,6 +34,9 @@
 #      with a smaller indent, which rustfmt makes reliable and which
 #      sees through closures and macro bodies. A site registered with
 #      `access = "bookkeeping"` may take the bookkeeping door only.
+#      A door named `*_for_write_unbacked` migrates without a snapshot
+#      and is for tests that build a store: a production call to one
+#      fails wherever it sits, listed or not.
 #      Exceptions: [[write_door]].
 #   6  paired names. Two production functions of one crate, or two
 #      source files of one directory, whose names differ only by kind
@@ -509,6 +512,10 @@ production $(cat "$tmp/door.sources") |
         }
         site = file "::" fn_at[best]
         hit[site] = 1
+        if (call ~ /_for_write_unbacked$/) {
+          print "STRUCTURE: " site " takes " call ", a door for tests only: it migrates without a snapshot"
+          bad = 1
+        }
         if (!(site in access)) {
           if (!(site in told)) print "STRUCTURE: " site " takes a write door (" call ") and is not registered in [[write_door]]"
           told[site] = 1; bad = 1

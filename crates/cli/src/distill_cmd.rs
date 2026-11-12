@@ -60,6 +60,8 @@ use crate::render::table::RowTable;
 struct DistillPaths {
     refs_path: PathBuf,
     catalog_path: PathBuf,
+    /// Where a catalog is snapshotted before a build migrates it.
+    backup_dir: PathBuf,
 }
 
 impl DistillPaths {
@@ -67,6 +69,7 @@ impl DistillPaths {
         Self {
             refs_path: cfg.reference_db(),
             catalog_path: cfg.catalog_db(),
+            backup_dir: cfg.backup_dir(),
         }
     }
 }
@@ -292,15 +295,16 @@ fn build(paths: &DistillPaths, args: DistillBuildArgs) -> Result<()> {
 /// is a price a preview may pay for a row about itself. `Ok(None)` is
 /// that refusal, and every caller degrades to the branch it already
 /// had for a catalog it could not open. A real build takes the
-/// writable door, which migrates.
+/// writable door, which snapshots a catalog that holds tables into the
+/// library's backup directory before migrating it.
 fn open_distill_catalog_for_write(
-    path: &Path,
+    paths: &DistillPaths,
     dry_run: bool,
 ) -> bookrack_catalog::Result<Option<Catalog>> {
     if dry_run {
-        Catalog::open_for_bookkeeping(path)
+        Catalog::open_for_bookkeeping(&paths.catalog_path)
     } else {
-        Catalog::open_for_write_unbacked(path).map(Some)
+        Catalog::open_for_write(&paths.catalog_path, &paths.backup_dir).map(Some)
     }
 }
 
@@ -315,7 +319,7 @@ fn open_distill_pipeline_run(
     if args.no_audit_write {
         return Ok(None);
     }
-    let catalog = match open_distill_catalog_for_write(&paths.catalog_path, args.dry_run) {
+    let catalog = match open_distill_catalog_for_write(paths, args.dry_run) {
         Ok(Some(c)) => c,
         Ok(None) => return Ok(None),
         Err(err) => {
@@ -356,7 +360,7 @@ fn open_distill_pipeline_run(
 /// close it. A catalog that stopped being one this call may write
 /// between the two opens takes the same branch.
 fn finalize_pipeline_run(paths: &DistillPaths, run: RunHandle, ok: bool, dry_run: bool) {
-    let catalog = match open_distill_catalog_for_write(&paths.catalog_path, dry_run) {
+    let catalog = match open_distill_catalog_for_write(paths, dry_run) {
         Ok(Some(c)) => c,
         Ok(None) => {
             run.abandon();
@@ -577,7 +581,7 @@ fn write_distill_audit(
         })
         .collect();
 
-    let mut catalog = match open_distill_catalog_for_write(&paths.catalog_path, dry_run) {
+    let mut catalog = match open_distill_catalog_for_write(paths, dry_run) {
         Ok(Some(c)) => c,
         Ok(None) => return,
         Err(err) => {
@@ -1161,6 +1165,7 @@ mod tests {
         DistillPaths {
             refs_path: bookrack_config::reference_db_in(root),
             catalog_path: root.join("catalog.db"),
+            backup_dir: root.join("backup"),
         }
     }
 
@@ -1494,6 +1499,7 @@ mod tests {
         let paths = DistillPaths {
             refs_path: tmp.path().join("missing").join("reference.db"),
             catalog_path: tmp.path().join("missing").join("catalog.db"),
+            backup_dir: tmp.path().join("missing").join("backup"),
         };
 
         let err = verify(&paths, verify_args(vec![book_dir])).expect_err("must fail");
@@ -1525,6 +1531,7 @@ mod tests {
         let paths = DistillPaths {
             refs_path: dir_path.clone(),
             catalog_path: tmp.path().join("catalog.db"),
+            backup_dir: tmp.path().join("backup"),
         };
 
         let err = verify(&paths, verify_args(vec![book_dir])).expect_err("must fail");
@@ -1672,5 +1679,60 @@ mod tests {
         let err = lint(lint_args(vec![book_dir], 16)).expect_err("must fail");
         let msg = format!("{err}");
         assert!(msg.contains("1 of 1"), "got: {msg}");
+    }
+
+    /// Every file under `root`, at any depth, whose name ends with
+    /// `suffix`.
+    fn files_ending_with(root: &Path, suffix: &str) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.to_string_lossy().ends_with(suffix) {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn build_on_a_behind_catalog_backs_it_up_before_migrating() {
+        use bookrack_catalog::fixtures;
+
+        let tmp = TempDir::new().expect("tmp");
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
+        let paths = make_paths(tmp.path());
+        Catalog::open_for_write_unbacked(&paths.catalog_path)
+            .expect("create catalog")
+            .register_intake(
+                bookrack_core::ItemKind::Book,
+                &bookrack_catalog::NewIntake::new("sha-behind"),
+            )
+            .expect("register intake");
+        fixtures::step_back_one_version(&paths.catalog_path);
+        let behind = fixtures::CURRENT_VERSION - 1;
+
+        build(&paths, build_args(vec![book_dir], false, false)).expect("build");
+
+        assert_eq!(
+            fixtures::user_version(&paths.catalog_path),
+            fixtures::CURRENT_VERSION,
+            "a real build migrates the catalog it writes to",
+        );
+        let backups = files_ending_with(&paths.backup_dir, &format!("-from-v{behind}.bak"));
+        assert!(
+            backups.iter().any(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("catalog-"))
+            }),
+            "a populated catalog was migrated with no snapshot; found {backups:?}",
+        );
     }
 }

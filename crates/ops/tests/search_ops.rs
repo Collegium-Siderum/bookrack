@@ -881,3 +881,53 @@ async fn an_empty_recall_skips_the_rerank_stage() {
         .expect("empty recall bypasses the stage");
     assert!(hits.is_empty());
 }
+
+#[tokio::test]
+async fn single_item_search_without_a_catalog_reports_the_intake_on_both_sides() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let absent = |name: &str| {
+        let root = tmp.path().join(name);
+        std::fs::create_dir_all(&root).expect("store root");
+        StorePaths {
+            corpus_db: root.join("corpus.db"),
+            catalog_db: root.join("catalog.db"),
+            lancedb_dir: root.join("lancedb"),
+        }
+    };
+    let book_paths = absent("books");
+    let paper_paths = absent("papers");
+    let book_library = open_library(&book_paths, Fixed::unit_x()).await;
+    let paper_library = open_library(&paper_paths, Fixed::unit_x())
+        .await
+        .with_kind(ItemKind::Paper);
+    let ops = attach_papers(
+        ops_over(&tmp, &book_paths, book_library),
+        &tmp,
+        &paper_paths,
+        paper_library,
+    );
+
+    let err = search_in_book(&ops, 1, "q", SearchOptions::default(), None)
+        .await
+        .expect_err("no book catalog on disk");
+    assert!(
+        matches!(err, OpsError::IntakeNotFound { intake_id: 1 }),
+        "book side: {err:?}"
+    );
+    let err = search_in_paper(&ops, 1, "q", SearchOptions::default(), None)
+        .await
+        .expect_err("no paper catalog on disk");
+    assert!(
+        matches!(err, OpsError::IntakeNotFound { intake_id: 1 }),
+        "paper side: {err:?}"
+    );
+
+    assert!(
+        !book_paths.catalog_db.exists(),
+        "the book catalog was created"
+    );
+    assert!(
+        !paper_paths.catalog_db.exists(),
+        "the paper catalog was created"
+    );
+}

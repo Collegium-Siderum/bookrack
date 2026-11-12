@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use bookrack_catalog::{Catalog, NewRetrievalCall};
+use bookrack_catalog::NewRetrievalCall;
 use bookrack_core::PartitionIdx;
 use bookrack_embed::Embedder;
 use bookrack_query::{Citation, Library, SearchOptions};
@@ -141,8 +141,11 @@ pub async fn search_in_book<E: Embedder>(
     );
     let result = async {
         let library = ops.library().ok_or(OpsError::SearchUnavailable)?;
-        let catalog = Catalog::open_read_only(ops.catalog_db())?;
-        if catalog.intake_by_id(intake_id)?.is_none() {
+        let known = match crate::reads::open_book_catalog(ops)? {
+            Some(catalog) => catalog.intake_by_id(intake_id)?.is_some(),
+            None => false,
+        };
+        if !known {
             return Err(OpsError::IntakeNotFound { intake_id });
         }
         match ops.rerank_stage() {

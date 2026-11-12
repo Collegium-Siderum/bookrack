@@ -34,6 +34,46 @@ release workflow extracts the matching section verbatim from this file.
 - **`bookrack config fixed` lists the backup retention as
   `db.backups_kept`**, formerly `catalog.backups_kept`. The value is
   unchanged.
+- **`vectors rebuild` and `vectors drop` refuse a library whose vector
+  table is missing.** When the corpus records a vector dimension and
+  the table is not on disk, the two commands and their `papers`
+  counterparts used to create an empty table and go on. They now
+  create nothing and answer `-32018` (exit `2`) with a hint naming
+  `vectors reset`. A library with nothing ingested is still answered
+  `-32602`, and no longer gets a `corpus.db` created for the answer.
+
+### Fixed
+
+- **A dry run, a plan, and the execution of an empty plan no longer
+  create or migrate a store.** `corpus rebuild --dry-run` and
+  `vectors reembed --dry-run`, their `papers` counterparts, and a
+  rebuild confirmed over an empty plan used to create `catalog.db`,
+  `corpus.db` and an empty vector table on a library that had none, and
+  to migrate a catalog that was behind. They now read what is there. A
+  dry run naming an intake the library does not hold reports that
+  intake as before, without creating anything.
+- **Recording a call and `doctor --close-abandoned-runs` no longer
+  migrate a catalog.** The call log row written after a read, and the
+  repair's own write, moved a catalog that was behind this build
+  forward without a snapshot. Both now leave such a catalog alone. The
+  repair also reports every catalog it could not read on an `UNREAD`
+  line and exits `1`; it used to print `0 closed` and exit `0`.
+- **`vectors reset` creates nothing when it has nothing to do or
+  refuses.** A `--resume` with no intake waiting, and a reset refused
+  because the backend does not produce the profile's dimension, used
+  to create `catalog.db` and `corpus.db` first.
+- **Removing an intake that never reached the corpus no longer creates
+  one, and a re-embed no longer creates an empty vector table.**
+  `remove` and `papers remove` created `corpus.db` to drop a partition
+  that was not there; `vectors reembed` on a library without a vector
+  table left an empty one behind.
+- **A metadata write and `distill build` snapshot a catalog before
+  migrating it.** Both migrated a catalog that was behind without the
+  snapshot [UPGRADE.md](docs/UPGRADE.md) describes. A metadata write
+  whose arguments are refused no longer creates `catalog.db`.
+- **`library.search_in_book` on a library with no catalog reports the
+  unknown intake**, as `library.search_in_paper` does, instead of
+  failing to open the catalog file.
 
 ### Removed
 

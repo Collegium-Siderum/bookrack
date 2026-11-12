@@ -169,3 +169,27 @@ async fn record_call_async_writes_one_ok_row() {
     assert_eq!(rows[0].source, "cli");
     assert!(rows[0].args.is_none(), "info takes no args");
 }
+
+#[test]
+fn recording_a_read_on_a_behind_catalog_neither_migrates_nor_backs_it_up() {
+    use bookrack_catalog::fixtures;
+
+    let fx = Fixture::cli();
+    fx.seed_intake("sha-behind");
+    fixtures::step_back_one_version(&fx.catalog_db);
+    let behind = fixtures::CURRENT_VERSION - 1;
+
+    // The read's own result is not under test: the row it would record is.
+    let _ = list_books(&fx.ops, 10, 0);
+
+    assert_eq!(
+        fixtures::user_version(&fx.catalog_db),
+        behind,
+        "recording a read must not migrate the catalog it could not write to",
+    );
+    let backup_dir = fx.catalog_db.parent().expect("parent").join("backup");
+    let backups: Vec<_> = std::fs::read_dir(&backup_dir)
+        .map(|entries| entries.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+        .unwrap_or_default();
+    assert!(backups.is_empty(), "recording a read wrote {backups:?}");
+}

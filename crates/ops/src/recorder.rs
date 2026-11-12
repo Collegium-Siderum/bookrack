@@ -156,14 +156,6 @@ impl<'a> Recorder<'a> {
             ),
         };
 
-        // Skip recording on a fresh data root that holds no catalog yet.
-        // `Catalog::open_for_write_unbacked` would otherwise materialize `catalog.db` just to
-        // hold a single audit row, which turns `bookrack info` on an empty
-        // root into a write — exactly what the read-only contract refuses.
-        if !self.catalog_db.exists() {
-            return;
-        }
-
         let mut row = NewMcpToolCall::new(self.source, self.tool, status);
         row.duration_ms = Some(duration_ms);
         row.args = self.args;
@@ -175,8 +167,16 @@ impl<'a> Recorder<'a> {
             );
         }
 
-        let write_attempt = Catalog::open_for_write_unbacked(self.catalog_db)
-            .and_then(|c| c.record_tool_call_with_retrieval(&row, retrieval.as_ref()));
+        // The row is incidental to the call it describes, so it goes
+        // through the bookkeeping door: a data root with no catalog yet
+        // gets none created for it, and a catalog behind this build is
+        // not migrated to hold it. Either way the call goes unrecorded.
+        let write_attempt = Catalog::open_for_bookkeeping(self.catalog_db).and_then(|catalog| {
+            if let Some(catalog) = catalog {
+                catalog.record_tool_call_with_retrieval(&row, retrieval.as_ref())?;
+            }
+            Ok(())
+        });
         if let Err(e) = write_attempt {
             tracing::warn!(
                 tool = self.tool,

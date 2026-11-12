@@ -519,7 +519,10 @@ computes the plan for the last three without touching disk:
 - `bookrack doctor --close-abandoned-runs` closes registry rows left
   at `running` by a command whose process died, stamping each
   `abandoned`. See the `pipeline runs` row below for how a run's owner
-  is judged; only rows proven ownerless are touched.
+  is judged; only rows proven ownerless are touched. A catalog the
+  pass cannot read — behind this build, newer than it, or damaged — is
+  listed on an `UNREAD` line with the reason and left as it is, and
+  the command exits `1`: none of that catalog's runs were judged.
 
 The last two write the catalog directly, so both are refused while a
 daemon is serving the library — stop it with `bookrack quit` first.

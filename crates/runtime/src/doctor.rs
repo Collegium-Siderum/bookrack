@@ -472,12 +472,13 @@ pub async fn backfill_ocr_derivation(
     let cfg = Config::resolve(selection).context("resolve config for OCR derivation backfill")?;
     // A dry run must not touch the database: the read-only open neither
     // migrates nor writes. The real run opens read-write, which also
-    // applies any pending migration as part of the repair.
+    // applies any pending migration as part of the repair, behind a
+    // snapshot in the library's backup directory.
     let catalog = if dry_run {
         Catalog::open_read_only(&cfg.catalog_db())
             .context("open catalog (read-only) for OCR derivation backfill plan")?
     } else {
-        Catalog::open_for_write_unbacked(&cfg.catalog_db())
+        Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir())
             .context("open catalog for OCR derivation backfill")?
     };
     let pending = catalog

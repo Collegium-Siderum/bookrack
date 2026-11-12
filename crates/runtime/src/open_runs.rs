@@ -156,6 +156,16 @@ pub struct CloseFailure {
     pub reason: String,
 }
 
+/// One catalog the pass could not read, so none of its runs were
+/// judged.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UnreadCatalog {
+    /// The catalog file.
+    pub catalog_db: PathBuf,
+    /// Flattened cause chain of the refusal.
+    pub reason: String,
+}
+
 /// Outcome of one `--close-abandoned-runs` pass, rendered verbatim so
 /// an operator can audit what moved.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -172,12 +182,17 @@ pub struct CloseAbandonedReport {
     /// Open runs left alone because they carry no liveness record, so
     /// nothing proves their owner is gone.
     pub left_unjudged: usize,
+    /// Catalogs present on disk that would not open. Their runs are in
+    /// none of the counts above.
+    pub unreadable: Vec<UnreadCatalog>,
 }
 
 impl CloseAbandonedReport {
-    /// `true` iff any row failed to close.
+    /// `true` iff any row failed to close or any catalog could not be
+    /// read: a pass that judged only part of the data root is not a
+    /// clean one.
     pub fn has_failures(&self) -> bool {
-        !self.failures.is_empty()
+        !self.failures.is_empty() || !self.unreadable.is_empty()
     }
 }
 
@@ -191,6 +206,10 @@ impl CloseAbandonedReport {
 /// stopped, never that its work succeeded or failed — that outcome died
 /// with the process and is not recoverable from the row.
 ///
+/// A catalog the survey could not read — behind this build, newer than
+/// it, or damaged — is carried into the report's `unreadable`, on a
+/// plan pass as on a real one, and nothing in it is touched.
+///
 /// This writes the catalog, so callers run it with no daemon serving
 /// the library.
 pub fn close_abandoned_runs(cfg: &Config, dry_run: bool) -> CloseAbandonedReport {
@@ -199,6 +218,14 @@ pub fn close_abandoned_runs(cfg: &Config, dry_run: bool) -> CloseAbandonedReport
         dry_run,
         left_running: survey.held(),
         left_unjudged: survey.unjudged(),
+        unreadable: survey
+            .unreadable
+            .iter()
+            .map(|(catalog_db, reason)| UnreadCatalog {
+                catalog_db: catalog_db.clone(),
+                reason: reason.clone(),
+            })
+            .collect(),
         ..CloseAbandonedReport::default()
     };
     for run in survey.abandoned() {
@@ -253,6 +280,13 @@ pub fn render_close_report(report: &CloseAbandonedReport, json: bool) {
     for failure in &report.failures {
         println!("  FAILED {} ({})", failure.pipeline_run_id, failure.reason);
     }
+    for unread in &report.unreadable {
+        println!(
+            "  UNREAD {} ({})",
+            unread.catalog_db.display(),
+            unread.reason
+        );
+    }
 }
 
 /// Stamp one row and discard the record that licensed stamping it. The
@@ -260,9 +294,17 @@ pub fn render_close_report(report: &CloseAbandonedReport, json: bool) {
 /// and a stray file, which the next survey reads as nothing at all,
 /// where the reverse order would leave a `running` row no longer
 /// provably abandoned.
+///
+/// The row is written through the bookkeeping door, which migrates
+/// nothing: a catalog that is gone or behind this build is refused, and
+/// its row and record stay as they were.
 fn close_one(run: &OpenRun) -> Result<(), String> {
-    let catalog = Catalog::open_for_write_unbacked(&run.catalog_db)
-        .map_err(|err| bookrack_core::error_chain(&err))?;
+    let catalog = Catalog::open_for_bookkeeping(&run.catalog_db)
+        .map_err(|err| bookrack_core::error_chain(&err))?
+        .ok_or_else(|| {
+            "the catalog is missing or its schema is behind this build, so the run was left open"
+                .to_string()
+        })?;
     catalog
         .close_pipeline_run(&run.pipeline_run_id, bookrack_catalog::RUN_STATUS_ABANDONED)
         .map_err(|err| bookrack_core::error_chain(&err))?;
@@ -464,5 +506,84 @@ mod tests {
             .find(|run| run.command == "glean")
             .expect("paper-side run");
         assert_eq!(paper_run.catalog_db, papers);
+    }
+
+    /// One abandoned run in a catalog one revision behind this build.
+    fn behind_catalog_with_an_abandoned_run(root: &Path) -> (PathBuf, PathBuf, String) {
+        let catalog_db = root.join("catalog.db");
+        let locks = run_locks_dir(&catalog_db).expect("lock dir");
+        let dead = open_row(&catalog_db, "ingest");
+        seed_abandoned_record(&locks, &dead);
+        bookrack_catalog::fixtures::step_back_one_version(&catalog_db);
+        (catalog_db, locks, dead)
+    }
+
+    fn entries(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|entries| entries.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_pass_over_a_behind_catalog_leaves_it_alone_and_counts_as_a_failure() {
+        use bookrack_catalog::fixtures;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (catalog_db, locks, dead) = behind_catalog_with_an_abandoned_run(dir.path());
+        let cfg = cfg_at(dir.path());
+
+        let report = close_abandoned_runs(&cfg, false);
+
+        assert_eq!(
+            fixtures::user_version(&catalog_db),
+            fixtures::CURRENT_VERSION - 1,
+            "the pass migrated the catalog",
+        );
+        assert!(
+            entries(&cfg.backup_dir()).is_empty(),
+            "the pass wrote {:?}",
+            entries(&cfg.backup_dir()),
+        );
+        assert_eq!(run_liveness(&locks, &dead), RunLiveness::Abandoned);
+        assert!(report.closed.is_empty(), "closed: {:?}", report.closed);
+        assert!(
+            report.has_failures(),
+            "a catalog the pass could not judge must not read as a clean pass: {report:?}",
+        );
+        let [unread] = report.unreadable.as_slice() else {
+            panic!("the behind catalog is the one the pass names: {report:?}");
+        };
+        assert_eq!(unread.catalog_db, catalog_db);
+        assert!(
+            unread.reason.contains("behind this build"),
+            "{}",
+            unread.reason
+        );
+    }
+
+    #[test]
+    fn closing_a_run_in_a_behind_catalog_is_refused_without_migrating_it() {
+        use bookrack_catalog::fixtures;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (catalog_db, locks, dead) = behind_catalog_with_an_abandoned_run(dir.path());
+        let run = OpenRun {
+            pipeline_run_id: dead.clone(),
+            command: "ingest".to_string(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            liveness: RunLiveness::Abandoned,
+            catalog_db: catalog_db.clone(),
+        };
+
+        let outcome = close_one(&run);
+
+        assert_eq!(
+            fixtures::user_version(&catalog_db),
+            fixtures::CURRENT_VERSION - 1,
+            "closing one run migrated the catalog",
+        );
+        let reason = outcome.expect_err("a behind catalog is not one this call may write");
+        assert!(reason.contains("behind"), "{reason}");
+        assert_eq!(run_liveness(&locks, &dead), RunLiveness::Abandoned);
     }
 }

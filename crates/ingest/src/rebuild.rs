@@ -87,6 +87,42 @@ pub fn rebuild_from_intakes(
     catalog: &Catalog,
     params: &RebuildParams,
 ) -> Result<RebuildReport> {
+    let dry_run = params.dry_run;
+    walk_rebuild_targets(catalog, params, |intake_id, envelope| {
+        if dry_run {
+            return Ok(());
+        }
+        ingest_structure(
+            corpus,
+            intake_id,
+            NodeType::Work,
+            &envelope.extraction,
+            &params.structure,
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    })
+}
+
+/// Classify the target intakes of a rebuild into the report's buckets
+/// from the catalog and the envelopes alone. Opens no corpus and writes
+/// nothing; `rebuilt` holds the intakes a rebuild would act on.
+pub fn classify_rebuild_targets(
+    catalog: &Catalog,
+    params: &RebuildParams,
+) -> Result<RebuildReport> {
+    walk_rebuild_targets(catalog, params, |_, _| Ok(()))
+}
+
+/// Resolve the target set, sort each intake into a bucket, and hand
+/// every intake whose envelope is present and matches its catalog row
+/// to `rebuild`. An `Err` from `rebuild` files the intake under
+/// `failed`; `Ok` files it under `rebuilt`.
+fn walk_rebuild_targets(
+    catalog: &Catalog,
+    params: &RebuildParams,
+    mut rebuild: impl FnMut(i64, &envelope::ExtractionEnvelope) -> std::result::Result<(), String>,
+) -> Result<RebuildReport> {
     let targets = if let Some(ids) = params.only_ids.as_deref() {
         collect_pinned_targets(catalog, ids)?
     } else {
@@ -123,19 +159,9 @@ pub fn rebuild_from_intakes(
             report.mismatched.push(intake_id);
             continue;
         }
-        if params.dry_run {
-            report.rebuilt.push(intake_id);
-            continue;
-        }
-        match ingest_structure(
-            corpus,
-            intake_id,
-            NodeType::Work,
-            &envelope.extraction,
-            &params.structure,
-        ) {
-            Ok(_) => report.rebuilt.push(intake_id),
-            Err(e) => report.failed.push((intake_id, e.to_string())),
+        match rebuild(intake_id, &envelope) {
+            Ok(()) => report.rebuilt.push(intake_id),
+            Err(reason) => report.failed.push((intake_id, reason)),
         }
     }
     Ok(report)

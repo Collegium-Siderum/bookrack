@@ -15,6 +15,7 @@ use serde::Serialize;
 
 use crate::cmd::ResetInterrupted;
 use crate::cmd::input_error::CmdInputError;
+use crate::cmd::state_error::CmdStateError;
 use crate::embed_helpers::{embedder, refuse_dimension_mismatch};
 use crate::pipeline_run_helpers::{close_run, open_run};
 
@@ -103,6 +104,52 @@ pub(crate) fn parse_ann_kind(s: &str) -> Result<AnnKind> {
     })
 }
 
+/// Open the chunks table an ANN command works on. The vector dimension
+/// is read from the corpus stamp through a read-only door and the table
+/// is probed before the write door is taken, so a library with nothing
+/// to index is refused with nothing created: `not_ingested` when the
+/// corpus or its stamp is absent, [`CmdStateError::VectorTableMissing`]
+/// when the stamp is there and the table is not.
+async fn open_ann_store_for_write(cfg: &Config, not_ingested: CmdInputError) -> Result<ChunkStore> {
+    let lancedb_dir = cfg.lancedb_dir();
+    let stamp = match Corpus::open(&cfg.corpus_db()).context("open corpus")? {
+        Some(corpus) => corpus
+            .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
+            .context("read vector_dim stamp")?,
+        None => None,
+    };
+    let dim = stamp
+        .ok_or(not_ingested)?
+        .parse::<usize>()
+        .context("parse vector_dim stamp")?;
+    if ChunkStore::try_open(&lancedb_dir)
+        .await
+        .context("open vector store")?
+        .is_none()
+    {
+        return Err(CmdStateError::VectorTableMissing {
+            dim,
+            reset_command: "bookrack vectors reset",
+        }
+        .into());
+    }
+    ChunkStore::open_for_write(&lancedb_dir, dim)
+        .await
+        .context("open vector store")
+}
+
+/// Whether any intake is still at `Extracted`, read without creating or
+/// migrating the catalog. A root with no catalog has none.
+fn has_extracted_intakes(cfg: &Config) -> Result<bool> {
+    let Some(catalog) = Catalog::open(&cfg.catalog_db()).context("open catalog")? else {
+        return Ok(false);
+    };
+    Ok(!catalog
+        .intakes_with_status(IntakeStatus::Extracted)
+        .context("count extracted intakes")?
+        .is_empty())
+}
+
 /// Run `bookrack vectors rebuild` — build or rebuild the ANN index
 /// from CLI flags, falling back to the persisted meta or the C1
 /// recommended default for any flag not supplied. Returns the
@@ -118,19 +165,14 @@ pub async fn rebuild(
     refine_factor: Option<u32>,
 ) -> Result<AnnRebuildReport> {
     let lancedb_dir = cfg.lancedb_dir();
-    let corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open corpus")?;
-    let dim = corpus
-        .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
-        .context("read vector_dim stamp")?
-        .ok_or(CmdInputError::NotIngested {
+    let store = open_ann_store_for_write(
+        cfg,
+        CmdInputError::NotIngested {
             what: "ingested chunks",
             hint: "Ingest a book before rebuilding the index.",
-        })?
-        .parse::<usize>()
-        .context("parse vector_dim stamp")?;
-    let store = ChunkStore::open_for_write(&lancedb_dir, dim)
-        .await
-        .context("open vector store")?;
+        },
+    )
+    .await?;
     // Pick the baseline: explicit kind > existing meta > default IvfFlat.
     let mut base = if let Some(s) = kind_str {
         bookrack_vectors::AnnConfig::default_for(parse_ann_kind(s)?)
@@ -167,14 +209,24 @@ pub async fn rebuild(
 /// Compute a reembed plan without writing anything. Returns the
 /// per-intake plan rows a subsequent
 /// [`execute_reembed_from_plan`] call will pin to.
+///
+/// The catalog is read through its read-only door. With no catalog on
+/// disk the plan is empty, unless `book` names an intake, which is
+/// then reported as unknown.
 pub async fn plan_reembed(
     cfg: &Config,
     book: Option<i64>,
     stale_only: bool,
 ) -> Result<Vec<bookrack_ingest::reembed::ReembedPlan>> {
     let lancedb_dir = cfg.lancedb_dir();
-    let catalog =
-        Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    let Some(catalog) = Catalog::open(&cfg.catalog_db()).context("open catalog")? else {
+        return match book {
+            Some(id) => {
+                Err(bookrack_ingest::IngestError::UnknownIntake(id)).context("plan reembed")
+            }
+            None => Ok(Vec::new()),
+        };
+    };
     bookrack_ingest::reembed::plan_reembed(&catalog, &lancedb_dir, book, None, stale_only)
         .await
         .context("plan reembed")
@@ -220,19 +272,14 @@ pub async fn execute_reembed_from_plan(
 /// meta as `kind = brute-force`. Search falls back to a full scan.
 pub async fn drop(cfg: &Config) -> Result<AnnDropReport> {
     let lancedb_dir = cfg.lancedb_dir();
-    let corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open corpus")?;
-    let dim = corpus
-        .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
-        .context("read vector_dim stamp")?
-        .ok_or(CmdInputError::NotIngested {
+    let store = open_ann_store_for_write(
+        cfg,
+        CmdInputError::NotIngested {
             what: "ingested chunks",
             hint: "There is no index to drop until a book has been ingested.",
-        })?
-        .parse::<usize>()
-        .context("parse vector_dim stamp")?;
-    let store = ChunkStore::open_for_write(&lancedb_dir, dim)
-        .await
-        .context("open vector store")?;
+        },
+    )
+    .await?;
     store
         .drop_ann_index(&lancedb_dir, bookrack_ingest::now_rfc3339())
         .await
@@ -259,27 +306,21 @@ pub async fn drop(cfg: &Config) -> Result<AnnDropReport> {
 /// A failure of the reset pass itself carries [`ResetInterrupted`]; a
 /// failure while setting it up does not.
 pub async fn reset(cfg: &Config, resume: bool) -> Result<VectorsResetReport> {
-    let lancedb_dir = cfg.lancedb_dir();
-    let catalog =
-        Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
-    let corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open corpus")?;
-    let (embed_cfg, declaration) = crate::profile::effective_embed_declaration(cfg)?;
-    let embedder_client = embedder(cfg, &embed_cfg)?;
-
-    if resume
-        && catalog
-            .intakes_with_status(IntakeStatus::Extracted)
-            .context("count extracted intakes")?
-            .is_empty()
-    {
+    if resume && !has_extracted_intakes(cfg)? {
         return Ok(VectorsResetReport {
             resumed: true,
             ..VectorsResetReport::default()
         });
     }
 
+    let (embed_cfg, declaration) = crate::profile::effective_embed_declaration(cfg)?;
+    let embedder_client = embedder(cfg, &embed_cfg)?;
     refuse_dimension_mismatch(&embedder_client, &embed_cfg.model, declaration.as_ref()).await?;
 
+    let lancedb_dir = cfg.lancedb_dir();
+    let catalog =
+        Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    let corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open corpus")?;
     let run = open_run(
         &catalog,
         &cfg.catalog_db(),
@@ -473,6 +514,172 @@ mod tests {
         assert_eq!(
             runs(&cfg),
             vec![("reembed".to_string(), Some("ok".to_string()))]
+        );
+    }
+
+    use crate::cmd::test_fixtures::{store_files, temp_cfg as empty_cfg};
+
+    fn is_not_ingested(err: &eyre::Report) -> bool {
+        err.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<CmdInputError>(),
+                Some(CmdInputError::NotIngested { .. })
+            )
+        })
+    }
+
+    #[tokio::test]
+    async fn plan_reembed_on_an_empty_root_creates_no_store() {
+        let (tmp, cfg) = empty_cfg();
+
+        let plan = plan_reembed(&cfg, None, false)
+            .await
+            .expect("plan on an empty root");
+
+        assert!(plan.is_empty(), "an empty root plans no work");
+        assert!(
+            store_files(tmp.path()).is_empty(),
+            "a reembed plan created {:?}",
+            store_files(tmp.path()),
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_reembed_naming_an_unknown_book_on_an_empty_root_reports_it_and_creates_no_store()
+    {
+        let (tmp, cfg) = empty_cfg();
+
+        let err = plan_reembed(&cfg, Some(9_999_999), false)
+            .await
+            .expect_err("an id no catalog holds cannot be planned");
+
+        assert!(
+            err.chain().any(|cause| matches!(
+                cause.downcast_ref::<bookrack_ingest::IngestError>(),
+                Some(bookrack_ingest::IngestError::UnknownIntake(9_999_999))
+            )),
+            "{err:?}",
+        );
+        assert!(
+            store_files(tmp.path()).is_empty(),
+            "a reembed plan created {:?}",
+            store_files(tmp.path()),
+        );
+    }
+
+    #[tokio::test]
+    async fn ann_rebuild_and_drop_on_an_empty_root_report_not_ingested_and_create_no_store() {
+        let (tmp, cfg) = empty_cfg();
+
+        let err = rebuild(&cfg, None, None, None, None, None, None)
+            .await
+            .expect_err("nothing to index on an empty root");
+        assert!(is_not_ingested(&err), "rebuild: {err:?}");
+        assert!(
+            store_files(tmp.path()).is_empty(),
+            "an index rebuild created {:?}",
+            store_files(tmp.path()),
+        );
+
+        let err = drop(&cfg)
+            .await
+            .expect_err("no index to drop on an empty root");
+        assert!(is_not_ingested(&err), "drop: {err:?}");
+        assert!(
+            store_files(tmp.path()).is_empty(),
+            "an index drop created {:?}",
+            store_files(tmp.path()),
+        );
+    }
+
+    #[tokio::test]
+    async fn ann_rebuild_and_drop_refuse_a_stamped_corpus_whose_vector_table_is_missing() {
+        let (_tmp, cfg) = empty_cfg();
+        Corpus::open_for_write(&cfg.corpus_db())
+            .expect("create corpus")
+            .meta_set(bookrack_corpus::VECTOR_DIM_KEY, "4")
+            .expect("stamp vector_dim");
+
+        let is_table_missing = |err: &eyre::Report| {
+            err.chain().any(|cause| {
+                matches!(
+                    cause.downcast_ref::<CmdStateError>(),
+                    Some(CmdStateError::VectorTableMissing { dim: 4, .. })
+                )
+            })
+        };
+
+        let err = rebuild(&cfg, None, None, None, None, None, None)
+            .await
+            .expect_err("a stamp with no table behind it is not a state to index");
+        assert!(
+            !cfg.lancedb_dir().exists(),
+            "an index rebuild created the vector table it found missing",
+        );
+        assert!(is_table_missing(&err), "rebuild: {err:?}");
+
+        let err = drop(&cfg)
+            .await
+            .expect_err("a stamp with no table behind it has no index to drop");
+        assert!(
+            !cfg.lancedb_dir().exists(),
+            "an index drop created the vector table it found missing",
+        );
+        assert!(is_table_missing(&err), "drop: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_resume_on_an_empty_root_reports_zero_and_creates_no_store() {
+        let (tmp, cfg) = empty_cfg();
+
+        let report = reset(&cfg, true).await.expect("resume on an empty root");
+
+        assert_eq!(
+            report,
+            VectorsResetReport {
+                resumed: true,
+                ..VectorsResetReport::default()
+            }
+        );
+        assert!(
+            store_files(tmp.path()).is_empty(),
+            "a resume with nothing to resume created {:?}",
+            store_files(tmp.path()),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reset_refused_on_dimension_creates_no_store() {
+        let stub = bookrack_test_support::EmbedStub::start();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(tmp.path().to_path_buf(), stub.url().to_string());
+        bookrack_config::set_manifest_index_profile(
+            tmp.path(),
+            Some(bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT),
+            bookrack_config::ManifestIdentitySeed {
+                name: "lib",
+                kind: bookrack_config::LibraryKind::Test,
+                description: None,
+                registered_uuid: None,
+            },
+        )
+        .expect("write a manifest declaring a built-in profile");
+
+        let err = reset(&cfg, false)
+            .await
+            .expect_err("the stub's width is not the profile's");
+
+        assert!(
+            err.chain().any(|cause| matches!(
+                cause.downcast_ref::<CmdInputError>(),
+                Some(CmdInputError::Refused { .. })
+            )),
+            "{err:?}",
+        );
+        assert!(
+            store_files(tmp.path()).is_empty(),
+            "a refused reset created {:?}",
+            store_files(tmp.path()),
         );
     }
 }

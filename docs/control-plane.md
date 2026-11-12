@@ -157,7 +157,9 @@ systems. bookrack is a local-first system and does not probe for it.
   written by a newer schema or demanding a newer reader, an index whose
   build stamps are missing or disagree with this build, a vector
   sidecar naming an ANN kind this build does not know or a dimension
-  the store was not built at). Distinct from `-32602`, which says the
+  the store was not built at, a vector table missing from under a
+  corpus that records its dimension). Distinct from `-32602`, which
+  says the
   request was wrong: here the request was fine and the library is not
   in a state to take it. Distinct from `-32603`, which says there is
   nothing for the caller to do but report: here there is a step, and
@@ -334,7 +336,10 @@ onto.
   (`CorpusError::{IndexNotStamped, IndexStampMismatch}`), and a vector
   store whose sidecar names an unknown ANN kind, whose dimension does
   not match, or whose reader stamp is too new
-  (`VectorsError::{UnknownAnnKind, DimensionMismatch, ReaderTooOld}`).
+  (`VectorsError::{UnknownAnnKind, DimensionMismatch, ReaderTooOld}`),
+  and an ANN rebuild or drop on a library whose corpus records a
+  vector dimension while the vector table is not on disk
+  (`CmdStateError::VectorTableMissing`; the hint names the reset).
   Each carries the operator's next step in `error.data.hint`, through
   the same wrappers as the `-32602` leaves above.
 - **Everything else** (`-32603`): the handler tried and a downstream
@@ -794,6 +799,11 @@ the exit-code bucket does not distinguish the two.
     configuration the index was built with.
   - `vectors.drop` → `{ ok: true, kind: "brute-force" }`, the kind the
     store is left at.
+  - `vectors.rebuild` and `vectors.drop` create nothing on a library
+    they cannot act on: with no `vector_dim` stamp on the corpus they
+    answer `-32602` (nothing ingested yet), and with the stamp present
+    and the vector table missing they answer `-32018`, whose hint names
+    `vectors reset`. The paper-side methods answer alike.
   - `vectors.reset` → `{ ok: true, resumed, intakes_reembedded,
     chunks_written, skipped_empty }`, the counts of this pass alone:
     a resume reports what it picked up, not the library's totals, and
