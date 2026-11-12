@@ -380,6 +380,7 @@ impl RootLock {
 /// so a concurrent [`TtyLock::acquire`] racing into that window can
 /// fail spuriously; use this only for advisory checks where that
 /// trade-off is acceptable.
+// Parallel implementation: lock-held-probe.
 pub fn lock_is_held(path: &Path) -> Result<bool> {
     let file = match OpenOptions::new().read(true).open(path) {
         Ok(f) => f,

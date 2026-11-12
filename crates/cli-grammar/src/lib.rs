@@ -259,6 +259,7 @@ pub struct IngestArgs {
 }
 
 /// Positional + flag bundle for `remove`.
+// Parallel implementation: clap-paired-args.
 #[derive(clap::Args, Debug, Clone)]
 #[command(group(
     clap::ArgGroup::new("remove_target")
@@ -284,6 +285,7 @@ pub struct RemoveArgs {
 }
 
 /// Positional + flag bundle for `dryrun`.
+// Parallel implementation: clap-paired-args.
 #[derive(clap::Args, Debug, Clone)]
 pub struct DryrunArgs {
     /// Source file, or a directory the dryrun walks recursively.
@@ -566,6 +568,7 @@ pub enum RetrievalAction {
 /// Metadata-side write commands. Lives in the grammar crate so both
 /// the daemon-side runner (`bookrack_runtime::cmd::metadata::run_write`)
 /// and the REPL client can parse them.
+// Parallel implementation: clap-paired-args.
 #[derive(clap::Subcommand, Debug)]
 pub enum WriteMetadataAction {
     /// Set (or change) one metadata field's value.
@@ -736,6 +739,7 @@ pub enum WriteMetadataAction {
 ///
 /// Prefer `bookrack index-profile apply`; this namespace is the
 /// low-level escape hatch.
+// Parallel implementation: clap-paired-args.
 #[derive(clap::Subcommand, Debug)]
 pub enum WriteVectorsAction {
     /// Build or rebuild the ANN index.
@@ -1092,6 +1096,7 @@ pub enum PapersAction {
 
 /// Paper-side metadata curation actions. Peer of `MetadataAction`
 /// for the books pipeline; currently exposes the `reaudit` action.
+// Parallel implementation: clap-paired-args.
 #[derive(clap::Subcommand, Debug)]
 pub enum PapersMetadataAction {
     /// Re-run the paper-side metadata audit on an existing intake's
@@ -1318,6 +1323,7 @@ pub enum PapersCorpusAction {
 ///
 /// Prefer `bookrack index-profile apply`; this namespace is the
 /// low-level escape hatch.
+// Parallel implementation: clap-paired-args.
 #[derive(clap::Subcommand, Debug)]
 pub enum PapersVectorsAction {
     /// Build or rebuild the ANN index over `lancedb_papers`.
@@ -1431,6 +1437,7 @@ pub enum PapersStampsAction {
 }
 
 /// Positional + flag bundle for `papers dryrun`.
+// Parallel implementation: clap-paired-args.
 #[derive(clap::Args, Debug, Clone)]
 pub struct PapersDryrunArgs {
     /// Source PDF / EPUB / TXT / HTML, or a directory the dryrun
@@ -1686,6 +1693,7 @@ pub struct LogsArgs {
 /// Positional + flag bundle for `papers remove`. Mirrors
 /// [`RemoveArgs`] for the paper pipeline. Either a positional intake
 /// id or `--sha <hex>` is required.
+// Parallel implementation: clap-paired-args.
 #[derive(clap::Args, Debug, Clone)]
 #[command(group(
     clap::ArgGroup::new("papers_remove_target")

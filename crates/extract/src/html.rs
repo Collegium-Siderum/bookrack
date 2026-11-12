@@ -95,6 +95,7 @@ pub fn extract(path: &Path, html_toggles: &HtmlToggles) -> Result<Extraction, Ex
 /// them (a book that starts at `<h2>` yields a topmost depth of 1).
 /// Honest to the source — loose HTML often has no consistent heading
 /// scheme to normalize against.
+// Parallel implementation: toc-from-headings.
 fn toc_from_headings(blocks: &[Block]) -> Toc {
     let mut entries = Vec::new();
     for (idx, block) in blocks.iter().enumerate() {

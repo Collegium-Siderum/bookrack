@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 /// Download, verify, and unpack the pinned PDFium library into the
 /// pinned build's managed directory. Returns the path of the installed
 /// library.
+// Parallel implementation: installer-fetch.
 pub async fn install_pinned_pdfium() -> Result<PathBuf> {
     let Some(pin) = pinned_pdfium_binary() else {
         bail!("no pinned PDFium binary is published for this platform");
@@ -56,6 +57,7 @@ pub async fn install_pinned_pdfium() -> Result<PathBuf> {
 /// Compare a downloaded archive's SHA-256 with the pinned digest.
 /// Upstream publishes no checksums, so this pin is the only defence
 /// against a corrupted download or a silently re-cut asset.
+// Parallel implementation: sha256-hex.
 fn verify_sha256(bytes: &[u8], expected: &str) -> Result<()> {
     let actual: String = Sha256::digest(bytes)
         .iter()

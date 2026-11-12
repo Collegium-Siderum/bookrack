@@ -821,6 +821,7 @@ pub fn now() -> f64 {
 /// Write `bytes` to `path` through a temporary file in the same
 /// directory and a rename, so a reader sees the old file or the new one
 /// and a hard link to the old file is never written through.
+// Parallel implementation: atomic-write.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let name = path
         .file_name()

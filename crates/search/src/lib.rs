@@ -547,6 +547,7 @@ struct LeafContext {
 /// across books. Internal organizing nodes (chapter / section / …)
 /// keep reading from the corpus, since those titles are TOC structure,
 /// not publication metadata.
+// Parallel implementation: search-leaf-context.
 fn leaf_context(corpus: &Corpus, catalog: &Catalog, start_node_id: NodeId) -> Result<LeafContext> {
     let mut titles = Vec::new();
     let mut book_title = None;
@@ -613,6 +614,7 @@ fn leaf_context(corpus: &Corpus, catalog: &Catalog, start_node_id: NodeId) -> Re
 /// across papers. The container segment is dropped when no container
 /// is known. The walk still yields the leaf's document-order position
 /// and its nearest organizing ancestor — the Work root.
+// Parallel implementation: search-leaf-context.
 fn paper_context(corpus: &Corpus, catalog: &Catalog, start_node_id: NodeId) -> Result<LeafContext> {
     let mut toc_position = None;
     let mut enclosing_node_id = None;

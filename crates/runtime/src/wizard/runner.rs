@@ -326,6 +326,7 @@ fn create_data_root_skeleton(data_root: &Path) -> Result<()> {
 /// Write `<data_root>/config.toml` unless one already exists and
 /// `force` is off. Returns the config path and whether the existing
 /// file was kept.
+// Parallel implementation: atomic-write.
 fn write_root_config(data_root: &Path, ollama_url: &str, force: bool) -> Result<(PathBuf, bool)> {
     let path = data_root.join(ROOT_CONFIG_NAME);
     if path.exists() && !force {

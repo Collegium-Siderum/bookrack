@@ -40,6 +40,7 @@ use super::status::default_served;
 /// Held as data rather than as a `match` per question, so a side
 /// cannot end up read through one pipeline's method and rendered as
 /// another's.
+// Parallel implementation: kind-to-paths.
 struct Side {
     /// The pipeline whose rows this side carries.
     kind: ItemKind,

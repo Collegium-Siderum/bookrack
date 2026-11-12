@@ -45,6 +45,7 @@ use serde_json::{Value, json};
 
 use super::helpers;
 
+// Parallel implementation: session-lock-classify.
 pub async fn run(runtime_dir: Option<PathBuf>) -> Result<()> {
     let resolved = resolve_runtime_dir(runtime_dir.as_deref())
         .context("resolve BOOKRACK_RUNTIME_DIR for `bookrack status`")?;

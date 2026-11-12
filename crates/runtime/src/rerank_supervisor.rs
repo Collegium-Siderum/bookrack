@@ -810,6 +810,7 @@ async fn monitor_loop(
 /// Back off, respawn, and wait for readiness, repeating on failure
 /// until a server is ready (returned) or shutdown is requested
 /// (`None`). No attempt cap; the delay doubles up to the cap.
+// Parallel implementation: http-client-skeleton.
 async fn respawn_until_ready(
     config: &RerankSupervisorConfig,
     port: u16,
@@ -933,6 +934,7 @@ fn unix_pid(pid: u32) -> Option<rustix::process::Pid> {
 }
 
 /// Signal 0: existence probe, no signal delivered.
+// Parallel implementation: pid-alive.
 #[cfg(unix)]
 fn process_is_alive(pid: u32) -> bool {
     unix_pid(pid).is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())

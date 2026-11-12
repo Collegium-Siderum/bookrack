@@ -30,6 +30,7 @@ use super::helpers;
 /// `SessionLockUnreadable` (exit 1); a held lock whose daemon does not
 /// answer is `StaleSessionLock` (exit 3); a daemon that answers is
 /// serving the library, and the refusal is operator input (exit 2).
+// Parallel implementation: session-lock-classify.
 async fn refuse_repair_under_a_daemon(runtime_dir: Option<&Path>, flag: &str) -> Result<()> {
     let resolved =
         resolve_runtime_dir(runtime_dir).context("resolve BOOKRACK_RUNTIME_DIR for the repair")?;

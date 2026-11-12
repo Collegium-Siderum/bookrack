@@ -62,6 +62,7 @@ impl PaperAuditData {
     /// Load from disk: parse the embedded default first, then merge
     /// the overlay at `<dir>/paper_audit_data.local.toml` on top. A
     /// missing overlay yields the shipped default.
+    // Parallel implementation: audit-overlay-load.
     pub fn load_from(dir: &Path) -> Result<Self, DataLoadError> {
         let mut data = Self::default_data();
         let overlay_path = dir.join(DATA_OVERLAY_FILE);

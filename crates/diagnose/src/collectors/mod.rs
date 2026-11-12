@@ -34,6 +34,7 @@ use bookrack_config::Config;
 /// instead of guessing at an absent file. Only the store's file name
 /// is recorded, never its full path, so the bundle stays free of
 /// local filesystem layout.
+// Parallel implementation: store-health.
 pub(crate) fn write_open_error(dst: &Path, store: &Path, error: Option<&str>) -> crate::Result<()> {
     let payload = serde_json::json!({
         "store": store.file_name().map(|n| n.to_string_lossy().into_owned()),

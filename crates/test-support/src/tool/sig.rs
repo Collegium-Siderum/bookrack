@@ -68,6 +68,7 @@ pub fn unescape(text: &str) -> Result<Vec<u8>, String> {
 }
 
 /// The SHA-256 of `bytes`, lowercase hex.
+// Parallel implementation: sha256-hex.
 pub fn sha256_bytes(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }

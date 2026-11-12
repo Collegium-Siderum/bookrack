@@ -55,6 +55,7 @@ pub fn count_sentences(text: &str) -> i64 {
 
 /// Whether `c` ends a sentence: Latin terminators plus the full-width and
 /// ideographic forms a CJK text uses.
+// Parallel implementation: sentence-terminators.
 fn is_terminator(c: char) -> bool {
     matches!(
         c,

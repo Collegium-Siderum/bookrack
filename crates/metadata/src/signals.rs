@@ -31,6 +31,8 @@
 //! where `trust-source` also sets `audit_enabled = false` and the
 //! caller skips the audit entirely.
 
+// Parallel implementation: audit-judgement.
+
 use bookrack_audit_profile::AuditProfile;
 use bookrack_extract::TextLayerQuality;
 
@@ -977,6 +979,7 @@ fn is_volume_marker(inner: &str, volume_tokens: &[String]) -> bool {
 /// Sentence-end punctuation used to spot marketing copy: CJK fullwidth
 /// `\u{3002}` / `\u{FF01}` / `\u{FF1F}` / `\u{2026}` and the ASCII
 /// equivalents `.` / `!` / `?`.
+// Parallel implementation: sentence-terminators.
 fn is_sentence_terminator(c: char) -> bool {
     matches!(
         c,

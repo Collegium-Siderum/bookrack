@@ -118,6 +118,7 @@ pub fn locate_llama_server() -> LlamaServerLocation {
 /// Pure search logic for [`locate_llama_server`], factored out so the
 /// chain can be tested without mutating process-global environment
 /// variables or touching the filesystem.
+// Parallel implementation: managed-lookup-chain.
 fn locate_llama_server_from(
     override_path: Option<String>,
     exe_dir: Option<PathBuf>,

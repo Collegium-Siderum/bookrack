@@ -314,6 +314,7 @@ impl Catalog {
 /// The current UTC time as a Zulu ISO-8601 string, read from a raw
 /// connection (before a [`Catalog`] handle exists, e.g. while naming a
 /// backup file).
+// Parallel implementation: rfc3339-now.
 fn now_iso_from(conn: &Connection) -> rusqlite::Result<String> {
     conn.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |row| {
         row.get(0)

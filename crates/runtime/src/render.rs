@@ -219,6 +219,7 @@ pub fn audit_profile_diff(a_name: &str, a: &AuditProfile, b_name: &str, b: &Audi
 /// which is a different claim from having no answer. The column reads
 /// `yes`, `skipped`, or blank, and each skipped library's reason and
 /// next step follow the table.
+// Parallel implementation: problem-rendering.
 pub fn libraries_list(entries: Option<&[LibraryEntry]>, daemon: Option<&DaemonLibraries>) {
     let Some(entries) = entries else {
         println!("No registry found (run `bookrack init`, or set BOOKRACK_REGISTRY).");

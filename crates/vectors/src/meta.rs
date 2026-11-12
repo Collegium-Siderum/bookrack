@@ -106,6 +106,7 @@ pub fn load(lancedb_dir: &Path) -> Result<Option<VectorsMeta>> {
 /// lands on a sibling temp file first and is renamed into place — a
 /// concurrent reader sees the old file or the new file, never a torn
 /// partial.
+// Parallel implementation: atomic-write.
 pub fn store(lancedb_dir: &Path, meta: &VectorsMeta) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(meta)?;
     let mut tmp = NamedTempFile::new_in(lancedb_dir)?;

@@ -101,6 +101,7 @@ impl HeadingPatterns {
     /// first; an optional overlay at `<dir>/headings.toml` is then
     /// merged on top. A missing directory or missing overlay yields
     /// the shipped default; a malformed overlay returns an error.
+    // Parallel implementation: audit-overlay-load.
     pub fn load_from(dir: &Path) -> Result<Self, HeadingsLoadError> {
         if !dir.exists() {
             return Ok(Self::default_patterns());

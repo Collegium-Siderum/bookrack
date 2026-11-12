@@ -21,12 +21,14 @@ use super::MethodContext;
 use crate::control::error_map::{ops_err, registry_err, rpc_from_problem, unknown_filter_value};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize, Default)]
 pub struct LibraryOnlyParams {
     #[serde(default)]
     pub library: Option<String>,
 }
 
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize)]
 pub struct BookIdParams {
     pub intake_id: i64,
@@ -34,6 +36,7 @@ pub struct BookIdParams {
     pub library: Option<String>,
 }
 
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize)]
 pub struct ShowTocParams {
     pub intake_id: i64,
@@ -65,6 +68,7 @@ impl ShowTocParams {
     }
 }
 
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize, Default)]
 pub struct PageParams {
     #[serde(default)]
@@ -91,6 +95,7 @@ pub struct ListMetadataParams {
     pub library: Option<String>,
 }
 
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize)]
 pub struct FindBooksParams {
     #[serde(default)]
@@ -115,6 +120,7 @@ pub struct FindBooksParams {
     pub library: Option<String>,
 }
 
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize)]
 pub struct SearchParams {
     pub query: String,
@@ -172,6 +178,7 @@ impl SearchParams {
     }
 }
 
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize)]
 pub struct SearchInBookParams {
     pub intake_id: i64,
@@ -188,6 +195,7 @@ pub struct SearchInBookParams {
     pub library: Option<String>,
 }
 
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize)]
 pub struct FindPapersParams {
     #[serde(default)]
@@ -214,6 +222,7 @@ pub struct FindPapersParams {
     pub library: Option<String>,
 }
 
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize)]
 pub struct SearchInPaperParams {
     pub intake_id: i64,
@@ -256,6 +265,7 @@ impl SearchInBookParams {
     }
 }
 
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize)]
 pub struct ReadContextParams {
     pub node_id: i64,
@@ -271,6 +281,7 @@ pub struct ReadContextParams {
     pub library: Option<String>,
 }
 
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize)]
 pub struct ReadSpanParams {
     pub node_id: i64,

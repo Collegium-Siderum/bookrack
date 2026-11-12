@@ -31,6 +31,7 @@ use crate::{Ops, OpsError, Result};
 /// carries no document-order position. Returns
 /// [`OpsError::PapersBackendNotConfigured`] when the target is a
 /// paper-kind node and this `Ops` was built without a papers backend.
+// Parallel implementation: kind-to-paths.
 pub fn read_context<E: Embedder>(
     ops: &Ops<E>,
     target: KindedNodeId,
@@ -101,6 +102,7 @@ pub fn read_context<E: Embedder>(
 /// [`OpsError::NotOrganizing`] when the node is a leaf. Returns
 /// [`OpsError::PapersBackendNotConfigured`] when the target is a
 /// paper-kind node and this `Ops` was built without a papers backend.
+// Parallel implementation: kind-to-paths.
 pub fn read_span<E: Embedder>(
     ops: &Ops<E>,
     target: KindedNodeId,

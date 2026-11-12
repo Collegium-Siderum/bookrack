@@ -18,6 +18,8 @@
 //! `reset_and_rechunk(..., resume = true)` continues without redoing
 //! the destructive steps.
 
+// Parallel implementation: pipeline-reset.
+
 use std::path::Path;
 use std::time::Instant;
 

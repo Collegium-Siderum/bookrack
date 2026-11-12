@@ -333,6 +333,7 @@ pub fn summarize(reports: &[DryrunPaperReport]) -> DryrunPaperSummary {
 /// Recursively collect every paper-shaped file under `path`. A
 /// single-file `path` returns that file when its extension is in
 /// [`PAPER_EXTENSIONS`] and an empty list otherwise.
+// Parallel implementation: recursive-walk.
 pub fn collect_files(path: &Path) -> Vec<PathBuf> {
     fn matches(p: &Path) -> bool {
         let Some(ext) = p.extension().and_then(|e| e.to_str()) else {

@@ -54,6 +54,7 @@ pub async fn install_reranker() -> Result<Vec<InstallOutcome>> {
 /// Download, verify, and unpack the pinned llama.cpp archive into the
 /// per-build managed directory. Returns the path of the `llama-server`
 /// executable; a no-op when it is already in place.
+// Parallel implementation: installer-fetch.
 pub async fn install_pinned_llama_server() -> Result<InstallOutcome> {
     let Some(pin) = pinned_llama_server() else {
         bail!("no llama-server archive is pinned for this platform");
@@ -119,6 +120,7 @@ fn prune_stale_builds(parent: &Path, keep: &Path) {
 /// Download and verify one pinned model file into the managed models
 /// directory. Returns the path of the `.gguf`; a no-op when it is
 /// already in place.
+// Parallel implementation: installer-fetch.
 pub async fn install_pinned_reranker_model(pin: &RerankerModelPin) -> Result<InstallOutcome> {
     let dir =
         models_managed_dir().context("locate the per-user data directory for this platform")?;
@@ -224,6 +226,7 @@ impl StagedDownload {
 /// Compare a downloaded archive's SHA-256 with the pinned digest.
 /// Upstream publishes no checksums, so this pin is the only defence
 /// against a corrupted download or a silently re-cut asset.
+// Parallel implementation: sha256-hex.
 fn verify_sha256(bytes: &[u8], expected: &str) -> Result<()> {
     let actual: String = Sha256::digest(bytes)
         .iter()

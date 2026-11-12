@@ -12,6 +12,8 @@
 //! its release tag and archive digests to `EXTRACTOR_VERSION` the same
 //! way, so swapping the binary alone also forces a bump.
 
+// Parallel implementation: dep-hash-guards.
+
 use std::path::PathBuf;
 
 use bookrack_extract::{EXTRACTOR_VERSION, FROZEN_DEPS_HASH};

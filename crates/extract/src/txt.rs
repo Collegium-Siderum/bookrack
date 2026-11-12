@@ -157,6 +157,7 @@ fn decode(bytes: &[u8], fallbacks: &mut Vec<FallbackEvent>) -> String {
 }
 
 /// Build a TOC from the heading blocks, each anchored to its own block.
+// Parallel implementation: toc-from-headings.
 fn toc_from_headings(blocks: &[Block]) -> Toc {
     let mut entries = Vec::new();
     for (idx, block) in blocks.iter().enumerate() {

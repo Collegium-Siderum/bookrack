@@ -197,6 +197,7 @@ pub fn save_atomic(state: &mut QueueState, path: &Path) -> Result<()> {
     written
 }
 
+// Parallel implementation: atomic-write.
 fn write_atomic(state: &QueueState, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -257,6 +258,7 @@ pub fn check_extension_supported(path: &Path) -> Result<(), String> {
 /// is in [`SUPPORTED_EXTENSIONS`]. Hidden files (those whose name starts
 /// with `.`) are skipped. The returned list is sorted by path so
 /// re-enqueueing the same directory yields a stable order.
+// Parallel implementation: recursive-walk.
 pub fn collect_supported_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];

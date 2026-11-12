@@ -524,6 +524,7 @@ fn run_pipeline(
 /// Recursively collect every file under `path` whose extension is in
 /// `extensions` (case-insensitive). A single-file `path` returns that
 /// file when its extension matches and an empty list otherwise.
+// Parallel implementation: recursive-walk.
 pub fn collect_files(path: &Path, extensions: &[String]) -> Vec<PathBuf> {
     fn matches(p: &Path, extensions: &[String]) -> bool {
         let Some(ext) = p.extension().and_then(|e| e.to_str()) else {

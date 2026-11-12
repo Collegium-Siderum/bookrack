@@ -7,6 +7,8 @@
 //! row the original glean run wrote, so the rebuilt tree carries the
 //! same abstract text as before.
 
+// Parallel implementation: pipeline-rebuild.
+
 use std::path::Path;
 
 use bookrack_catalog::{Catalog, IntakeStatus};
@@ -137,6 +139,7 @@ pub fn rebuild_from_intakes(
 ///
 /// Returns `Ok(true)` if stamps were written or already matched,
 /// `Ok(false)` if the chunks table is missing or empty.
+// Parallel implementation: pipeline-stamps.
 pub async fn stamp_index_from_existing_chunks(
     corpus: &Corpus,
     lancedb_dir: &Path,

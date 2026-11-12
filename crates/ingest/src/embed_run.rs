@@ -13,6 +13,8 @@
 //! Writing a book is delete-then-append on its partition, so re-ingesting
 //! the same file replaces its rows rather than duplicating them.
 
+// Parallel implementation: pipeline-embed-write.
+
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -266,6 +268,7 @@ fn scale_to_corpus(mut cfg: AnnConfig, chunk_count: u64) -> AnnConfig {
 
 /// Current wall-clock time as an RFC 3339 UTC string at second
 /// precision, e.g. `2024-06-05T07:40:00Z`.
+// Parallel implementation: rfc3339-now.
 pub fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }

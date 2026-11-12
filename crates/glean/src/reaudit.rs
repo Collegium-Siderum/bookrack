@@ -232,6 +232,7 @@ fn report_for_intake(
 /// `pipeline_runs` registry: a per-item reaudit recomputes one
 /// rollup for one intake and stays out of `bookrack runs list`,
 /// which registers whole-library passes.
+// Parallel implementation: pipeline-run-id.
 fn maintenance_run_id(op: &str) -> String {
     let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
     format!("glean-{op}-{nanos}")

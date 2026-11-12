@@ -596,6 +596,7 @@ fn write_distill_audit(
     }
 }
 
+// Parallel implementation: rfc3339-now.
 fn format_iso8601(dt: &chrono::DateTime<chrono::Utc>) -> String {
     dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }

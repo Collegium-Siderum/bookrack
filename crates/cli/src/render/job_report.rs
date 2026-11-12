@@ -155,6 +155,7 @@ impl JobOutcomeReport {
     /// One `hint: <hint>` line per distinct hint among the records'
     /// diagnostics, in record order; a hint several jobs share is
     /// printed once.
+    // Parallel implementation: problem-rendering.
     pub fn hint_lines(&self) -> Vec<String> {
         let mut seen: Vec<&str> = Vec::new();
         for hint in self

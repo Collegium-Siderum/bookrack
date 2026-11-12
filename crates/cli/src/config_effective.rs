@@ -339,6 +339,7 @@ fn row_out<'a>(row: &'a KnobOrigin, root: &Option<String>) -> RowOut<'a> {
 /// The diagnostic goes at the head rather than into every row: it is
 /// one fact about the run, and repeating it per row would bury the
 /// rows that are unaffected by it.
+// Parallel implementation: problem-rendering.
 fn print_human(
     problem: Option<&Problem>,
     rows: &[RowOut<'_>],

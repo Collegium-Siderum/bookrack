@@ -96,6 +96,7 @@ pub fn profile_fingerprint<P: Serialize>(profile: &P) -> Result<String, Fingerpr
 }
 
 /// SHA-256 the canonical text and keep the first 16 hex characters.
+// Parallel implementation: sha256-hex.
 fn digest_hex(canonical: &str) -> String {
     let digest = Sha256::digest(canonical.as_bytes());
     let mut hex = String::with_capacity(FINGERPRINT_HEX_LEN);

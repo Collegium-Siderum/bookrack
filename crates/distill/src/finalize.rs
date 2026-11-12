@@ -38,6 +38,7 @@ impl std::fmt::Debug for FtsComposer {
 
 /// Normalization strategy for the lookup key. The key form follows
 /// the script of the headword.
+// Parallel implementation: latin-fallback-key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyNormalizer {
     /// Lower-case and strip non-alphanumeric characters; suited for

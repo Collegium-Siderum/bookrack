@@ -48,6 +48,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 
 /// Arguments for the `library.search` tool.
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SearchArgs {
     /// The natural-language query to search the library for.
@@ -95,6 +96,7 @@ pub struct SearchArgs {
 }
 
 /// Arguments for the `library.search_in_book` tool.
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SearchInBookArgs {
     /// Catalog intake id of the book to confine recall to.
@@ -180,6 +182,7 @@ pub struct ListBooksArgs {
 }
 
 /// Arguments for the `library.find_books` tool.
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct FindBooksArgs {
     /// Substring match against the book title as reported, i.e. with
@@ -231,6 +234,7 @@ pub struct FindBooksArgs {
 }
 
 /// Arguments for the tools that address one book by intake id.
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct BookIdArgs {
     /// Catalog intake id of the book.
@@ -244,6 +248,7 @@ pub struct BookIdArgs {
 
 /// Arguments for the `library.show_toc` and `library.show_paper_toc`
 /// tools.
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ShowTocArgs {
     /// Catalog intake id of the book or paper.
@@ -309,6 +314,7 @@ pub struct ListPapersArgs {
 }
 
 /// Arguments for the `library.find_papers` tool.
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct FindPapersArgs {
     /// Substring match against the paper title as reported, i.e. with
@@ -374,6 +380,7 @@ pub struct PaperIdArgs {
 }
 
 /// Arguments for the `library.search_in_paper` tool.
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SearchInPaperArgs {
     /// Catalog intake id of the paper to confine recall to.
@@ -412,6 +419,7 @@ impl SearchInPaperArgs {
 }
 
 /// Arguments for the `library.read_context` tool.
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReadContextArgs {
     /// Corpus node id of the anchor leaf — take it from a search
@@ -441,6 +449,7 @@ pub struct ReadContextArgs {
 }
 
 /// Arguments for the `library.read_span` tool.
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReadSpanArgs {
     /// Corpus node id of the organizing node (chapter, section, ...)
@@ -467,6 +476,7 @@ pub struct ReadSpanArgs {
 /// Arguments shared by `library.list_metadata` and
 /// `library.list_pending_reviews`. Identical field set — the two tools
 /// differ only in which catalog rows they include.
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MetadataPageArgs {
     /// Substring match against the title as extraction and enrichment
@@ -501,6 +511,7 @@ pub struct MetadataPageArgs {
 
 /// Arguments for `library.stats` and `library.categories`. Carries only
 /// the library selector; the tools themselves accept no other inputs.
+// Parallel implementation: frontend-param-mirror.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct LibraryOnlyArgs {
     /// Library short name from the registry. Omit to let the daemon

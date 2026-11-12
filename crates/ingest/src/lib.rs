@@ -63,6 +63,7 @@ bookrack_core::fixed_settings! {
 /// normalize versions are this binary's compiled-in constants. Both the
 /// build-side gate (in [`embed_book_chunks`]) and the serve-side gate (in
 /// the query facade) compare against the [`IndexStamps`] this returns.
+// Parallel implementation: pipeline-stamps.
 pub fn current_index_stamps(embed_model: impl Into<String>, vector_dim: u32) -> IndexStamps {
     IndexStamps {
         embed_model: embed_model.into(),
@@ -798,6 +799,7 @@ enum OnFile {
 /// stamp then decides: equal to this binary's is [`OnFile::Current`];
 /// behind it is [`OnFile::ExtractorBehind`], except on an OCR-intake row,
 /// whose staleness is a separate version dimension.
+// Parallel implementation: pipeline-noop.
 fn on_file(
     catalog: &Catalog,
     corpus: &Corpus,
@@ -1263,6 +1265,7 @@ pub async fn resume_from_chunk<E: Embedder>(
 /// Build a per-invocation pipeline run id: a short source-hash prefix for
 /// readability, plus a nanosecond timestamp so repeated ingests of the
 /// same file stay distinct runs.
+// Parallel implementation: pipeline-run-id.
 pub(crate) fn new_run_id(source_sha: &str) -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1342,6 +1345,7 @@ pub(crate) fn audit_as(
 /// This id lives in `item_pipeline_audit`'s namespace and is separate
 /// from the `pipeline_runs` registry the `reembed` / `reset` commands
 /// open at their entry point; the two are not expected to match.
+// Parallel implementation: pipeline-run-id.
 pub(crate) fn maintenance_run_id(prefix: &str) -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2047,6 +2051,7 @@ pub(crate) fn set_state(catalog: &Catalog, state: NewItemState) {
 
 /// SHA-256 of raw bytes as 64 lowercase hex characters — the whole-file
 /// identity anchor an intake registers under.
+// Parallel implementation: sha256-hex.
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut hex = String::with_capacity(digest.len() * 2);

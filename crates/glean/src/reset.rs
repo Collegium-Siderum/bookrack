@@ -6,6 +6,8 @@
 //! each one under the current [`CHUNK_VERSION`] and re-embeds it under
 //! the active embedder.
 
+// Parallel implementation: pipeline-reset.
+
 use std::path::Path;
 use std::time::Instant;
 

@@ -7,6 +7,8 @@
 //! lockstep. The list is the normalizer's row of the bump-to-refresh
 //! matrix in `docs/UPGRADE.md`.
 
+// Parallel implementation: dep-hash-guards.
+
 use std::path::PathBuf;
 
 use bookrack_normalize::{FROZEN_DEPS_HASH, NORMALIZE_VERSION};

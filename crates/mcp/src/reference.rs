@@ -88,6 +88,7 @@ pub struct ReferenceOverlaySetResult {
 
 /// Errors raised by the reference logic helpers. Maps to MCP
 /// `internal_error` / `invalid_params` at the tool-method layer.
+// Parallel implementation: frontend-error-map.
 #[derive(Debug, thiserror::Error)]
 pub enum ReferenceError {
     #[error("refs error: {0}")]

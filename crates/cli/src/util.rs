@@ -11,6 +11,7 @@
 /// walked breadth-first; unreadable subdirectories are skipped. Used by
 /// the paper-side ingest dispatch to expand `--recursive` into the
 /// `paths` array `glean.submit` expects.
+// Parallel implementation: recursive-walk.
 pub fn collect_pdf_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     fn is_pdf(p: &std::path::Path) -> bool {
         p.extension()

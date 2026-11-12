@@ -16,6 +16,8 @@
 //!
 //! [`reembed_all`]: crate::reembed::reembed_all
 
+// Parallel implementation: pipeline-rebuild.
+
 use std::path::Path;
 
 use bookrack_catalog::{Catalog, IntakeStatus};

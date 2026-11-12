@@ -90,6 +90,7 @@ impl MetadataAuditReport {
     /// Project an in-memory audit report onto the wire shape, with the
     /// per-field origins read off the override rows and the stored
     /// rollup and review status attached for comparison.
+    // Parallel implementation: metadata-report-origin.
     pub fn build(
         intake_id: i64,
         profile: &str,
@@ -240,6 +241,7 @@ impl PaperMetadataAuditReport {
     /// with the per-field origins read off the override rows and the
     /// stored judgement attached for comparison.
     #[allow(clippy::too_many_arguments)] // One argument per independent source the report is assembled from; a bundle struct would exist only to be destructured here.
+    // Parallel implementation: metadata-report-origin.
     pub fn build(
         intake_id: i64,
         profile: &str,

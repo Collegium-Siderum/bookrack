@@ -126,6 +126,8 @@ pub enum EnvelopeError {
 /// Serialize `extraction` into an envelope at `path` via tempfile +
 /// atomic rename so a partial write never leaves a corrupt file in
 /// the opaque store.
+// Parallel implementation: rfc3339-now.
+// Parallel implementation: atomic-write.
 pub fn write_envelope(
     path: &Path,
     extraction: &Extraction,

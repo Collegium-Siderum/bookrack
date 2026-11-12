@@ -53,12 +53,14 @@ pub mod stamps;
 /// Both pipelines share those crates, so a change there moves both
 /// stamps. The companion test `tests/dep_hash.rs` fails until
 /// [`FROZEN_SPLITTER_DEPS`] is restated, forcing a deliberate bump.
+// Parallel implementation: chunk-version.
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const CHUNK_VERSION: u32 = 1;
 
 /// `name@version` of `text-splitter` and every `icu_*` crate in
 /// `Cargo.lock`, sorted bytewise. Restated in lockstep with
 /// [`CHUNK_VERSION`]. See `tests/dep_hash.rs` for the selection rule.
+// Parallel implementation: chunk-version.
 pub const FROZEN_SPLITTER_DEPS: &[&str] = &[
     "icu_collections@2.2.0",
     "icu_locale@2.2.0",
@@ -1279,6 +1281,7 @@ pub(crate) struct PlannedChunk {
 /// Embed each planned chunk and append the rows to the paper vector
 /// store. Reconciles the store's index_meta with this pipeline's
 /// stamps on the first write into an empty dir.
+// Parallel implementation: pipeline-embed-write.
 pub(crate) async fn embed_and_write_chunks<E: Embedder>(
     corpus: &mut Corpus,
     lancedb_dir: &Path,
@@ -1506,6 +1509,7 @@ fn paper_body_sample(blocks: &[Block]) -> String {
 /// source would be a no-op: the file is already on file at
 /// `Embedded` status, the stored extractor version equals this
 /// binary's, and the embed model on the work state matches.
+// Parallel implementation: pipeline-noop.
 fn noop_if_up_to_date(
     catalog: &Catalog,
     source_sha: &str,
@@ -1551,6 +1555,7 @@ fn noop_if_up_to_date(
 }
 
 /// Hex-encoded SHA-256 of a byte slice — the source identity anchor.
+// Parallel implementation: sha256-hex.
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -1560,6 +1565,7 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 /// One run id ties every audit row from this invocation together. The
 /// `glean-` prefix distinguishes paper-pipeline rows from ingest's
 /// `ingest-` prefix when a mixed log is inspected.
+// Parallel implementation: pipeline-run-id.
 pub(crate) fn new_run_id(source_sha: &str) -> String {
     let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
     let prefix = source_sha.get(..8).unwrap_or(source_sha);

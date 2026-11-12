@@ -788,6 +788,7 @@ fn push_reporter_row(rows: &mut Vec<Row>, reporter: &Reporter<'_>) {
 /// `None` when no lock is held. A lock left behind by a crashed daemon
 /// is not held, so it reports as no daemon — the same reading
 /// `bookrack status` takes.
+// Parallel implementation: session-lock-classify.
 fn session_lock_holder(runtime_dir: Option<&Path>) -> Result<Option<u32>, String> {
     let dir = bookrack_session::resolve_runtime_dir(runtime_dir).map_err(|e| format!("{e}"))?;
     let lock_path = dir.join(bookrack_session::tty_lock_name());
@@ -1129,6 +1130,7 @@ fn push_store_rows(rows: &mut Vec<Row>, cfg: &Config) {
 /// Whether two paths name one location: equal as written, or equal
 /// once both resolve on disk, so a symlinked or differently spelled
 /// default is not reported as an override.
+// Parallel implementation: same-root.
 fn same_path(a: &Path, b: &Path) -> bool {
     a == b
         || match (a.canonicalize(), b.canonicalize()) {
@@ -1139,6 +1141,7 @@ fn same_path(a: &Path, b: &Path) -> bool {
 
 /// One store's row: its path and the outcome of opening it when
 /// present, and the reading of its absence when not.
+// Parallel implementation: store-health.
 fn store_row(label: &str, path: &std::path::Path, door: Door, absent: Absent) -> Row {
     if path.exists() {
         return Row {

@@ -284,6 +284,7 @@ pub fn refuse_bad_profile_reference(name: &str) -> Option<String> {
 /// One of the two indexed pipelines a library can carry. The same
 /// profile governs both; each pipeline keeps its own corpus database,
 /// LanceDB directory, and stamp record, so plans derive per pipeline.
+// Parallel implementation: kind-to-paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pipeline {
     /// The book pipeline: `corpus.db` and `lancedb/`.
@@ -384,6 +385,7 @@ impl BuiltStamps {
 /// lock — so callers can tell "unbuilt" from "unreadable" instead of
 /// collapsing both into a skipped check. A database that opens but
 /// carries no stamps returns an unstamped record, not `Ok(None)`.
+// Parallel implementation: corpus-stamp-read.
 pub fn built_stamps(corpus_db: &Path) -> Result<Option<BuiltStamps>, String> {
     if !corpus_db.exists() {
         return Ok(None);

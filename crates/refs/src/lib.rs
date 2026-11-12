@@ -426,6 +426,7 @@ impl Refs {
 /// with every non-alphanumeric character removed. Mirrors the distill
 /// side's `KeyNormalizer::NormalizeLatinKey`; a cli-side test pins the
 /// two together.
+// Parallel implementation: latin-fallback-key.
 pub fn latin_fallback_key(query: &str) -> String {
     query
         .to_lowercase()

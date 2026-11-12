@@ -20,6 +20,8 @@
 //! crate's retry loop only smooths a transient transport failure of a
 //! single request.
 
+// Parallel implementation: http-client-skeleton.
+
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;

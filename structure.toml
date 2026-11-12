@@ -721,3 +721,489 @@ reason = "transitional"
 detail = "the book side embeds in batches with progress, optimizes, and builds the index, and its no-op check compares the chunk and normalize stamps; the paper side embeds in one batch and does none of that"
 agreement = "divergent"
 exit = "the pipeline takes the kind as a parameter"
+
+[[parallel]]
+id = "pipeline-reset"
+summary = "vector reset, one module per pipeline"
+sites = [
+  "crates/ingest/src/reset.rs",
+  "crates/glean/src/reset.rs",
+]
+reason = "transitional"
+detail = "the destructive part differs only in the kind; each side derives the chunks to re-embed from its own kind's tree"
+agreement = "divergent"
+exit = "the pipeline takes the kind as a parameter"
+
+[[parallel]]
+id = "pipeline-rebuild"
+summary = "corpus rebuild from envelopes, one module per pipeline"
+sites = [
+  "crates/ingest/src/rebuild.rs",
+  "crates/glean/src/rebuild.rs",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "the pipeline takes the kind as a parameter"
+
+[[parallel]]
+id = "pipeline-stamps"
+summary = "the index stamps this build writes"
+sites = [
+  "crates/ingest/src/lib.rs::current_index_stamps",
+  "crates/glean/src/stamps.rs::current_index_stamps",
+  "crates/glean/src/rebuild.rs::stamp_index_from_existing_chunks",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "one embed stage writes the stamps for both kinds"
+
+[[parallel]]
+id = "pipeline-embed-write"
+summary = "embedding a plan and writing its vectors"
+sites = [
+  "crates/ingest/src/embed_run.rs",
+  "crates/glean/src/lib.rs::embed_and_write_chunks",
+]
+reason = "transitional"
+detail = "the book side embeds in batches, halves a batch on overload, reports progress, optimizes, and builds the index; the paper side sends one batch and does none of that"
+agreement = "divergent"
+exit = "one embed stage serves both kinds"
+
+[[parallel]]
+id = "pipeline-noop"
+summary = "deciding that a known file needs no rerun"
+sites = [
+  "crates/ingest/src/lib.rs::on_file",
+  "crates/glean/src/lib.rs::noop_if_up_to_date",
+]
+reason = "transitional"
+detail = "the book side compares the chunk and normalize stamps in the corpus; the paper side compares the extractor version and the embed model only"
+agreement = "divergent"
+exit = "one no-op check serves both kinds"
+
+[[parallel]]
+id = "pipeline-run-id"
+summary = "run ids built from a prefix and the clock"
+sites = [
+  "crates/ingest/src/lib.rs::new_run_id",
+  "crates/ingest/src/lib.rs::maintenance_run_id",
+  "crates/glean/src/lib.rs::new_run_id",
+  "crates/glean/src/reaudit.rs::maintenance_run_id",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "the pipelines merge"
+
+[[parallel]]
+id = "chunk-version"
+summary = "the chunk version and the frozen splitter dependencies behind it"
+sites = [
+  "crates/ingest/src/chunk.rs::CHUNK_VERSION",
+  "crates/ingest/src/chunk.rs::FROZEN_SPLITTER_DEPS",
+  "crates/glean/src/lib.rs::CHUNK_VERSION",
+  "crates/glean/src/lib.rs::FROZEN_SPLITTER_DEPS",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "the text crate owns the chunker and one chunk version"
+
+[[parallel]]
+id = "dep-hash-guards"
+summary = "the frozen dependency values behind each version stamp"
+sites = [
+  "crates/extract/tests/dep_hash.rs",
+  "crates/normalize/tests/dep_hash.rs",
+  "crates/ingest/tests/dep_hash.rs",
+  "crates/glean/tests/dep_hash.rs",
+  "scripts/dep-stamp-check.sh",
+]
+reason = "compile-boundary"
+detail = "the gate script runs without compiling anything, and each test lives in the crate whose stamp it guards"
+agreement = "pinned"
+pin = "scripts/dep-stamp-check.sh"
+
+[[parallel]]
+id = "sentence-terminators"
+summary = "the characters that end a sentence"
+sites = [
+  "crates/ingest/src/sentences.rs::is_terminator",
+  "crates/metadata/src/signals.rs::is_sentence_terminator",
+]
+reason = "transitional"
+detail = "the audit signal's set leaves out the ASCII full stop and semicolon that the sentence counter takes"
+agreement = "divergent"
+exit = "the text crate owns the terminator table"
+
+[[parallel]]
+id = "latin-fallback-key"
+summary = "Latin key folding for reference entries"
+sites = [
+  "crates/distill/src/finalize.rs::KeyNormalizer",
+  "crates/refs/src/lib.rs::latin_fallback_key",
+]
+reason = "dependency-direction"
+detail = "distill is a pure transform and refs a store; neither tier may depend on the other"
+agreement = "pinned"
+pin = "crates/cli/src/distill_cmd.rs::latin_fallback_key_matches_the_distill_key_normalizer"
+exit = "both call the text crate"
+
+[[parallel]]
+id = "page-marker"
+summary = "finding page markers in recognised text"
+sites = [
+  "crates/extract/src/ocr.rs::find_marker",
+  "crates/distill/src/segment.rs::PAGE_MARKER_RE",
+]
+reason = "transitional"
+detail = "extract anchors a marker at the start of a line and takes any label; distill takes a numeric label only and does not anchor"
+agreement = "divergent"
+exit = "distill reads pages through extract's parser"
+
+[[parallel]]
+id = "pdf-date-pattern"
+summary = "the pattern for a PDF date string"
+sites = [
+  "crates/glean/src/identify.rs::D_DATE_RE",
+  "crates/glean/src/audit/signals.rs::PDF_DATE_RE",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "the audit signals move out of glean and one pattern remains"
+
+[[parallel]]
+id = "audit-judgement"
+summary = "audit signals over metadata fields: script share, language tags, timestamps"
+sites = [
+  "crates/metadata/src/signals.rs",
+  "crates/glean/src/audit/signals.rs",
+]
+reason = "transitional"
+detail = "timestamp detection differs: one side accepts a T or a colon, the other a colon only"
+agreement = "divergent"
+exit = "metadata scores both kinds"
+
+[[parallel]]
+id = "audit-overlay-load"
+summary = "loading a built-in audit table with its local overlay file"
+sites = [
+  "crates/audit-profile/src/lib.rs::AuditProfile",
+  "crates/audit-profile/src/data.rs::AuditData",
+  "crates/audit-profile/src/headings.rs::HeadingPatterns",
+  "crates/glean/src/audit/profile.rs::PaperAuditProfile",
+  "crates/glean/src/audit/data.rs::PaperAuditData",
+]
+reason = "transitional"
+detail = "the book-side data loader drops blank tokens; the paper-side one keeps them"
+agreement = "divergent"
+exit = "one generic overlay loader in audit-profile"
+
+[[parallel]]
+id = "search-leaf-context"
+summary = "the citation context around a hit"
+sites = [
+  "crates/search/src/lib.rs::leaf_context",
+  "crates/search/src/lib.rs::paper_context",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "one context builder takes the kind"
+
+[[parallel]]
+id = "metadata-report-origin"
+summary = "the origin label of a reported metadata field"
+sites = [
+  "crates/ops/src/dto/metadata_report.rs::MetadataAuditReport",
+  "crates/ops/src/dto/metadata_report.rs::PaperMetadataAuditReport",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "one report builder takes the kind"
+
+[[parallel]]
+id = "corpus-stamp-read"
+summary = "reading the stamps a corpus was built with"
+sites = [
+  "crates/ops/src/reads/info.rs::read_corpus_stamps",
+  "crates/diagnose/src/collectors/corpus.rs::collect_into",
+  "crates/runtime/src/profile.rs::built_stamps",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "store facts are read through one function in ops"
+
+[[parallel]]
+id = "store-health"
+summary = "judging whether a store opens and what its absence means"
+sites = [
+  "crates/runtime/src/doctor.rs::store_row",
+  "crates/runtime/src/cmd/verify.rs::verify_pipeline",
+  "crates/ops/src/reads/info.rs::show_library_info",
+  "crates/diagnose/src/collectors/mod.rs::write_open_error",
+]
+reason = "transitional"
+detail = "each gives a store that does not exist a different meaning"
+agreement = "divergent"
+exit = "store facts are read through one function in ops"
+
+[[parallel]]
+id = "kind-to-paths"
+summary = "the map from a kind to its stores' paths"
+sites = [
+  "crates/ops/src/lib.rs::PapersPaths",
+  "crates/runtime/src/profile.rs::Pipeline",
+  "crates/runtime/src/cmd/verify.rs::PipelinePaths",
+  "crates/ops/src/reads/passages.rs::read_context",
+  "crates/ops/src/reads/passages.rs::read_span",
+  "crates/cli/src/cmd/cli_client/listing.rs::Side",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "one map keyed by kind lives in ops"
+
+[[parallel]]
+id = "recursive-walk"
+summary = "collecting the files under a directory"
+sites = [
+  "crates/cli/src/util.rs::collect_pdf_files",
+  "crates/runtime/src/queue.rs::collect_supported_files",
+  "crates/ingest/src/dryrun.rs::collect_files",
+  "crates/glean/src/dryrun.rs::collect_files",
+]
+reason = "transitional"
+detail = "the accepted extensions differ: .pdf only on the client, every supported type in the daemon, and a list of its own in each dry run"
+agreement = "divergent"
+exit = "one walk takes the accepted extensions"
+
+[[parallel]]
+id = "frontend-param-mirror"
+summary = "read parameters, declared once per front end"
+sites = [
+  "crates/mcp/src/lib.rs::SearchArgs",
+  "crates/mcp/src/lib.rs::SearchInBookArgs",
+  "crates/mcp/src/lib.rs::FindBooksArgs",
+  "crates/mcp/src/lib.rs::BookIdArgs",
+  "crates/mcp/src/lib.rs::ShowTocArgs",
+  "crates/mcp/src/lib.rs::FindPapersArgs",
+  "crates/mcp/src/lib.rs::SearchInPaperArgs",
+  "crates/mcp/src/lib.rs::ReadContextArgs",
+  "crates/mcp/src/lib.rs::ReadSpanArgs",
+  "crates/mcp/src/lib.rs::LibraryOnlyArgs",
+  "crates/mcp/src/lib.rs::MetadataPageArgs",
+  "crates/runtime/src/control/methods/reads_library.rs::SearchParams",
+  "crates/runtime/src/control/methods/reads_library.rs::SearchInBookParams",
+  "crates/runtime/src/control/methods/reads_library.rs::FindBooksParams",
+  "crates/runtime/src/control/methods/reads_library.rs::BookIdParams",
+  "crates/runtime/src/control/methods/reads_library.rs::ShowTocParams",
+  "crates/runtime/src/control/methods/reads_library.rs::FindPapersParams",
+  "crates/runtime/src/control/methods/reads_library.rs::SearchInPaperParams",
+  "crates/runtime/src/control/methods/reads_library.rs::ReadContextParams",
+  "crates/runtime/src/control/methods/reads_library.rs::ReadSpanParams",
+  "crates/runtime/src/control/methods/reads_library.rs::LibraryOnlyParams",
+  "crates/runtime/src/control/methods/reads_library.rs::PageParams",
+]
+reason = "transitional"
+detail = "library.info selects its library by name on the control plane and by library over MCP"
+agreement = "divergent"
+exit = "both transports read one method table"
+
+[[parallel]]
+id = "frontend-error-map"
+summary = "mapping ops and store errors to wire errors"
+sites = [
+  "crates/mcp/src/error_map.rs",
+  "crates/mcp/src/reference.rs::ReferenceError",
+  "crates/runtime/src/control/error_map.rs::classify",
+]
+reason = "transitional"
+detail = "MCP answers every registry error as invalid params and folds a reference schema mismatch into an internal error; the control plane gives each its own code"
+agreement = "divergent"
+exit = "both transports map errors in one place"
+
+[[parallel]]
+id = "destructive-roundtrip"
+summary = "the client side of plan, confirm, execute"
+sites = [
+  "crates/cli/src/cmd/cli_client/index_profile.rs::execute_action",
+  "crates/cli/src/cmd/cli_client/helpers.rs::run_pinned_destructive_with",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "index-profile apply calls the shared helper"
+
+[[parallel]]
+id = "clap-paired-args"
+summary = "command-line argument types, one per kind"
+sites = [
+  "crates/cli-grammar/src/lib.rs::RemoveArgs",
+  "crates/cli-grammar/src/lib.rs::PapersRemoveArgs",
+  "crates/cli-grammar/src/lib.rs::DryrunArgs",
+  "crates/cli-grammar/src/lib.rs::PapersDryrunArgs",
+  "crates/cli-grammar/src/lib.rs::WriteVectorsAction",
+  "crates/cli-grammar/src/lib.rs::PapersVectorsAction",
+  "crates/cli-grammar/src/lib.rs::WriteMetadataAction",
+  "crates/cli-grammar/src/lib.rs::PapersMetadataAction",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "the command surface takes the kind as an argument"
+
+[[parallel]]
+id = "problem-rendering"
+summary = "printing a problem for a person"
+sites = [
+  "crates/cli/src/main.rs::report_cli_error",
+  "crates/cli/src/config_effective.rs::print_human",
+  "crates/runtime/src/render.rs::libraries_list",
+  "crates/cli/src/render/job_report.rs::hint_lines",
+]
+reason = "transitional"
+detail = "some print the hint without its prefix, and some drop the detail"
+agreement = "divergent"
+exit = "one renderer prints every problem"
+
+[[parallel]]
+id = "session-lock-classify"
+summary = "deciding whether a daemon holds the session lock"
+sites = [
+  "crates/cli/src/run.rs::handle_lock_conflict",
+  "crates/cli/src/cmd/cli_client/status.rs::run",
+  "crates/cli/src/cmd/cli_client/doctor.rs::refuse_repair_under_a_daemon",
+  "crates/runtime/src/doctor.rs::session_lock_holder",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "session classifies the lock in one function"
+
+[[parallel]]
+id = "pid-alive"
+summary = "deciding whether a process is alive"
+sites = [
+  "crates/runtime/src/rerank_supervisor.rs::process_is_alive",
+  "crates/test-support/src/tool/detach.rs::pid_alive",
+]
+reason = "transitional"
+detail = "on a permission error the supervisor reports the process dead and the sandbox tool reports it alive"
+agreement = "divergent"
+exit = "one function, once the meaning of a permission error is settled"
+
+[[parallel]]
+id = "http-client-skeleton"
+summary = "HTTP client construction, retry loop, and backoff"
+sites = [
+  "crates/embed/src/lib.rs",
+  "crates/rerank/src/lib.rs",
+  "crates/runtime/src/rerank_supervisor.rs::respawn_until_ready",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "a client skeleton crate holds the builder, the retry loop, and the backoff"
+
+[[parallel]]
+id = "atomic-write"
+summary = "replacing a file through a temporary and a rename"
+sites = [
+  "crates/config/src/lib.rs::write_atomically",
+  "crates/runtime/src/queue.rs::write_atomic",
+  "crates/extract/src/envelope.rs::write_envelope",
+  "crates/vectors/src/meta.rs::store",
+  "crates/test-support/src/tool/mod.rs::write_atomic",
+  "crates/runtime/src/wizard/runner.rs::write_root_config",
+]
+reason = "transitional"
+detail = "none syncs the directory; the sandbox tool flushes without syncing the file; the wizard writes the root config in place"
+agreement = "divergent"
+exit = "core holds one atomic write that also syncs the directory"
+
+[[parallel]]
+id = "sha256-hex"
+summary = "SHA-256 as lowercase hex, whole or cut short"
+sites = [
+  "crates/ingest/src/structure.rs::sha256_hex",
+  "crates/ingest/src/lib.rs::sha256_hex",
+  "crates/glean/src/lib.rs::sha256_hex",
+  "crates/audit-profile/src/fingerprint.rs::digest_hex",
+  "crates/diagnose/src/scrub.rs::sha8",
+  "crates/test-support/src/tool/sig.rs::sha256_bytes",
+  "crates/runtime/src/pdfium_install.rs::verify_sha256",
+  "crates/runtime/src/reranker_install.rs::verify_sha256",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "core holds the hash, the prefix, and the verification"
+
+[[parallel]]
+id = "rfc3339-now"
+summary = "the current time as an RFC 3339 string in seconds"
+sites = [
+  "crates/ingest/src/embed_run.rs::now_rfc3339",
+  "crates/diagnose/src/manifest.rs::iso8601_z",
+  "crates/cli/src/distill_cmd.rs::format_iso8601",
+  "crates/extract/src/envelope.rs::write_envelope",
+  "crates/catalog/src/db.rs::now_iso_from",
+  "crates/catalog/src/pipeline_runs.rs::open_pipeline_run",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "core holds one clock formatter"
+
+[[parallel]]
+id = "installer-fetch"
+summary = "download, verify, and place a pinned artifact"
+sites = [
+  "crates/runtime/src/pdfium_install.rs::install_pinned_pdfium",
+  "crates/runtime/src/reranker_install.rs::install_pinned_llama_server",
+  "crates/runtime/src/reranker_install.rs::install_pinned_reranker_model",
+]
+reason = "transitional"
+detail = "the PDFium installer downloads every time; the reranker installers first look at what is installed"
+agreement = "divergent"
+exit = "one fetch-and-verify function serves every installer"
+
+[[parallel]]
+id = "managed-lookup-chain"
+summary = "locating a native artifact: override, beside the executable, managed directory"
+sites = [
+  "crates/config/src/lib.rs::locate_pdfium_from",
+  "crates/config/src/llama_server_pin.rs::locate_llama_server_from",
+  "crates/config/src/reranker_model_pin.rs::locate_reranker_model_from",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "one lookup chain takes the artifact as a parameter"
+
+[[parallel]]
+id = "lock-held-probe"
+summary = "probing whether a lock file is held"
+sites = [
+  "crates/session/src/lib.rs::lock_is_held",
+  "crates/catalog/src/run_lock.rs::run_liveness",
+  "crates/test-support/src/tool/detach.rs::call_running",
+]
+reason = "transitional"
+detail = "the sandbox tool treats every error as a held lock"
+agreement = "divergent"
+exit = "session holds the one probe"
+
+[[parallel]]
+id = "same-root"
+summary = "deciding that two paths name the same directory"
+sites = [
+  "crates/config/src/lib.rs::same_root",
+  "crates/config/src/profile_ref.rs::same_dir",
+  "crates/cli/src/cmd/cli_client/helpers.rs::same_root",
+  "crates/runtime/src/doctor.rs::same_path",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "every caller uses config's same_root"
+
+[[parallel]]
+id = "toc-from-headings"
+summary = "building a table of contents from heading blocks"
+sites = [
+  "crates/extract/src/txt.rs::toc_from_headings",
+  "crates/extract/src/html.rs::toc_from_headings",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "one shared module in extract holds it"

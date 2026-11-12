@@ -20,6 +20,8 @@
 #
 # Usage, from the repository root:
 #   ./scripts/dep-stamp-check.sh [lockfile]
+#
+# Parallel implementation: dep-hash-guards.
 set -eu
 lock=${1:-Cargo.lock}
 fail=0

@@ -199,6 +199,7 @@ pub(crate) fn watch(
 /// Whether a call holds the sandbox's session lock. A lock file that is
 /// not there has no holder; one that cannot be opened or probed counts
 /// as held, so a doubt keeps the process.
+// Parallel implementation: lock-held-probe.
 fn call_running(paths: &ToolPaths) -> bool {
     match std::fs::File::open(paths.lock()) {
         Ok(file) => file.try_lock().is_err(),
@@ -262,6 +263,7 @@ pub(crate) fn write_recovered(
 
 /// Whether `pid` names a live process. One that exists but belongs to
 /// someone else is live too.
+// Parallel implementation: pid-alive.
 pub(crate) fn pid_alive(pid: u32) -> bool {
     let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
         return false;

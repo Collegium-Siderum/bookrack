@@ -145,6 +145,7 @@ pub(crate) fn report_problem(err: &Report) -> Problem {
 /// The envelope `err` takes when its chain carries a type this map
 /// knows, or `None` when it does not and the caller falls back to the
 /// residual `INTERNAL_ERROR`.
+// Parallel implementation: frontend-error-map.
 fn classify(err: &Report) -> Option<RpcError> {
     for cause in err.chain() {
         if let Some(e) = cause.downcast_ref::<OpsError>() {

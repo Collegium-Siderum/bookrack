@@ -107,6 +107,7 @@ pub fn write(bundle_dir: &Path, manifest: &Manifest) -> Result<(), DiagnoseError
 
 /// Format a [`SystemTime`] as `YYYY-MM-DDTHH:MM:SSZ` (seconds
 /// precision, UTC zone written as `Z`).
+// Parallel implementation: rfc3339-now.
 pub fn iso8601_z(t: SystemTime) -> String {
     chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }

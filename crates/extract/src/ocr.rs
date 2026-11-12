@@ -241,6 +241,7 @@ fn line_start(text: &str, pos: usize) -> usize {
 /// of byte-order marks between the line start and the prefix does not
 /// break the anchor: a directory product joins per-file text, and each
 /// file may open with one.
+// Parallel implementation: page-marker.
 fn find_marker(text: &str, from: usize) -> Option<usize> {
     let mut search = from;
     while let Some(rel) = text[search..].find(MARKER_PREFIX) {

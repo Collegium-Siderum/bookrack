@@ -180,6 +180,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
 /// held lock whose recorded daemon does not answer returns
 /// [`BookrackCliError::StaleSessionLock`] (exit 3); an unprobeable
 /// lock returns [`BookrackCliError::SessionLockUnreadable`] (exit 1).
+// Parallel implementation: session-lock-classify.
 async fn handle_lock_conflict(err: eyre::Report, lock_path: &Path) -> Result<()> {
     let info = match bookrack_session::peek_lock(lock_path) {
         Ok(Some(i)) => i,

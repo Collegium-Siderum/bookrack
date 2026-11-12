@@ -20,6 +20,8 @@
 //! `= false`, which short-circuits [`audit_paper`] before any signal
 //! runs, suppresses them.
 
+// Parallel implementation: audit-judgement.
+
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
@@ -634,6 +636,7 @@ static ARXIV_OLD_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-z][a-z\-]*(?:\.[A-Z]{2})?/\d{7}$").expect("arXiv old-form regex")
 });
 
+// Parallel implementation: pdf-date-pattern.
 static PDF_DATE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^D:[0-9]{8,}").expect("PDF date regex"));
 

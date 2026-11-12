@@ -27,6 +27,7 @@ pub fn collect(cfg: &Config, bundle_dir: &Path) -> Result<()> {
 /// writes `open-error.json` in place of the payload, keeping the two
 /// states distinguishable in the bundle. The book and paper corpora
 /// share one schema, so both sides route through here.
+// Parallel implementation: corpus-stamp-read.
 pub(crate) fn collect_into(corpus_db: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
 

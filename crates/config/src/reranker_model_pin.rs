@@ -92,6 +92,7 @@ pub fn locate_reranker_model(tag: &str) -> RerankerModelLocation {
 /// Pure search logic for [`locate_reranker_model`], factored out so
 /// the chain can be tested without mutating process-global environment
 /// variables or touching the filesystem.
+// Parallel implementation: managed-lookup-chain.
 fn locate_reranker_model_from(
     override_path: Option<String>,
     managed_dir: Option<PathBuf>,

@@ -471,6 +471,7 @@ fn subtree_hashes(
 }
 
 /// SHA-256 of `bytes`, as 64 lowercase hex characters.
+// Parallel implementation: sha256-hex.
 fn sha256_hex(bytes: &[u8]) -> String {
     hex(Sha256::digest(bytes))
 }

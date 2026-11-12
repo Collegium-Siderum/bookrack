@@ -29,12 +29,14 @@ use text_splitter::{ChunkConfig, TextSplitter};
 /// text feeds `norm_chunk_sha256`, so a change is a re-embedding
 /// commitment. The companion test `tests/dep_hash.rs` fails until
 /// [`FROZEN_SPLITTER_DEPS`] is restated, forcing a deliberate bump.
+// Parallel implementation: chunk-version.
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const CHUNK_VERSION: u32 = 1;
 
 /// `name@version` of `text-splitter` and every `icu_*` crate in
 /// `Cargo.lock`, sorted bytewise. Restated in lockstep with
 /// [`CHUNK_VERSION`]. See `tests/dep_hash.rs` for the selection rule.
+// Parallel implementation: chunk-version.
 pub const FROZEN_SPLITTER_DEPS: &[&str] = &[
     "icu_collections@2.2.0",
     "icu_locale@2.2.0",

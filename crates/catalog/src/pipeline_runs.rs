@@ -229,6 +229,7 @@ impl Catalog {
     /// `status = 'running'` row, and return the assigned id. The
     /// `started_at` instant comes from SQLite's `strftime('%Y-%m-%dT%H:%M:%SZ', 'now')`
     /// so the catalog crate stays wall-clock-free.
+    // Parallel implementation: rfc3339-now.
     pub fn open_pipeline_run(
         &self,
         command: &str,

@@ -317,6 +317,7 @@ impl PaperAuditProfile {
     /// `<dir>/paper_audit_profile.local.toml` is then merged on top.
     /// A missing directory or missing overlay yields the shipped
     /// default; a malformed overlay returns an error.
+    // Parallel implementation: audit-overlay-load.
     pub fn load_from(dir: &Path) -> Result<Self, LoadError> {
         let mut profile = Self::default_profile();
         let overlay_path = dir.join(PROFILE_OVERLAY_FILE);

@@ -2925,6 +2925,7 @@ fn claim_root_by_path(
 /// and falling back to a raw comparison when canonicalization fails.
 /// The one comparison every registry-aware check uses, so a symlink or
 /// mount alias matches the same way everywhere.
+// Parallel implementation: same-root.
 pub fn same_root(a: &Path, b: &Path) -> bool {
     let ca = a.canonicalize();
     let cb = b.canonicalize();
@@ -3709,6 +3710,7 @@ fn write_registry_table(path: &Path, doc: &toml::Table) -> Result<(), ConfigErro
 /// racing the write sees either the old file or the new one, never a
 /// truncated one. The single I/O error is returned raw so each caller
 /// wraps it in its own error type.
+// Parallel implementation: atomic-write.
 pub(crate) fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
@@ -4045,6 +4047,7 @@ pub fn locate_pdfium(tag: &str) -> PdfiumLocation {
 /// Pure search logic for [`locate_pdfium`], factored out so the chain
 /// can be tested without mutating process-global environment variables
 /// or touching the filesystem.
+// Parallel implementation: managed-lookup-chain.
 fn locate_pdfium_from(
     override_dir: Option<String>,
     exe_dir: Option<PathBuf>,

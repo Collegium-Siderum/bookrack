@@ -14,6 +14,8 @@
 //! where the caller can no longer reach it.
 //! `scripts/error-boundary-check.sh` enforces that for this file.
 
+// Parallel implementation: frontend-error-map.
+
 use bookrack_core::{Explain, Problem};
 use bookrack_ops::OpsError;
 use bookrack_ops::dto::UnknownFilterValue;

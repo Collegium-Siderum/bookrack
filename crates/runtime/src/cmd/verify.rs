@@ -92,6 +92,7 @@ impl PipelineFindings {
 }
 
 /// Where one pipeline keeps its stores and intake files.
+// Parallel implementation: kind-to-paths.
 struct PipelinePaths {
     kind: ItemKind,
     catalog_db: PathBuf,
@@ -149,6 +150,7 @@ pub fn build_verify_report(cfg: &Config) -> VerifyReport {
 /// Fill `findings` for one pipeline whose store presence is already
 /// probed: open each present store through its read-only door, scan
 /// the intake files its catalog names, and read its vector sidecar.
+// Parallel implementation: store-health.
 fn verify_pipeline(findings: &mut PipelineFindings, paths: &PipelinePaths) {
     // Schema verification happens inside the open paths; surface success
     // as a one-liner per database, and any failure as a multi-line block.

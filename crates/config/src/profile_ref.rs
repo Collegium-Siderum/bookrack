@@ -164,6 +164,7 @@ pub fn registry_profile_ref_in(
 /// Whether two paths name the same directory, comparing canonicalized
 /// forms and falling back to a raw comparison when canonicalization
 /// fails.
+// Parallel implementation: same-root.
 fn same_dir(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(ca), Ok(cb)) => ca == cb,

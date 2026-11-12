@@ -449,6 +449,7 @@ fn flush_run(out: &mut String, run: &mut String) {
 /// Twelve hex characters of sha256: 48 bits of identity per redaction,
 /// enough to disambiguate the handful of titles in one bundle without
 /// turning the placeholder into an opaque wall.
+// Parallel implementation: sha256-hex.
 fn sha8(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());

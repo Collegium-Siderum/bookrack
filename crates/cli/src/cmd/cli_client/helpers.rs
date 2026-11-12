@@ -208,6 +208,7 @@ pub(super) fn route_unclaimed_root(
 /// Whether two paths name the same root, comparing canonicalized forms
 /// and falling back to a raw comparison when canonicalization fails —
 /// the same rule the config crate matches registry entries by.
+// Parallel implementation: same-root.
 fn same_root(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
@@ -504,6 +505,7 @@ pub async fn run_pinned_destructive(
 /// terminal. `confirm` receives the prompt text and answers for the
 /// operator; anything but [`Confirmation::Agreed`] must leave the
 /// execute leg unsent.
+// Parallel implementation: destructive-roundtrip.
 async fn run_pinned_destructive_with<F>(
     client: std::sync::Arc<ControlClient>,
     method: &str,

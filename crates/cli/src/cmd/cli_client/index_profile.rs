@@ -462,6 +462,7 @@ fn with_library(library: Option<&str>, mut params: Value) -> Value {
 /// Drive one action through its method. The orchestrator satisfies
 /// every handler-side `yes` requirement itself — the operator already
 /// confirmed the whole plan, so no step asks again.
+// Parallel implementation: destructive-roundtrip.
 async fn execute_action(
     client: &Arc<ControlClient>,
     pipeline: Pipeline,

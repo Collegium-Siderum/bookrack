@@ -15,6 +15,8 @@
 //! retrying blindly. The client sends bare query and document texts;
 //! the server applies the reranker model's own input template.
 
+// Parallel implementation: http-client-skeleton.
+
 use std::time::Duration;
 
 use bookrack_core::{Explain, Problem};

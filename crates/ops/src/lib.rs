@@ -180,6 +180,7 @@ pub type Result<T> = std::result::Result<T, OpsError>;
 /// Paths the paper-side stack of an [`Ops`] is configured against.
 /// Mirrors the book-side path bundle (`corpus_db`, `catalog_db`,
 /// `lancedb_dir`, `books_dir`) but for the paper pipeline.
+// Parallel implementation: kind-to-paths.
 #[derive(Debug, Clone)]
 pub struct PapersPaths {
     /// Path to `papers_corpus.db`.

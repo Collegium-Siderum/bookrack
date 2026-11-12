@@ -151,6 +151,7 @@ static VENUE_CUE_RE: LazyLock<Regex> = LazyLock::new(|| {
 // setting: internal -- part of the venue heuristic; moving it needs recalibration
 const MAX_VENUE_CHARS: usize = 120;
 
+// Parallel implementation: pdf-date-pattern.
 static D_DATE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^D:[0-9]{8,}").expect("PDF date regex"));
 

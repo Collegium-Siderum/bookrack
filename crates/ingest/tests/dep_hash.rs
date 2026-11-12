@@ -6,6 +6,8 @@
 //! are restated in lockstep. The rule covers the whole `icu_*` family
 //! because its crates are released together and move as one.
 
+// Parallel implementation: dep-hash-guards.
+
 use std::path::PathBuf;
 
 use bookrack_ingest::{CHUNK_VERSION, FROZEN_SPLITTER_DEPS};

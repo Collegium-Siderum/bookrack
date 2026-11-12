@@ -191,6 +191,7 @@ pub enum RunLiveness {
 /// fail spuriously. The loser of that race opens its run without a
 /// record rather than not at all, which reads as [`RunLiveness::NoRecord`]
 /// and is never treated as evidence of death.
+// Parallel implementation: lock-held-probe.
 pub fn run_liveness(dir: &Path, pipeline_run_id: &str) -> RunLiveness {
     let path = run_lock_path(dir, pipeline_run_id);
     let file = match File::open(&path) {

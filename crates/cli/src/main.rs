@@ -1074,6 +1074,7 @@ async fn main() -> std::process::ExitCode {
 ///
 /// Errors that carry no `data` print exactly the single line they did
 /// before, so nothing gains a blank second line it did not need.
+// Parallel implementation: problem-rendering.
 fn report_cli_error(cli_err: &bookrack_cli::error::BookrackCliError) {
     let problem = cli_err.problem_data();
     if bookrack_cli::render::ctx().output().is_json() {

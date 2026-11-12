@@ -60,6 +60,7 @@ pub struct LibraryInfoContext {
 /// database or vector store that exists but cannot be read reports the
 /// reason in the `*_error` fields instead of collapsing into the same
 /// absent values a fresh library shows.
+// Parallel implementation: store-health.
 pub async fn show_library_info<E: Embedder>(
     ops: &Ops<E>,
     ctx: LibraryInfoContext,
@@ -167,6 +168,7 @@ async fn read_papers_info<E: Embedder>(ops: &Ops<E>) -> Option<PapersInfo> {
     })
 }
 
+// Parallel implementation: corpus-stamp-read.
 fn read_corpus_stamps(corpus_db: &Path) -> Result<CorpusStamps> {
     if !corpus_db.exists() {
         return Ok(CorpusStamps::default());

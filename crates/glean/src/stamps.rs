@@ -16,6 +16,7 @@ use crate::CHUNK_VERSION;
 /// [`CHUNK_VERSION`] and the workspace-wide [`NORMALIZE_VERSION`],
 /// the embed model name comes from the live runtime configuration, and
 /// the vector dimension from a live probe against the embedder.
+// Parallel implementation: pipeline-stamps.
 pub fn current_index_stamps(embed_model: &str, vector_dim: u32) -> IndexStamps {
     IndexStamps {
         embed_model: embed_model.to_string(),
