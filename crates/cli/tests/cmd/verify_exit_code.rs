@@ -31,7 +31,8 @@ const STORED_PATH: &str = "aa/bb/source.txt";
 /// Both book stores and one intake row whose `stored_path` is
 /// `STORED_PATH`; the file itself is written only when `file_present`.
 fn books_with_one_intake(root: &Path, file_present: bool) {
-    let mut catalog = Catalog::open(&root.join("catalog.db")).expect("open the catalog");
+    let mut catalog =
+        Catalog::open_for_write_unbacked(&root.join("catalog.db")).expect("open the catalog");
     let intake_id = catalog
         .register_intake(ItemKind::Book, &NewIntake::new("sha-1"))
         .expect("register an intake")
@@ -41,7 +42,7 @@ fn books_with_one_intake(root: &Path, file_present: bool) {
         .set_stored_path(ItemKind::Book, intake_id, STORED_PATH)
         .expect("record the stored path");
     drop(catalog);
-    drop(Corpus::open(&root.join("corpus.db")).expect("open the corpus"));
+    drop(Corpus::open_for_write(&root.join("corpus.db")).expect("open the corpus"));
     if file_present {
         let file = root.join("books").join(STORED_PATH);
         std::fs::create_dir_all(file.parent().expect("parent")).expect("books dir");
@@ -53,8 +54,8 @@ fn books_with_one_intake(root: &Path, file_present: bool) {
 /// absolute path under `papers/`, the shape glean records; the file
 /// itself is written only when `file_present`.
 fn papers_with_one_intake(root: &Path, file_present: bool) {
-    let mut catalog =
-        Catalog::open(&root.join("papers_catalog.db")).expect("open the papers catalog");
+    let mut catalog = Catalog::open_for_write_unbacked(&root.join("papers_catalog.db"))
+        .expect("open the papers catalog");
     let intake_id = catalog
         .register_intake(ItemKind::Paper, &NewIntake::new("sha-paper"))
         .expect("register a paper")
@@ -69,7 +70,7 @@ fn papers_with_one_intake(root: &Path, file_present: bool) {
         )
         .expect("record the stored path");
     drop(catalog);
-    drop(Corpus::open(&root.join("papers_corpus.db")).expect("open the papers corpus"));
+    drop(Corpus::open_for_write(&root.join("papers_corpus.db")).expect("open the papers corpus"));
     if file_present {
         std::fs::create_dir_all(envelope.parent().expect("parent")).expect("papers dir");
         std::fs::write(&envelope, b"{}").expect("write the envelope");
@@ -225,7 +226,7 @@ async fn verify_judges_a_root_holding_only_a_reference_store() {
     let readable = sandbox.data_root("reference-root");
     let behind = sandbox.data_root("reference-behind-root");
     let stores = |root: &PathBuf| {
-        drop(Refs::open(&root.join("reference.db")).expect("create reference.db"));
+        drop(Refs::open_for_write(&root.join("reference.db")).expect("create reference.db"));
     };
     stores(&readable);
     stores(&behind);

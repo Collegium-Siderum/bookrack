@@ -67,7 +67,7 @@ pub async fn plan_reembed(
 ) -> Result<Vec<ReembedPlan>> {
     // Passing 0 forces the open path to read dim from the schema for an
     // existing table.
-    let store = ChunkStore::open(lancedb_dir, 0).await?;
+    let store = ChunkStore::open_for_write(lancedb_dir, 0).await?;
     let targets = if let Some(ids) = only_ids {
         collect_pinned_targets(catalog, ids)?
     } else {
@@ -241,7 +241,7 @@ async fn read_chunk_plans(
     lancedb_dir: &Path,
     partition: PartitionIdx,
 ) -> Result<Vec<PlannedChunk>> {
-    let store = ChunkStore::open(lancedb_dir, 0).await?;
+    let store = ChunkStore::open_for_write(lancedb_dir, 0).await?;
     let rows = store.scan_partition(partition).await?;
     Ok(rows
         .into_iter()
@@ -321,7 +321,9 @@ mod tests {
     }
 
     async fn seed_partition(lancedb_dir: &Path, intake_id: i64, count: usize) {
-        let store = ChunkStore::open(lancedb_dir, 4).await.expect("open");
+        let store = ChunkStore::open_for_write(lancedb_dir, 4)
+            .await
+            .expect("open");
         let rows: Vec<ChunkRow> = (0..count as i64)
             .map(|o| fake_row(intake_id, o + 1, &format!("chunk {intake_id}-{o}")))
             .collect();
@@ -351,7 +353,9 @@ mod tests {
     }
 
     async fn partition_tags(lancedb_dir: &Path, intake_id: i64) -> Vec<f32> {
-        let store = ChunkStore::open(lancedb_dir, 4).await.expect("open");
+        let store = ChunkStore::open_for_write(lancedb_dir, 4)
+            .await
+            .expect("open");
         store
             .scan_partition(PartitionIdx::new(intake_id))
             .await

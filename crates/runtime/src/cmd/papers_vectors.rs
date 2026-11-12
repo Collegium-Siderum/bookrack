@@ -35,7 +35,7 @@ pub async fn rebuild(
     refine_factor: Option<u32>,
 ) -> Result<AnnRebuildReport> {
     let lancedb_dir = cfg.papers_lancedb_dir();
-    let corpus = Corpus::open(&cfg.papers_corpus_db()).context("open papers corpus")?;
+    let corpus = Corpus::open_for_write(&cfg.papers_corpus_db()).context("open papers corpus")?;
     let dim = corpus
         .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
         .context("read vector_dim stamp")?
@@ -45,7 +45,7 @@ pub async fn rebuild(
         })?
         .parse::<usize>()
         .context("parse vector_dim stamp")?;
-    let store = ChunkStore::open(&lancedb_dir, dim)
+    let store = ChunkStore::open_for_write(&lancedb_dir, dim)
         .await
         .context("open papers vector store")?;
     let mut base = if let Some(s) = kind_str {
@@ -85,7 +85,7 @@ pub async fn rebuild(
 /// falls back to a full scan.
 pub async fn drop(cfg: &Config) -> Result<AnnDropReport> {
     let lancedb_dir = cfg.papers_lancedb_dir();
-    let corpus = Corpus::open(&cfg.papers_corpus_db()).context("open papers corpus")?;
+    let corpus = Corpus::open_for_write(&cfg.papers_corpus_db()).context("open papers corpus")?;
     let dim = corpus
         .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
         .context("read vector_dim stamp")?
@@ -95,7 +95,7 @@ pub async fn drop(cfg: &Config) -> Result<AnnDropReport> {
         })?
         .parse::<usize>()
         .context("parse vector_dim stamp")?;
-    let store = ChunkStore::open(&lancedb_dir, dim)
+    let store = ChunkStore::open_for_write(&lancedb_dir, dim)
         .await
         .context("open papers vector store")?;
     store
@@ -124,9 +124,10 @@ pub async fn drop(cfg: &Config) -> Result<AnnDropReport> {
 /// failure while setting it up does not.
 pub async fn reset(cfg: &Config, resume: bool) -> Result<VectorsResetReport> {
     let lancedb_dir = cfg.papers_lancedb_dir();
-    let catalog = Catalog::open_with_backup(&cfg.papers_catalog_db(), &cfg.backup_dir())
+    let catalog = Catalog::open_for_write(&cfg.papers_catalog_db(), &cfg.backup_dir())
         .context("open papers catalog")?;
-    let mut corpus = Corpus::open(&cfg.papers_corpus_db()).context("open papers corpus")?;
+    let mut corpus =
+        Corpus::open_for_write(&cfg.papers_corpus_db()).context("open papers corpus")?;
     let (embed_cfg, declaration) = crate::profile::effective_embed_declaration(cfg)?;
     let embedder_client = embedder(cfg, &embed_cfg)?;
 
@@ -180,7 +181,7 @@ pub async fn plan_reembed(
     stale_only: bool,
 ) -> Result<Vec<bookrack_glean::reembed::ReembedPlan>> {
     let lancedb_dir = cfg.papers_lancedb_dir();
-    let catalog = Catalog::open_with_backup(&cfg.papers_catalog_db(), &cfg.backup_dir())
+    let catalog = Catalog::open_for_write(&cfg.papers_catalog_db(), &cfg.backup_dir())
         .context("open papers catalog")?;
     bookrack_glean::reembed::plan_reembed(&catalog, &lancedb_dir, paper, None, stale_only)
         .await
@@ -196,9 +197,10 @@ pub async fn execute_reembed_from_plan(
     pinned_ids: Vec<i64>,
 ) -> Result<bookrack_glean::reembed::ReembedReport> {
     let lancedb_dir = cfg.papers_lancedb_dir();
-    let catalog = Catalog::open_with_backup(&cfg.papers_catalog_db(), &cfg.backup_dir())
+    let catalog = Catalog::open_for_write(&cfg.papers_catalog_db(), &cfg.backup_dir())
         .context("open papers catalog")?;
-    let mut corpus = Corpus::open(&cfg.papers_corpus_db()).context("open papers corpus")?;
+    let mut corpus =
+        Corpus::open_for_write(&cfg.papers_corpus_db()).context("open papers corpus")?;
     let embed_cfg = crate::profile::effective_embed_config(cfg)?;
     let embedder_client = embedder(cfg, &embed_cfg)?;
     let run = open_run(
@@ -235,8 +237,8 @@ mod tests {
         );
         // `drop` names this module's command function, so the seed
         // handles are released by falling out of the statement.
-        Catalog::open(&cfg.papers_catalog_db()).expect("seed paper catalog");
-        Corpus::open(&cfg.papers_corpus_db()).expect("seed paper corpus");
+        Catalog::open_for_write_unbacked(&cfg.papers_catalog_db()).expect("seed paper catalog");
+        Corpus::open_for_write(&cfg.papers_corpus_db()).expect("seed paper corpus");
         (dir, cfg)
     }
 

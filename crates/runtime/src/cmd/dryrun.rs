@@ -66,7 +66,7 @@ pub fn run(
 /// failure logs and demotes to a NULL run id; the dryrun itself
 /// proceeds unchanged either way.
 fn open_dryrun_pipeline_run(cfg: &Config, command: &str) -> Option<RunHandle> {
-    let catalog = match bookrack_catalog::Catalog::open_if_current(&cfg.catalog_db()) {
+    let catalog = match bookrack_catalog::Catalog::open_for_bookkeeping(&cfg.catalog_db()) {
         Ok(Some(c)) => c,
         Ok(None) => return None,
         Err(err) => {
@@ -100,7 +100,7 @@ fn close_dryrun_pipeline_run(cfg: &Config, run: Option<RunHandle>, ok: bool) {
     let Some(run) = run else {
         return;
     };
-    let catalog = match bookrack_catalog::Catalog::open_if_current(&cfg.catalog_db()) {
+    let catalog = match bookrack_catalog::Catalog::open_for_bookkeeping(&cfg.catalog_db()) {
         Ok(Some(c)) => c,
         Ok(None) => {
             run.abandon();

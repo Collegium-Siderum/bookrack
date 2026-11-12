@@ -46,7 +46,7 @@ async fn a_path_selected_root_is_reached_by_path_beside_a_mounted_library() {
     // does not name. Both roots carry a catalog, so the card's counts
     // below are numbers rather than the null an absent store reports.
     for root in [&anonymous, &beta] {
-        drop(Catalog::open(&root.join("catalog.db")).expect("open the catalog"));
+        drop(Catalog::open_for_write_unbacked(&root.join("catalog.db")).expect("open the catalog"));
     }
     sandbox.write_registry_entries(None, &[("beta", beta.as_path())]);
     let book = sandbox.data_root("fixtures").join("synthetic-ledger.txt");

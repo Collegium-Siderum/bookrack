@@ -235,8 +235,8 @@ async fn smoke_ingest(
     embed_cfg: &EmbedConfig,
     fixture: &Path,
 ) -> Result<bookrack_ingest::IngestReport> {
-    let mut corpus = Corpus::open(&cfg.corpus_db()).context("open smoke corpus")?;
-    let mut catalog = Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir())
+    let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open smoke corpus")?;
+    let mut catalog = Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir())
         .context("open smoke catalog")?;
     let embedder = build_embedder(cfg, embed_cfg)?;
     let params = IngestParams {

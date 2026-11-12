@@ -76,7 +76,7 @@ const SPECS: &[&TableSpec] = &[
 
 /// A handle to one `catalog.db` database.
 ///
-/// Owns a single SQLite connection. Construct with [`Catalog::open`]
+/// Owns a single SQLite connection. Construct with [`Catalog::open_for_write_unbacked`]
 /// for a file-backed database or [`Catalog::open_in_memory`] for an
 /// ephemeral one (useful in tests).
 pub struct Catalog {
@@ -88,10 +88,10 @@ impl Catalog {
     /// Open the `catalog.db` at `path`, creating and initializing it if it
     /// does not exist, without taking a pre-migration backup.
     ///
-    /// Use [`Catalog::open_with_backup`] for the production path, which
+    /// Use [`Catalog::open_for_write`] for the production path, which
     /// snapshots an existing database before migrating it. This variant is
     /// for callers that manage backups themselves or do not need them.
-    pub fn open(path: &Path) -> Result<Catalog> {
+    pub fn open_for_write_unbacked(path: &Path) -> Result<Catalog> {
         Catalog::from_connection(bookrack_dbkit::open_production(path)?, None)
     }
 
@@ -102,7 +102,7 @@ impl Catalog {
     /// migrated is backed up; a freshly created one is not. Fails with
     /// [`CatalogError::SchemaTooNew`] if the file was written by a newer
     /// schema revision than this binary understands.
-    pub fn open_with_backup(path: &Path, backup_dir: &Path) -> Result<Catalog> {
+    pub fn open_for_write(path: &Path, backup_dir: &Path) -> Result<Catalog> {
         let stem = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -119,13 +119,13 @@ impl Catalog {
     ///
     /// `Ok(None)` means the database is not one this call may write:
     /// either no file is there, or the file is behind and opening it
-    /// through [`Catalog::open`] would migrate it. Migration is
+    /// through [`Catalog::open_for_write_unbacked`] would migrate it. Migration is
     /// forward-only, so a caller whose write is incidental to its real
     /// work — a preview recording that it ran, a probe noting its own
     /// pass — has no business triggering one; it takes the `None` and
     /// does without the row. A database newer than this binary is
     /// still an error, not a `None`: that one no caller can proceed on.
-    pub fn open_if_current(path: &Path) -> Result<Option<Catalog>> {
+    pub fn open_for_bookkeeping(path: &Path) -> Result<Option<Catalog>> {
         if !path.exists() {
             return Ok(None);
         }
@@ -424,13 +424,13 @@ mod tests {
 
         let too_new = READER_VERSION + 1;
         {
-            let catalog = Catalog::open(&path).expect("first open");
+            let catalog = Catalog::open_for_write_unbacked(&path).expect("first open");
             catalog
                 .meta_set(MIN_READER_VERSION_KEY, &too_new.to_string())
                 .expect("overwrite stamp with a too-new value");
         }
 
-        let Err(err) = Catalog::open(&path) else {
+        let Err(err) = Catalog::open_for_write_unbacked(&path) else {
             panic!("reopen must refuse")
         };
         assert!(
@@ -457,7 +457,7 @@ mod tests {
         // Absent: nothing to open, and nothing created by asking.
         let absent = dir.path().join("absent.db");
         assert!(
-            Catalog::open_if_current(&absent)
+            Catalog::open_for_bookkeeping(&absent)
                 .expect("an absent file is not an error")
                 .is_none()
         );
@@ -472,7 +472,7 @@ mod tests {
         let behind = dir.path().join("behind.db");
         std::fs::write(&behind, b"").expect("seed an uninitialised file");
         assert!(
-            Catalog::open_if_current(&behind)
+            Catalog::open_for_bookkeeping(&behind)
                 .expect("a database behind is not an error")
                 .is_none()
         );
@@ -484,8 +484,8 @@ mod tests {
 
         // Current: opens, and the handle can actually write.
         let current = dir.path().join("current.db");
-        drop(Catalog::open(&current).expect("build a current database"));
-        let catalog = Catalog::open_if_current(&current)
+        drop(Catalog::open_for_write_unbacked(&current).expect("build a current database"));
+        let catalog = Catalog::open_for_bookkeeping(&current)
             .expect("a current database opens")
             .expect("a current database yields a handle");
         assert!(!catalog.is_read_only());
@@ -500,11 +500,11 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("catalog.db");
 
-        Catalog::open(&path).expect("first open");
+        Catalog::open_for_write_unbacked(&path).expect("first open");
         // Scope the reopened handle so its connection is closed before
         // the cleanup: Windows refuses to delete a file still held open.
         let version = {
-            let reopened = Catalog::open(&path).expect("second open");
+            let reopened = Catalog::open_for_write_unbacked(&path).expect("second open");
             reopened.meta_get(SCHEMA_VERSION_KEY).expect("read")
         };
         assert_eq!(version, Some(SCHEMA_VERSION.to_string()));
@@ -518,9 +518,9 @@ mod tests {
         // be on regardless of the linked SQLite's compile-time default.
         let dir = unique_dir("fk-steady-state");
         let path = dir.join("catalog.db");
-        Catalog::open(&path).expect("first open");
+        Catalog::open_for_write_unbacked(&path).expect("first open");
         {
-            let reopened = Catalog::open(&path).expect("second open");
+            let reopened = Catalog::open_for_write_unbacked(&path).expect("second open");
             let fk: i64 = reopened
                 .conn
                 .pragma_query_value(None, "foreign_keys", |row| row.get(0))
@@ -538,13 +538,13 @@ mod tests {
         let dir = unique_dir("refuse-newer");
         let path = dir.join("catalog.db");
         {
-            let catalog = Catalog::open(&path).expect("first open");
+            let catalog = Catalog::open_for_write_unbacked(&path).expect("first open");
             catalog
                 .conn
                 .pragma_update(None, "user_version", TARGET_VERSION + 1)
                 .expect("bump user_version");
         }
-        let Err(err) = Catalog::open(&path) else {
+        let Err(err) = Catalog::open_for_write_unbacked(&path) else {
             panic!("must refuse a newer database");
         };
         assert!(matches!(err, CatalogError::SchemaTooNew { .. }), "{err:?}");
@@ -578,7 +578,7 @@ mod tests {
         }
         {
             let adopted =
-                Catalog::open_with_backup(&path, &backup_dir).expect("adopt existing database");
+                Catalog::open_for_write(&path, &backup_dir).expect("adopt existing database");
             let version: i64 = adopted
                 .conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -603,7 +603,7 @@ mod tests {
         let dir = unique_dir("fresh-no-backup");
         let path = dir.join("catalog.db");
         let backup_dir = dir.join("backup");
-        Catalog::open_with_backup(&path, &backup_dir).expect("fresh open");
+        Catalog::open_for_write(&path, &backup_dir).expect("fresh open");
         let empty = !backup_dir.exists()
             || std::fs::read_dir(&backup_dir)
                 .expect("read backup dir")
@@ -751,7 +751,7 @@ mod tests {
     fn try_open_read_only_opens_an_existing_file_read_only() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("catalog.db");
-        drop(Catalog::open(&path).expect("seed"));
+        drop(Catalog::open_for_write_unbacked(&path).expect("seed"));
 
         let opened = Catalog::try_open_read_only(&path).expect("open");
         assert!(opened.is_some_and(|c| c.is_read_only()));
@@ -777,7 +777,7 @@ mod tests {
         let path = dir.join("catalog.db");
         {
             // Initialize the schema through the read-write entry point.
-            let mut catalog = Catalog::open(&path).expect("first open");
+            let mut catalog = Catalog::open_for_write_unbacked(&path).expect("first open");
             catalog
                 .register_intake(ItemKind::Book, &NewIntake::new("sha-rw"))
                 .expect("seed");
@@ -807,7 +807,7 @@ mod tests {
     fn open_read_only_is_idempotent_against_an_initialized_database() {
         let dir = unique_dir("read-only-reads");
         let path = dir.join("catalog.db");
-        Catalog::open(&path).expect("first open");
+        Catalog::open_for_write_unbacked(&path).expect("first open");
         let read_only = Catalog::open_read_only(&path).expect("read-only open");
         // The acceptance gate ran: the version mirror is still readable.
         let version = read_only.meta_get(SCHEMA_VERSION_KEY).expect("read");
@@ -844,7 +844,7 @@ mod tests {
         let dir = unique_dir("read-only-newer");
         let path = dir.join("catalog.db");
         {
-            let catalog = Catalog::open(&path).expect("create");
+            let catalog = Catalog::open_for_write_unbacked(&path).expect("create");
             catalog
                 .conn
                 .pragma_update(None, "user_version", TARGET_VERSION + 1)
@@ -868,7 +868,7 @@ mod tests {
         let dir = unique_dir("read-only-unseeded");
         let path = dir.join("catalog.db");
         {
-            let catalog = Catalog::open(&path).expect("create");
+            let catalog = Catalog::open_for_write_unbacked(&path).expect("create");
             catalog
                 .conn
                 .execute(
@@ -890,7 +890,7 @@ mod tests {
         }
         // The next read-write open seeds it again.
         {
-            let reopened = Catalog::open(&path).expect("read-write reopen");
+            let reopened = Catalog::open_for_write_unbacked(&path).expect("read-write reopen");
             assert_eq!(
                 reopened.meta_get(MIN_READER_VERSION_KEY).expect("read"),
                 Some(MIN_READER_VERSION.to_string())
@@ -926,7 +926,7 @@ mod tests {
         let dir = unique_dir("read-during-exclusive");
         let path = dir.join("catalog.db");
         {
-            let mut catalog = Catalog::open(&path).expect("seed open");
+            let mut catalog = Catalog::open_for_write_unbacked(&path).expect("seed open");
             for i in 0..32 {
                 catalog
                     .register_intake(ItemKind::Book, &NewIntake::new(format!("sha-{i}")))

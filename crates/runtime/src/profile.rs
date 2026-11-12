@@ -806,7 +806,7 @@ mod tests {
 
         // Freshly created corpus: opens, carries an unstamped record.
         let real = dir.path().join("real.db");
-        drop(Corpus::open(&real).expect("create corpus"));
+        drop(Corpus::open_for_write(&real).expect("create corpus"));
         let stamps = built_stamps(&real)
             .expect("readable corpus")
             .expect("stamp record");

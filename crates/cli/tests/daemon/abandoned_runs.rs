@@ -28,7 +28,7 @@ use tokio::process::Command;
 
 /// Open a `running` row on a real catalog under `root` and return its id.
 fn open_run(root: &Path, command: &str) -> String {
-    let catalog = Catalog::open(&root.join("catalog.db")).expect("open catalog");
+    let catalog = Catalog::open_for_write_unbacked(&root.join("catalog.db")).expect("open catalog");
     catalog
         .open_pipeline_run(command, None, None)
         .expect("open pipeline run")

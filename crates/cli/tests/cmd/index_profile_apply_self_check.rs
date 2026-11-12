@@ -127,7 +127,7 @@ async fn a_dimension_left_divergent_is_reported_with_both_values() {
 
     // A library with chunks, no stamps, and no persisted ANN state: the
     // only action the plan derives is the stamp reconciliation.
-    Corpus::open(&root.join("corpus.db"))
+    Corpus::open_for_write(&root.join("corpus.db"))
         .expect("open the books corpus")
         .clear_index_stamps()
         .expect("clear the books stamps");

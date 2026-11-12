@@ -53,7 +53,7 @@ pub async fn reconcile(cfg: &Config) -> Result<StampsReconcileReport> {
         .map(Vec::len)
         .context("embedder returned no vector")?;
     let stamps = bookrack_ingest::current_index_stamps(&embed_cfg.model, dim as u32);
-    let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    let corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open corpus")?;
     corpus
         .reconcile_index_stamps(&stamps)
         .context("reconcile index stamps")?;
@@ -78,12 +78,12 @@ mod tests {
             dir.path().to_path_buf(),
             EmbedStub::shared().url().to_string(),
         );
-        Corpus::open(&cfg.corpus_db()).expect("seed corpus");
+        Corpus::open_for_write(&cfg.corpus_db()).expect("seed corpus");
 
         let report = reconcile(&cfg).await.expect("reconcile");
 
         assert_eq!(report.vector_dim as usize, EmbedStub::DIMENSION);
-        let corpus = Corpus::open(&cfg.corpus_db()).expect("reopen corpus");
+        let corpus = Corpus::open_for_write(&cfg.corpus_db()).expect("reopen corpus");
         let stamp = |key: &str| corpus.meta_get(key).expect("read stamp");
         assert_eq!(stamp(EMBED_MODEL_KEY), Some(report.embed_model.clone()));
         assert_eq!(stamp(VECTOR_DIM_KEY), Some(report.vector_dim.to_string()));

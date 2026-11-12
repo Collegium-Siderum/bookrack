@@ -230,7 +230,8 @@ async fn a_job_targeting_a_library_runs_under_that_librarys_parameters() -> Resu
 
     // Paths 2/3: the audit ran, because beta declares no overlay
     // switching it off — alpha does.
-    let catalog = bookrack_catalog::Catalog::open(&beta_root.join("catalog.db"))?;
+    let catalog =
+        bookrack_catalog::Catalog::open_for_write_unbacked(&beta_root.join("catalog.db"))?;
     let review = catalog
         .review(1, bookrack_core::ItemKind::Book)?
         .with_context(|| "beta's catalog holds no review row for the ingested book")?;

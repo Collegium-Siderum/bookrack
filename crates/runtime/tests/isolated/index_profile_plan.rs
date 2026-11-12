@@ -32,7 +32,7 @@ fn stamped_root(sandbox: &bookrack_test_support::Sandbox, name: &str) -> PathBuf
     let profile = IndexProfile::from_named(PROFILE_QWEN3_06B_DEFAULT).expect("built-in profile");
     let target = Pipeline::Books.target_stamps(&profile.embed.model, profile.embed.dim);
 
-    let corpus = bookrack_corpus::Corpus::open(&Pipeline::Books.corpus_db(&root))
+    let corpus = bookrack_corpus::Corpus::open_for_write(&Pipeline::Books.corpus_db(&root))
         .expect("create the book corpus");
     for (key, value) in [
         (bookrack_corpus::EMBED_MODEL_KEY, target.embed_model.clone()),

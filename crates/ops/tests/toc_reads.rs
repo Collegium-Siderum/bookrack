@@ -36,8 +36,8 @@ impl Fixture {
         let lancedb_dir = tmp.path().join("lancedb");
         let books_dir = tmp.path().join("books");
         let backup_dir = tmp.path().join("backup");
-        Catalog::open(&catalog_db).expect("seed catalog");
-        let corpus = Corpus::open(&corpus_db).expect("seed corpus");
+        Catalog::open_for_write_unbacked(&catalog_db).expect("seed catalog");
+        let corpus = Corpus::open_for_write(&corpus_db).expect("seed corpus");
         let ops = Ops::<OllamaEmbedClient>::catalog_only(
             corpus_db,
             catalog_db.clone(),
@@ -55,7 +55,7 @@ impl Fixture {
     }
 
     fn register_book(&self, sha: &str) -> i64 {
-        let mut catalog = Catalog::open(&self.catalog_db).expect("open catalog");
+        let mut catalog = Catalog::open_for_write_unbacked(&self.catalog_db).expect("open catalog");
         catalog
             .register_intake(ItemKind::Book, &NewIntake::new(sha))
             .expect("register intake")
@@ -427,7 +427,8 @@ async fn paper_toc_pages_with_the_same_contract() {
     let papers_lancedb = tmp.path().join("lancedb_papers");
 
     let intake_id = {
-        let mut catalog = Catalog::open(&papers_catalog_db).expect("open paper catalog");
+        let mut catalog =
+            Catalog::open_for_write_unbacked(&papers_catalog_db).expect("open paper catalog");
         catalog
             .register_intake(ItemKind::Paper, &NewIntake::new("sha-paper"))
             .expect("register intake")
@@ -435,7 +436,7 @@ async fn paper_toc_pages_with_the_same_contract() {
             .intake_id
     };
     {
-        let mut corpus = Corpus::open(&papers_corpus_db).expect("open paper corpus");
+        let mut corpus = Corpus::open_for_write(&papers_corpus_db).expect("open paper corpus");
         seed_chapters(&mut corpus, intake_id, 3);
     }
 

@@ -46,8 +46,8 @@ fn seed(root: &Path, label: &str) {
             format!("{label}-paper.pdf"),
         ),
     ] {
-        let mut catalog =
-            Catalog::open(&root.join(file)).unwrap_or_else(|e| panic!("open {label}/{file}: {e}"));
+        let mut catalog = Catalog::open_for_write_unbacked(&root.join(file))
+            .unwrap_or_else(|e| panic!("open {label}/{file}: {e}"));
         let sha = format!("{:0>64}", format!("{label}{}", kind.as_scope_str()));
         let format = basename.rsplit('.').next().expect("an extension");
         catalog

@@ -76,7 +76,7 @@ pub async fn plan_remove(cfg: &Config, args: &RemovePaperArgs) -> Result<RemoveP
 /// hold, so deriving a plan never opens the catalog a second time —
 /// which is what keeps the drift check inside
 /// [`execute_remove_from_plan`] from rewriting the backup that
-/// [`Catalog::open_with_backup`] stamps on first open.
+/// [`Catalog::open_for_write`] stamps on first open.
 async fn derive_remove_plan(
     cfg: &Config,
     catalog: &Catalog,
@@ -140,7 +140,7 @@ pub async fn execute_remove_from_plan(
     intake_id: i64,
     expected_fingerprint: ExpectedFingerprint<'_>,
 ) -> Result<RemovePaperOutcome> {
-    let mut catalog = Catalog::open_with_backup(&cfg.papers_catalog_db(), &cfg.backup_dir())
+    let mut catalog = Catalog::open_for_write(&cfg.papers_catalog_db(), &cfg.backup_dir())
         .context("open papers catalog")?;
     let intake = catalog
         .intake_by_id(intake_id)
@@ -174,14 +174,15 @@ pub async fn execute_remove_from_plan(
         .delete_book_derived(intake_id, paper_root_id)
         .context("delete cascaded catalog rows")?;
 
-    let mut corpus = Corpus::open(&cfg.papers_corpus_db()).context("open papers corpus")?;
+    let mut corpus =
+        Corpus::open_for_write(&cfg.papers_corpus_db()).context("open papers corpus")?;
     corpus
         .drop_partition(partition)
         .context("drop corpus partition")?;
     drop(corpus);
 
     if let Some(dim) = corpus_vector_dim(cfg)? {
-        let store = ChunkStore::open(&cfg.papers_lancedb_dir(), dim)
+        let store = ChunkStore::open_for_write(&cfg.papers_lancedb_dir(), dim)
             .await
             .context("open papers vector store")?;
         store
@@ -475,8 +476,9 @@ mod tests {
     async fn plan_reports_counts_and_writes_nothing() {
         let (_tmp, cfg) = temp_cfg();
         let intake_id = {
-            let mut catalog = Catalog::open(&cfg.papers_catalog_db()).expect("catalog");
-            let mut corpus = Corpus::open(&cfg.papers_corpus_db()).expect("corpus");
+            let mut catalog =
+                Catalog::open_for_write_unbacked(&cfg.papers_catalog_db()).expect("catalog");
+            let mut corpus = Corpus::open_for_write(&cfg.papers_corpus_db()).expect("corpus");
             seed_paper(&cfg, &mut catalog, &mut corpus, "sha-dry")
         };
 
@@ -514,8 +516,9 @@ mod tests {
     async fn the_plan_fingerprint_covers_the_paper_audit_projection() {
         let (_tmp, cfg) = temp_cfg();
         let intake_id = {
-            let mut catalog = Catalog::open(&cfg.papers_catalog_db()).expect("catalog");
-            let mut corpus = Corpus::open(&cfg.papers_corpus_db()).expect("corpus");
+            let mut catalog =
+                Catalog::open_for_write_unbacked(&cfg.papers_catalog_db()).expect("catalog");
+            let mut corpus = Corpus::open_for_write(&cfg.papers_corpus_db()).expect("corpus");
             seed_paper(&cfg, &mut catalog, &mut corpus, "sha-fingerprint")
         };
 
@@ -525,7 +528,8 @@ mod tests {
             .fingerprint();
 
         {
-            let catalog = Catalog::open(&cfg.papers_catalog_db()).expect("catalog");
+            let catalog =
+                Catalog::open_for_write_unbacked(&cfg.papers_catalog_db()).expect("catalog");
             catalog
                 .upsert_node_paper_audit(&paper_audit_row(intake_id))
                 .expect("projection row");
@@ -561,8 +565,9 @@ mod tests {
     async fn plan_does_not_materialize_the_vector_store() {
         let (_tmp, cfg) = temp_cfg();
         let intake_id = {
-            let mut catalog = Catalog::open(&cfg.papers_catalog_db()).expect("catalog");
-            let mut corpus = Corpus::open(&cfg.papers_corpus_db()).expect("corpus");
+            let mut catalog =
+                Catalog::open_for_write_unbacked(&cfg.papers_catalog_db()).expect("catalog");
+            let mut corpus = Corpus::open_for_write(&cfg.papers_corpus_db()).expect("corpus");
             let id = seed_paper(&cfg, &mut catalog, &mut corpus, "sha-no-lance");
             // A cluster that has been embedded once carries the stamp,
             // even after its lancedb directory is deleted.
@@ -591,8 +596,9 @@ mod tests {
     async fn plan_neither_migrates_nor_backs_up_the_catalog() {
         let (_tmp, cfg) = temp_cfg();
         let intake_id = {
-            let mut catalog = Catalog::open(&cfg.papers_catalog_db()).expect("catalog");
-            let mut corpus = Corpus::open(&cfg.papers_corpus_db()).expect("corpus");
+            let mut catalog =
+                Catalog::open_for_write_unbacked(&cfg.papers_catalog_db()).expect("catalog");
+            let mut corpus = Corpus::open_for_write(&cfg.papers_corpus_db()).expect("corpus");
             seed_paper(&cfg, &mut catalog, &mut corpus, "sha-stale")
         };
         // Present the catalog as one revision behind: a read-write open

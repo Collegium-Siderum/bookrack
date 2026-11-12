@@ -289,7 +289,7 @@ mod tests {
     /// sidecar.
     fn catalog_only_root(dir: &Path) -> Config {
         let cfg = config_for(dir);
-        drop(Catalog::open(&cfg.catalog_db()).expect("create catalog"));
+        drop(Catalog::open_for_write_unbacked(&cfg.catalog_db()).expect("create catalog"));
         cfg
     }
 
@@ -455,7 +455,7 @@ mod tests {
     fn a_catalog_only_root_reports_the_corpus_missing_without_creating_it() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cfg = config_for(dir.path());
-        drop(Catalog::open(&cfg.catalog_db()).expect("create catalog"));
+        drop(Catalog::open_for_write_unbacked(&cfg.catalog_db()).expect("create catalog"));
         let before = db_files(dir.path());
 
         let report = build_verify_report(&cfg);
@@ -491,7 +491,8 @@ mod tests {
     /// `file_present`. Returns the intake id and the envelope path.
     fn papers_only_root(dir: &Path, file_present: bool) -> (Config, i64, PathBuf) {
         let cfg = config_for(dir);
-        let mut catalog = Catalog::open(&cfg.papers_catalog_db()).expect("create papers catalog");
+        let mut catalog = Catalog::open_for_write_unbacked(&cfg.papers_catalog_db())
+            .expect("create papers catalog");
         let intake_id = catalog
             .register_intake(ItemKind::Paper, &NewIntake::new("sha-paper"))
             .expect("register a paper")
@@ -508,7 +509,7 @@ mod tests {
             )
             .expect("record the stored path");
         drop(catalog);
-        drop(Corpus::open(&cfg.papers_corpus_db()).expect("create papers corpus"));
+        drop(Corpus::open_for_write(&cfg.papers_corpus_db()).expect("create papers corpus"));
         if file_present {
             std::fs::create_dir_all(cfg.papers_dir()).expect("papers dir");
             std::fs::write(&envelope, b"{}").expect("write the envelope");
@@ -607,7 +608,10 @@ mod tests {
     fn half_a_paper_pipeline_reports_the_absent_store_without_creating_it() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cfg = config_for(dir.path());
-        drop(Catalog::open(&cfg.papers_catalog_db()).expect("create papers catalog"));
+        drop(
+            Catalog::open_for_write_unbacked(&cfg.papers_catalog_db())
+                .expect("create papers catalog"),
+        );
         let before = db_files(dir.path());
 
         let report = report_json(&cfg);
@@ -629,7 +633,7 @@ mod tests {
     fn a_reference_only_root_is_verified_rather_than_reported_uninitialised() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cfg = config_for(dir.path());
-        drop(Refs::open(&cfg.reference_db()).expect("create reference.db"));
+        drop(Refs::open_for_write(&cfg.reference_db()).expect("create reference.db"));
         let before = db_files(dir.path());
 
         let report = report_json(&cfg);
@@ -663,7 +667,7 @@ mod tests {
         ] {
             let dir = tempfile::tempdir().expect("tempdir");
             let cfg = config_for(dir.path());
-            drop(Refs::open(&cfg.reference_db()).expect("create reference.db"));
+            drop(Refs::open_for_write(&cfg.reference_db()).expect("create reference.db"));
             let conn = bookrack_dbkit::open_production(&cfg.reference_db()).expect("open");
             conn.pragma_update(None, "user_version", found)
                 .expect("stamp the version");
@@ -689,7 +693,8 @@ mod tests {
     fn the_book_side_fields_keep_their_top_level_names_types_and_values() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cfg = config_for(dir.path());
-        let mut catalog = Catalog::open(&cfg.catalog_db()).expect("create catalog");
+        let mut catalog =
+            Catalog::open_for_write_unbacked(&cfg.catalog_db()).expect("create catalog");
         let intake_id = catalog
             .register_intake(ItemKind::Book, &NewIntake::new("sha-book"))
             .expect("register a book")
@@ -699,7 +704,7 @@ mod tests {
             .set_stored_path(ItemKind::Book, intake_id, "aa/source.txt")
             .expect("record the stored path");
         drop(catalog);
-        drop(Corpus::open(&cfg.corpus_db()).expect("create corpus"));
+        drop(Corpus::open_for_write(&cfg.corpus_db()).expect("create corpus"));
         let stored = cfg.books_dir().join("aa/source.txt");
         std::fs::create_dir_all(stored.parent().expect("parent")).expect("books dir");
         std::fs::write(&stored, b"source bytes").expect("write the stored file");

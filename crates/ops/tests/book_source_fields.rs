@@ -36,8 +36,8 @@ impl Fixture {
         let lancedb_dir = tmp.path().join("lancedb");
         let books_dir = tmp.path().join("books");
         let backup_dir = tmp.path().join("backup");
-        Catalog::open(&catalog_db).expect("seed catalog");
-        Corpus::open(&corpus_db).expect("seed corpus");
+        Catalog::open_for_write_unbacked(&catalog_db).expect("seed catalog");
+        Corpus::open_for_write(&corpus_db).expect("seed corpus");
         let ops = Ops::<OllamaEmbedClient>::catalog_only(
             corpus_db,
             catalog_db.clone(),
@@ -57,7 +57,7 @@ impl Fixture {
     /// reads are expected to surface. `page_count` is not a
     /// registration-time column, so it is written separately.
     fn seed_book(&self, sha: &str, original_path: &str, byte_size: i64, page_count: i64) -> i64 {
-        let mut catalog = Catalog::open(&self.catalog_db).expect("open catalog");
+        let mut catalog = Catalog::open_for_write_unbacked(&self.catalog_db).expect("open catalog");
         let intake_id = catalog
             .register_intake(
                 ItemKind::Book,
@@ -104,7 +104,7 @@ fn list_rows_name_the_source_file() {
 #[test]
 fn a_list_row_without_a_recorded_path_carries_a_null_filename() {
     let fx = Fixture::build();
-    let mut catalog = Catalog::open(&fx.catalog_db).expect("open catalog");
+    let mut catalog = Catalog::open_for_write_unbacked(&fx.catalog_db).expect("open catalog");
     let intake_id = catalog
         .register_intake(ItemKind::Book, &NewIntake::new("sha-pathless"))
         .expect("register intake")
@@ -150,7 +150,7 @@ fn the_detail_read_carries_the_page_count_and_byte_size_of_its_intake_row() {
 #[test]
 fn the_detail_read_reports_absent_source_columns_as_null() {
     let fx = Fixture::build();
-    let mut catalog = Catalog::open(&fx.catalog_db).expect("open catalog");
+    let mut catalog = Catalog::open_for_write_unbacked(&fx.catalog_db).expect("open catalog");
     let intake_id = catalog
         .register_intake(ItemKind::Book, &NewIntake::new("sha-bare"))
         .expect("register intake")

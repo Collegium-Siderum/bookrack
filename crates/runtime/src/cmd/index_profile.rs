@@ -1009,8 +1009,9 @@ mod tests {
         let profile = IndexProfile::from_named(PROFILE_QWEN3_06B_DEFAULT).expect("built-in");
         let mut drifted = Pipeline::Papers.target_stamps(&profile.embed.model, profile.embed.dim);
         drifted.chunk_version += 1;
-        let corpus = bookrack_corpus::Corpus::open(&Pipeline::Papers.corpus_db(root.path()))
-            .expect("create the paper corpus");
+        let corpus =
+            bookrack_corpus::Corpus::open_for_write(&Pipeline::Papers.corpus_db(root.path()))
+                .expect("create the paper corpus");
         for (key, value) in [
             (
                 bookrack_corpus::EMBED_MODEL_KEY,

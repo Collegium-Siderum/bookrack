@@ -23,6 +23,18 @@
 #      double-quoted string does not count: word lists and patterns are
 #      data, a predicate is written as a character or an integer.
 #      Exceptions: [[codepoint]].
+#   5  write doors. Outside the store crates, a production function
+#      that opens a store for writing must be listed. A door is a call
+#      to `open_for_write`, to any function whose name ends in
+#      `_for_write` or `_for_write_unbacked`, to `open_for_bookkeeping`,
+#      to `drop_chunks_table`, or to `ChunkStore::try_open`. A function
+#      outside the store crates that opens a door and hands the handle
+#      on is named `*_for_write`, so its callers are held to the list
+#      too. The enclosing function is the nearest `fn` above the call
+#      with a smaller indent, which rustfmt makes reliable and which
+#      sees through closures and macro bodies. A site registered with
+#      `access = "bookkeeping"` may take the bookkeeping door only.
+#      Exceptions: [[write_door]].
 #   6  paired names. Two production functions of one crate, or two
 #      source files of one directory, whose names differ only by kind
 #      must be covered by one [[parallel]] entry, or be on the list of
@@ -167,6 +179,7 @@ awk -F '\t' -v reg="$reg" -v reasons="$REASONS" '
     keys["file"] = "paths[] reason exit"; need["file"] = "paths[] reason"
     keys["text_dep"] = "from to reason exit"; need["text_dep"] = "from to reason"
     keys["codepoint"] = "paths[] reason exit"; need["codepoint"] = "paths[] reason"
+    keys["write_door"] = "site access"; need["write_door"] = "site access"
     keys["parallel"] = "id summary sites[] reason detail agreement pin exit"
     need["parallel"] = "id summary sites[] reason agreement"
     split(reasons, r, " "); for (i in r) known_reason[r[i]] = 1
@@ -202,6 +215,16 @@ awk -F '\t' -v reg="$reg" -v reasons="$REASONS" '
       for (i = 1; i <= m; i++) if (!((id SUBSEP a[i]) in has)) say(at, "missing \"" a[i] "\"")
       if (val[id SUBSEP "reason"] == "transitional" && !((id SUBSEP "exit") in has))
         say(at, "a transitional entry needs an \"exit\"")
+      if (t == "write_door") {
+        name = val[id SUBSEP "site"]; access = val[id SUBSEP "access"]
+        if ((id SUBSEP "site") in has) {
+          if (name !~ /^crates\/.+\.rs::[A-Za-z0-9_]+$/) say(at, "site \"" name "\" is not <file>::<function>")
+          if (name in seen_site) say(at, "site \"" name "\" is registered twice")
+          seen_site[name] = 1
+        }
+        if ((id SUBSEP "access") in has && access != "write" && access != "bookkeeping")
+          say(at, "access \"" access "\" is not write or bookkeeping")
+      }
       if (t == "parallel") {
         name = val[id SUBSEP "id"]; agreement = val[id SUBSEP "agreement"]
         if ((id SUBSEP "id") in has) {
@@ -442,6 +465,67 @@ awk -v waived="$tmp/codepoint.waived" -v owner="$TEXT_CRATE" '
     exit bad
   }
 ' "$tmp/codepoint.hits" || fail=1
+
+# Check 5.
+awk -F '\t' '
+  $1 != "write_door" { next }
+  $4 == "site" { site[$2] = $5 }
+  $4 == "access" { access[$2] = $5 }
+  END { for (e in site) print site[e] "\t" access[e] }
+' "$tmp/reg.tsv" > "$tmp/door.listed"
+stores=$(echo "$TIERS" | awk '$1 == "store" { for (i = 2; i <= NF; i++) printf "%s%s", (i > 2 ? "\\|" : ""), $i }')
+grep -v "^crates/\\($stores\\)/" "$tmp/sources" > "$tmp/door.sources" || true
+# shellcheck disable=SC2046
+production $(cat "$tmp/door.sources") |
+  awk -v listed="$tmp/door.listed" '
+    BEGIN {
+      while ((getline line < listed) > 0) { split(line, f, "\t"); access[f[1]] = f[2] }
+      define = "^ *(pub(\\([^)]*\\))? )?(const )?(async )?(unsafe )?fn [A-Za-z0-9_]+"
+      door = "(^|[^A-Za-z0-9_])(open_for_bookkeeping|drop_chunks_table|[A-Za-z0-9_]*_for_write(_unbacked)?|ChunkStore::try_open)([^A-Za-z0-9_]|$)"
+    }
+    {
+      file = $0; sub(/:.*/, "", file)
+      body = $0; sub(/^[^:]*:[^:]*:/, "", body)
+      if (file != current) { current = file; for (k in fn_at) delete fn_at[k] }
+      match(body, /^ */); indent = RLENGTH
+      if (match(body, define)) {
+        name = substr(body, RSTART, RLENGTH); sub(/^.*fn /, "", name)
+        for (k in fn_at) if (k + 0 >= indent) delete fn_at[k]
+        fn_at[indent] = name
+        next
+      }
+      if (body ~ /^ *(pub(\([^)]*\))? )?use /) next
+      gsub(/"([^"\\]|\\.)*"/, " ", body)
+      rest = body
+      while (match(rest, door)) {
+        call = substr(rest, RSTART, RLENGTH); rest = substr(rest, RSTART + RLENGTH - 1)
+        gsub(/^[^A-Za-z0-9_]|[^A-Za-z0-9_]$/, "", call)
+        best = -1
+        for (k in fn_at) if (k + 0 < indent && k + 0 > best) best = k + 0
+        if (best < 0) {
+          print "structure-check: " file ": a write door is taken outside any function: " call
+          bad = 1
+          continue
+        }
+        site = file "::" fn_at[best]
+        hit[site] = 1
+        if (!(site in access)) {
+          if (!(site in told)) print "STRUCTURE: " site " takes a write door (" call ") and is not registered in [[write_door]]"
+          told[site] = 1; bad = 1
+        } else if (access[site] == "bookkeeping" && call != "open_for_bookkeeping") {
+          print "STRUCTURE: " site " is registered for bookkeeping and takes a write door (" call ")"
+          bad = 1
+        }
+      }
+    }
+    END {
+      for (site in access) if (!(site in hit)) {
+        print "STRUCTURE: stale [[write_door]] " site ": it takes no write door, or is gone -- delete it"
+        bad = 1
+      }
+      exit bad
+    }
+  ' || fail=1
 
 # --- parallel implementations ----------------------------------------
 

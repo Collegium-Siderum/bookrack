@@ -28,8 +28,8 @@ impl Fixture {
         let catalog_db = tmp.path().join("catalog.db");
         let corpus_db = tmp.path().join("corpus.db");
         let lancedb_dir = tmp.path().join("lancedb");
-        Catalog::open(&catalog_db).expect("seed catalog");
-        let corpus = Corpus::open(&corpus_db).expect("seed corpus");
+        Catalog::open_for_write_unbacked(&catalog_db).expect("seed catalog");
+        let corpus = Corpus::open_for_write(&corpus_db).expect("seed corpus");
         let books_dir = tmp.path().join("books");
         let backup_dir = tmp.path().join("backup");
         let ops = Ops::<OllamaEmbedClient>::catalog_only(

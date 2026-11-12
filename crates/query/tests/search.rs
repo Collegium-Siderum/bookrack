@@ -23,7 +23,7 @@ use bookrack_vectors::{ChunkRow, ChunkStore};
 /// facade's read-only opens succeed. The facade refuses to open a
 /// non-existent catalog file.
 fn seed_catalog(catalog_db: &Path) {
-    drop(Catalog::open(catalog_db).expect("seed catalog"));
+    drop(Catalog::open_for_write_unbacked(catalog_db).expect("seed catalog"));
 }
 
 const DIM: usize = 4;
@@ -94,7 +94,7 @@ async fn search_returns_a_cited_passage_through_the_facade() {
 
     // Build a one-chapter book in an on-disk corpus.
     let leaf_id = {
-        let mut corpus = Corpus::open(&corpus_db).expect("open corpus");
+        let mut corpus = Corpus::open_for_write(&corpus_db).expect("open corpus");
         let report = ingest_structure(
             &mut corpus,
             1,
@@ -117,7 +117,7 @@ async fn search_returns_a_cited_passage_through_the_facade() {
 
         // Index the leaf in the vector store, then close both handles so
         // the facade reopens them from their paths.
-        let store = ChunkStore::open(&lancedb_dir, DIM)
+        let store = ChunkStore::open_for_write(&lancedb_dir, DIM)
             .await
             .expect("open store");
         store
@@ -169,7 +169,7 @@ async fn build_stamped_books(
     lancedb_dir: &std::path::Path,
     intake_ids: &[i64],
 ) {
-    let mut corpus = Corpus::open(corpus_db).expect("open corpus");
+    let mut corpus = Corpus::open_for_write(corpus_db).expect("open corpus");
     let mut rows = Vec::new();
     for &intake_id in intake_ids {
         let report = ingest_structure(
@@ -199,7 +199,7 @@ async fn build_stamped_books(
     corpus
         .reconcile_index_stamps(&current_index_stamps(MODEL, DIM as u32))
         .expect("stamp");
-    let store = ChunkStore::open(lancedb_dir, DIM)
+    let store = ChunkStore::open_for_write(lancedb_dir, DIM)
         .await
         .expect("open store");
     store.append(&rows).await.expect("append");
@@ -469,7 +469,7 @@ async fn an_intake_stamped_by_an_older_extractor_is_still_served() {
     // Intake 1 is embedded but stamped one extractor version behind this
     // binary, so the catalog lists its partition as stale.
     {
-        let mut catalog = Catalog::open(&catalog_db).expect("open catalog");
+        let mut catalog = Catalog::open_for_write_unbacked(&catalog_db).expect("open catalog");
         let intake_id = catalog
             .register_intake(ItemKind::Book, &NewIntake::new("ab".repeat(32)))
             .expect("register intake")

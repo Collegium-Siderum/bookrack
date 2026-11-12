@@ -264,7 +264,7 @@ fn entry(slug: &str, key: &str, payload: Value, flags: &[&str]) -> NewEntry {
 /// to `smith` in `book_a`; `ashgrovewren` is reachable from its
 /// headword through the latin fallback.
 fn seed(path: &Path) {
-    let refs = Refs::open(path).expect("create reference.db");
+    let refs = Refs::open_for_write(path).expect("create reference.db");
     refs.upsert_book(&book("book_a", 10)).unwrap();
     refs.upsert_book(&book("book_b", 5)).unwrap();
     refs.upsert_entry(&entry(

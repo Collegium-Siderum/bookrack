@@ -109,9 +109,10 @@ impl Fixture {
         let catalog_db = root.join("catalog.db");
         // An empty catalog, so the second library is a real root rather
         // than a bare directory.
-        Catalog::open(&second_root.join("catalog.db")).expect("open second catalog");
+        Catalog::open_for_write_unbacked(&second_root.join("catalog.db"))
+            .expect("open second catalog");
         let intake_id = {
-            let mut catalog = Catalog::open(&catalog_db).expect("open catalog");
+            let mut catalog = Catalog::open_for_write_unbacked(&catalog_db).expect("open catalog");
             catalog
                 .register_intake(
                     ItemKind::Book,
@@ -190,7 +191,7 @@ impl Fixture {
     /// Register one book and drive it to `status`, returning its
     /// intake id.
     fn seed_book(&self, sha: &str, status: IntakeStatus) -> i64 {
-        let mut catalog = Catalog::open(&self.catalog_db).expect("open catalog");
+        let mut catalog = Catalog::open_for_write_unbacked(&self.catalog_db).expect("open catalog");
         let intake_id = catalog
             .register_intake(ItemKind::Book, &NewIntake::new(sha).format("epub"))
             .expect("register intake")
@@ -393,7 +394,7 @@ async fn a_tool_call_round_trips_and_is_attributed_to_the_mcp_surface() {
 
     // The registry's Ops carries `Caller::cli()`, so only the
     // `call_tool` override can make the recorded source read "mcp".
-    let catalog = Catalog::open(&fx.catalog_db).expect("reopen catalog");
+    let catalog = Catalog::open_for_write_unbacked(&fx.catalog_db).expect("reopen catalog");
     let rows = catalog
         .tool_calls_for_tool("library.stats")
         .expect("tool calls");

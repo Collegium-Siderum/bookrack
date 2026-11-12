@@ -868,7 +868,9 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().expect("temp dir");
-        let store = ChunkStore::open(dir.path(), DIM).await.expect("store");
+        let store = ChunkStore::open_for_write(dir.path(), DIM)
+            .await
+            .expect("store");
         store
             .append(&[ChunkRow {
                 vector: vec![1.0, 0.0, 0.0, 0.0],
@@ -1164,7 +1166,9 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().expect("temp dir");
-        let store = ChunkStore::open(dir.path(), DIM).await.expect("store");
+        let store = ChunkStore::open_for_write(dir.path(), DIM)
+            .await
+            .expect("store");
         store
             .append(&[ChunkRow {
                 vector: vec![1.0, 0.0, 0.0, 0.0],

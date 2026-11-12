@@ -58,7 +58,7 @@ fn retrieval_show_reads_the_weak_threshold_from_the_target_library() -> Result<(
     // One recorded call, one hit at 0.62 -- between the two thresholds
     // the test drives, so the verdict can only come from the file.
     let call_id = {
-        let catalog = Catalog::open(&root.path().join("catalog.db"))?;
+        let catalog = Catalog::open_for_write_unbacked(&root.path().join("catalog.db"))?;
         catalog.record_tool_call_with_retrieval(
             &NewMcpToolCall::new("mcp", "library.search", "ok"),
             Some(&NewRetrievalCall {

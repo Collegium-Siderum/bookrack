@@ -113,7 +113,7 @@ async fn registry_glean_records_a_pipeline_run_on_the_paper_catalog() {
         .await
         .expect("glean must succeed");
 
-    let catalog = Catalog::open(&catalog_db).expect("open paper catalog");
+    let catalog = Catalog::open_for_write_unbacked(&catalog_db).expect("open paper catalog");
     let runs = catalog
         .list_pipeline_runs(Some("glean"), None)
         .expect("list runs");

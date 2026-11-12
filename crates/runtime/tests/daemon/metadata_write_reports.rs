@@ -65,7 +65,7 @@ fn keys(value: &Value) -> Vec<&str> {
 
 /// The book's current pipeline stage.
 fn stage_of(root: &Path, book: i64) -> Result<Option<String>> {
-    Ok(Catalog::open(&root.join("catalog.db"))?
+    Ok(Catalog::open_for_write_unbacked(&root.join("catalog.db"))?
         .book_state(PartitionIdx::new(book).root().get())?
         .map(|state| state.current_stage))
 }
@@ -76,7 +76,7 @@ fn audit_row_exists(root: &Path, reply: &Value) -> Result<bool> {
     let audit_id = reply["audit_id"]
         .as_i64()
         .with_context(|| format!("no audit_id: {reply}"))?;
-    Ok(Catalog::open(&root.join("catalog.db"))?
+    Ok(Catalog::open_for_write_unbacked(&root.join("catalog.db"))?
         .recent_metadata_audit("", 1000)?
         .iter()
         .any(|row| row.audit_id == audit_id))
@@ -133,7 +133,7 @@ async fn park_one(reader: &mut Reader, w: &mut Writer, root: &Path, dir: &Path) 
             _ => tokio::time::sleep(Duration::from_millis(100)).await,
         }
     }
-    let intakes = Catalog::open(&root.join("catalog.db"))?.intakes_head(10)?;
+    let intakes = Catalog::open_for_write_unbacked(&root.join("catalog.db"))?.intakes_head(10)?;
     let [intake] = intakes.as_slice() else {
         return Err(eyre!("expected one intake, found {}", intakes.len()));
     };
@@ -186,7 +186,7 @@ where
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_approve_off_the_gate_does_not_resume() -> Result<()> {
     with_daemon(|sock, root| async move {
-        let book = Catalog::open(&root.join("catalog.db"))?
+        let book = Catalog::open_for_write_unbacked(&root.join("catalog.db"))?
             .register_intake(
                 ItemKind::Book,
                 &NewIntake::new("sha-off-gate").format("epub"),

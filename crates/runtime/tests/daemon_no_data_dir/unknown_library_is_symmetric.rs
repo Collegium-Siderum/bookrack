@@ -54,10 +54,10 @@ async fn every_handler_resolving_a_library_param_refuses_an_unknown_name_alike()
     // control below reports a library rather than a missing store.
     for root in [&alpha, &beta] {
         for db in ["catalog.db", "papers_catalog.db"] {
-            bookrack_catalog::Catalog::open(&root.join(db))?;
+            bookrack_catalog::Catalog::open_for_write_unbacked(&root.join(db))?;
         }
         for db in ["corpus.db", "papers_corpus.db"] {
-            bookrack_corpus::Corpus::open(&root.join(db))?;
+            bookrack_corpus::Corpus::open_for_write(&root.join(db))?;
         }
     }
     sandbox.write_registry_entries(

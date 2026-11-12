@@ -81,12 +81,12 @@ fn intake_v1_fixture_round_trips() {
     );
 
     // Open through a temp copy so a CI run never mutates the committed
-    // fixture file even though `Catalog::open` migrates and verifies.
+    // fixture file even though `Catalog::open_for_write_unbacked` migrates and verifies.
     let dir = tempdir().expect("tempdir");
     let target = dir.path().join("catalog.db");
     std::fs::copy(&fixture_src, &target).expect("copy fixture");
 
-    let catalog = Catalog::open(&target).expect("open migrated fixture");
+    let catalog = Catalog::open_for_write_unbacked(&target).expect("open migrated fixture");
 
     assert_eq!(catalog.count_intakes().expect("count"), ROWS.len() as u64);
 
@@ -141,7 +141,7 @@ fn regenerate_intake_v1_fixture() {
         std::fs::remove_file(&dst).expect("clear previous fixture");
     }
 
-    let mut catalog = Catalog::open(&dst).expect("open new catalog");
+    let mut catalog = Catalog::open_for_write_unbacked(&dst).expect("open new catalog");
     for row in ROWS {
         let id = catalog
             .register_intake(

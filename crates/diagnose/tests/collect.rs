@@ -65,7 +65,8 @@ impl Fixture {
         // Seed the catalog with one intake + one row of each audit
         // table so the catalog collector has something to write out.
         {
-            let mut catalog = Catalog::open(&data_dir.join("catalog.db")).unwrap();
+            let mut catalog =
+                Catalog::open_for_write_unbacked(&data_dir.join("catalog.db")).unwrap();
             catalog
                 .register_intake(
                     ItemKind::Book,
@@ -92,7 +93,7 @@ impl Fixture {
 
         // Seed an (unstamped) corpus so the corpus collector reads a
         // real store instead of reporting a missing one.
-        drop(Corpus::open(&data_dir.join("corpus.db")).unwrap());
+        drop(Corpus::open_for_write(&data_dir.join("corpus.db")).unwrap());
 
         let cfg = Config::new(data_dir, "http://localhost:0/".to_string());
         Fixture { _tmp: tmp, cfg }
@@ -678,7 +679,7 @@ fn collect_snapshots_the_paper_stores_when_present() {
     isolate_daemon_state_dir();
     let fx = Fixture::build();
     {
-        let mut catalog = Catalog::open(&fx.cfg.papers_catalog_db()).unwrap();
+        let mut catalog = Catalog::open_for_write_unbacked(&fx.cfg.papers_catalog_db()).unwrap();
         catalog
             .register_intake(
                 ItemKind::Paper,
@@ -686,7 +687,7 @@ fn collect_snapshots_the_paper_stores_when_present() {
             )
             .unwrap();
     }
-    drop(Corpus::open(&fx.cfg.papers_corpus_db()).unwrap());
+    drop(Corpus::open_for_write(&fx.cfg.papers_corpus_db()).unwrap());
     let lancedb_dir = fx.cfg.papers_lancedb_dir();
     std::fs::create_dir_all(&lancedb_dir).unwrap();
     let meta = bookrack_vectors::meta::VectorsMeta {
@@ -741,7 +742,7 @@ fn collect_summarises_the_reference_store_without_its_titles() {
     isolate_daemon_state_dir();
     let fx = Fixture::build();
     {
-        let refs = bookrack_refs::Refs::open(&fx.cfg.reference_db()).unwrap();
+        let refs = bookrack_refs::Refs::open_for_write(&fx.cfg.reference_db()).unwrap();
         refs.upsert_book(&bookrack_refs::NewBook {
             book_slug: "ref-fixture".to_string(),
             schema_name: "glossary".to_string(),

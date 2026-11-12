@@ -36,7 +36,7 @@ impl Fixture {
         std::fs::create_dir_all(&books_dir).expect("books dir");
         // Create the catalog once so the schema is migrated before the
         // first op runs.
-        Catalog::open(&catalog_db).expect("seed catalog");
+        Catalog::open_for_write_unbacked(&catalog_db).expect("seed catalog");
         let ops = Ops::<OllamaEmbedClient>::catalog_only(
             corpus_db,
             catalog_db.clone(),
@@ -86,7 +86,7 @@ fn sample_extraction() -> Extraction {
 }
 
 fn seed_book(fx: &Fixture, sha: &str) -> i64 {
-    let mut catalog = Catalog::open(&fx.catalog_db).expect("open catalog");
+    let mut catalog = Catalog::open_for_write_unbacked(&fx.catalog_db).expect("open catalog");
     let intake_id = catalog
         .register_intake(
             ItemKind::Book,
@@ -110,7 +110,7 @@ fn report_grades_the_effective_view_and_writes_nothing() {
     let fx = Fixture::build();
     let id = seed_book(&fx, "sha-report-read");
 
-    let catalog = Catalog::open(&fx.catalog_db).expect("open catalog");
+    let catalog = Catalog::open_for_write_unbacked(&fx.catalog_db).expect("open catalog");
     // Seed a stale stored rollup the report must surface untouched.
     let mut attrs = NewPublicationAttrs::new(id, ItemKind::Book);
     attrs.title = Some("A Plain Title".to_string());
@@ -199,7 +199,7 @@ fn unknown_book_maps_to_intake_not_found() {
 #[test]
 fn missing_envelope_is_an_error() {
     let fx = Fixture::build();
-    let mut catalog = Catalog::open(&fx.catalog_db).expect("open catalog");
+    let mut catalog = Catalog::open_for_write_unbacked(&fx.catalog_db).expect("open catalog");
     let id = catalog
         .register_intake(
             ItemKind::Book,

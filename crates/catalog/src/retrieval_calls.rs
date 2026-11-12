@@ -477,7 +477,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("catalog.db");
         {
-            let catalog = Catalog::open(&path).expect("first open");
+            let catalog = Catalog::open_for_write_unbacked(&path).expect("first open");
             seed_call(
                 &catalog,
                 "feedfacecafebeef",
@@ -485,7 +485,7 @@ mod tests {
             );
         }
 
-        let catalog = Catalog::open(&path).expect("reopen");
+        let catalog = Catalog::open_for_write_unbacked(&path).expect("reopen");
         let deleted = catalog
             .prune_retrieval_calls_with_stale_fingerprint("0123456789abcdef")
             .expect("prune");

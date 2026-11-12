@@ -49,7 +49,7 @@ const SPECS: &[&TableSpec] = &[
 
 /// A handle to one `corpus.db` database.
 ///
-/// Owns a single SQLite connection. Construct with [`Corpus::open`] for
+/// Owns a single SQLite connection. Construct with [`Corpus::open_for_write`] for
 /// a file-backed database or [`Corpus::open_in_memory`] for an
 /// ephemeral one (useful in tests and for throwaway processing).
 pub struct Corpus {
@@ -62,7 +62,7 @@ impl Corpus {
     ///
     /// Fails with [`CorpusError::SchemaMismatch`] if the file exists but
     /// was built by an incompatible schema revision.
-    pub fn open(path: &Path) -> Result<Corpus> {
+    pub fn open_for_write(path: &Path) -> Result<Corpus> {
         Corpus::from_connection(bookrack_dbkit::open_production(path)?)
     }
 
@@ -236,13 +236,13 @@ mod tests {
 
         let too_new = READER_VERSION + 1;
         {
-            let corpus = Corpus::open(&path).expect("first open");
+            let corpus = Corpus::open_for_write(&path).expect("first open");
             corpus
                 .meta_set(MIN_READER_VERSION_KEY, &too_new.to_string())
                 .expect("overwrite stamp with a too-new value");
         }
 
-        let Err(err) = Corpus::open(&path) else {
+        let Err(err) = Corpus::open_for_write(&path) else {
             panic!("reopen must refuse")
         };
         assert!(
@@ -263,11 +263,11 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("corpus.db");
 
-        Corpus::open(&path).expect("first open");
+        Corpus::open_for_write(&path).expect("first open");
         // Scope the reopened handle so its connection is closed before
         // the cleanup: Windows refuses to delete a file still held open.
         let version = {
-            let reopened = Corpus::open(&path).expect("second open");
+            let reopened = Corpus::open_for_write(&path).expect("second open");
             reopened.meta_get(SCHEMA_VERSION_KEY).expect("read")
         };
         assert_eq!(version, Some(SCHEMA_VERSION.to_string()));
@@ -294,7 +294,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("corpus.db");
 
-        Corpus::open(&path).expect("first open stamps the current schema version");
+        Corpus::open_for_write(&path).expect("first open stamps the current schema version");
         // A matching stamp opens read-only cleanly.
         Corpus::open_read_only(&path).expect("read-only open of a matching corpus");
 
@@ -304,7 +304,7 @@ mod tests {
         // catches the mismatch.
         let foreign = (SCHEMA_VERSION + 1).to_string();
         {
-            let corpus = Corpus::open(&path).expect("reopen");
+            let corpus = Corpus::open_for_write(&path).expect("reopen");
             corpus
                 .meta_set(SCHEMA_VERSION_KEY, &foreign)
                 .expect("overwrite schema_version");
@@ -351,7 +351,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("corpus.db");
 
-        Corpus::open(&path).expect("create");
+        Corpus::open_for_write(&path).expect("create");
         // Rename a column behind the specs' back. The version stamps are
         // untouched, so only the spec-conformance check can catch this.
         {
@@ -380,7 +380,7 @@ mod tests {
 
         let too_new = READER_VERSION + 1;
         {
-            let corpus = Corpus::open(&path).expect("first open");
+            let corpus = Corpus::open_for_write(&path).expect("first open");
             corpus
                 .meta_set(MIN_READER_VERSION_KEY, &too_new.to_string())
                 .expect("overwrite stamp with a too-new value");

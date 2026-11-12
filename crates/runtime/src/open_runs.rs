@@ -261,7 +261,8 @@ pub fn render_close_report(report: &CloseAbandonedReport, json: bool) {
 /// where the reverse order would leave a `running` row no longer
 /// provably abandoned.
 fn close_one(run: &OpenRun) -> Result<(), String> {
-    let catalog = Catalog::open(&run.catalog_db).map_err(|err| bookrack_core::error_chain(&err))?;
+    let catalog = Catalog::open_for_write_unbacked(&run.catalog_db)
+        .map_err(|err| bookrack_core::error_chain(&err))?;
     catalog
         .close_pipeline_run(&run.pipeline_run_id, bookrack_catalog::RUN_STATUS_ABANDONED)
         .map_err(|err| bookrack_core::error_chain(&err))?;
@@ -290,7 +291,7 @@ mod tests {
 
     /// Seed one `running` row and hand back its id.
     fn open_row(catalog_db: &Path, command: &str) -> String {
-        let catalog = Catalog::open(catalog_db).expect("open catalog");
+        let catalog = Catalog::open_for_write_unbacked(catalog_db).expect("open catalog");
         catalog
             .open_pipeline_run(command, None, None)
             .expect("open run")
@@ -342,7 +343,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let catalog_db = dir.path().join("catalog.db");
         let id = open_row(&catalog_db, "ingest");
-        Catalog::open(&catalog_db)
+        Catalog::open_for_write_unbacked(&catalog_db)
             .expect("reopen")
             .close_pipeline_run(&id, "error")
             .expect("close");

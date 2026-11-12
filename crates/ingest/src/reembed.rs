@@ -77,7 +77,7 @@ pub async fn plan_reembed(
 ) -> Result<Vec<ReembedPlan>> {
     // The on-disk schema decides the dim; passing 0 forces the open
     // path to read it from the schema for an existing table.
-    let store = ChunkStore::open(lancedb_dir, 0).await?;
+    let store = ChunkStore::open_for_write(lancedb_dir, 0).await?;
     let targets = if let Some(ids) = only_ids {
         collect_pinned_targets(catalog, ids)?
     } else {
@@ -266,7 +266,7 @@ fn collect_pinned_targets(catalog: &Catalog, ids: &[i64]) -> Result<Vec<Intake>>
 async fn read_chunk_plans(lancedb_dir: &Path, partition: PartitionIdx) -> Result<Vec<ChunkPlan>> {
     // Dim hint is irrelevant for an existing table: open reads the
     // schema. For a fresh directory the scan is empty.
-    let store = ChunkStore::open(lancedb_dir, 0).await?;
+    let store = ChunkStore::open_for_write(lancedb_dir, 0).await?;
     let rows = store.scan_partition(partition).await?;
     Ok(rows.into_iter().map(row_to_plan).collect())
 }
@@ -338,7 +338,9 @@ mod tests {
     }
 
     async fn seed_partition(lancedb_dir: &Path, intake_id: i64, count: usize) {
-        let store = ChunkStore::open(lancedb_dir, 4).await.expect("open");
+        let store = ChunkStore::open_for_write(lancedb_dir, 4)
+            .await
+            .expect("open");
         let rows: Vec<ChunkRow> = (0..count as i64)
             .map(|o| fake_row(intake_id, o + 1, &format!("chunk {intake_id}-{o}")))
             .collect();
@@ -436,7 +438,7 @@ mod tests {
         seed_catalog_embedded(&mut catalog, &[1]);
         seed_partition(dir.path(), 1, 5).await;
 
-        let before = ChunkStore::open(dir.path(), 4)
+        let before = ChunkStore::open_for_write(dir.path(), 4)
             .await
             .expect("open")
             .count_rows()
@@ -450,7 +452,9 @@ mod tests {
             .expect("reembed");
         assert_eq!(report.chunks_written, 5);
 
-        let store = ChunkStore::open(dir.path(), 4).await.expect("open");
+        let store = ChunkStore::open_for_write(dir.path(), 4)
+            .await
+            .expect("open");
         assert_eq!(store.count_rows().await.expect("count"), 5);
         let rows = store
             .scan_partition(PartitionIdx::new(1))

@@ -129,7 +129,7 @@ impl World {
     /// index a profile would plan work for.
     fn unidentified_alpha(&self) {
         self.distill_into_alpha();
-        let corpus = Corpus::open(&self.alpha.join("corpus.db")).expect("open corpus");
+        let corpus = Corpus::open_for_write(&self.alpha.join("corpus.db")).expect("open corpus");
         corpus
             .meta_set(EMBED_MODEL_KEY, "another-embed-model")
             .expect("stamp corpus");

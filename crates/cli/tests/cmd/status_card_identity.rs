@@ -33,12 +33,15 @@ async fn the_card_counts_the_library_it_names() {
     let beta = sandbox.data_root("beta-root");
     // Both roots carry a catalog, so the two libraries differ in their
     // counts alone rather than in whether a store is there at all.
-    let catalog = Catalog::open(&alpha.join("catalog.db")).expect("open the alpha catalog");
+    let catalog = Catalog::open_for_write_unbacked(&alpha.join("catalog.db"))
+        .expect("open the alpha catalog");
     catalog
         .upsert_book_state(&NewItemState::new(1, 1, "ready"))
         .expect("record a ready book in alpha");
     drop(catalog);
-    drop(Catalog::open(&beta.join("catalog.db")).expect("open the beta catalog"));
+    drop(
+        Catalog::open_for_write_unbacked(&beta.join("catalog.db")).expect("open the beta catalog"),
+    );
     // `alpha` is the registry default; the daemon comes up under `beta`.
     sandbox.write_registry_entries(
         Some("alpha"),

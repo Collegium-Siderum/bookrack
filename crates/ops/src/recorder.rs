@@ -157,7 +157,7 @@ impl<'a> Recorder<'a> {
         };
 
         // Skip recording on a fresh data root that holds no catalog yet.
-        // `Catalog::open` would otherwise materialize `catalog.db` just to
+        // `Catalog::open_for_write_unbacked` would otherwise materialize `catalog.db` just to
         // hold a single audit row, which turns `bookrack info` on an empty
         // root into a write — exactly what the read-only contract refuses.
         if !self.catalog_db.exists() {
@@ -175,7 +175,7 @@ impl<'a> Recorder<'a> {
             );
         }
 
-        let write_attempt = Catalog::open(self.catalog_db)
+        let write_attempt = Catalog::open_for_write_unbacked(self.catalog_db)
             .and_then(|c| c.record_tool_call_with_retrieval(&row, retrieval.as_ref()));
         if let Err(e) = write_attempt {
             tracing::warn!(
@@ -279,7 +279,7 @@ mod tests {
 
     fn open_catalog(tmp: &TempDir) -> (std::path::PathBuf, Catalog) {
         let path = tmp.path().join("catalog.db");
-        let catalog = Catalog::open(&path).expect("seed catalog");
+        let catalog = Catalog::open_for_write_unbacked(&path).expect("seed catalog");
         (path, catalog)
     }
 

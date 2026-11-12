@@ -93,7 +93,7 @@ impl From<&EmbedRunReport> for ResumeCounts {
 }
 
 /// REPL-side dispatch for the write actions. Triggers a pending
-/// migration once via `open_with_backup` before each write so the
+/// migration once via `open_for_write` before each write so the
 /// per-call handles inside the ops layer only see the migrated
 /// database. Returns what the write did.
 pub async fn run_write(
@@ -110,7 +110,7 @@ pub async fn run_write(
         });
     }
     let _migrate =
-        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+        Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let ops = catalog_only_ops(cfg);
     let edit =
         |book: i64, field: Option<String>, outcome: WriteOutcome| MetadataWriteReport::Edit {
@@ -202,7 +202,7 @@ pub async fn run_write(
 fn book_is_parked_at_metadata(cfg: &Config, book: i64) -> Result<bool> {
     use bookrack_corpus::PartitionIdx;
     let catalog =
-        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+        Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let book_root_id = PartitionIdx::new(book).root();
     let Some(state) = catalog
         .book_state(book_root_id.get())
@@ -436,9 +436,9 @@ fn reject(ops: &Ops<OllamaEmbedClient>, book: i64, reason: &str) -> Result<Write
 
 async fn advance(cfg: &Config, book: i64, profile_name: Option<&str>) -> Result<EmbedRunReport> {
     let embed_cfg = crate::profile::effective_embed_config(cfg)?;
-    let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open corpus")?;
     let mut catalog =
-        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+        Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let audit_profile = load_audit_profile(cfg, profile_name);
 
     let book_root_id = PartitionIdx::new(book).root();
@@ -515,7 +515,7 @@ mod tests {
     }
 
     fn seed_intake(root: &Path, sha: &str) -> i64 {
-        Catalog::open(&root.join("catalog.db"))
+        Catalog::open_for_write_unbacked(&root.join("catalog.db"))
             .expect("open catalog")
             .register_intake(ItemKind::Book, &NewIntake::new(sha))
             .expect("register intake")
@@ -558,7 +558,7 @@ mod tests {
     /// The `metadata_audit` row a report's `audit_id` names.
     fn audit_row(cfg: &Config, value: &serde_json::Value) -> bookrack_catalog::MetadataAudit {
         let audit_id = value["audit_id"].as_i64().expect("an audit id");
-        Catalog::open(&cfg.catalog_db())
+        Catalog::open_for_write_unbacked(&cfg.catalog_db())
             .expect("open catalog")
             .recent_metadata_audit("", 1000)
             .expect("read the audit trail")

@@ -359,8 +359,8 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
             .ok_or_else(|| eyre::eyre!("ingest requires a library handle with an embedder"))?;
         let _guard = self.ingest_lock.lock().await;
         let mut corpus =
-            Corpus::open(self.ops.corpus_db()).context("open corpus for ingest write")?;
-        let mut catalog = Catalog::open_with_backup(self.ops.catalog_db(), self.ops.backup_dir())
+            Corpus::open_for_write(self.ops.corpus_db()).context("open corpus for ingest write")?;
+        let mut catalog = Catalog::open_for_write(self.ops.catalog_db(), self.ops.backup_dir())
             .context("open catalog for ingest write")?;
         let report = bookrack_ingest::ingest_book_with_progress(
             path,
@@ -419,9 +419,9 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
             .embedder()
             .ok_or_else(|| eyre::eyre!("OCR intake requires a library handle with an embedder"))?;
         let _guard = self.ingest_lock.lock().await;
-        let mut corpus =
-            Corpus::open(self.ops.corpus_db()).context("open corpus for OCR intake write")?;
-        let mut catalog = Catalog::open_with_backup(self.ops.catalog_db(), self.ops.backup_dir())
+        let mut corpus = Corpus::open_for_write(self.ops.corpus_db())
+            .context("open corpus for OCR intake write")?;
+        let mut catalog = Catalog::open_for_write(self.ops.catalog_db(), self.ops.backup_dir())
             .context("open catalog for OCR intake write")?;
         let report = ingest_ocr_intake_with_progress(
             &mut corpus,
@@ -488,8 +488,9 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
             .papers_dir()
             .ok_or_else(|| eyre::eyre!("library handle has no papers backend"))?;
         let _guard = self.glean_lock.lock().await;
-        let mut corpus = Corpus::open(corpus_db).context("open papers corpus for glean write")?;
-        let mut catalog = Catalog::open_with_backup(catalog_db, self.ops.backup_dir())
+        let mut corpus =
+            Corpus::open_for_write(corpus_db).context("open papers corpus for glean write")?;
+        let mut catalog = Catalog::open_for_write(catalog_db, self.ops.backup_dir())
             .context("open papers catalog for glean write")?;
         // A caller that already opened a `pipeline_runs` row keeps
         // ownership of its lifecycle; otherwise this handle opens one
@@ -526,17 +527,6 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
                 .context("refresh papers library store after glean")?;
         }
         Ok(report)
-    }
-
-    /// Open the paper catalog for synchronous read/write. Returns an
-    /// error when this handle has no papers backend attached.
-    // Parallel implementation: ops-open-catalog.
-    pub fn open_paper_catalog(&self) -> eyre::Result<Catalog> {
-        let catalog_db = self
-            .ops
-            .papers_catalog_db()
-            .ok_or_else(|| eyre::eyre!("library handle has no papers backend"))?;
-        Catalog::open_with_backup(catalog_db, self.ops.backup_dir()).context("open papers catalog")
     }
 
     /// Re-run the paper-side metadata audit on an existing intake's
@@ -1088,7 +1078,8 @@ mod tests {
     /// beside the database file.
     fn glean_catalog(dir: &tempfile::TempDir) -> (PathBuf, bookrack_catalog::Catalog) {
         let path = dir.path().join("papers_catalog.db");
-        let catalog = bookrack_catalog::Catalog::open(&path).expect("open catalog");
+        let catalog =
+            bookrack_catalog::Catalog::open_for_write_unbacked(&path).expect("open catalog");
         (path, catalog)
     }
 

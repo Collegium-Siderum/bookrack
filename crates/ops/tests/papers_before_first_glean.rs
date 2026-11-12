@@ -53,7 +53,7 @@ impl Fixture {
     async fn build() -> Fixture {
         let tmp = tempfile::tempdir().expect("tempdir");
         let catalog_db = tmp.path().join("catalog.db");
-        Catalog::open(&catalog_db).expect("seed book catalog");
+        Catalog::open_for_write_unbacked(&catalog_db).expect("seed book catalog");
 
         let papers_catalog_db = tmp.path().join("papers_catalog.db");
         let papers_corpus_db = tmp.path().join("papers_corpus.db");

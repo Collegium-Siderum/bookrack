@@ -62,7 +62,7 @@ pub fn run(
 /// a database nor migrating one is a price a preview may pay for a
 /// single lifecycle row. An open failure demotes to a NULL run id.
 fn open_papers_dryrun_pipeline_run(cfg: &Config) -> Option<RunHandle> {
-    let catalog = match bookrack_catalog::Catalog::open_if_current(&cfg.papers_catalog_db()) {
+    let catalog = match bookrack_catalog::Catalog::open_for_bookkeeping(&cfg.papers_catalog_db()) {
         Ok(Some(c)) => c,
         Ok(None) => return None,
         Err(err) => {
@@ -90,7 +90,7 @@ fn close_papers_dryrun_pipeline_run(cfg: &Config, run: Option<RunHandle>, ok: bo
     let Some(run) = run else {
         return;
     };
-    let catalog = match bookrack_catalog::Catalog::open_if_current(&cfg.papers_catalog_db()) {
+    let catalog = match bookrack_catalog::Catalog::open_for_bookkeeping(&cfg.papers_catalog_db()) {
         Ok(Some(c)) => c,
         Ok(None) => {
             run.abandon();
@@ -402,8 +402,10 @@ mod tests {
     #[test]
     fn run_registers_its_pipeline_run_on_the_paper_catalog() {
         let (tmp, cfg) = temp_cfg();
-        drop(Catalog::open(&cfg.catalog_db()).expect("seed book catalog"));
-        drop(Catalog::open(&cfg.papers_catalog_db()).expect("seed paper catalog"));
+        drop(Catalog::open_for_write_unbacked(&cfg.catalog_db()).expect("seed book catalog"));
+        drop(
+            Catalog::open_for_write_unbacked(&cfg.papers_catalog_db()).expect("seed paper catalog"),
+        );
 
         let empty = tmp.path().join("no-papers");
         fs::create_dir_all(&empty).expect("create input dir");

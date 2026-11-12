@@ -110,7 +110,7 @@ mod tests {
     fn open_then_close_stamps_a_terminal_status() {
         let dir = tempfile::tempdir().expect("tempdir");
         let catalog_db = dir.path().join("catalog.db");
-        let catalog = Catalog::open(&catalog_db).expect("open catalog");
+        let catalog = Catalog::open_for_write_unbacked(&catalog_db).expect("open catalog");
         let handle = open_run(&catalog, &catalog_db, "reembed", Some("lib-a")).expect("run id");
         let id = handle.id().to_string();
 
@@ -152,7 +152,7 @@ mod tests {
     fn the_liveness_record_lives_exactly_as_long_as_the_open_run() {
         let dir = tempfile::tempdir().expect("tempdir");
         let catalog_db = dir.path().join("catalog.db");
-        let catalog = Catalog::open(&catalog_db).expect("open catalog");
+        let catalog = Catalog::open_for_write_unbacked(&catalog_db).expect("open catalog");
         let locks = run_locks_dir(&catalog_db).expect("lock dir");
 
         let handle = open_run(&catalog, &catalog_db, "ingest", None).expect("run id");
@@ -170,7 +170,7 @@ mod tests {
     fn a_run_dropped_without_closing_leaves_a_running_row() {
         let dir = tempfile::tempdir().expect("tempdir");
         let catalog_db = dir.path().join("catalog.db");
-        let catalog = Catalog::open(&catalog_db).expect("open catalog");
+        let catalog = Catalog::open_for_write_unbacked(&catalog_db).expect("open catalog");
 
         let handle = open_run(&catalog, &catalog_db, "dryrun", None).expect("run id");
         let id = handle.id().to_string();

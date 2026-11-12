@@ -527,7 +527,7 @@ mod tests {
 
     fn stamped_corpus_at(dir: &std::path::Path) -> std::path::PathBuf {
         let corpus_db = dir.join("corpus.db");
-        let corpus = Corpus::open(&corpus_db).expect("open corpus");
+        let corpus = Corpus::open_for_write(&corpus_db).expect("open corpus");
         corpus
             .reconcile_index_stamps(&IndexStamps {
                 embed_model: "qwen3-embedding:0.6b".to_string(),
@@ -547,7 +547,7 @@ mod tests {
 
         let fingerprint =
             corpus_fingerprint_at(&corpus_db, &lancedb_dir).expect("compose fingerprint");
-        let expected = Corpus::open(&corpus_db)
+        let expected = Corpus::open_for_write(&corpus_db)
             .expect("reopen corpus")
             .compose_corpus_fingerprint("brute-force")
             .expect("compose expected");
@@ -581,7 +581,7 @@ mod tests {
 
         let fingerprint =
             corpus_fingerprint_at(&corpus_db, &lancedb_dir).expect("compose fingerprint");
-        let expected = Corpus::open(&corpus_db)
+        let expected = Corpus::open_for_write(&corpus_db)
             .expect("reopen corpus")
             .compose_corpus_fingerprint("ivf-pq")
             .expect("compose expected");

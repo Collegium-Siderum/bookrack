@@ -52,8 +52,8 @@ impl Fixture {
         let papers_catalog_db = tmp.path().join("papers_catalog.db");
         let papers_corpus_db = tmp.path().join("papers_corpus.db");
         let papers_lancedb = tmp.path().join("lancedb_papers");
-        Catalog::open(&papers_catalog_db).expect("seed paper catalog");
-        bookrack_corpus::Corpus::open(&papers_corpus_db).expect("seed paper corpus");
+        Catalog::open_for_write_unbacked(&papers_catalog_db).expect("seed paper catalog");
+        bookrack_corpus::Corpus::open_for_write(&papers_corpus_db).expect("seed paper corpus");
 
         let papers_library = bookrack_query::Library::open(
             papers_corpus_db.clone(),
@@ -98,7 +98,7 @@ impl Fixture {
     }
 
     fn catalog(&self) -> Catalog {
-        Catalog::open(&self.papers_catalog_db).expect("open paper catalog")
+        Catalog::open_for_write_unbacked(&self.papers_catalog_db).expect("open paper catalog")
     }
 
     fn seed_paper(&self, sha: &str) -> i64 {

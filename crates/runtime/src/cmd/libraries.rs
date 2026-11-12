@@ -398,8 +398,9 @@ mod tests {
         std::fs::create_dir_all(&source).expect("source");
         // Initialize the two databases fork snapshots, and give the
         // source its own identity manifest.
-        bookrack_catalog::Catalog::open(&source.join("catalog.db")).expect("catalog");
-        bookrack_corpus::Corpus::open(&source.join("corpus.db")).expect("corpus");
+        bookrack_catalog::Catalog::open_for_write_unbacked(&source.join("catalog.db"))
+            .expect("catalog");
+        bookrack_corpus::Corpus::open_for_write(&source.join("corpus.db")).expect("corpus");
         let source_manifest = new_manifest("source-lib", LibraryKind::Prod, None);
         write_manifest(&source, &source_manifest).expect("write source manifest");
         // Point the registry into the tempdir and register the source,

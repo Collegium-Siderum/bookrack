@@ -329,6 +329,325 @@ paths = [
 reason = "stamp-isolation"
 exit = "the reference splitter's next behaviour change, which already rebuilds every distilled book"
 
+# Functions outside the store crates that open a store for writing.
+# `access = "bookkeeping"` holds a site to the bookkeeping door.
+
+[[write_door]]
+site = "crates/cli/src/distill_cmd.rs::finalize_pipeline_run"
+access = "write"
+
+[[write_door]]
+site = "crates/cli/src/distill_cmd.rs::open_distill_catalog_for_write"
+access = "write"
+
+[[write_door]]
+site = "crates/cli/src/distill_cmd.rs::open_distill_pipeline_run"
+access = "write"
+
+[[write_door]]
+site = "crates/cli/src/distill_cmd.rs::run_books"
+access = "write"
+
+[[write_door]]
+site = "crates/cli/src/distill_cmd.rs::write_distill_audit"
+access = "write"
+
+[[write_door]]
+site = "crates/glean/src/lib.rs::embed_and_write_chunks"
+access = "write"
+
+[[write_door]]
+site = "crates/glean/src/rebuild.rs::stamp_index_from_existing_chunks"
+access = "write"
+
+[[write_door]]
+site = "crates/glean/src/reembed.rs::plan_reembed"
+access = "write"
+
+[[write_door]]
+site = "crates/glean/src/reembed.rs::read_chunk_plans"
+access = "write"
+
+[[write_door]]
+site = "crates/glean/src/reset.rs::reset_and_rechunk"
+access = "write"
+
+[[write_door]]
+site = "crates/ingest/src/embed_run.rs::embed_book_chunks_with_progress"
+access = "write"
+
+[[write_door]]
+site = "crates/ingest/src/rebuild.rs::stamp_index_from_existing_chunks"
+access = "write"
+
+[[write_door]]
+site = "crates/ingest/src/reembed.rs::plan_reembed"
+access = "write"
+
+[[write_door]]
+site = "crates/ingest/src/reembed.rs::read_chunk_plans"
+access = "write"
+
+[[write_door]]
+site = "crates/ingest/src/reset.rs::reset_and_rechunk"
+access = "write"
+
+[[write_door]]
+site = "crates/mcp/src/lib.rs::reference_overlay_set"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/reads/info.rs::read_current_chunk_count"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/reads/vectors.rs::status"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/recorder.rs::finish_with_retrieval"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/registry.rs::glean_paper"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/registry.rs::ingest_book"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/registry.rs::ingest_ocr"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/metadata.rs::acknowledge_metadata_gap"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/metadata.rs::add_contributor"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/metadata.rs::approve_metadata"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/metadata.rs::clear_metadata_field"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/metadata.rs::reaudit_metadata"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/metadata.rs::reject_metadata"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/metadata.rs::remove_contributor"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/metadata.rs::set_metadata_field"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/metadata.rs::void_metadata_field"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/papers_metadata.rs::acknowledge_paper_metadata_gap"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/papers_metadata.rs::add_paper_contributor"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/papers_metadata.rs::approve_paper_metadata"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/papers_metadata.rs::clear_paper_metadata_field"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/papers_metadata.rs::open_paper_catalog_for_write"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/papers_metadata.rs::reaudit_paper_metadata"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/papers_metadata.rs::reject_paper_metadata"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/papers_metadata.rs::remove_paper_contributor"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/papers_metadata.rs::reopen_paper_review"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/papers_metadata.rs::set_paper_metadata_field"
+access = "write"
+
+[[write_door]]
+site = "crates/ops/src/writes/papers_metadata.rs::void_paper_metadata_field"
+access = "write"
+
+[[write_door]]
+site = "crates/query/src/lib.rs::ensure_store"
+access = "write"
+
+[[write_door]]
+site = "crates/query/src/lib.rs::open"
+access = "write"
+
+[[write_door]]
+site = "crates/query/src/lib.rs::refresh_store"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/corpus.rs::execute_rebuild_from_plan"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/corpus.rs::plan_rebuild"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/dryrun.rs::close_dryrun_pipeline_run"
+access = "bookkeeping"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/dryrun.rs::open_dryrun_pipeline_run"
+access = "bookkeeping"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/index_profile.rs::count_chunks"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/ingest.rs::run"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/intake_ocr.rs::run"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/metadata.rs::advance"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/metadata.rs::book_is_parked_at_metadata"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/metadata.rs::run_write"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/papers_corpus.rs::execute_rebuild_from_plan"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/papers_corpus.rs::plan_rebuild"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/papers_dryrun.rs::close_papers_dryrun_pipeline_run"
+access = "bookkeeping"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/papers_dryrun.rs::open_papers_dryrun_pipeline_run"
+access = "bookkeeping"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/papers_stamps.rs::reconcile"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/papers_vectors.rs::drop"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/papers_vectors.rs::execute_reembed_from_plan"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/papers_vectors.rs::plan_reembed"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/papers_vectors.rs::rebuild"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/papers_vectors.rs::reset"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/remove.rs::derive_remove_plan"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/remove.rs::execute_remove_from_plan"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/remove_paper.rs::derive_remove_plan"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/remove_paper.rs::execute_remove_from_plan"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/stamps.rs::reconcile"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/vectors.rs::drop"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/vectors.rs::execute_reembed_from_plan"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/vectors.rs::plan_reembed"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/vectors.rs::rebuild"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/cmd/vectors.rs::reset"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/daemon.rs::build_library_handle"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/doctor.rs::backfill_ocr_derivation"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/open_runs.rs::close_one"
+access = "write"
+
+[[write_door]]
+site = "crates/runtime/src/wizard/runner.rs::smoke_ingest"
+access = "write"
+
 # Methods implemented in more than one place. Each site carries the comment
 # line `// Parallel implementation: <id>.`
 
@@ -573,17 +892,15 @@ exit = "search reads take the kind as a parameter"
 
 [[parallel]]
 id = "ops-open-catalog"
-summary = "helpers that open one kind's catalog"
+summary = "read-only probes for one kind's catalog"
 sites = [
   "crates/ops/src/reads/mod.rs::open_book_catalog",
   "crates/ops/src/reads/mod.rs::open_papers_catalog",
-  "crates/ops/src/writes/papers_metadata.rs::open_paper_catalog",
-  "crates/ops/src/registry.rs::open_paper_catalog",
 ]
 reason = "transitional"
-detail = "two are read-only probes and two open for writing with a backup; the paper side also reports a missing papers backend, as an ops error in two sites and as an eyre message in the third"
+detail = "the paper side also reports a missing papers backend"
 agreement = "divergent"
-exit = "the write-side helpers are gone and one read view opens either catalog"
+exit = "one read view opens either catalog"
 
 [[parallel]]
 id = "ops-handle-pipeline"

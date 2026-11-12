@@ -24,9 +24,9 @@ pub fn plan_rebuild(
     book: Option<i64>,
     stale_only: bool,
 ) -> Result<bookrack_ingest::rebuild::RebuildReport> {
-    let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open corpus")?;
     let catalog =
-        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+        Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let params = bookrack_ingest::rebuild::RebuildParams {
         only: book,
         stale_only,
@@ -69,9 +69,9 @@ pub async fn execute_rebuild_from_plan(
     pinned_ids: Vec<i64>,
     include_vectors: bool,
 ) -> Result<ExecuteRebuildOutcome> {
-    let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open corpus")?;
     let catalog =
-        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+        Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
 
     let report = bookrack_ingest::rebuild::rebuild_from_intakes(
         &mut corpus,

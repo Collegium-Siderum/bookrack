@@ -301,7 +301,9 @@ mod tests {
     async fn seed_one_chunk(lancedb_dir: &Path) {
         use bookrack_core::PartitionIdx;
         use bookrack_vectors::ChunkRow;
-        let store = ChunkStore::open(lancedb_dir, 4).await.expect("open");
+        let store = ChunkStore::open_for_write(lancedb_dir, 4)
+            .await
+            .expect("open");
         let node = PartitionIdx::new(1).node_id(1).expect("offset in range");
         store
             .append(&[ChunkRow {
@@ -347,7 +349,9 @@ mod tests {
         let corpus = Corpus::open_in_memory().expect("corpus");
         // Create an empty chunks table by opening with a real dim;
         // count_rows is zero, and the helper should not stamp.
-        let _ = ChunkStore::open(dir.path(), 4).await.expect("open");
+        let _ = ChunkStore::open_for_write(dir.path(), 4)
+            .await
+            .expect("open");
 
         let wrote = stamp_index_from_existing_chunks(&corpus, dir.path(), "fake-model")
             .await
@@ -365,7 +369,7 @@ mod tests {
     async fn stamp_index_reports_no_write_when_table_is_absent() {
         let dir = tempdir().expect("tempdir");
         let corpus = Corpus::open_in_memory().expect("corpus");
-        // No ChunkStore::open call: the chunks table does not exist.
+        // No ChunkStore::open_for_write call: the chunks table does not exist.
         // The helper must report `false` without creating one.
 
         let wrote = stamp_index_from_existing_chunks(&corpus, dir.path(), "fake-model")

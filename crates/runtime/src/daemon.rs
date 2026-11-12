@@ -1387,11 +1387,11 @@ pub(crate) async fn build_library_handle(
     // binary even though the migration step is forward-compatible —
     // read-write open lets routine binary upgrades just work.
     if cfg.catalog_db().exists() {
-        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir())
+        Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir())
             .context("preflight catalog schema check failed")?;
     }
     if cfg.papers_catalog_db().exists() {
-        Catalog::open_with_backup(&cfg.papers_catalog_db(), &cfg.backup_dir())
+        Catalog::open_for_write(&cfg.papers_catalog_db(), &cfg.backup_dir())
             .context("preflight papers catalog schema check failed")?;
     }
 

@@ -46,8 +46,8 @@ impl Fixture {
         // the first op runs. The read ops open `corpus.db` through the
         // read-only door, which refuses a missing file, so the fixture
         // materializes it the way ingest does in a real library.
-        Catalog::open(&catalog_db).expect("seed catalog");
-        bookrack_corpus::Corpus::open(&corpus_db).expect("seed corpus");
+        Catalog::open_for_write_unbacked(&catalog_db).expect("seed catalog");
+        bookrack_corpus::Corpus::open_for_write(&corpus_db).expect("seed corpus");
         let ops = Ops::<OllamaEmbedClient>::catalog_only(
             corpus_db.clone(),
             catalog_db.clone(),
@@ -81,7 +81,7 @@ impl Fixture {
     }
 
     fn catalog(&self) -> Catalog {
-        Catalog::open(&self.catalog_db).expect("open catalog")
+        Catalog::open_for_write_unbacked(&self.catalog_db).expect("open catalog")
     }
 
     fn seed_intake(&self, sha: &str) -> i64 {

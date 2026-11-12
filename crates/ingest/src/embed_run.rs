@@ -105,7 +105,7 @@ pub async fn embed_book_chunks_with_progress<E: Embedder>(
         return Err(e.into());
     }
 
-    let store = ChunkStore::open(lancedb_dir, dim).await?;
+    let store = ChunkStore::open_for_write(lancedb_dir, dim).await?;
     let rows_before_delete = store.count_rows().await?;
     store
         .delete_partition(plans[0].start_node_id.partition())
@@ -466,7 +466,9 @@ mod tests {
         assert_eq!(report.batches, 1);
         assert_eq!(report.shrink_events, 0);
 
-        let store = ChunkStore::open(dir.path(), 8).await.expect("reopen");
+        let store = ChunkStore::open_for_write(dir.path(), 8)
+            .await
+            .expect("reopen");
         assert_eq!(store.count_rows().await.expect("count"), 5);
     }
 
@@ -782,7 +784,9 @@ mod tests {
             .await
             .expect("second");
 
-        let store = ChunkStore::open(dir.path(), 8).await.expect("reopen");
+        let store = ChunkStore::open_for_write(dir.path(), 8)
+            .await
+            .expect("reopen");
         // The second run deletes the partition before appending, so the
         // count stays at three rather than doubling to six.
         assert_eq!(store.count_rows().await.expect("count"), 3);

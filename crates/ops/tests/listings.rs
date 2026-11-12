@@ -33,7 +33,7 @@ impl Fixture {
         let lancedb_dir = tmp.path().join("lancedb");
         let books_dir = tmp.path().join("books");
         let backup_dir = tmp.path().join("backup");
-        Catalog::open(&catalog_db).expect("seed catalog");
+        Catalog::open_for_write_unbacked(&catalog_db).expect("seed catalog");
         let ops = Ops::<OllamaEmbedClient>::catalog_only(
             corpus_db,
             catalog_db.clone(),
@@ -50,7 +50,7 @@ impl Fixture {
     }
 
     fn catalog(&self) -> Catalog {
-        Catalog::open(&self.catalog_db).expect("open catalog")
+        Catalog::open_for_write_unbacked(&self.catalog_db).expect("open catalog")
     }
 
     fn seed_book(&self, sha: &str, title: &str) -> i64 {

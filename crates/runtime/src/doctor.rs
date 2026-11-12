@@ -477,7 +477,8 @@ pub async fn backfill_ocr_derivation(
         Catalog::open_read_only(&cfg.catalog_db())
             .context("open catalog (read-only) for OCR derivation backfill plan")?
     } else {
-        Catalog::open(&cfg.catalog_db()).context("open catalog for OCR derivation backfill")?
+        Catalog::open_for_write_unbacked(&cfg.catalog_db())
+            .context("open catalog for OCR derivation backfill")?
     };
     let pending = catalog
         .ocr_intakes_missing_derivation()
@@ -2676,7 +2677,10 @@ mod tests {
             root.path().to_path_buf(),
             "http://127.0.0.1:11434".to_string(),
         );
-        drop(bookrack_corpus::Corpus::open(&cfg.corpus_db()).expect("create the book corpus"));
+        drop(
+            bookrack_corpus::Corpus::open_for_write(&cfg.corpus_db())
+                .expect("create the book corpus"),
+        );
         let mut rows = Vec::new();
         push_store_rows(&mut rows, &cfg);
 
@@ -2905,8 +2909,8 @@ mod tests {
         let (profile, _) = resolve(None, bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT)
             .expect("resolve the built-in profile")
             .expect("the built-in profile is defined");
-        let corpus =
-            bookrack_corpus::Corpus::open(&pipeline.corpus_db(root)).expect("create corpus");
+        let corpus = bookrack_corpus::Corpus::open_for_write(&pipeline.corpus_db(root))
+            .expect("create corpus");
         stamp(&corpus, &profile);
         drop(corpus);
 

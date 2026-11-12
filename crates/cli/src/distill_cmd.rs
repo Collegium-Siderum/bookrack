@@ -293,11 +293,14 @@ fn build(paths: &DistillPaths, args: DistillBuildArgs) -> Result<()> {
 /// that refusal, and every caller degrades to the branch it already
 /// had for a catalog it could not open. A real build takes the
 /// writable door, which migrates.
-fn open_distill_catalog(path: &Path, dry_run: bool) -> bookrack_catalog::Result<Option<Catalog>> {
+fn open_distill_catalog_for_write(
+    path: &Path,
+    dry_run: bool,
+) -> bookrack_catalog::Result<Option<Catalog>> {
     if dry_run {
-        Catalog::open_if_current(path)
+        Catalog::open_for_bookkeeping(path)
     } else {
-        Catalog::open(path).map(Some)
+        Catalog::open_for_write_unbacked(path).map(Some)
     }
 }
 
@@ -312,7 +315,7 @@ fn open_distill_pipeline_run(
     if args.no_audit_write {
         return Ok(None);
     }
-    let catalog = match open_distill_catalog(&paths.catalog_path, args.dry_run) {
+    let catalog = match open_distill_catalog_for_write(&paths.catalog_path, args.dry_run) {
         Ok(Some(c)) => c,
         Ok(None) => return Ok(None),
         Err(err) => {
@@ -353,7 +356,7 @@ fn open_distill_pipeline_run(
 /// close it. A catalog that stopped being one this call may write
 /// between the two opens takes the same branch.
 fn finalize_pipeline_run(paths: &DistillPaths, run: RunHandle, ok: bool, dry_run: bool) {
-    let catalog = match open_distill_catalog(&paths.catalog_path, dry_run) {
+    let catalog = match open_distill_catalog_for_write(&paths.catalog_path, dry_run) {
         Ok(Some(c)) => c,
         Ok(None) => {
             run.abandon();
@@ -469,7 +472,7 @@ fn run_books(
             continue;
         }
 
-        let mut refs = Refs::open(&paths.refs_path)
+        let mut refs = Refs::open_for_write(&paths.refs_path)
             .with_context(|| format!("open {}", paths.refs_path.display()))?;
         register_book_indexes(&mut refs, &book.slug, &parsed)?;
         upsert_book_row(&refs, &parsed, distill_run_id)?;
@@ -574,7 +577,7 @@ fn write_distill_audit(
         })
         .collect();
 
-    let mut catalog = match open_distill_catalog(&paths.catalog_path, dry_run) {
+    let mut catalog = match open_distill_catalog_for_write(&paths.catalog_path, dry_run) {
         Ok(Some(c)) => c,
         Ok(None) => return,
         Err(err) => {
@@ -1173,7 +1176,7 @@ mod tests {
     }
 
     fn count_audit_rows(paths: &DistillPaths, slug: &str) -> (i64, i64) {
-        let catalog = Catalog::open(&paths.catalog_path).expect("open catalog");
+        let catalog = Catalog::open_for_write_unbacked(&paths.catalog_path).expect("open catalog");
         let rows = catalog
             .distill_audits_for_book(slug)
             .expect("read audit rows");
@@ -1250,7 +1253,7 @@ mod tests {
 
         build(&paths, build_args(vec![book_dir], false, false)).expect("build");
 
-        let refs = Refs::open(&paths.refs_path).expect("open refs");
+        let refs = Refs::open_for_write(&paths.refs_path).expect("open refs");
         let conn = refs.connection();
         let book_rows: i64 = conn
             .query_row(
@@ -1292,7 +1295,7 @@ mod tests {
 
         build(&paths, build_args(vec![book_dir], false, false)).expect("build");
 
-        let catalog = Catalog::open(&paths.catalog_path).expect("open catalog");
+        let catalog = Catalog::open_for_write_unbacked(&paths.catalog_path).expect("open catalog");
         let rows = catalog.distill_audits_for_book("tiny").expect("read");
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
@@ -1350,7 +1353,7 @@ mod tests {
         let tmp = TempDir::new().expect("tmp");
         let book_dir = seed_book_dir(tmp.path(), "tiny");
         let paths = make_paths(tmp.path());
-        drop(Catalog::open(&paths.catalog_path).expect("initialise catalog.db"));
+        drop(Catalog::open_for_write_unbacked(&paths.catalog_path).expect("initialise catalog.db"));
 
         build(&paths, build_args(vec![book_dir], true, false)).expect("dry-run build");
 
@@ -1382,7 +1385,7 @@ mod tests {
             "got: {msg}"
         );
 
-        let catalog = Catalog::open(&paths.catalog_path).expect("open catalog");
+        let catalog = Catalog::open_for_write_unbacked(&paths.catalog_path).expect("open catalog");
         let rows = catalog.distill_audits_for_book("tiny").expect("read");
         assert_eq!(rows.len(), 1, "fail run must still leave one audit row");
         assert_eq!(rows[0].gate_status, GATE_STATUS_FAIL);
@@ -1396,13 +1399,13 @@ mod tests {
         let paths = make_paths(tmp.path());
         // The run under test is a dry one, which records into an
         // existing catalog rather than creating one.
-        drop(Catalog::open(&paths.catalog_path).expect("initialise catalog.db"));
+        drop(Catalog::open_for_write_unbacked(&paths.catalog_path).expect("initialise catalog.db"));
 
         let mut args = build_args(vec![book_dir], true, false);
         args.no_retention_check = true;
         build(&paths, args).expect("build");
 
-        let catalog = Catalog::open(&paths.catalog_path).expect("open catalog");
+        let catalog = Catalog::open_for_write_unbacked(&paths.catalog_path).expect("open catalog");
         let rows = catalog.distill_audits_for_book("tiny").expect("read");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].gate_status, GATE_STATUS_OFF);
@@ -1424,7 +1427,7 @@ mod tests {
             .expect("build recursive root");
 
         let count = |paths: &DistillPaths| -> i64 {
-            let refs = Refs::open(&paths.refs_path).expect("open");
+            let refs = Refs::open_for_write(&paths.refs_path).expect("open");
             let conn = refs.connection();
             conn.query_row(
                 "SELECT COUNT(*) FROM reference_entries WHERE book_slug = 'tiny'",
@@ -1449,7 +1452,7 @@ mod tests {
         assert!(diffs[0].added.is_empty());
         assert!(diffs[0].removed.is_empty());
         assert!(diffs[0].changed.is_empty());
-        let refs = Refs::open(&paths.refs_path).expect("open after verify");
+        let refs = Refs::open_for_write(&paths.refs_path).expect("open after verify");
         let _ = refs
             .lookup_resolved(None, "smith", &[])
             .expect("lookup post-verify");
@@ -1462,7 +1465,7 @@ mod tests {
         let paths = make_paths(tmp.path());
         build(&paths, build_args(vec![book_dir.clone()], false, false)).expect("build");
 
-        let refs = Refs::open(&paths.refs_path).expect("open");
+        let refs = Refs::open_for_write(&paths.refs_path).expect("open");
         refs.connection()
             .execute(
                 "UPDATE reference_entries SET payload_json = '{\"manual\":true}' \
@@ -1482,7 +1485,7 @@ mod tests {
 
     /// `verify` against a path that does not exist must surface a
     /// `not found` error and leave the path untouched. Previously
-    /// `Refs::open` would silently create an empty SQLite file there
+    /// `Refs::open_for_write` would silently create an empty SQLite file there
     /// and the diff would tag every drafted entry as `added`.
     #[test]
     fn verify_errors_when_refs_db_does_not_exist() {
@@ -1511,7 +1514,7 @@ mod tests {
     }
 
     /// `verify` against a path that points at a directory must report
-    /// the type mismatch instead of letting `Refs::open` fall over the
+    /// the type mismatch instead of letting `Refs::open_for_write` fall over the
     /// SQLite error mid-pipeline.
     #[test]
     fn verify_errors_when_refs_path_is_a_directory() {
@@ -1545,7 +1548,7 @@ mod tests {
         // must carry the registered book with its live entry count
         // (the tiny fixture drafts two headwords).
         list(&paths, DistillListArgs::default()).expect("list");
-        let refs = Refs::open(&paths.refs_path).expect("open");
+        let refs = Refs::open_for_write(&paths.refs_path).expect("open");
         let rows = read_list_rows(&refs).expect("rows");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].slug, "tiny");

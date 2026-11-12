@@ -41,10 +41,10 @@ fn world() -> (&'static Sandbox, PathBuf, PathBuf) {
 /// a source that has none.
 fn initialize(root: &Path) {
     for db in ["catalog.db", "papers_catalog.db"] {
-        bookrack_catalog::Catalog::open(&root.join(db)).expect("seed catalog");
+        bookrack_catalog::Catalog::open_for_write_unbacked(&root.join(db)).expect("seed catalog");
     }
     for db in ["corpus.db", "papers_corpus.db"] {
-        bookrack_corpus::Corpus::open(&root.join(db)).expect("seed corpus");
+        bookrack_corpus::Corpus::open_for_write(&root.join(db)).expect("seed corpus");
     }
 }
 

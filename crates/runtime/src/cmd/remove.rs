@@ -147,7 +147,7 @@ pub async fn execute_remove_from_plan(
     expected_fingerprint: ExpectedFingerprint<'_>,
 ) -> Result<RemoveOutcome> {
     let mut catalog =
-        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+        Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let intake = catalog
         .intake_by_id(intake_id)
         .context("look up intake")?
@@ -185,14 +185,14 @@ pub async fn execute_remove_from_plan(
         .delete_book_derived(intake_id, book_root_id)
         .context("delete cascaded catalog rows")?;
 
-    let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open corpus")?;
     corpus
         .drop_partition(partition)
         .context("drop corpus partition")?;
     drop(corpus);
 
     if let Some(dim) = corpus_vector_dim(cfg)? {
-        let store = ChunkStore::open(&cfg.lancedb_dir(), dim)
+        let store = ChunkStore::open_for_write(&cfg.lancedb_dir(), dim)
             .await
             .context("open vector store")?;
         store
@@ -460,8 +460,8 @@ mod tests {
     async fn plan_reports_counts_and_writes_nothing() {
         let (_tmp, cfg) = temp_cfg();
         let intake_id = {
-            let mut catalog = Catalog::open(&cfg.catalog_db()).expect("catalog");
-            let mut corpus = Corpus::open(&cfg.corpus_db()).expect("corpus");
+            let mut catalog = Catalog::open_for_write_unbacked(&cfg.catalog_db()).expect("catalog");
+            let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).expect("corpus");
             seed_book(&cfg, &mut catalog, &mut corpus, "sha-dry").0
         };
 
@@ -524,8 +524,8 @@ mod tests {
     async fn plan_does_not_materialize_the_vector_store() {
         let (_tmp, cfg) = temp_cfg();
         let intake_id = {
-            let mut catalog = Catalog::open(&cfg.catalog_db()).expect("catalog");
-            let mut corpus = Corpus::open(&cfg.corpus_db()).expect("corpus");
+            let mut catalog = Catalog::open_for_write_unbacked(&cfg.catalog_db()).expect("catalog");
+            let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).expect("corpus");
             let id = seed_book(&cfg, &mut catalog, &mut corpus, "sha-no-lance").0;
             // A library that has been embedded once carries the stamp,
             // even after its lancedb directory is deleted.
@@ -562,8 +562,8 @@ mod tests {
     async fn plan_neither_migrates_nor_backs_up_the_catalog() {
         let (_tmp, cfg) = temp_cfg();
         let intake_id = {
-            let mut catalog = Catalog::open(&cfg.catalog_db()).expect("catalog");
-            let mut corpus = Corpus::open(&cfg.corpus_db()).expect("corpus");
+            let mut catalog = Catalog::open_for_write_unbacked(&cfg.catalog_db()).expect("catalog");
+            let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).expect("corpus");
             seed_book(&cfg, &mut catalog, &mut corpus, "sha-stale").0
         };
         // Present the catalog as one revision behind: a read-write open
@@ -603,8 +603,8 @@ mod tests {
     async fn remove_clears_intake_corpus_and_envelope() {
         let (_tmp, cfg) = temp_cfg();
         let (intake_id, envelope_path) = {
-            let mut catalog = Catalog::open(&cfg.catalog_db()).expect("catalog");
-            let mut corpus = Corpus::open(&cfg.corpus_db()).expect("corpus");
+            let mut catalog = Catalog::open_for_write_unbacked(&cfg.catalog_db()).expect("catalog");
+            let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).expect("corpus");
             seed_book(&cfg, &mut catalog, &mut corpus, "sha-rm")
         };
         assert!(envelope_path.exists());
@@ -625,7 +625,7 @@ mod tests {
         let catalog = Catalog::open_read_only(&cfg.catalog_db()).expect("reopen catalog");
         assert!(catalog.intake_by_id(intake_id).expect("lookup").is_none(),);
         // Corpus partition gone.
-        let corpus = Corpus::open(&cfg.corpus_db()).expect("reopen corpus");
+        let corpus = Corpus::open_for_write(&cfg.corpus_db()).expect("reopen corpus");
         assert!(
             corpus
                 .partition_for_intake(intake_id)
@@ -643,8 +643,8 @@ mod tests {
         // A second run with the same intake id must complete cleanly.
         let (_tmp, cfg) = temp_cfg();
         let intake_id = {
-            let mut catalog = Catalog::open(&cfg.catalog_db()).expect("catalog");
-            let mut corpus = Corpus::open(&cfg.corpus_db()).expect("corpus");
+            let mut catalog = Catalog::open_for_write_unbacked(&cfg.catalog_db()).expect("catalog");
+            let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).expect("corpus");
             let (id, _envelope) = seed_book(&cfg, &mut catalog, &mut corpus, "sha-rerun");
             // Drop everything but the intake row to mimic the partial state.
             let book_root_id = PartitionIdx::new(id).root().get();
@@ -677,8 +677,8 @@ mod tests {
     async fn remove_resolves_by_sha_when_only_sha_supplied() {
         let (_tmp, cfg) = temp_cfg();
         let intake_id = {
-            let mut catalog = Catalog::open(&cfg.catalog_db()).expect("catalog");
-            let mut corpus = Corpus::open(&cfg.corpus_db()).expect("corpus");
+            let mut catalog = Catalog::open_for_write_unbacked(&cfg.catalog_db()).expect("catalog");
+            let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).expect("corpus");
             seed_book(&cfg, &mut catalog, &mut corpus, "sha-by-hash").0
         };
         plan_and_execute(
@@ -718,8 +718,8 @@ mod tests {
         let (_tmp, cfg) = temp_cfg();
         // Open and close to materialize empty catalog + corpus.
         {
-            Catalog::open(&cfg.catalog_db()).expect("init catalog");
-            Corpus::open(&cfg.corpus_db()).expect("init corpus");
+            Catalog::open_for_write_unbacked(&cfg.catalog_db()).expect("init catalog");
+            Corpus::open_for_write(&cfg.corpus_db()).expect("init corpus");
         }
         let err = plan_remove(
             &cfg,
@@ -801,8 +801,8 @@ mod tests {
     async fn fingerprint_is_stable_for_unchanged_state() {
         let (_tmp, cfg) = temp_cfg();
         let intake_id = {
-            let mut catalog = Catalog::open(&cfg.catalog_db()).expect("catalog");
-            let mut corpus = Corpus::open(&cfg.corpus_db()).expect("corpus");
+            let mut catalog = Catalog::open_for_write_unbacked(&cfg.catalog_db()).expect("catalog");
+            let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).expect("corpus");
             seed_book(&cfg, &mut catalog, &mut corpus, "sha-fp").0
         };
         let args = RemoveArgs {
@@ -820,8 +820,8 @@ mod tests {
     async fn execute_aborts_when_target_state_drifts_after_plan() {
         let (_tmp, cfg) = temp_cfg();
         let (intake_id, _envelope) = {
-            let mut catalog = Catalog::open(&cfg.catalog_db()).expect("catalog");
-            let mut corpus = Corpus::open(&cfg.corpus_db()).expect("corpus");
+            let mut catalog = Catalog::open_for_write_unbacked(&cfg.catalog_db()).expect("catalog");
+            let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).expect("corpus");
             seed_book(&cfg, &mut catalog, &mut corpus, "sha-drift")
         };
         let plan = plan_remove(
@@ -840,12 +840,13 @@ mod tests {
         // the derived rows so corpus_nodes shrinks. The execute leg
         // must notice and refuse to delete.
         {
-            let mut catalog = Catalog::open(&cfg.catalog_db()).expect("reopen catalog");
+            let mut catalog =
+                Catalog::open_for_write_unbacked(&cfg.catalog_db()).expect("reopen catalog");
             let book_root_id = PartitionIdx::new(intake_id).root().get();
             catalog
                 .delete_book_derived(intake_id, book_root_id)
                 .expect("drift cascade");
-            let mut corpus = Corpus::open(&cfg.corpus_db()).expect("reopen corpus");
+            let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).expect("reopen corpus");
             corpus
                 .drop_partition(PartitionIdx::new(intake_id))
                 .expect("drift corpus");

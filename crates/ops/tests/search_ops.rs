@@ -189,13 +189,13 @@ async fn seed_store_with_model(
     let catalog_db = root.join(format!("{name}-catalog.db"));
     let lancedb_dir = root.join(format!("{name}-lancedb"));
 
-    let catalog = Catalog::open(&catalog_db).expect("seed catalog");
+    let catalog = Catalog::open_for_write_unbacked(&catalog_db).expect("seed catalog");
     let mut catalog = catalog;
     catalog
         .register_intake(ItemKind::Book, &NewIntake::new(format!("sha-{name}")))
         .expect("register intake");
 
-    let mut corpus = Corpus::open(&corpus_db).expect("seed corpus");
+    let mut corpus = Corpus::open_for_write(&corpus_db).expect("seed corpus");
     let report = ingest_structure(
         &mut corpus,
         1,
@@ -214,7 +214,9 @@ async fn seed_store_with_model(
         .find(|n| n.node_type.is_prose_leaf())
         .expect("a prose leaf");
 
-    let store = ChunkStore::open(&lancedb_dir, DIM).await.expect("store");
+    let store = ChunkStore::open_for_write(&lancedb_dir, DIM)
+        .await
+        .expect("store");
     let rows: Vec<ChunkRow> = chunks
         .iter()
         .enumerate()
@@ -255,8 +257,8 @@ async fn seed_multi_book_store(
     let mut intake_ids: Vec<i64> = chunks.iter().map(|(id, _, _)| *id).collect();
     intake_ids.dedup();
 
-    let mut catalog = Catalog::open(&catalog_db).expect("seed catalog");
-    let mut corpus = Corpus::open(&corpus_db).expect("seed corpus");
+    let mut catalog = Catalog::open_for_write_unbacked(&catalog_db).expect("seed catalog");
+    let mut corpus = Corpus::open_for_write(&corpus_db).expect("seed corpus");
     let mut leaves = std::collections::HashMap::new();
     for &intake_id in &intake_ids {
         let registered = catalog
@@ -290,7 +292,9 @@ async fn seed_multi_book_store(
         .reconcile_index_stamps(&current_index_stamps(MODEL, DIM as u32))
         .expect("stamp");
 
-    let store = ChunkStore::open(&lancedb_dir, DIM).await.expect("store");
+    let store = ChunkStore::open_for_write(&lancedb_dir, DIM)
+        .await
+        .expect("store");
     let rows: Vec<ChunkRow> = chunks
         .iter()
         .enumerate()
@@ -441,8 +445,8 @@ async fn catalog_only_search_ops_report_their_missing_backend() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let catalog_db = tmp.path().join("catalog.db");
     let corpus_db = tmp.path().join("corpus.db");
-    drop(Catalog::open(&catalog_db).expect("seed catalog"));
-    drop(Corpus::open(&corpus_db).expect("seed corpus"));
+    drop(Catalog::open_for_write_unbacked(&catalog_db).expect("seed catalog"));
+    drop(Corpus::open_for_write(&corpus_db).expect("seed corpus"));
     let ops = Ops::<Fixed>::catalog_only(
         corpus_db,
         catalog_db,

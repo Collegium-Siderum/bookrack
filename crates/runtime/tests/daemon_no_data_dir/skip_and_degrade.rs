@@ -109,7 +109,7 @@ fn declare_profile(root: &Path, name: &str, profile: &str) {
 /// the handle's preflight refuses it as `SchemaTooNew`.
 fn break_catalog(root: &Path) {
     let db = root.join("catalog.db");
-    drop(Catalog::open(&db).expect("seed catalog"));
+    drop(Catalog::open_for_write_unbacked(&db).expect("seed catalog"));
     bookrack_dbkit::open_production(&db)
         .expect("open catalog")
         .pragma_update(None, "user_version", i64::from(SCHEMA_VERSION) + 1)

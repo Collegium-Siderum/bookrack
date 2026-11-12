@@ -357,7 +357,7 @@ mod tests {
     /// beside the database file and the marking reads it from there.
     fn open_on_disk(dir: &tempfile::TempDir, name: &str) -> (PathBuf, Catalog) {
         let path = dir.path().join(name);
-        let catalog = Catalog::open(&path).expect("open catalog");
+        let catalog = Catalog::open_for_write_unbacked(&path).expect("open catalog");
         (path, catalog)
     }
 

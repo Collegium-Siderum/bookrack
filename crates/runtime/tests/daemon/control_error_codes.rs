@@ -74,7 +74,7 @@ async fn call(
 /// separates "this library has nothing in it" from "that id is not one
 /// of the ids it has".
 fn seed_intake(catalog_db: &Path, kind: ItemKind, sha: &str) -> Result<i64> {
-    let mut catalog = Catalog::open(catalog_db)?;
+    let mut catalog = Catalog::open_for_write_unbacked(catalog_db)?;
     Ok(catalog
         .register_intake(kind, &NewIntake::new(sha).format("epub"))?
         .into_intake()
@@ -521,7 +521,7 @@ async fn a_target_that_moved_since_the_dry_run_is_reported_as_drift() -> Result<
             .await?;
             let pinned = plan_id(&resp)?;
             {
-                let catalog = Catalog::open(&db)?;
+                let catalog = Catalog::open_for_write_unbacked(&db)?;
                 assert!(catalog.delete_intake(vanishing)?, "{method}: seed removed");
             }
             id += 1;
@@ -552,7 +552,7 @@ async fn a_target_that_moved_since_the_dry_run_is_reported_as_drift() -> Result<
             .await?;
             let pinned = plan_id(&resp)?;
             {
-                let catalog = Catalog::open(&db)?;
+                let catalog = Catalog::open_for_write_unbacked(&db)?;
                 assert!(
                     catalog.set_stored_path(kind, moving, "/nowhere/envelope.json")?,
                     "{method}: seed moved"
@@ -661,7 +661,7 @@ async fn an_unsupported_ann_kind_is_refused_with_the_accepted_set() -> Result<()
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     for name in ["corpus.db", "papers_corpus.db"] {
-        let corpus = bookrack_corpus::Corpus::open(&data_root.path().join(name))?;
+        let corpus = bookrack_corpus::Corpus::open_for_write(&data_root.path().join(name))?;
         corpus.meta_set(bookrack_corpus::VECTOR_DIM_KEY, "8")?;
     }
     let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
@@ -801,7 +801,7 @@ async fn advance_reports_each_unmet_precondition_as_caller_input() -> Result<()>
     let stateless = seed_intake(&catalog_db, ItemKind::Book, "sha-stateless")?;
     let unparsed = seed_intake(&catalog_db, ItemKind::Book, "sha-unparsed")?;
     {
-        let catalog = Catalog::open(&catalog_db)?;
+        let catalog = Catalog::open_for_write_unbacked(&catalog_db)?;
         catalog.upsert_book_state(&NewItemState::new(
             PartitionIdx::new(unparsed).root().get(),
             unparsed,
@@ -884,7 +884,7 @@ async fn an_unknown_id_reads_as_null_and_writes_as_caller_input() -> Result<()> 
     // The book reads project TOC statistics out of the corpus, which
     // they open read-only; the file has to be there for the positive
     // control below to reach the catalog row it is about.
-    bookrack_corpus::Corpus::open(&data_root.path().join("corpus.db"))?;
+    bookrack_corpus::Corpus::open_for_write(&data_root.path().join("corpus.db"))?;
     let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
         data_root.path().into(),
         runtime_root.path().into(),
@@ -977,7 +977,7 @@ async fn find_books_applies_the_status_filter_and_refuses_an_unknown_one() -> Re
     let catalog_db = data_root.path().join("catalog.db");
     let embedded = seed_intake(&catalog_db, ItemKind::Book, "sha-embedded")?;
     let pending = seed_intake(&catalog_db, ItemKind::Book, "sha-pending")?;
-    Catalog::open(&catalog_db)?.set_intake_status(
+    Catalog::open_for_write_unbacked(&catalog_db)?.set_intake_status(
         ItemKind::Book,
         embedded,
         bookrack_catalog::IntakeStatus::Embedded,
@@ -1133,7 +1133,7 @@ async fn read_proxies_route_failures_through_the_shared_classifier() -> Result<(
         ItemKind::Book,
         "sha-book",
     )?;
-    bookrack_corpus::Corpus::open(&data_root.path().join("corpus.db"))?;
+    bookrack_corpus::Corpus::open_for_write(&data_root.path().join("corpus.db"))?;
     let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
         data_root.path().into(),
         runtime_root.path().into(),

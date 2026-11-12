@@ -44,7 +44,7 @@ pub enum RefsError {
 
     /// A read-only open found a `user_version` past [`TARGET_VERSION`]:
     /// the file was written by a newer schema this build cannot read.
-    /// The writable [`Refs::open`] would migrate forward; the read path
+    /// The writable [`Refs::open_for_write`] would migrate forward; the read path
     /// refuses rather than touch a database it does not understand.
     #[error(
         "reference.db schema is newer than this build supports: found user_version {found}, supports {supported}"
@@ -54,7 +54,7 @@ pub enum RefsError {
     /// A read-only open found a `user_version` short of
     /// [`TARGET_VERSION`]: the file exists but the migrations that
     /// build the tables the read path queries have not run. The
-    /// writable [`Refs::open`] would migrate it forward; the read path
+    /// writable [`Refs::open_for_write`] would migrate it forward; the read path
     /// refuses rather than write to a database a read command opened.
     #[error(
         "reference.db schema is behind this build: found user_version {found}, expects {supported}"
@@ -92,7 +92,7 @@ pub struct Refs {
 
 impl Refs {
     /// Open `reference.db` at `path` and bring it to [`TARGET_VERSION`].
-    pub fn open(path: &Path) -> RefsResult<Self> {
+    pub fn open_for_write(path: &Path) -> RefsResult<Self> {
         let mut conn = bookrack_dbkit::open_production(path)?;
         migrate::migrations().to_latest(&mut conn)?;
         Ok(Self { conn })
@@ -109,7 +109,7 @@ impl Refs {
     /// cannot read, [`RefsError::SchemaTooOld`] for one whose tables
     /// have not been built yet — because the alternative is a query
     /// against a schema the caller was not promised. The writable
-    /// [`Refs::open`] is the only path that migrates.
+    /// [`Refs::open_for_write`] is the only path that migrates.
     pub fn open_read_only(path: &Path) -> RefsResult<Self> {
         let conn = bookrack_dbkit::open_production_strict_read_only(path)?;
         let found: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -1289,7 +1289,7 @@ mod read_only_tests {
     fn open_read_only_reads_existing_and_blocks_writes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("reference.db");
-        drop(Refs::open(&path).expect("build reference.db"));
+        drop(Refs::open_for_write(&path).expect("build reference.db"));
 
         let refs = Refs::open_read_only(&path).expect("open existing read-only");
         let count: i64 = refs
@@ -1340,7 +1340,7 @@ mod read_only_tests {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("reference.db");
         {
-            let refs = Refs::open(&path).expect("build reference.db");
+            let refs = Refs::open_for_write(&path).expect("build reference.db");
             refs.connection()
                 .pragma_update(None, "user_version", TARGET_VERSION + 1)
                 .expect("bump user_version");

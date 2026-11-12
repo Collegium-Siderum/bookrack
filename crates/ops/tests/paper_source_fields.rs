@@ -52,8 +52,8 @@ impl Fixture {
         let papers_catalog_db = tmp.path().join("papers_catalog.db");
         let papers_corpus_db = tmp.path().join("papers_corpus.db");
         let papers_lancedb = tmp.path().join("lancedb_papers");
-        Catalog::open(&papers_catalog_db).expect("seed paper catalog");
-        Corpus::open(&papers_corpus_db).expect("seed paper corpus");
+        Catalog::open_for_write_unbacked(&papers_catalog_db).expect("seed paper catalog");
+        Corpus::open_for_write(&papers_corpus_db).expect("seed paper corpus");
 
         let papers_library = bookrack_query::Library::open(
             papers_corpus_db.clone(),
@@ -97,7 +97,8 @@ impl Fixture {
     /// reads are expected to surface. `page_count` is not a
     /// registration-time column, so it is written separately.
     fn seed_paper(&self, sha: &str, original_path: &str, byte_size: i64, page_count: i64) -> i64 {
-        let mut catalog = Catalog::open(&self.papers_catalog_db).expect("open paper catalog");
+        let mut catalog =
+            Catalog::open_for_write_unbacked(&self.papers_catalog_db).expect("open paper catalog");
         let intake_id = catalog
             .register_intake(
                 ItemKind::Paper,
@@ -117,7 +118,8 @@ impl Fixture {
     /// Register one paper intake with nothing but its hash, so every
     /// source-side column stays unwritten.
     fn seed_bare_paper(&self, sha: &str) -> i64 {
-        let mut catalog = Catalog::open(&self.papers_catalog_db).expect("open paper catalog");
+        let mut catalog =
+            Catalog::open_for_write_unbacked(&self.papers_catalog_db).expect("open paper catalog");
         catalog
             .register_intake(ItemKind::Paper, &NewIntake::new(sha))
             .expect("register intake")
@@ -135,7 +137,8 @@ impl Fixture {
         base: (&str, &str),
         curated: (Option<&str>, Option<&str>),
     ) -> i64 {
-        let mut catalog = Catalog::open(&self.papers_catalog_db).expect("open paper catalog");
+        let mut catalog =
+            Catalog::open_for_write_unbacked(&self.papers_catalog_db).expect("open paper catalog");
         let intake_id = catalog
             .register_intake(ItemKind::Paper, &NewIntake::new(sha))
             .expect("register intake")

@@ -181,7 +181,7 @@ async fn fill(
 }
 
 fn intakes(root: &Path, side: Side, status: IntakeStatus) -> Result<Vec<i64>> {
-    Ok(Catalog::open(&root.join(side.catalog))?
+    Ok(Catalog::open_for_write_unbacked(&root.join(side.catalog))?
         .intakes_with_status(status)?
         .into_iter()
         .map(|i| i.intake_id)
@@ -208,7 +208,7 @@ async fn chunk_rows_of(root: &Path, side: Side, intake_id: i64) -> Result<usize>
 /// Whether a reset pass audited any step of `intake_id`.
 fn reset_audited(root: &Path, side: Side, intake_id: i64) -> Result<bool> {
     let root_id = PartitionIdx::new(intake_id).root().get();
-    Ok(Catalog::open(&root.join(side.catalog))?
+    Ok(Catalog::open_for_write_unbacked(&root.join(side.catalog))?
         .pipeline_audit_for_book(root_id)?
         .iter()
         .any(|row| row.pipeline_run_id.starts_with(side.reset_audit_prefix)))
@@ -306,7 +306,7 @@ async fn reconcile_returns_the_stamps_it_wrote(
         Some(EmbedStub::DIMENSION as u64),
         "{reply}"
     );
-    let corpus = Corpus::open(&root.join(side.corpus))?;
+    let corpus = Corpus::open_for_write(&root.join(side.corpus))?;
     for (field, key) in [
         ("embed_model", EMBED_MODEL_KEY),
         ("vector_dim", VECTOR_DIM_KEY),
@@ -366,7 +366,7 @@ async fn reset_reports_what_it_reembedded(side: Side, sock: PathBuf, root: PathB
     ];
     fill(&mut r, &mut w, &mut id, side, &paths).await?;
     let waiting = intakes(&root, side, IntakeStatus::Embedded)?[0];
-    Catalog::open(&root.join(side.catalog))?.set_intake_status(
+    Catalog::open_for_write_unbacked(&root.join(side.catalog))?.set_intake_status(
         side.kind,
         waiting,
         IntakeStatus::Extracted,
@@ -425,7 +425,7 @@ async fn reset_resume_reports_this_runs_share_only(
     let embedded = intakes(&root, side, IntakeStatus::Embedded)?;
     assert_eq!(embedded.len(), 2, "the fixture embeds two items");
     let (target, untouched) = (embedded[0], embedded[1]);
-    Catalog::open(&root.join(side.catalog))?.set_intake_status(
+    Catalog::open_for_write_unbacked(&root.join(side.catalog))?.set_intake_status(
         side.kind,
         target,
         IntakeStatus::Extracted,

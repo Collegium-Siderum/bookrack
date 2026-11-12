@@ -23,8 +23,9 @@ pub fn plan_rebuild(
     paper: Option<i64>,
     stale_only: bool,
 ) -> Result<bookrack_glean::rebuild::RebuildReport> {
-    let mut corpus = Corpus::open(&cfg.papers_corpus_db()).context("open papers corpus")?;
-    let catalog = Catalog::open_with_backup(&cfg.papers_catalog_db(), &cfg.backup_dir())
+    let mut corpus =
+        Corpus::open_for_write(&cfg.papers_corpus_db()).context("open papers corpus")?;
+    let catalog = Catalog::open_for_write(&cfg.papers_catalog_db(), &cfg.backup_dir())
         .context("open papers catalog")?;
     let params = bookrack_glean::rebuild::RebuildParams {
         only: paper,
@@ -69,8 +70,9 @@ pub async fn execute_rebuild_from_plan(
     pinned_ids: Vec<i64>,
     include_vectors: bool,
 ) -> Result<ExecutePapersRebuildOutcome> {
-    let mut corpus = Corpus::open(&cfg.papers_corpus_db()).context("open papers corpus")?;
-    let catalog = Catalog::open_with_backup(&cfg.papers_catalog_db(), &cfg.backup_dir())
+    let mut corpus =
+        Corpus::open_for_write(&cfg.papers_corpus_db()).context("open papers corpus")?;
+    let catalog = Catalog::open_for_write(&cfg.papers_catalog_db(), &cfg.backup_dir())
         .context("open papers catalog")?;
 
     let report = bookrack_glean::rebuild::rebuild_from_intakes(

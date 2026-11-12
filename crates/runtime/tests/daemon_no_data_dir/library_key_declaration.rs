@@ -120,10 +120,10 @@ async fn a_routed_method_honours_the_key_the_registry_declares() -> Result<()> {
     let beta = sandbox.data_root("beta-root");
     for root in [&alpha, &beta] {
         for db in ["catalog.db", "papers_catalog.db"] {
-            bookrack_catalog::Catalog::open(&root.join(db))?;
+            bookrack_catalog::Catalog::open_for_write_unbacked(&root.join(db))?;
         }
         for db in ["corpus.db", "papers_corpus.db"] {
-            bookrack_corpus::Corpus::open(&root.join(db))?;
+            bookrack_corpus::Corpus::open_for_write(&root.join(db))?;
         }
     }
     sandbox.write_registry_entries(

@@ -961,7 +961,10 @@ mod tests {
     #[test]
     fn purge_gate_accepts_a_probable_root_with_a_real_store() {
         let dir = tempfile::tempdir().expect("tempdir");
-        drop(bookrack_catalog::Catalog::open(&dir.path().join("catalog.db")).expect("seed"));
+        drop(
+            bookrack_catalog::Catalog::open_for_write_unbacked(&dir.path().join("catalog.db"))
+                .expect("seed"),
+        );
         std::fs::write(dir.path().join("corpus.db"), b"").expect("touch corpus");
 
         gate_purge_target(dir.path()).expect("a real store behind the name authorises");

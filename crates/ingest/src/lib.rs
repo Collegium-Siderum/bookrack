@@ -2952,7 +2952,7 @@ mod book_pipeline_tests {
 
     /// Rows in the vector store under `dir`.
     async fn vector_rows(dir: &Path) -> usize {
-        bookrack_vectors::ChunkStore::open(dir, 8)
+        bookrack_vectors::ChunkStore::open_for_write(dir, 8)
             .await
             .expect("open store")
             .count_rows()
@@ -3524,7 +3524,7 @@ mod book_pipeline_tests {
         let corpus_path = dir.path().join("corpus.db");
         let mut catalog = Catalog::open_in_memory().expect("catalog");
         let (first, stale) = {
-            let mut corpus = Corpus::open(&corpus_path).expect("corpus");
+            let mut corpus = Corpus::open_for_write(&corpus_path).expect("corpus");
             ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await
         };
         let envelope_path = dir
@@ -3581,7 +3581,7 @@ mod book_pipeline_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let file = write_sample(dir.path());
         let corpus_path = dir.path().join("corpus.db");
-        drop(Corpus::open(&corpus_path).expect("create corpus"));
+        drop(Corpus::open_for_write(&corpus_path).expect("create corpus"));
         let mut corpus = Corpus::open_read_only(&corpus_path).expect("read-only corpus");
         let mut catalog = Catalog::open_in_memory().expect("catalog");
 
@@ -5628,7 +5628,7 @@ mod book_pipeline_tests {
         assert_ne!(intake_after_crash.status, IntakeStatus::Embedded);
 
         let rows_after_crash = {
-            let store = bookrack_vectors::ChunkStore::open(dir.path(), 8)
+            let store = bookrack_vectors::ChunkStore::open_for_write(dir.path(), 8)
                 .await
                 .expect("open store");
             store.count_rows().await.expect("count")
@@ -5662,7 +5662,7 @@ mod book_pipeline_tests {
         assert_eq!(intake_after_resume.status, IntakeStatus::Embedded);
 
         let rows_after_resume = {
-            let store = bookrack_vectors::ChunkStore::open(dir.path(), 8)
+            let store = bookrack_vectors::ChunkStore::open_for_write(dir.path(), 8)
                 .await
                 .expect("open store");
             store.count_rows().await.expect("count")

@@ -57,10 +57,10 @@ fn data_root_value(report: &Value) -> Result<String> {
 
 fn seed_root(root: &Path) -> Result<()> {
     for db in ["catalog.db", "papers_catalog.db"] {
-        bookrack_catalog::Catalog::open(&root.join(db))?;
+        bookrack_catalog::Catalog::open_for_write_unbacked(&root.join(db))?;
     }
     for db in ["corpus.db", "papers_corpus.db"] {
-        bookrack_corpus::Corpus::open(&root.join(db))?;
+        bookrack_corpus::Corpus::open_for_write(&root.join(db))?;
     }
     Ok(())
 }

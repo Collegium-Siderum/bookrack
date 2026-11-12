@@ -65,7 +65,8 @@ async fn distill_build_writes_audit_with_pipeline_run_id() {
         .await
         .expect("build");
 
-    let catalog = Catalog::open(&catalog_path(tmp.path())).expect("open catalog");
+    let catalog =
+        Catalog::open_for_write_unbacked(&catalog_path(tmp.path())).expect("open catalog");
     let runs = catalog
         .list_pipeline_runs(Some("distill_build"), None)
         .expect("list runs");
@@ -108,7 +109,8 @@ async fn one_invocation_opens_one_run_for_all_books() {
         .await
         .expect("build");
 
-    let catalog = Catalog::open(&catalog_path(tmp.path())).expect("open catalog");
+    let catalog =
+        Catalog::open_for_write_unbacked(&catalog_path(tmp.path())).expect("open catalog");
     let runs = catalog
         .list_pipeline_runs(Some("distill_build"), None)
         .expect("list runs");
@@ -150,7 +152,8 @@ async fn failed_build_closes_the_run_with_error_status() {
         "the run must fail on the retention guard, not elsewhere: {msg}",
     );
 
-    let catalog = Catalog::open(&catalog_path(tmp.path())).expect("open catalog");
+    let catalog =
+        Catalog::open_for_write_unbacked(&catalog_path(tmp.path())).expect("open catalog");
     let runs = catalog
         .list_pipeline_runs(Some("distill_build"), None)
         .expect("list runs");
@@ -182,7 +185,9 @@ async fn dry_run_still_registers_the_run_and_stamps_the_audit_row() {
     // A preview records into a catalog that is already there. It does
     // not bring one into existence for the sake of its own bookkeeping,
     // so the fixture creates it rather than letting the dry run do it.
-    drop(Catalog::open(&catalog_path(tmp.path())).expect("initialise catalog.db"));
+    drop(
+        Catalog::open_for_write_unbacked(&catalog_path(tmp.path())).expect("initialise catalog.db"),
+    );
 
     let mut args = build_args(vec![book_dir]);
     args.dry_run = true;
@@ -190,7 +195,8 @@ async fn dry_run_still_registers_the_run_and_stamps_the_audit_row() {
         .await
         .expect("dry-run build");
 
-    let catalog = Catalog::open(&catalog_path(tmp.path())).expect("open catalog");
+    let catalog =
+        Catalog::open_for_write_unbacked(&catalog_path(tmp.path())).expect("open catalog");
     // The preview registers under its own command name, so a `runs`
     // listing never mistakes it for a build that wrote `reference.db`.
     let runs = catalog

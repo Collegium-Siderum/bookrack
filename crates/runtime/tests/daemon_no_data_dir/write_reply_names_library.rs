@@ -194,7 +194,7 @@ async fn a_metadata_write_carries_the_library_and_its_audit_row() -> Result<()> 
     let roots = world();
     let runtime_root = tempfile::tempdir()?;
     let runtime = start_under_beta(runtime_root.path()).await?;
-    let book = Catalog::open(&roots.alpha.join("catalog.db"))?
+    let book = Catalog::open_for_write_unbacked(&roots.alpha.join("catalog.db"))?
         .register_intake(
             ItemKind::Book,
             &NewIntake::new("sha-write-reply").format("epub"),
@@ -222,7 +222,7 @@ async fn a_metadata_write_carries_the_library_and_its_audit_row() -> Result<()> 
             .as_i64()
             .with_context(|| format!("no audit_id: {reply}"))?;
         assert!(
-            Catalog::open(&alpha_catalog)?
+            Catalog::open_for_write_unbacked(&alpha_catalog)?
                 .recent_metadata_audit("", 1000)?
                 .iter()
                 .any(|row| row.audit_id == audit_id),

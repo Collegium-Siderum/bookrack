@@ -190,7 +190,7 @@ async fn paper_metadata_writes_refuse_an_intake_the_catalog_does_not_hold() -> R
     // 7. The assertion the codes cannot make: nothing was written. A
     //    guard that returns -32602 and then falls through to the write
     //    would satisfy every check above and none of these.
-    let catalog = Catalog::open(&papers_catalog)
+    let catalog = Catalog::open_for_write_unbacked(&papers_catalog)
         .map_err(|e| eyre!("reopen paper catalog at {}: {e}", papers_catalog.display()))?;
     assert!(
         catalog
@@ -279,7 +279,7 @@ fn seed_audited_paper(data_root: &std::path::Path) -> Result<i64> {
     };
 
     let sha = "5eed5eed".to_string();
-    let mut catalog = Catalog::open(&data_root.join("papers_catalog.db"))
+    let mut catalog = Catalog::open_for_write_unbacked(&data_root.join("papers_catalog.db"))
         .map_err(|e| eyre!("open paper catalog to seed: {e}"))?;
     let intake_id = catalog
         .register_intake(ItemKind::Paper, &NewIntake::new(sha.clone()).format("pdf"))
@@ -347,7 +347,7 @@ fn seed_audited_paper(data_root: &std::path::Path) -> Result<i64> {
 
     // `show_paper` reads the corpus for the node shape alongside the
     // catalog, and opens it read-only, so the store has to exist.
-    let mut corpus = bookrack_corpus::Corpus::open(&data_root.join("papers_corpus.db"))
+    let mut corpus = bookrack_corpus::Corpus::open_for_write(&data_root.join("papers_corpus.db"))
         .map_err(|e| eyre!("open paper corpus to seed: {e}"))?;
     let partition = corpus
         .allocate_partition(intake_id)
@@ -473,8 +473,9 @@ async fn a_paper_metadata_write_announces_the_library_it_changed() -> Result<()>
     // Seed one real intake before bring-up: the event only fires on a
     // write that succeeds, and a phantom id is refused before any.
     let intake_id = {
-        let mut catalog = Catalog::open(&data_root.path().join("papers_catalog.db"))
-            .map_err(|e| eyre!("open paper catalog to seed: {e}"))?;
+        let mut catalog =
+            Catalog::open_for_write_unbacked(&data_root.path().join("papers_catalog.db"))
+                .map_err(|e| eyre!("open paper catalog to seed: {e}"))?;
         catalog
             .register_intake(
                 ItemKind::Paper,
@@ -555,7 +556,7 @@ async fn a_paper_metadata_write_announces_the_library_it_changed() -> Result<()>
 
     // The write itself landed — an event published by a body that then
     // failed would satisfy the loop above and nothing else.
-    let catalog = Catalog::open(&data_root.path().join("papers_catalog.db"))
+    let catalog = Catalog::open_for_write_unbacked(&data_root.path().join("papers_catalog.db"))
         .map_err(|e| eyre!("reopen paper catalog: {e}"))?;
     assert!(
         !catalog
@@ -612,7 +613,7 @@ async fn a_paper_curation_write_records_an_audit_row() -> Result<()> {
 
     join_with_deadline(runtime, repl_handle, driver).await?;
 
-    let catalog = Catalog::open(&data_root.path().join("papers_catalog.db"))
+    let catalog = Catalog::open_for_write_unbacked(&data_root.path().join("papers_catalog.db"))
         .map_err(|e| eyre!("reopen paper catalog: {e}"))?;
     let node_id = bookrack_core::PartitionIdx::new(intake_id).root().get();
     let rows = catalog.metadata_audit_for_node(node_id)?;
@@ -677,7 +678,7 @@ async fn a_second_edit_records_the_value_the_first_one_left() -> Result<()> {
 
     join_with_deadline(runtime, repl_handle, driver).await?;
 
-    let catalog = Catalog::open(&data_root.path().join("papers_catalog.db"))
+    let catalog = Catalog::open_for_write_unbacked(&data_root.path().join("papers_catalog.db"))
         .map_err(|e| eyre!("reopen paper catalog: {e}"))?;
     let node_id = bookrack_core::PartitionIdx::new(intake_id).root().get();
     let rows = catalog.metadata_audit_for_node(node_id)?;
@@ -706,8 +707,8 @@ async fn contributor_remove_refuses_a_row_on_another_paper() -> Result<()> {
     // Two papers, so "belongs to the named paper" has something to
     // fail against.
     let (paper_a, paper_b) = {
-        let mut catalog =
-            Catalog::open(&papers_catalog).map_err(|e| eyre!("open paper catalog to seed: {e}"))?;
+        let mut catalog = Catalog::open_for_write_unbacked(&papers_catalog)
+            .map_err(|e| eyre!("open paper catalog to seed: {e}"))?;
         let mut register = |sha: &str| -> Result<i64> {
             Ok(catalog
                 .register_intake(
@@ -773,7 +774,8 @@ async fn contributor_remove_refuses_a_row_on_another_paper() -> Result<()> {
 
     join_with_deadline(runtime, repl_handle, driver).await?;
 
-    let catalog = Catalog::open(&papers_catalog).map_err(|e| eyre!("reopen paper catalog: {e}"))?;
+    let catalog = Catalog::open_for_write_unbacked(&papers_catalog)
+        .map_err(|e| eyre!("reopen paper catalog: {e}"))?;
     assert_eq!(
         catalog
             .contributors_for_address(paper_a, ItemKind::Paper)?
@@ -796,7 +798,7 @@ async fn a_paper_curation_write_is_logged_as_a_tool_call() -> Result<()> {
     // paper reads included, and the recorder skips a data root that
     // holds no catalog at all. A library with both pipelines is what
     // this assertion is about, so the fixture materializes it.
-    Catalog::open(&data_root.path().join("catalog.db"))
+    Catalog::open_for_write_unbacked(&data_root.path().join("catalog.db"))
         .map_err(|e| eyre!("seed book catalog: {e}"))?;
 
     let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
@@ -830,7 +832,7 @@ async fn a_paper_curation_write_is_logged_as_a_tool_call() -> Result<()> {
 
     join_with_deadline(runtime, repl_handle, driver).await?;
 
-    let catalog = Catalog::open(&data_root.path().join("catalog.db"))
+    let catalog = Catalog::open_for_write_unbacked(&data_root.path().join("catalog.db"))
         .map_err(|e| eyre!("reopen catalog: {e}"))?;
     let calls = catalog.tool_calls_for_tool("papers.metadata.set")?;
     assert_eq!(
@@ -852,11 +854,12 @@ async fn a_review_verb_does_not_overwrite_the_ingest_report() -> Result<()> {
     let runtime_root = tempfile::tempdir()?;
     let intake_id = seed_audited_paper(data_root.path())?;
 
-    let seeded_notes = Catalog::open(&data_root.path().join("papers_catalog.db"))
-        .map_err(|e| eyre!("open paper catalog: {e}"))?
-        .review(intake_id, ItemKind::Paper)?
-        .and_then(|r| r.notes)
-        .ok_or_else(|| eyre!("the fixture must seed a report into the review row"))?;
+    let seeded_notes =
+        Catalog::open_for_write_unbacked(&data_root.path().join("papers_catalog.db"))
+            .map_err(|e| eyre!("open paper catalog: {e}"))?
+            .review(intake_id, ItemKind::Paper)?
+            .and_then(|r| r.notes)
+            .ok_or_else(|| eyre!("the fixture must seed a report into the review row"))?;
     assert!(
         seeded_notes.contains("fields"),
         "the seeded notes must be the report JSON: {seeded_notes}"
@@ -893,7 +896,7 @@ async fn a_review_verb_does_not_overwrite_the_ingest_report() -> Result<()> {
 
     join_with_deadline(runtime, repl_handle, driver).await?;
 
-    let catalog = Catalog::open(&data_root.path().join("papers_catalog.db"))
+    let catalog = Catalog::open_for_write_unbacked(&data_root.path().join("papers_catalog.db"))
         .map_err(|e| eyre!("reopen paper catalog: {e}"))?;
     let review = catalog
         .review(intake_id, ItemKind::Paper)?
@@ -1050,7 +1053,7 @@ async fn a_paper_reaudit_is_logged_as_a_tool_call() -> Result<()> {
     let intake_id = seed_audited_paper(data_root.path())?;
     // The tool-call log lives in the book-side catalog, and the
     // recorder skips a data root that holds no catalog at all.
-    Catalog::open(&data_root.path().join("catalog.db"))
+    Catalog::open_for_write_unbacked(&data_root.path().join("catalog.db"))
         .map_err(|e| eyre!("seed book catalog: {e}"))?;
 
     let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
@@ -1088,7 +1091,7 @@ async fn a_paper_reaudit_is_logged_as_a_tool_call() -> Result<()> {
 
     join_with_deadline(runtime, repl_handle, driver).await?;
 
-    let catalog = Catalog::open(&data_root.path().join("catalog.db"))
+    let catalog = Catalog::open_for_write_unbacked(&data_root.path().join("catalog.db"))
         .map_err(|e| eyre!("reopen catalog: {e}"))?;
     let calls = catalog.tool_calls_for_tool("papers.metadata.reaudit")?;
     assert_eq!(
@@ -1100,7 +1103,7 @@ async fn a_paper_reaudit_is_logged_as_a_tool_call() -> Result<()> {
 
     // A re-audit is a recomputation, not a curator edit, so it leaves
     // no `metadata_audit` row — the same split the book side keeps.
-    let papers = Catalog::open(&data_root.path().join("papers_catalog.db"))
+    let papers = Catalog::open_for_write_unbacked(&data_root.path().join("papers_catalog.db"))
         .map_err(|e| eyre!("reopen paper catalog: {e}"))?;
     let node_id = bookrack_core::PartitionIdx::new(intake_id).root().get();
     assert!(
@@ -1344,7 +1347,7 @@ fn seed_graded_paper(
 ) -> Result<i64> {
     use bookrack_catalog::{NewIntake, NewPublicationAttrs, NewReview};
 
-    let mut catalog = Catalog::open(&data_root.join("papers_catalog.db"))
+    let mut catalog = Catalog::open_for_write_unbacked(&data_root.join("papers_catalog.db"))
         .map_err(|e| eyre!("open paper catalog to seed: {e}"))?;
     let intake_id = catalog
         .register_intake(ItemKind::Paper, &NewIntake::new(sha).format("pdf"))

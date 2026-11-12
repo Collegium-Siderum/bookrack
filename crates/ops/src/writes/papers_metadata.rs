@@ -11,7 +11,7 @@
 //! [`crate::Caller`], so a CLI edit and an MCP edit are
 //! distinguishable by `actor_kind` / `actor_detail`.
 //!
-//! The catalog is opened through [`Catalog::open_with_backup`]: the
+//! The catalog is opened through [`Catalog::open_for_write`]: the
 //! paper write path has no outer caller that migrates the schema
 //! first, so this is the door that takes a backup before a migration
 //! runs.
@@ -59,12 +59,11 @@ pub const PAPER_EDITABLE_FIELDS: &[&str] = &[
 ];
 
 /// Open the paper catalog this `Ops` is configured against.
-// Parallel implementation: ops-open-catalog.
-fn open_paper_catalog<E: Embedder>(ops: &Ops<E>) -> Result<Catalog> {
+fn open_paper_catalog_for_write<E: Embedder>(ops: &Ops<E>) -> Result<Catalog> {
     let catalog_db = ops
         .papers_catalog_db()
         .ok_or(OpsError::PapersBackendNotConfigured)?;
-    Ok(Catalog::open_with_backup(catalog_db, ops.backup_dir())?)
+    Ok(Catalog::open_for_write(catalog_db, ops.backup_dir())?)
 }
 
 fn require_paper_editable(field: &str) -> Result<()> {
@@ -97,7 +96,7 @@ pub fn set_paper_metadata_field<E: Embedder>(
     });
     record_call_sync!(ops, "papers.metadata.set", args, {
         require_paper_editable(&req.field)?;
-        let catalog = open_paper_catalog(ops)?;
+        let catalog = open_paper_catalog_for_write(ops)?;
         require_intake(&catalog, req.intake_id)?;
 
         let effective = catalog.effective_publication_attrs(req.intake_id, ItemKind::Paper)?;
@@ -148,7 +147,7 @@ pub fn clear_paper_metadata_field<E: Embedder>(
         "reason": req.reason,
     });
     record_call_sync!(ops, "papers.metadata.clear", args, {
-        let catalog = open_paper_catalog(ops)?;
+        let catalog = open_paper_catalog_for_write(ops)?;
         require_intake(&catalog, req.intake_id)?;
 
         let effective = catalog.effective_publication_attrs(req.intake_id, ItemKind::Paper)?;
@@ -192,7 +191,7 @@ pub fn void_paper_metadata_field<E: Embedder>(
     });
     record_call_sync!(ops, "papers.metadata.void", args, {
         require_paper_editable(&req.field)?;
-        let catalog = open_paper_catalog(ops)?;
+        let catalog = open_paper_catalog_for_write(ops)?;
         require_intake(&catalog, req.intake_id)?;
 
         let effective = catalog.effective_publication_attrs(req.intake_id, ItemKind::Paper)?;
@@ -273,7 +272,7 @@ pub fn add_paper_contributor<E: Embedder>(
                 "contributor name must not be empty"
             )));
         }
-        let catalog = open_paper_catalog(ops)?;
+        let catalog = open_paper_catalog_for_write(ops)?;
         require_intake(&catalog, req.intake_id)?;
 
         let existing = catalog.contributors_for_address(req.intake_id, ItemKind::Paper)?;
@@ -331,7 +330,7 @@ pub fn remove_paper_contributor<E: Embedder>(
         "reason": req.reason,
     });
     record_call_sync!(ops, "papers.metadata.contributor_remove", args, {
-        let catalog = open_paper_catalog(ops)?;
+        let catalog = open_paper_catalog_for_write(ops)?;
         require_intake(&catalog, req.intake_id)?;
 
         let existing = catalog.contributors_for_address(req.intake_id, ItemKind::Paper)?;
@@ -380,7 +379,7 @@ pub fn reaudit_paper_metadata<E: Embedder>(
 ) -> Result<ReauditOutcome> {
     let args = serde_json::json!({ "intake_id": req.intake_id });
     record_call_sync!(ops, "papers.metadata.reaudit", args, {
-        let catalog = open_paper_catalog(ops)?;
+        let catalog = open_paper_catalog_for_write(ops)?;
         let outcome = bookrack_glean::reaudit::reaudit_paper(
             &catalog,
             req.intake_id,
@@ -414,7 +413,7 @@ pub fn acknowledge_paper_metadata_gap<E: Embedder>(
         "reason": req.reason,
     });
     record_call_sync!(ops, "papers.metadata.ack", args, {
-        let catalog = open_paper_catalog(ops)?;
+        let catalog = open_paper_catalog_for_write(ops)?;
         write_review_status_inner(
             ops,
             &catalog,
@@ -438,7 +437,7 @@ pub fn approve_paper_metadata<E: Embedder>(
         "reason": req.reason,
     });
     record_call_sync!(ops, "papers.metadata.approve", args, {
-        let catalog = open_paper_catalog(ops)?;
+        let catalog = open_paper_catalog_for_write(ops)?;
         write_review_status_inner(
             ops,
             &catalog,
@@ -462,7 +461,7 @@ pub fn reject_paper_metadata<E: Embedder>(
         "reason": req.reason,
     });
     record_call_sync!(ops, "papers.metadata.reject", args, {
-        let catalog = open_paper_catalog(ops)?;
+        let catalog = open_paper_catalog_for_write(ops)?;
         write_review_status_inner(
             ops,
             &catalog,
@@ -486,7 +485,7 @@ pub fn reopen_paper_review<E: Embedder>(
         "reason": req.reason,
     });
     record_call_sync!(ops, "papers.metadata.reopen", args, {
-        let catalog = open_paper_catalog(ops)?;
+        let catalog = open_paper_catalog_for_write(ops)?;
         write_review_status_inner(
             ops,
             &catalog,

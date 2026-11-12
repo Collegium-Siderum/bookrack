@@ -33,13 +33,13 @@ fn opening_a_chmod_444_catalog_for_read_write_fails_readably() {
 
     // Seed the file at the current schema, then drop the handle so the
     // file is closed before its permissions are tightened.
-    drop(Catalog::open(&path).expect("seed catalog"));
+    drop(Catalog::open_for_write_unbacked(&path).expect("seed catalog"));
 
     let mut perms = std::fs::metadata(&path).expect("stat").permissions();
     perms.set_mode(0o444);
     std::fs::set_permissions(&path, perms).expect("chmod 444");
 
-    let err = match Catalog::open(&path) {
+    let err = match Catalog::open_for_write_unbacked(&path) {
         Ok(_) => panic!("a read-only file must refuse rw open"),
         Err(err) => err,
     };

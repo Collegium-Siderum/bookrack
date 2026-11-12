@@ -48,7 +48,7 @@ use bookrack_core::{
 const TABLE: &str = "chunks";
 
 /// One-shot init of process-global environment lancedb consults.
-/// Reads this once on first [`ChunkStore::open`] call and never again.
+/// Reads this once on first [`ChunkStore::open_for_write`] call and never again.
 static LANCE_ENV_INIT: OnceLock<()> = OnceLock::new();
 
 /// Set the environment variables lancedb honours at startup. Today
@@ -726,7 +726,7 @@ impl ChunkStore {
     /// Open the existing chunks table under `lancedb_dir`, or return
     /// `None` if no such table is on disk.
     ///
-    /// Unlike [`ChunkStore::open`] this method never creates the table
+    /// Unlike [`ChunkStore::open_for_write`] this method never creates the table
     /// — a missing directory or a directory without the `chunks` table
     /// is reported as `Ok(None)` rather than silently established
     /// with a placeholder dimension. The reader-version guard still
@@ -804,7 +804,7 @@ impl ChunkStore {
     /// table is first created; reopening a store with a different `dim`
     /// than its rows were written with will fail later, on write or
     /// read — a directory must be reused only with one embedding model.
-    pub async fn open(lancedb_dir: &Path, dim: usize) -> Result<ChunkStore> {
+    pub async fn open_for_write(lancedb_dir: &Path, dim: usize) -> Result<ChunkStore> {
         ensure_lance_env();
         // Reader-version axis: a meta file written by a future binary
         // may demand a stamp this build cannot meet. The check runs
@@ -1515,7 +1515,9 @@ mod tests {
     /// so the test keeps it alive (drop cleans the directory up).
     async fn fresh_store() -> (TempDir, ChunkStore) {
         let dir = tempfile::tempdir().expect("temp dir");
-        let store = ChunkStore::open(dir.path(), DIM).await.expect("open");
+        let store = ChunkStore::open_for_write(dir.path(), DIM)
+            .await
+            .expect("open");
         (dir, store)
     }
 
@@ -1542,7 +1544,7 @@ mod tests {
         };
         meta::store(dir.path(), &forged).expect("store forged meta");
 
-        let Err(err) = ChunkStore::open(dir.path(), DIM).await else {
+        let Err(err) = ChunkStore::open_for_write(dir.path(), DIM).await else {
             panic!("open must refuse a too-new reader stamp")
         };
         assert!(
@@ -1601,7 +1603,9 @@ mod tests {
     async fn try_open_finds_the_existing_table_and_its_dimension() {
         let dir = tempfile::tempdir().expect("temp dir");
         {
-            let store = ChunkStore::open(dir.path(), DIM).await.expect("open");
+            let store = ChunkStore::open_for_write(dir.path(), DIM)
+                .await
+                .expect("open");
             store
                 .append(&[row(1, 1, [1.0, 0.0, 0.0, 0.0])])
                 .await
@@ -1619,7 +1623,9 @@ mod tests {
     async fn open_with_a_mismatched_dim_hint_adopts_the_on_disk_dimension() {
         let dir = tempfile::tempdir().expect("temp dir");
         {
-            let store = ChunkStore::open(dir.path(), DIM).await.expect("open");
+            let store = ChunkStore::open_for_write(dir.path(), DIM)
+                .await
+                .expect("open");
             store
                 .append(&[row(1, 1, [1.0, 0.0, 0.0, 0.0])])
                 .await
@@ -1627,7 +1633,9 @@ mod tests {
         }
         // Reopen with a wrong hint: the table schema is the source of
         // truth, so the handle must reflect the on-disk dimension.
-        let reopened = ChunkStore::open(dir.path(), DIM + 3).await.expect("reopen");
+        let reopened = ChunkStore::open_for_write(dir.path(), DIM + 3)
+            .await
+            .expect("reopen");
         assert_eq!(
             reopened.dimension(),
             DIM,
@@ -1730,7 +1738,9 @@ mod tests {
     /// Helper for tests that need a non-default embedding dimension.
     async fn fresh_store_with_dim(dim: usize) -> (TempDir, ChunkStore) {
         let dir = tempfile::tempdir().expect("temp dir");
-        let store = ChunkStore::open(dir.path(), dim).await.expect("open");
+        let store = ChunkStore::open_for_write(dir.path(), dim)
+            .await
+            .expect("open");
         (dir, store)
     }
 
@@ -2268,7 +2278,7 @@ mod tests {
             .expect("drop");
 
         const NEW_DIM: usize = 8;
-        let fresh = ChunkStore::open(dir.path(), NEW_DIM)
+        let fresh = ChunkStore::open_for_write(dir.path(), NEW_DIM)
             .await
             .expect("reopen with new dim");
         assert_eq!(fresh.dimension(), NEW_DIM);
@@ -2938,14 +2948,18 @@ mod tests {
     async fn a_reopened_store_sees_existing_rows() {
         let dir = tempfile::tempdir().expect("temp dir");
         {
-            let store = ChunkStore::open(dir.path(), DIM).await.expect("open");
+            let store = ChunkStore::open_for_write(dir.path(), DIM)
+                .await
+                .expect("open");
             store
                 .append(&[row(1, 1, [1.0, 0.0, 0.0, 0.0])])
                 .await
                 .expect("append");
         }
         // A second handle on the same directory finds the committed row.
-        let reopened = ChunkStore::open(dir.path(), DIM).await.expect("reopen");
+        let reopened = ChunkStore::open_for_write(dir.path(), DIM)
+            .await
+            .expect("reopen");
         assert_eq!(reopened.count_rows().await.expect("count"), 1);
     }
 
@@ -2956,7 +2970,7 @@ mod tests {
     #[tokio::test]
     async fn a_long_lived_handle_sees_a_delete_made_through_another_handle() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let reader = ChunkStore::open(dir.path(), DIM)
+        let reader = ChunkStore::open_for_write(dir.path(), DIM)
             .await
             .expect("open reader");
         reader
@@ -2968,7 +2982,7 @@ mod tests {
             .expect("append");
         assert_eq!(reader.count_rows().await.expect("count before"), 2);
 
-        let writer = ChunkStore::open(dir.path(), DIM)
+        let writer = ChunkStore::open_for_write(dir.path(), DIM)
             .await
             .expect("open writer");
         writer

@@ -80,7 +80,7 @@ mod tests {
 
     /// Two books, one entry each, under the same key.
     fn seed(dir: &Path) {
-        let refs = Refs::open(&dir.join("reference.db")).expect("create reference.db");
+        let refs = Refs::open_for_write(&dir.join("reference.db")).expect("create reference.db");
         refs.upsert_book(&book("book_a", 10)).unwrap();
         refs.upsert_book(&book("book_b", 5)).unwrap();
         refs.upsert_entry(&entry(

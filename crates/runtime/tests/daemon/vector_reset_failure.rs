@@ -248,7 +248,7 @@ async fn side_state(root: &Path, side: Side) -> Result<SideState> {
 }
 
 fn reset_runs(root: &Path, side: Side) -> Result<usize> {
-    Ok(Catalog::open(&root.join(side.catalog))?
+    Ok(Catalog::open_for_write_unbacked(&root.join(side.catalog))?
         .list_pipeline_runs(None, None)?
         .into_iter()
         .filter(|run| run.command == side.reset_run)

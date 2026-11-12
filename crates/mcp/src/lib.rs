@@ -2214,7 +2214,7 @@ impl BookrackServer {
                 },
             ));
         }
-        let refs = bookrack_refs::Refs::open(&refs_path)
+        let refs = bookrack_refs::Refs::open_for_write(&refs_path)
             .map_err(|e| internal_message(format!("open reference.db: {e}")))?;
         let edited_at = chrono::Utc::now().to_rfc3339();
         let catalogs = reference::catalogs().map_err(reference_error_to_mcp)?;

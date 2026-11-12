@@ -118,7 +118,7 @@ pub async fn rebuild(
     refine_factor: Option<u32>,
 ) -> Result<AnnRebuildReport> {
     let lancedb_dir = cfg.lancedb_dir();
-    let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    let corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open corpus")?;
     let dim = corpus
         .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
         .context("read vector_dim stamp")?
@@ -128,7 +128,7 @@ pub async fn rebuild(
         })?
         .parse::<usize>()
         .context("parse vector_dim stamp")?;
-    let store = ChunkStore::open(&lancedb_dir, dim)
+    let store = ChunkStore::open_for_write(&lancedb_dir, dim)
         .await
         .context("open vector store")?;
     // Pick the baseline: explicit kind > existing meta > default IvfFlat.
@@ -174,7 +174,7 @@ pub async fn plan_reembed(
 ) -> Result<Vec<bookrack_ingest::reembed::ReembedPlan>> {
     let lancedb_dir = cfg.lancedb_dir();
     let catalog =
-        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+        Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     bookrack_ingest::reembed::plan_reembed(&catalog, &lancedb_dir, book, None, stale_only)
         .await
         .context("plan reembed")
@@ -190,8 +190,8 @@ pub async fn execute_reembed_from_plan(
 ) -> Result<bookrack_ingest::reembed::ReembedReport> {
     let lancedb_dir = cfg.lancedb_dir();
     let catalog =
-        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
-    let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+        Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    let corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open corpus")?;
     let embed_cfg = crate::profile::effective_embed_config(cfg)?;
     let embedder_client = embedder(cfg, &embed_cfg)?;
     let run = open_run(
@@ -220,7 +220,7 @@ pub async fn execute_reembed_from_plan(
 /// meta as `kind = brute-force`. Search falls back to a full scan.
 pub async fn drop(cfg: &Config) -> Result<AnnDropReport> {
     let lancedb_dir = cfg.lancedb_dir();
-    let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    let corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open corpus")?;
     let dim = corpus
         .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
         .context("read vector_dim stamp")?
@@ -230,7 +230,7 @@ pub async fn drop(cfg: &Config) -> Result<AnnDropReport> {
         })?
         .parse::<usize>()
         .context("parse vector_dim stamp")?;
-    let store = ChunkStore::open(&lancedb_dir, dim)
+    let store = ChunkStore::open_for_write(&lancedb_dir, dim)
         .await
         .context("open vector store")?;
     store
@@ -261,8 +261,8 @@ pub async fn drop(cfg: &Config) -> Result<AnnDropReport> {
 pub async fn reset(cfg: &Config, resume: bool) -> Result<VectorsResetReport> {
     let lancedb_dir = cfg.lancedb_dir();
     let catalog =
-        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
-    let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+        Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    let corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open corpus")?;
     let (embed_cfg, declaration) = crate::profile::effective_embed_declaration(cfg)?;
     let embedder_client = embedder(cfg, &embed_cfg)?;
 
@@ -325,8 +325,8 @@ mod tests {
         );
         // `drop` names this module's command function, so the seed
         // handles are released by falling out of the statement.
-        Catalog::open(&cfg.catalog_db()).expect("seed catalog");
-        Corpus::open(&cfg.corpus_db()).expect("seed corpus");
+        Catalog::open_for_write_unbacked(&cfg.catalog_db()).expect("seed catalog");
+        Corpus::open_for_write(&cfg.corpus_db()).expect("seed corpus");
         (dir, cfg)
     }
 
@@ -343,11 +343,11 @@ mod tests {
     /// Stamp the corpus with the store width and write `n` chunk rows,
     /// enough for a one-partition IVF index to train on.
     async fn seed_chunks(cfg: &Config, n: i64) {
-        Corpus::open(&cfg.corpus_db())
+        Corpus::open_for_write(&cfg.corpus_db())
             .expect("open corpus")
             .meta_set(VECTOR_DIM_KEY, &DIM.to_string())
             .expect("stamp vector_dim");
-        let store = ChunkStore::open(&cfg.lancedb_dir(), DIM)
+        let store = ChunkStore::open_for_write(&cfg.lancedb_dir(), DIM)
             .await
             .expect("open store");
         let rows: Vec<ChunkRow> = (1..=n)
@@ -370,7 +370,7 @@ mod tests {
 
     /// The ANN configuration as the store's own sidecar records it.
     async fn stored_ann_cfg(cfg: &Config) -> AnnConfig {
-        ChunkStore::open(&cfg.lancedb_dir(), DIM)
+        ChunkStore::open_for_write(&cfg.lancedb_dir(), DIM)
             .await
             .expect("open store")
             .current_ann_cfg(&cfg.lancedb_dir())
