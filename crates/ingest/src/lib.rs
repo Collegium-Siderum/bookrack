@@ -25,7 +25,7 @@ pub mod sentences;
 mod structure;
 
 pub use bookrack_corpus::IndexStamps;
-pub use bookrack_text::{CHUNK_VERSION, ChunkParams, ChunkPlan};
+pub use bookrack_text::{ChunkParams, ChunkPlan};
 pub use dryrun::{
     BiblioOut, ChunkStatsOut, DryrunBookReport, DryrunParams, DryrunSummary, FieldOut,
     StructureOut, TocStatsOut, collect_files, dryrun_book, dryrun_path, summarize,
@@ -67,7 +67,7 @@ pub fn current_index_stamps(embed_model: impl Into<String>, vector_dim: u32) -> 
     IndexStamps {
         embed_model: embed_model.into(),
         vector_dim,
-        chunk_version: CHUNK_VERSION,
+        chunk_version: bookrack_text::CHUNK_VERSION,
         normalize_version: bookrack_text::NORMALIZE_VERSION,
     }
 }
@@ -826,7 +826,7 @@ fn on_file(
     let stored_chunk = corpus
         .meta_get(bookrack_corpus::CHUNK_VERSION_KEY)?
         .and_then(|v| v.parse::<u32>().ok());
-    if stored_chunk != Some(CHUNK_VERSION) {
+    if stored_chunk != Some(bookrack_text::CHUNK_VERSION) {
         return Ok(OnFile::Rerun);
     }
     let stored_normalize = corpus
@@ -2653,7 +2653,7 @@ mod book_pipeline_tests {
             corpus
                 .meta_get(bookrack_corpus::CHUNK_VERSION_KEY)
                 .expect("get"),
-            Some(CHUNK_VERSION.to_string())
+            Some(bookrack_text::CHUNK_VERSION.to_string())
         );
         assert_eq!(
             corpus
@@ -3689,7 +3689,7 @@ mod book_pipeline_tests {
                 "another chunk version" => corpus
                     .meta_set(
                         bookrack_corpus::CHUNK_VERSION_KEY,
-                        &(CHUNK_VERSION + 1).to_string(),
+                        &(bookrack_text::CHUNK_VERSION + 1).to_string(),
                     )
                     .expect("chunk version"),
                 _ => {

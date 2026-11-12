@@ -7,9 +7,7 @@
 //! swap; see `runtime::cmd::papers_stamps`.
 
 use bookrack_corpus::IndexStamps;
-use bookrack_text::NORMALIZE_VERSION;
-
-use crate::CHUNK_VERSION;
+use bookrack_text::{CHUNK_VERSION, NORMALIZE_VERSION};
 
 /// Build the [`IndexStamps`] this binary writes into `papers_corpus`'s
 /// `index_meta` table. Uses the workspace-wide

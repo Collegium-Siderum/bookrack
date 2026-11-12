@@ -16,10 +16,10 @@ use bookrack_core::ItemKind;
 use bookrack_corpus::{Corpus, IndexStamps};
 use bookrack_extract::envelope::ExtractionEnvelope;
 use bookrack_extract::{EXTRACTOR_VERSION, EnvelopeError, read_envelope_with_fallback};
-use bookrack_text::NORMALIZE_VERSION;
+use bookrack_text::{CHUNK_VERSION, NORMALIZE_VERSION};
 use bookrack_vectors::ChunkReader;
 
-use crate::{CHUNK_VERSION, GleanError, Result, build_structure};
+use crate::{GleanError, Result, build_structure};
 
 /// What to rebuild and how.
 #[derive(Debug, Clone, Default)]

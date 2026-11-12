@@ -144,7 +144,6 @@ async fn search_returns_a_cited_passage_through_the_facade() {
         Fixed,
         MODEL.to_string(),
         5,
-        bookrack_ingest::CHUNK_VERSION,
     )
     .await
     .expect("open library");
@@ -227,7 +226,6 @@ async fn search_in_an_unknown_intake_returns_empty_not_an_error() {
         Fixed,
         MODEL.to_string(),
         5,
-        bookrack_ingest::CHUNK_VERSION,
     )
     .await
     .expect("open library");
@@ -272,7 +270,6 @@ async fn two_book_library() -> (tempfile::TempDir, Library<Fixed>) {
         Fixed,
         MODEL.to_string(),
         5,
-        bookrack_ingest::CHUNK_VERSION,
     )
     .await
     .expect("open library");
@@ -422,7 +419,6 @@ async fn opening_with_a_different_model_is_refused() {
         Fixed,
         "other-model".to_string(),
         5,
-        bookrack_ingest::CHUNK_VERSION,
     )
     .await;
     assert!(matches!(
@@ -450,7 +446,6 @@ async fn an_empty_index_is_served_without_stamps() {
         Fixed,
         MODEL.to_string(),
         5,
-        bookrack_ingest::CHUNK_VERSION,
     )
     .await
     .expect("open empty library");
@@ -498,7 +493,6 @@ async fn an_intake_stamped_by_an_older_extractor_is_still_served() {
         Fixed,
         MODEL.to_string(),
         5,
-        bookrack_ingest::CHUNK_VERSION,
     )
     .await
     .expect("open library with a stale extractor stamp");
@@ -570,7 +564,6 @@ async fn search_returns_a_readable_error_when_a_lance_data_file_is_missing() {
         Fixed,
         MODEL.to_string(),
         5,
-        bookrack_ingest::CHUNK_VERSION,
     )
     .await
     {

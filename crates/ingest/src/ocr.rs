@@ -469,7 +469,7 @@ fn ocr_noop_if_up_to_date(
     let stored_chunk = corpus
         .meta_get(bookrack_corpus::CHUNK_VERSION_KEY)?
         .and_then(|v| v.parse::<u32>().ok());
-    if stored_chunk != Some(crate::CHUNK_VERSION) {
+    if stored_chunk != Some(bookrack_text::CHUNK_VERSION) {
         return Ok(None);
     }
     let stored_normalize = corpus

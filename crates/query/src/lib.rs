@@ -24,7 +24,7 @@ use bookrack_embed::Embedder;
 use bookrack_search::{
     cite, embed_query, env_overrides, recall_with, retrieve_with, retrieve_with_partition,
 };
-use bookrack_text::NORMALIZE_VERSION;
+use bookrack_text::{CHUNK_VERSION, NORMALIZE_VERSION};
 use bookrack_vectors::ChunkReader;
 pub use bookrack_vectors::SearchOptions;
 use tokio::sync::RwLock;
@@ -93,7 +93,6 @@ pub struct Library<E: Embedder> {
     catalog_db: PathBuf,
     lancedb_dir: PathBuf,
     default_top_k: usize,
-    chunk_version: u32,
     /// Pipeline kind this library belongs to: `Book` for ingest,
     /// `Paper` for glean. Citations resolved through this library's
     /// search methods are tagged with this kind and use the matching
@@ -112,12 +111,6 @@ impl<E: Embedder> Library<E> {
     /// version is refused here, at startup, rather than returning subtly
     /// wrong results. An empty index has no provenance to check, so it is
     /// served without complaint.
-    ///
-    /// `chunk_version` is the chunker-algorithm stamp the calling
-    /// pipeline writes alongside its embeddings. Each pipeline (`ingest`
-    /// for books, `glean` for papers) owns its own constant and threads
-    /// it through here, so a single query crate can guard either index
-    /// without taking a runtime dependency on either pipeline.
     pub async fn open(
         corpus_db: PathBuf,
         catalog_db: PathBuf,
@@ -125,7 +118,6 @@ impl<E: Embedder> Library<E> {
         embedder: E,
         embed_model: String,
         default_top_k: usize,
-        chunk_version: u32,
     ) -> Result<Library<E>> {
         let probed_dim = probe_dimension(&embedder).await?;
         let store = ChunkReader::open(lancedb_dir).await?;
@@ -133,11 +125,7 @@ impl<E: Embedder> Library<E> {
             && s.count_rows().await? > 0
         {
             let corpus = Corpus::open_read_only(&corpus_db)?;
-            corpus.verify_index_stamps(&current_stamps(
-                &embed_model,
-                probed_dim as u32,
-                chunk_version,
-            ))?;
+            corpus.verify_index_stamps(&current_stamps(&embed_model, probed_dim as u32))?;
         }
         Ok(Library {
             store: RwLock::new(store),
@@ -148,7 +136,6 @@ impl<E: Embedder> Library<E> {
             catalog_db,
             lancedb_dir: lancedb_dir.to_path_buf(),
             default_top_k,
-            chunk_version,
             kind: ItemKind::Book,
         })
     }
@@ -184,11 +171,8 @@ impl<E: Embedder> Library<E> {
             && s.count_rows().await? > 0
         {
             let corpus = Corpus::open_read_only(&self.corpus_db)?;
-            corpus.verify_index_stamps(&current_stamps(
-                &self.embed_model,
-                self.probed_dim as u32,
-                self.chunk_version,
-            ))?;
+            corpus
+                .verify_index_stamps(&current_stamps(&self.embed_model, self.probed_dim as u32))?;
         }
         let mut guard = self.store.write().await;
         *guard = fresh;
@@ -211,11 +195,8 @@ impl<E: Embedder> Library<E> {
         };
         if s.count_rows().await? > 0 {
             let corpus = Corpus::open_read_only(&self.corpus_db)?;
-            corpus.verify_index_stamps(&current_stamps(
-                &self.embed_model,
-                self.probed_dim as u32,
-                self.chunk_version,
-            ))?;
+            corpus
+                .verify_index_stamps(&current_stamps(&self.embed_model, self.probed_dim as u32))?;
         }
         let mut guard = self.store.write().await;
         if guard.is_none() {
@@ -446,15 +427,14 @@ async fn probe_dimension<E: Embedder>(embedder: &E) -> Result<usize> {
 }
 
 /// Assemble the [`IndexStamps`] this serve binary expects, given the
-/// embed model and dimension known to the warm library and the
-/// chunk-algorithm stamp the calling pipeline owns. `normalize_version`
-/// comes from the workspace `bookrack-text` constant, since both
-/// pipelines share it.
-fn current_stamps(embed_model: &str, vector_dim: u32, chunk_version: u32) -> IndexStamps {
+/// embed model and dimension known to the warm library. The chunk and
+/// normalize versions are the text crate's constants, which the book
+/// store and the papers store both stamp.
+fn current_stamps(embed_model: &str, vector_dim: u32) -> IndexStamps {
     IndexStamps {
         embed_model: embed_model.to_string(),
         vector_dim,
-        chunk_version,
+        chunk_version: CHUNK_VERSION,
         normalize_version: NORMALIZE_VERSION,
     }
 }

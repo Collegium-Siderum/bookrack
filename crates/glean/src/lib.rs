@@ -30,7 +30,9 @@ use bookrack_extract::{
     Block, BlockKind, Contributor, ContributorRole, ExtractOutcome, envelope_filename,
     write_envelope,
 };
-use bookrack_text::{ChunkLeaf, ChunkPlan, NORMALIZE_VERSION, norm_text_sha256, plan_chunks};
+use bookrack_text::{
+    CHUNK_VERSION, ChunkLeaf, ChunkPlan, NORMALIZE_VERSION, norm_text_sha256, plan_chunks,
+};
 use bookrack_vectors::{ChunkRow, ChunkStore};
 use sha2::{Digest, Sha256};
 
@@ -43,7 +45,7 @@ pub mod reembed;
 pub mod reset;
 pub mod stamps;
 
-pub use bookrack_text::{CHUNK_VERSION, ChunkParams};
+pub use bookrack_text::ChunkParams;
 
 /// Which way the IDENTIFY pass picks the abstract body. Only
 /// [`AbstractStrategy::HeadingFirst`] is implemented; the other variants

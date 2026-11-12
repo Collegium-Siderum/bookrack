@@ -1403,10 +1403,9 @@ pub(crate) async fn build_library_handle(
             .context("preflight reference store schema check failed")?;
     }
 
-    // Library::open — books + papers. Each pipeline owns its
-    // chunk-version stamp; papers warms unconditionally so the first
-    // glean into an empty data dir lights up the read path the same
-    // way the book side does.
+    // Library::open — books + papers. Papers warms unconditionally so
+    // the first glean into an empty data dir lights up the read path
+    // the same way the book side does.
     let search_cfg = SearchConfig::resolve(cfg.root_config());
     let library = Library::open(
         cfg.corpus_db(),
@@ -1415,7 +1414,6 @@ pub(crate) async fn build_library_handle(
         embedder,
         embed_cfg.model.clone(),
         search_cfg.top_k,
-        bookrack_ingest::CHUNK_VERSION,
     )
     .await
     .context("open query library")?;
@@ -1434,7 +1432,6 @@ pub(crate) async fn build_library_handle(
         papers_embedder,
         embed_cfg.model.clone(),
         search_cfg.top_k,
-        bookrack_glean::CHUNK_VERSION,
     )
     .await
     .context("open papers query library")?

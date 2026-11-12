@@ -65,7 +65,6 @@ impl Fixture {
             Fake { dim: 8 },
             "fake-model".to_string(),
             5,
-            bookrack_glean::CHUNK_VERSION,
         )
         .await
         .expect("open papers library")

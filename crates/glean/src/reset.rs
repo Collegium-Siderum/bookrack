@@ -3,7 +3,7 @@
 //! Paper-side reset+rechunk. Peer of `bookrack_ingest::reset` for the
 //! paper pipeline: drops the chunks table, demotes every `Embedded`
 //! paper intake to `Extracted`, then re-chunks the abstract leaf of
-//! each one under the current [`CHUNK_VERSION`] and re-embeds it under
+//! each one under the current [`bookrack_text::CHUNK_VERSION`] and re-embeds it under
 //! the active embedder.
 
 // Parallel implementation: pipeline-reset.

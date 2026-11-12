@@ -66,7 +66,6 @@ async fn registry_glean_records_a_pipeline_run_on_the_paper_catalog() {
         Fake { dim: 8 },
         "fake-model".to_string(),
         5,
-        bookrack_glean::CHUNK_VERSION,
     )
     .await
     .expect("open papers library")

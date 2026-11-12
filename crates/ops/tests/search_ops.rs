@@ -338,7 +338,6 @@ async fn open_library_with_model<E: Embedder>(
         embedder,
         model.to_string(),
         5,
-        bookrack_ingest::CHUNK_VERSION,
     )
     .await
     .expect("open library")
