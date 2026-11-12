@@ -15,6 +15,8 @@
 //! shape, and the bibliographic fields glean would have written, plus
 //! a per-format / per-outcome [`DryrunPaperSummary`] aggregator.
 
+// Parallel implementation: pipeline-dryrun.
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;

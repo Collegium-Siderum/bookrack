@@ -14,6 +14,8 @@
 //! catalog, applies the change, and appends the `metadata_audit` row
 //! that records who made it.
 
+// Parallel implementation: control-metadata.
+
 use bookrack_ops::dto::writes::{
     PaperClearMetadataFieldRequest, PaperContributorAddRequest, PaperContributorRemoveRequest,
     PaperReviewRequest, PaperSetMetadataFieldRequest, PaperVoidMetadataFieldRequest,

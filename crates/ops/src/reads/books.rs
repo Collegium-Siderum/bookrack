@@ -8,6 +8,8 @@
 //! [`bookrack_query::Library`] does, but lives here so the CLI does not
 //! have to pay the embedder probe before it can browse the catalog.
 
+// Parallel implementation: ops-reads-items.
+
 use std::collections::BTreeMap;
 
 use bookrack_catalog::{Catalog, IntakeFilter, IntakeStatus, MatchLayer};

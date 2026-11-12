@@ -291,6 +291,7 @@ pub type Result<T> = std::result::Result<T, GleanError>;
 /// tree and vector rows rather than duplicating them. Re-glean is
 /// idempotent when the file is at `Embedded` with current stamps;
 /// pass `params.force = true` to bypass that check.
+// Parallel implementation: pipeline-entry.
 #[tracing::instrument(
     name = "paper",
     skip_all,
@@ -1240,6 +1241,7 @@ fn role_str(role: ContributorRole) -> &'static str {
 /// previous chunk and whitespace trimmed between chunks are both
 /// accounted for, and slicing `text` by the offsets reproduces the
 /// chunk text.
+// Parallel implementation: pipeline-chunk-plan.
 pub(crate) fn plan_chunks(leaf_id: NodeId, text: &str, params: &ChunkParams) -> Vec<PlannedChunk> {
     let splitter = text_splitter::TextSplitter::new(
         text_splitter::ChunkConfig::new(params.target_chars)
@@ -1477,6 +1479,7 @@ fn run_paper_audit_substep(
 
 /// Concatenate text from the first few body blocks, bounded by a
 /// character cap, for the audit's language signal.
+// Parallel implementation: pipeline-body-sample.
 fn paper_body_sample(blocks: &[Block]) -> String {
     // setting: internal -- how much of a paper the metadata sample reads, alongside SAMPLE_CHARS
     const SAMPLE_BLOCKS: usize = 10;

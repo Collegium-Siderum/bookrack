@@ -7,6 +7,8 @@
 //! set, so drift between the dry-run and the execute leg cannot leak
 //! into the destructive operation.
 
+// Parallel implementation: runtime-cmd-corpus.
+
 use bookrack_catalog::Catalog;
 use bookrack_config::Config;
 use bookrack_corpus::Corpus;

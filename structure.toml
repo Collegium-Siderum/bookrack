@@ -328,3 +328,396 @@ paths = [
 ]
 reason = "stamp-isolation"
 exit = "the reference splitter's next behaviour change, which already rebuilds every distilled book"
+
+# Methods implemented in more than one place. Each site carries the comment
+# line `// Parallel implementation: <id>.`
+
+[[parallel]]
+id = "runtime-cmd-corpus"
+summary = "corpus rebuild command bodies, one per kind"
+sites = [
+  "crates/runtime/src/cmd/corpus.rs",
+  "crates/runtime/src/cmd/papers_corpus.rs",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "one command body takes the kind as a parameter"
+
+[[parallel]]
+id = "runtime-cmd-stamps"
+summary = "index stamp command bodies, one per kind"
+sites = [
+  "crates/runtime/src/cmd/stamps.rs",
+  "crates/runtime/src/cmd/papers_stamps.rs",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "one command body takes the kind as a parameter"
+
+[[parallel]]
+id = "runtime-cmd-vectors"
+summary = "vector maintenance command bodies, one per kind"
+sites = [
+  "crates/runtime/src/cmd/vectors.rs",
+  "crates/runtime/src/cmd/papers_vectors.rs",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "one command body takes the kind as a parameter"
+
+[[parallel]]
+id = "runtime-cmd-dryrun"
+summary = "dry-run command bodies, one per kind"
+sites = [
+  "crates/runtime/src/cmd/dryrun.rs",
+  "crates/runtime/src/cmd/papers_dryrun.rs",
+]
+reason = "transitional"
+detail = "artifact names differ: dryrun-<stamp>-<sha> for a book, dryrun-paper-<stamp>-<sha> for a paper"
+agreement = "divergent"
+exit = "one command body takes the kind as a parameter"
+
+[[parallel]]
+id = "runtime-cmd-remove"
+summary = "remove command bodies, one per kind"
+sites = [
+  "crates/runtime/src/cmd/remove.rs",
+  "crates/runtime/src/cmd/remove_paper.rs",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "one command body takes the kind as a parameter"
+
+[[parallel]]
+id = "control-corpus"
+summary = "corpus control-plane handlers, one file per kind"
+sites = [
+  "crates/runtime/src/control/methods/corpus.rs",
+  "crates/runtime/src/control/methods/papers_corpus.rs",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "one handler takes the kind as a parameter"
+
+[[parallel]]
+id = "control-dryrun"
+summary = "dry-run control-plane handlers, one file per kind"
+sites = [
+  "crates/runtime/src/control/methods/dryrun.rs",
+  "crates/runtime/src/control/methods/papers_dryrun.rs",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "one handler takes the kind as a parameter"
+
+[[parallel]]
+id = "control-remove"
+summary = "remove control-plane handlers, one file per kind"
+sites = [
+  "crates/runtime/src/control/methods/remove.rs",
+  "crates/runtime/src/control/methods/papers_remove.rs",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "one handler takes the kind as a parameter"
+
+[[parallel]]
+id = "control-stamps"
+summary = "stamp control-plane handlers, one file per kind"
+sites = [
+  "crates/runtime/src/control/methods/stamps.rs",
+  "crates/runtime/src/control/methods/papers_stamps.rs",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "one handler takes the kind as a parameter"
+
+[[parallel]]
+id = "control-vectors"
+summary = "vector control-plane handlers, one file per kind"
+sites = [
+  "crates/runtime/src/control/methods/vectors.rs",
+  "crates/runtime/src/control/methods/papers_vectors.rs",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "one handler takes the kind as a parameter"
+
+[[parallel]]
+id = "control-metadata"
+summary = "metadata control-plane handlers, one file per kind"
+sites = [
+  "crates/runtime/src/control/methods/metadata.rs",
+  "crates/runtime/src/control/methods/papers_metadata.rs",
+]
+reason = "transitional"
+detail = "book handlers go through cmd::metadata::run_write on a catalog-only Ops; paper handlers call the handle's ops directly; advance exists only for books, reopen only for papers"
+agreement = "divergent"
+exit = "one handler takes the kind as a parameter"
+
+[[parallel]]
+id = "control-intake"
+summary = "intake submission handlers, one file per pipeline"
+sites = [
+  "crates/runtime/src/control/methods/ingest.rs",
+  "crates/runtime/src/control/methods/glean.rs",
+]
+reason = "transitional"
+detail = "ingest.rs also holds cancel and the priority argument type glean.rs borrows"
+agreement = "divergent"
+exit = "one handler takes the kind as a parameter"
+
+[[parallel]]
+id = "control-error-map-pipeline"
+summary = "pipeline error to RPC error mapping"
+sites = [
+  "crates/runtime/src/control/error_map.rs::from_ingest",
+  "crates/runtime/src/control/error_map.rs::from_glean",
+]
+reason = "transitional"
+detail = "each maps its own pipeline's error enum, and the variants differ: EmptyExtraction on the ingest side, IntakeNotRebuildable on the glean side"
+agreement = "divergent"
+exit = "the merged pipeline has one error type"
+
+[[parallel]]
+id = "control-reads-library"
+summary = "library read handlers, one per kind"
+sites = [
+  "crates/runtime/src/control/methods/reads_library.rs::find_books",
+  "crates/runtime/src/control/methods/reads_library.rs::find_papers",
+  "crates/runtime/src/control/methods/reads_library.rs::list_books",
+  "crates/runtime/src/control/methods/reads_library.rs::list_papers",
+  "crates/runtime/src/control/methods/reads_library.rs::list_metadata",
+  "crates/runtime/src/control/methods/reads_library.rs::list_paper_metadata",
+  "crates/runtime/src/control/methods/reads_library.rs::list_pending_reviews",
+  "crates/runtime/src/control/methods/reads_library.rs::list_paper_pending_reviews",
+  "crates/runtime/src/control/methods/reads_library.rs::search_in_book",
+  "crates/runtime/src/control/methods/reads_library.rs::search_in_paper",
+  "crates/runtime/src/control/methods/reads_library.rs::show_book",
+  "crates/runtime/src/control/methods/reads_library.rs::show_paper",
+  "crates/runtime/src/control/methods/reads_library.rs::show_audit_trail",
+  "crates/runtime/src/control/methods/reads_library.rs::show_paper_audit_trail",
+  "crates/runtime/src/control/methods/reads_library.rs::show_metadata_report",
+  "crates/runtime/src/control/methods/reads_library.rs::show_paper_metadata_report",
+  "crates/runtime/src/control/methods/reads_library.rs::show_toc",
+  "crates/runtime/src/control/methods/reads_library.rs::show_paper_toc",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "handlers are generated from one method table"
+
+[[parallel]]
+id = "runtime-audit-helpers"
+summary = "audit profile and audit data loaders, one per kind"
+sites = [
+  "crates/runtime/src/audit_helpers.rs::load_audit_data",
+  "crates/runtime/src/audit_helpers.rs::load_paper_audit_data",
+  "crates/runtime/src/audit_helpers.rs::load_audit_profile",
+  "crates/runtime/src/audit_helpers.rs::load_paper_audit_profile",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "one audit loader serves both kinds"
+
+[[parallel]]
+id = "ops-reads-items"
+summary = "item list, find, show, and table-of-contents reads, one file per kind"
+sites = [
+  "crates/ops/src/reads/books.rs",
+  "crates/ops/src/reads/papers.rs",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "reads go through one view keyed by kind"
+
+[[parallel]]
+id = "ops-reads-metadata"
+summary = "metadata reads, one file per kind"
+sites = [
+  "crates/ops/src/reads/metadata.rs",
+  "crates/ops/src/reads/papers_metadata.rs",
+]
+reason = "transitional"
+detail = "each side takes its own kind's audit profile and audit data types"
+agreement = "divergent"
+exit = "reads go through one view keyed by kind"
+
+[[parallel]]
+id = "ops-writes-metadata"
+summary = "metadata curation writes, one file per kind"
+sites = [
+  "crates/ops/src/writes/metadata.rs",
+  "crates/ops/src/writes/papers_metadata.rs",
+]
+reason = "transitional"
+detail = "the paper side opens its catalog through a helper that reports a missing papers backend, and has reopen_paper_review, which the book side lacks"
+agreement = "divergent"
+exit = "curation writes take the kind as a parameter"
+
+[[parallel]]
+id = "ops-reads-search"
+summary = "search reads and their retrieval-record payloads, one per kind"
+sites = [
+  "crates/ops/src/reads/search.rs::search",
+  "crates/ops/src/reads/search.rs::search_paper",
+  "crates/ops/src/reads/search.rs::search_in_book",
+  "crates/ops/src/reads/search.rs::search_in_paper",
+  "crates/ops/src/reads/search.rs::retrieval_payload",
+  "crates/ops/src/reads/search.rs::book_retrieval_payload",
+  "crates/ops/src/reads/search.rs::paper_retrieval_payload",
+]
+reason = "transitional"
+detail = "search_in_book opens the catalog with open_read_only and fails on a missing file; search_in_paper probes for it and answers IntakeNotFound"
+agreement = "divergent"
+exit = "search reads take the kind as a parameter"
+
+[[parallel]]
+id = "ops-open-catalog"
+summary = "helpers that open one kind's catalog"
+sites = [
+  "crates/ops/src/reads/mod.rs::open_book_catalog",
+  "crates/ops/src/reads/mod.rs::open_papers_catalog",
+  "crates/ops/src/writes/papers_metadata.rs::open_paper_catalog",
+  "crates/ops/src/registry.rs::open_paper_catalog",
+]
+reason = "transitional"
+detail = "two are read-only probes and two open for writing with a backup; the paper side also reports a missing papers backend, as an ops error in two sites and as an eyre message in the third"
+agreement = "divergent"
+exit = "the write-side helpers are gone and one read view opens either catalog"
+
+[[parallel]]
+id = "ops-handle-pipeline"
+summary = "library-handle entry into each pipeline"
+sites = [
+  "crates/ops/src/registry.rs::ingest_book",
+  "crates/ops/src/registry.rs::glean_paper",
+]
+reason = "transitional"
+detail = "the paper side resolves its optional paper paths and opens a pipeline run when its caller has none; the book side reports embed progress through a callback"
+agreement = "divergent"
+exit = "the pipelines live in ops and take the kind as a parameter"
+
+[[parallel]]
+id = "query-search-in-item"
+summary = "search scoped to one item, one per kind"
+sites = [
+  "crates/query/src/lib.rs::search_in_book",
+  "crates/query/src/lib.rs::search_in_book_with",
+  "crates/query/src/lib.rs::search_in_paper",
+  "crates/query/src/lib.rs::search_in_paper_with",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "one entry point takes the kind"
+
+[[parallel]]
+id = "mcp-paired-read-tools"
+summary = "MCP read tools, one per kind"
+sites = [
+  "crates/mcp/src/lib.rs::library_find_books",
+  "crates/mcp/src/lib.rs::library_find_papers",
+  "crates/mcp/src/lib.rs::library_list_books",
+  "crates/mcp/src/lib.rs::library_list_papers",
+  "crates/mcp/src/lib.rs::library_list_metadata",
+  "crates/mcp/src/lib.rs::library_list_paper_metadata",
+  "crates/mcp/src/lib.rs::library_list_pending_reviews",
+  "crates/mcp/src/lib.rs::library_list_paper_pending_reviews",
+  "crates/mcp/src/lib.rs::library_search_in_book",
+  "crates/mcp/src/lib.rs::library_search_in_paper",
+  "crates/mcp/src/lib.rs::library_show_book",
+  "crates/mcp/src/lib.rs::library_show_paper",
+  "crates/mcp/src/lib.rs::library_show_audit_trail",
+  "crates/mcp/src/lib.rs::library_show_paper_audit_trail",
+  "crates/mcp/src/lib.rs::library_show_metadata_report",
+  "crates/mcp/src/lib.rs::library_show_paper_metadata_report",
+  "crates/mcp/src/lib.rs::library_show_toc",
+  "crates/mcp/src/lib.rs::library_show_paper_toc",
+]
+reason = "transitional"
+detail = "both pending-review tools accept three filter parameters and ignore them"
+agreement = "divergent"
+exit = "tools are registered from one method table"
+
+[[parallel]]
+id = "cli-item-rendering"
+summary = "human-readable item card and item list, one per kind"
+sites = [
+  "crates/cli/src/cmd/cli_client/show.rs::format_book_detail",
+  "crates/cli/src/cmd/cli_client/listing.rs::format_book_list",
+  "crates/cli/src/cmd/cli_client/papers.rs::format_paper_detail",
+  "crates/cli/src/cmd/cli_client/papers.rs::format_paper_list",
+]
+reason = "transitional"
+detail = "the paper card carries audit and profile rows the book card does not"
+agreement = "divergent"
+exit = "one renderer takes the kind"
+
+[[parallel]]
+id = "pipeline-reembed"
+summary = "re-embedding, one module per pipeline"
+sites = [
+  "crates/ingest/src/reembed.rs",
+  "crates/glean/src/reembed.rs",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "the pipeline takes the kind as a parameter"
+
+[[parallel]]
+id = "pipeline-reaudit"
+summary = "metadata re-audit, one module per pipeline"
+sites = [
+  "crates/ingest/src/reaudit.rs",
+  "crates/glean/src/reaudit.rs",
+]
+reason = "transitional"
+detail = "the book side writes the rollup only; the paper side also writes the node_paper_audit projection; the profile and data arguments come in opposite order"
+agreement = "divergent"
+exit = "the pipeline takes the kind as a parameter"
+
+[[parallel]]
+id = "pipeline-dryrun"
+summary = "dry run, one module per pipeline"
+sites = [
+  "crates/ingest/src/dryrun.rs",
+  "crates/glean/src/dryrun.rs",
+]
+reason = "transitional"
+detail = "the book side runs the real path on in-memory stores; the paper side predicts the structure statically and runs no audit"
+agreement = "divergent"
+exit = "the paper dry run takes the book side's approach"
+
+[[parallel]]
+id = "pipeline-chunk-plan"
+summary = "chunk planning over a leaf's text"
+sites = [
+  "crates/ingest/src/chunk.rs::plan_chunks",
+  "crates/ingest/src/lib.rs::plan_book_chunks",
+  "crates/glean/src/lib.rs::plan_chunks",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "the text crate owns the chunker"
+
+[[parallel]]
+id = "pipeline-body-sample"
+summary = "body sample handed to the metadata audit"
+sites = [
+  "crates/ingest/src/lib.rs::body_sample",
+  "crates/glean/src/lib.rs::paper_body_sample",
+]
+reason = "transitional"
+agreement = "unverified"
+exit = "the pipelines merge"
+
+[[parallel]]
+id = "pipeline-entry"
+summary = "pipeline entry point, one per kind"
+sites = [
+  "crates/ingest/src/lib.rs::ingest_book",
+  "crates/glean/src/lib.rs::glean_paper",
+]
+reason = "transitional"
+detail = "the book side embeds in batches with progress, optimizes, and builds the index, and its no-op check compares the chunk and normalize stamps; the paper side embeds in one batch and does none of that"
+agreement = "divergent"
+exit = "the pipeline takes the kind as a parameter"

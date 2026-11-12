@@ -5,6 +5,8 @@
 //! [`bookrack_glean::dryrun::DryrunPaperReport`] plus a summary
 //! sidecar under `<data_root>/dryruns/`.
 
+// Parallel implementation: runtime-cmd-dryrun.
+
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};

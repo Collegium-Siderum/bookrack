@@ -4,6 +4,8 @@
 //!
 //! Peer of [`super::dryrun::run`] for the paper pipeline.
 
+// Parallel implementation: control-dryrun.
+
 use std::path::PathBuf;
 
 use serde::Deserialize;

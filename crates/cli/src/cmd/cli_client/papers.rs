@@ -638,6 +638,7 @@ pub(super) fn paper_list_output(mode: OutputMode, response: &Value) -> Option<St
 /// cell reads `-` only when neither is recorded. A page that covers
 /// less than the whole result set carries a trailing count line; an
 /// empty page is one sentence and no table.
+// Parallel implementation: cli-item-rendering.
 pub(super) fn format_paper_list(response: &Value) -> String {
     let papers = response.get("papers").and_then(Value::as_array);
     let rows = match papers {
@@ -702,6 +703,7 @@ const BIBLIO_KEYS_ROWED_SEPARATELY: [&str; 2] = ["abstract_text", "title"];
 /// the hash, the intake timestamp, the page count and the byte size —
 /// stays in the `--json` payload: the card names the file, it does not
 /// reproduce the intake row.
+// Parallel implementation: cli-item-rendering.
 pub(super) fn format_paper_detail(response: &Value) -> String {
     let mut t = KvTable::new();
     if let Some(id) = response.get("intake_id").and_then(Value::as_i64) {

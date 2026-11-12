@@ -16,6 +16,8 @@
 //! first, so this is the door that takes a backup before a migration
 //! runs.
 
+// Parallel implementation: ops-writes-metadata.
+
 use bookrack_catalog::{
     CONTRIBUTOR_ROLES, Catalog, NewContributor, NewOverride, STATUS_ACKNOWLEDGED, STATUS_APPROVED,
     STATUS_PENDING, STATUS_REJECTED,
@@ -57,6 +59,7 @@ pub const PAPER_EDITABLE_FIELDS: &[&str] = &[
 ];
 
 /// Open the paper catalog this `Ops` is configured against.
+// Parallel implementation: ops-open-catalog.
 fn open_paper_catalog<E: Embedder>(ops: &Ops<E>) -> Result<Catalog> {
     let catalog_db = ops
         .papers_catalog_db()

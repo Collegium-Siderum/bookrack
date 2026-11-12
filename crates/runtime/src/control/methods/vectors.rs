@@ -8,6 +8,8 @@
 //! parameter rejects requests with `yes = false` up front. Each write
 //! answers with the report its command returned.
 
+// Parallel implementation: control-vectors.
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

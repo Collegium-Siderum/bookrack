@@ -16,6 +16,8 @@
 //! it returns the full per-field report for read surfaces that need the
 //! grades, flags, and hints rather than the two-scalar rollup.
 
+// Parallel implementation: pipeline-reaudit.
+
 use std::path::Path;
 use std::time::Instant;
 

@@ -79,6 +79,7 @@ pub fn exclusions_to_partitions(ids: &[i64]) -> Vec<PartitionIdx> {
 /// `overrides` layers per-call overrides on top of the persisted meta
 /// defaults — see [`bookrack_search::retrieve_with`] for the merge order.
 /// Pass [`SearchOptions::default()`] to use the meta defaults unchanged.
+// Parallel implementation: ops-reads-search.
 pub async fn search<E: Embedder>(
     ops: &Ops<E>,
     query: &str,
@@ -120,6 +121,7 @@ pub async fn search<E: Embedder>(
 /// merge order. Returns [`OpsError::IntakeNotFound`] when no such intake
 /// is registered, [`OpsError::SearchUnavailable`] when this [`Ops`] is
 /// catalog-only.
+// Parallel implementation: ops-reads-search.
 pub async fn search_in_book<E: Embedder>(
     ops: &Ops<E>,
     intake_id: i64,
@@ -167,6 +169,7 @@ pub async fn search_in_book<E: Embedder>(
 /// Mirrors [`search`] for the paper pipeline. Returns
 /// [`OpsError::PapersBackendNotConfigured`] when this [`Ops`] has no
 /// papers backend.
+// Parallel implementation: ops-reads-search.
 pub async fn search_paper<E: Embedder>(
     ops: &Ops<E>,
     query: &str,
@@ -209,6 +212,7 @@ pub async fn search_paper<E: Embedder>(
 /// [`OpsError::PapersBackendNotConfigured`] when this [`Ops`] has no
 /// papers backend, or [`OpsError::IntakeNotFound`] when no such
 /// intake exists on the paper catalog.
+// Parallel implementation: ops-reads-search.
 pub async fn search_in_paper<E: Embedder>(
     ops: &Ops<E>,
     intake_id: i64,
@@ -417,6 +421,7 @@ fn corpus_fingerprint_at(corpus_db: &Path, lancedb_dir: &Path) -> Result<String>
 /// citation. Returns `None` when the fingerprint cannot be composed
 /// (e.g. an unstamped index) — recording is opportunistic and must
 /// never fail the search itself.
+// Parallel implementation: ops-reads-search.
 fn retrieval_payload<E: Embedder>(
     library: &Library<E>,
     corpus_db: &Path,
@@ -448,6 +453,7 @@ fn retrieval_payload<E: Embedder>(
 
 /// The retrieval payload of one settled book-side search, or `None`
 /// when the result failed or the library is absent.
+// Parallel implementation: ops-reads-search.
 fn book_retrieval_payload<E: Embedder>(
     ops: &Ops<E>,
     query: &str,
@@ -469,6 +475,7 @@ fn book_retrieval_payload<E: Embedder>(
 
 /// The retrieval payload of one settled paper-side search, or `None`
 /// when the result failed or no papers backend is attached.
+// Parallel implementation: ops-reads-search.
 fn paper_retrieval_payload<E: Embedder>(
     ops: &Ops<E>,
     query: &str,

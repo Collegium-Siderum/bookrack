@@ -3,6 +3,8 @@
 //! `bookrack stamps reconcile` — write the binary's current index
 //! stamps onto the corpus, useful after a model swap.
 
+// Parallel implementation: runtime-cmd-stamps.
+
 use bookrack_config::Config;
 use bookrack_corpus::{Corpus, IndexStamps};
 use eyre::{Context, ContextCompat, Result};

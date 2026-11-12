@@ -10,6 +10,8 @@
 //! built with — so a CLI edit and an MCP edit are distinguishable by
 //! `actor_kind` / `actor_detail` in the audit trail.
 
+// Parallel implementation: ops-writes-metadata.
+
 use bookrack_catalog::{
     CONTRIBUTOR_ROLES, Catalog, EDITABLE_FIELDS, NewContributor, NewOverride, STATUS_ACKNOWLEDGED,
     STATUS_APPROVED, STATUS_REJECTED,

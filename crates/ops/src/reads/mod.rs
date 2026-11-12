@@ -32,6 +32,7 @@ pub mod vectors;
 /// registered has none; `Ok(Some)` otherwise. Each book read decides
 /// what "no catalog yet" means for its own shape: an empty page, zero
 /// counts, or an unknown intake. Looking never creates the file.
+// Parallel implementation: ops-open-catalog.
 pub(crate) fn open_book_catalog<E: Embedder>(ops: &Ops<E>) -> Result<Option<Catalog>> {
     Ok(Catalog::try_open_read_only(ops.catalog_db())?)
 }
@@ -45,6 +46,7 @@ pub(crate) fn open_book_catalog<E: Embedder>(ops: &Ops<E>) -> Result<Option<Cata
 /// it, so a library that only ever ingested books has none; `Ok(Some)`
 /// otherwise. Each paper read decides what "no catalog yet" means for
 /// its own shape: an empty page, zero counts, or an unknown intake.
+// Parallel implementation: ops-open-catalog.
 pub(crate) fn open_papers_catalog<E: Embedder>(ops: &Ops<E>) -> Result<Option<Catalog>> {
     let papers_db = ops
         .papers_catalog_db()

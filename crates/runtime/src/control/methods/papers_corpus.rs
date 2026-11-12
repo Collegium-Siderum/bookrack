@@ -5,6 +5,8 @@
 //! Peer of [`super::corpus::rebuild`] for the paper pipeline: same
 //! two-step pinned protocol.
 
+// Parallel implementation: control-corpus.
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

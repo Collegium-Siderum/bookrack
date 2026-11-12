@@ -188,6 +188,7 @@ pub(super) fn not_found_problem(id: &TypedItemId, library: Option<&str>) -> Prob
 ///
 /// `title` is rowed on its own above, so the biblio section skips it
 /// rather than printing it verbatim twice.
+// Parallel implementation: cli-item-rendering.
 fn format_book_detail(response: &Value) -> String {
     let mut t = KvTable::new();
     if let Some(id) = response.get("intake_id").and_then(Value::as_i64) {

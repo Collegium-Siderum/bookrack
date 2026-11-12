@@ -10,6 +10,8 @@
 //! write answers with the report its command returned, in the same
 //! shape as its book-side peer.
 
+// Parallel implementation: control-vectors.
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

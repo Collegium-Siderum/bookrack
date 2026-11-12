@@ -13,6 +13,8 @@
 //! holding no papers: the listings return an empty page and the
 //! per-paper reads report the intake as unknown.
 
+// Parallel implementation: ops-reads-metadata.
+
 use bookrack_catalog::IntakeFilter;
 use bookrack_core::ItemKind;
 use bookrack_embed::Embedder;

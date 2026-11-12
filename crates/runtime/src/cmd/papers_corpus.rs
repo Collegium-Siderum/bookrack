@@ -6,6 +6,8 @@
 //! [`plan_rebuild`] + [`execute_rebuild_from_plan`]; mirrors
 //! [`crate::cmd::corpus`] for the paper pipeline.
 
+// Parallel implementation: runtime-cmd-corpus.
+
 use bookrack_catalog::Catalog;
 use bookrack_config::Config;
 use bookrack_corpus::Corpus;

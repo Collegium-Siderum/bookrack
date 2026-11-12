@@ -44,6 +44,7 @@ pub fn require_known_profile(name: Option<&str>, names: &[&str]) -> Result<(), C
 /// logged and the shipped default is returned, so the audit still
 /// runs against the in-repo URL / abbreviation / placeholder / extension
 /// defaults; only the operator-curated token lists fall back to empty.
+// Parallel implementation: runtime-audit-helpers.
 pub fn load_audit_data(cfg: &Config) -> AuditData {
     match AuditData::load_from(&cfg.audit_rules_dir()) {
         Ok(data) => data,
@@ -86,6 +87,7 @@ pub fn load_heading_patterns(cfg: &Config) -> bookrack_audit_profile::HeadingPat
 /// control-plane entry point runs [`require_known_profile`] before
 /// calling this, so a name that came off the wire is either a built-in
 /// or already refused.
+// Parallel implementation: runtime-audit-helpers.
 pub fn load_audit_profile(cfg: &Config, name: Option<&str>) -> bookrack_metadata::AuditProfile {
     if let Some(label) = name
         && let Some(named) = bookrack_metadata::AuditProfile::from_named(label)
@@ -117,6 +119,7 @@ pub fn load_audit_profile(cfg: &Config, name: Option<&str>) -> bookrack_metadata
 /// in-process: the control-plane entry point runs
 /// [`require_known_profile`] against the paper-side built-in set
 /// first.
+// Parallel implementation: runtime-audit-helpers.
 pub fn load_paper_audit_profile(cfg: &Config, name: Option<&str>) -> PaperAuditProfile {
     if let Some(label) = name {
         match label {
@@ -141,6 +144,7 @@ pub fn load_paper_audit_profile(cfg: &Config, name: Option<&str>) -> PaperAuditP
 /// Load the paper-side audit data set from `cfg.audit_rules_dir()`.
 /// A missing directory or malformed file is logged and the shipped
 /// default is returned.
+// Parallel implementation: runtime-audit-helpers.
 pub fn load_paper_audit_data(cfg: &Config) -> PaperAuditData {
     match PaperAuditData::load_from(&cfg.audit_rules_dir()) {
         Ok(data) => data,

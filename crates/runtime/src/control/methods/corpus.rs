@@ -11,6 +11,8 @@
 //! and the execute leg acts on the exact pinned target set —
 //! independent of any catalog drift between the two RPCs.
 
+// Parallel implementation: control-corpus.
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

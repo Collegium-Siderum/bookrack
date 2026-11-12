@@ -2,6 +2,8 @@
 
 //! Read ops over the metadata audit trail and the review queue.
 
+// Parallel implementation: ops-reads-metadata.
+
 use bookrack_catalog::{Catalog, IntakeFilter, STATUS_ACKNOWLEDGED, STATUS_PENDING};
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::Corpus;

@@ -21,6 +21,8 @@
 //! pinned intake id. Strict: the intake must still resolve when the
 //! execute leg runs, else the call aborts without writing.
 
+// Parallel implementation: runtime-cmd-remove.
+
 use bookrack_catalog::{Catalog, Intake, ItemRemovalCounts};
 use bookrack_config::Config;
 use bookrack_core::{NodeId, PartitionIdx};

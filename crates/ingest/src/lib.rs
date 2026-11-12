@@ -281,6 +281,7 @@ pub fn ingest_structure(
 /// Reads the book's prose leaves from `corpus`, orders them by document
 /// position, and chunks them with the pure [`chunk`] planner. The chunks
 /// are the embed stage's input; this only reads — nothing is written.
+// Parallel implementation: pipeline-chunk-plan.
 pub fn plan_book_chunks(
     corpus: &Corpus,
     book_root_id: NodeId,
@@ -420,6 +421,7 @@ pub struct IngestReport {
 /// `lancedb_dir` is the vector store directory; `embedder` turns chunk
 /// text into vectors. A file whose text layer is unusable yields
 /// [`IngestError::NeedsOcr`].
+// Parallel implementation: pipeline-entry.
 pub async fn ingest_book<E: Embedder>(
     file: &Path,
     corpus: &mut Corpus,
@@ -1957,6 +1959,7 @@ fn merge_from_filename(
 
 /// Concatenate text from the first few blocks of the extraction,
 /// bounded by a character cap, for the audit's language signal.
+// Parallel implementation: pipeline-body-sample.
 fn body_sample(extraction: &Extraction) -> String {
     let mut out = String::new();
     for block in extraction.blocks.iter().take(METADATA_BODY_SAMPLE_BLOCKS) {

@@ -2,6 +2,8 @@
 
 //! `stamps.reconcile` JSON-RPC handler.
 
+// Parallel implementation: control-stamps.
+
 use serde::Deserialize;
 use serde_json::Value;
 

@@ -339,6 +339,7 @@ impl<E: Embedder> Library<E> {
     /// predicate that confines recall to the chunks owned by
     /// `intake_id`. An unknown intake or one with no chunks returns an
     /// empty `Vec`.
+    // Parallel implementation: query-search-in-item.
     pub async fn search_in_book(
         &self,
         intake_id: i64,
@@ -352,6 +353,7 @@ impl<E: Embedder> Library<E> {
     /// Variant of [`Self::search_in_book`] that layers per-call overrides
     /// on top of the persisted meta defaults — see
     /// [`bookrack_search::retrieve_with_partition`] for the merge order.
+    // Parallel implementation: query-search-in-item.
     pub async fn search_in_book_with(
         &self,
         intake_id: i64,
@@ -386,6 +388,7 @@ impl<E: Embedder> Library<E> {
     /// to [`Self::search_in_book`] but cites with the paper-side
     /// breadcrumb (container title + paper title) instead of the
     /// book-side chapter/section trail.
+    // Parallel implementation: query-search-in-item.
     pub async fn search_in_paper(
         &self,
         intake_id: i64,
@@ -398,6 +401,7 @@ impl<E: Embedder> Library<E> {
 
     /// Variant of [`Self::search_in_paper`] that layers per-call
     /// overrides on top of the persisted meta defaults.
+    // Parallel implementation: query-search-in-item.
     pub async fn search_in_paper_with(
         &self,
         intake_id: i64,

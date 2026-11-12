@@ -11,6 +11,8 @@
 //! They still broadcast a [`crate::control::events::QueueTick`] after
 //! persisting so connected clients update their view immediately.
 
+// Parallel implementation: control-intake.
+
 use std::path::PathBuf;
 
 use serde::Deserialize;

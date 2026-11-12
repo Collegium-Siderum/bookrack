@@ -4,6 +4,8 @@
 //! simulation, writing the JSONL plus a summary sidecar under
 //! `<data_root>/dryruns/`.
 
+// Parallel implementation: control-dryrun.
+
 use std::path::PathBuf;
 
 use serde::Deserialize;

@@ -969,6 +969,7 @@ impl BookrackServer {
 
     /// Search within one book only — the same ranking as `library.search`
     /// but recall is confined to the chunks owned by `intake_id`.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.search_in_book",
         description = "Search a single book for passages relevant to a query. Pass \
@@ -1043,6 +1044,7 @@ impl BookrackServer {
     }
 
     /// List books in the library, paginated.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.list_books",
         description = "List books known to the library, paginated. Returns a slice \
@@ -1071,6 +1073,7 @@ impl BookrackServer {
 
     /// Find books by title substring, contributor, format, lifecycle
     /// status, or category tags.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.find_books",
         description = "Search the book registry by title substring (fuzzy), contributor \
@@ -1107,6 +1110,7 @@ impl BookrackServer {
     }
 
     /// Fetch the full bibliographic record for one book.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.show_book",
         description = "Fetch the full bibliographic record for one book by intake id. \
@@ -1137,6 +1141,7 @@ impl BookrackServer {
     }
 
     /// Return one book's table of contents.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.show_toc",
         description = "Return the table of contents of one book: a depth-first list \
@@ -1167,6 +1172,7 @@ impl BookrackServer {
     }
 
     /// List papers in the library, paginated.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.list_papers",
         description = "List papers known to the library, paginated. Mirrors \
@@ -1194,6 +1200,7 @@ impl BookrackServer {
     }
 
     /// Find papers by title substring, contributor, year, venue, or DOI.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.find_papers",
         description = "Search the paper registry by title substring (fuzzy), \
@@ -1232,6 +1239,7 @@ impl BookrackServer {
     }
 
     /// Fetch the full bibliographic record for one paper.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.show_paper",
         description = "Fetch the full bibliographic record for one paper by intake \
@@ -1285,6 +1293,7 @@ impl BookrackServer {
     }
 
     /// Return one paper's table of contents.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.show_paper_toc",
         description = "Return the table of contents of one paper. Papers carry one \
@@ -1310,6 +1319,7 @@ impl BookrackServer {
 
     /// Search within one paper only — the partition-bounded peer of
     /// `library.search_in_book` for the paper pipeline.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.search_in_paper",
         description = "Search a single paper for passages relevant to a query. Pass \
@@ -1436,6 +1446,7 @@ impl BookrackServer {
 
     /// Recompute and return the full per-field metadata audit report
     /// for one book.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.show_metadata_report",
         description = "Recompute the metadata plausibility audit for one book from \
@@ -1473,6 +1484,7 @@ impl BookrackServer {
     /// Return registered books with their confidence and review
     /// status, optionally narrowed by the extracted title, the audit
     /// verdict, or the review state.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.list_metadata",
         description = "List registered books with their current confidence and review \
@@ -1500,6 +1512,7 @@ impl BookrackServer {
     }
 
     /// Return books still on the metadata review queue.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.list_pending_reviews",
         description = "List books whose metadata audit confidence is low or medium \
@@ -1518,6 +1531,7 @@ impl BookrackServer {
     }
 
     /// Return the metadata-edit audit trail for one book.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.show_audit_trail",
         description = "Return the metadata-edit audit trail for one book, oldest \
@@ -1539,6 +1553,7 @@ impl BookrackServer {
 
     /// Recompute and return the full per-field metadata audit report
     /// for one paper.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.show_paper_metadata_report",
         description = "Recompute the metadata plausibility audit for one paper from \
@@ -1576,6 +1591,7 @@ impl BookrackServer {
 
     /// Return registered papers with their confidence and review
     /// status.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.list_paper_metadata",
         description = "List registered papers with their current confidence and \
@@ -1604,6 +1620,7 @@ impl BookrackServer {
     }
 
     /// Return papers still on the metadata review queue.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.list_paper_pending_reviews",
         description = "List papers whose metadata audit confidence is low or medium \
@@ -1622,6 +1639,7 @@ impl BookrackServer {
     }
 
     /// Return the metadata-edit audit trail for one paper.
+    // Parallel implementation: mcp-paired-read-tools.
     #[tool(
         name = "library.show_paper_audit_trail",
         description = "Return the metadata-edit audit trail for one paper, oldest \

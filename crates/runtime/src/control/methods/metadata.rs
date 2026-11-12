@@ -9,6 +9,8 @@
 //! the [`crate::cmd::metadata::MetadataWriteReport`] the write
 //! returned.
 
+// Parallel implementation: control-metadata.
+
 use serde::Deserialize;
 use serde_json::Value;
 

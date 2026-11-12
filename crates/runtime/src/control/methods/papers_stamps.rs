@@ -4,6 +4,8 @@
 //!
 //! Peer of [`super::stamps::reconcile`] for the paper pipeline.
 
+// Parallel implementation: control-stamps.
+
 use serde::Deserialize;
 use serde_json::Value;
 

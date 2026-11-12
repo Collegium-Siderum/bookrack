@@ -9,6 +9,8 @@
 //! `queue.list`, `queue.pause`, `queue.resume`, `queue.clear`)
 //! already cover both kinds, so there is no `glean.cancel` peer.
 
+// Parallel implementation: control-intake.
+
 use std::path::PathBuf;
 
 use serde::Deserialize;

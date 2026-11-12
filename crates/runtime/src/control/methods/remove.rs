@@ -7,6 +7,8 @@
 //! returned plan_id and removes the intake that was confirmed,
 //! independent of any catalog drift between the two RPCs.
 
+// Parallel implementation: control-remove.
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

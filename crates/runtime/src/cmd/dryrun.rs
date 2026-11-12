@@ -8,6 +8,8 @@
 //! `<data_root>/dryruns/`; the directory is pruned to the most recent
 //! [`DRYRUN_KEEP`] runs after each successful invocation.
 
+// Parallel implementation: runtime-cmd-dryrun.
+
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};

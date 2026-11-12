@@ -346,6 +346,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
     /// Returns an error when this handle was built catalog-only, since
     /// ingest requires the embedder that lives on the
     /// [`bookrack_query::Library`] half.
+    // Parallel implementation: ops-handle-pipeline.
     pub async fn ingest_book(
         &self,
         path: &Path,
@@ -460,6 +461,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
     /// Returns an error when this handle has no papers backend attached
     /// (`Ops::with_papers` was never called), since glean has no way to
     /// open a corpus or run an embedder without one.
+    // Parallel implementation: ops-handle-pipeline.
     pub async fn glean_paper(
         &self,
         path: &Path,
@@ -528,6 +530,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
 
     /// Open the paper catalog for synchronous read/write. Returns an
     /// error when this handle has no papers backend attached.
+    // Parallel implementation: ops-open-catalog.
     pub fn open_paper_catalog(&self) -> eyre::Result<Catalog> {
         let catalog_db = self
             .ops

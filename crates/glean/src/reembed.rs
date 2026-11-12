@@ -5,6 +5,8 @@
 //! re-embeds them under the active embedder, and writes the new vectors
 //! back. The corpus node tree is not touched — only the chunks table.
 
+// Parallel implementation: pipeline-reembed.
+
 use std::path::Path;
 use std::time::Instant;
 

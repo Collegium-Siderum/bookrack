@@ -23,6 +23,8 @@
 //! need the per-field grades, flags, and hints rather than the two-
 //! scalar rollup.
 
+// Parallel implementation: pipeline-reaudit.
+
 use std::path::Path;
 use std::time::Instant;
 

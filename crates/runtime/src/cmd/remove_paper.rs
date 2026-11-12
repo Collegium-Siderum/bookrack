@@ -15,6 +15,8 @@
 //! partition, envelope file, source PDF, intake row. Audit tables
 //! (`metadata_audit`, `item_pipeline_audit`) are preserved.
 
+// Parallel implementation: runtime-cmd-remove.
+
 use bookrack_catalog::{Catalog, Intake, ItemRemovalCounts};
 use bookrack_config::Config;
 use bookrack_core::{NodeId, PartitionIdx};

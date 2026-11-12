@@ -11,6 +11,8 @@
 //! holding no papers: listings return an empty page and per-paper
 //! reads report the intake as unknown.
 
+// Parallel implementation: ops-reads-items.
+
 use bookrack_catalog::{IntakeFilter, MatchLayer};
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::Corpus;

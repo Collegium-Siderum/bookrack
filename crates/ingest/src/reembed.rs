@@ -10,6 +10,8 @@
 //! decisions, so reembed inherits them automatically — stamps mismatch
 //! handling is the same.
 
+// Parallel implementation: pipeline-reembed.
+
 use std::path::Path;
 use std::time::Instant;
 

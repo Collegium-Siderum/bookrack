@@ -4,6 +4,8 @@
 //! re-embed against the active model. Status reads live at
 //! `bookrack rpc call library.vectors_status`.
 
+// Parallel implementation: runtime-cmd-vectors.
+
 use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_config::Config;
 use bookrack_corpus::Corpus;

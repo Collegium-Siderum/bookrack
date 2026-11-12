@@ -486,6 +486,7 @@ fn from_ops(e: &OpsError) -> RpcError {
 /// `DrmProtected`) are intercepted earlier on the write path by the
 /// queue's extension check and by `NeedsOcr`, so a second judgement
 /// here would be a second place for the two to drift apart.
+// Parallel implementation: control-error-map-pipeline.
 fn from_ingest(e: &IngestError) -> RpcError {
     use IngestError::*;
     match e {
@@ -510,6 +511,7 @@ fn from_ingest(e: &IngestError) -> RpcError {
     rpc_from_problem(code, e.explain())
 }
 
+// Parallel implementation: control-error-map-pipeline.
 fn from_glean(e: &GleanError) -> RpcError {
     use GleanError::*;
     match e {

@@ -14,6 +14,8 @@
 //! cost. It is the read-only equivalent of an ingest: a tool to ask
 //! "what would happen?" before committing to the real run.
 
+// Parallel implementation: pipeline-dryrun.
+
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 

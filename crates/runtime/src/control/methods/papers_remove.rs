@@ -2,6 +2,8 @@
 
 //! `papers.remove` JSON-RPC handler. Paper-side peer of `remove`.
 
+// Parallel implementation: control-remove.
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

@@ -4,6 +4,8 @@
 //! name and vector dimension into `papers_corpus.db`'s `index_meta`
 //! table. Peer of [`crate::cmd::stamps`] for the paper pipeline.
 
+// Parallel implementation: runtime-cmd-stamps.
+
 use bookrack_config::Config;
 use bookrack_corpus::Corpus;
 use eyre::{Context, ContextCompat, Result};

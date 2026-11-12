@@ -515,6 +515,7 @@ pub(super) fn page_footer(response: &Value, shown: usize) -> Option<String> {
 /// match the paper table's: `format` and `status` have no paper-side
 /// counterpart worth a column, and `year` and `container` have no
 /// book-side one.
+// Parallel implementation: cli-item-rendering.
 fn format_book_list(response: &Value) -> String {
     let books = response.get("books").and_then(Value::as_array);
     let rows = match books {

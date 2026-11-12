@@ -323,6 +323,7 @@ pub fn categories(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
     to_value(&counts)
 }
 
+// Parallel implementation: control-reads-library.
 pub fn list_books(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: PageParams = parse(params, "library.list_books")?;
     let handle = resolve(ctx, p.library.as_deref())?;
@@ -340,6 +341,7 @@ pub fn list_ocr_pending(params: &Option<Value>, ctx: &MethodContext) -> Result<V
     to_value(&page)
 }
 
+// Parallel implementation: control-reads-library.
 pub fn find_books(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: FindBooksParams = parse(params, "library.find_books")?;
     let handle = resolve(ctx, p.library.as_deref())?;
@@ -364,6 +366,7 @@ pub fn find_books(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
     to_value(&page)
 }
 
+// Parallel implementation: control-reads-library.
 pub fn show_book(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: BookIdParams = parse(params, "library.show_book")?;
     let handle = resolve(ctx, p.library.as_deref())?;
@@ -374,6 +377,7 @@ pub fn show_book(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
     }
 }
 
+// Parallel implementation: control-reads-library.
 pub fn show_toc(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: ShowTocParams = parse(params, "library.show_toc")?;
     let handle = resolve(ctx, p.library.as_deref())?;
@@ -428,6 +432,7 @@ pub fn show_metadata_audit(params: &Option<Value>, ctx: &MethodContext) -> Resul
     }
 }
 
+// Parallel implementation: control-reads-library.
 pub fn show_metadata_report(
     params: &Option<Value>,
     ctx: &MethodContext,
@@ -462,6 +467,7 @@ pub struct PaperAuditReadParams {
     pub library: Option<String>,
 }
 
+// Parallel implementation: control-reads-library.
 pub fn show_paper_metadata_report(
     params: &Option<Value>,
     ctx: &MethodContext,
@@ -492,6 +498,7 @@ pub fn show_paper_metadata_report(
     }
 }
 
+// Parallel implementation: control-reads-library.
 pub fn show_paper_audit_trail(
     params: &Option<Value>,
     ctx: &MethodContext,
@@ -505,6 +512,7 @@ pub fn show_paper_audit_trail(
     }
 }
 
+// Parallel implementation: control-reads-library.
 pub fn list_metadata(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: ListMetadataParams = parse(params, "library.list_metadata")?;
     let handle = resolve(ctx, p.library.as_deref())?;
@@ -524,6 +532,7 @@ pub fn list_metadata(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
     to_value(&page)
 }
 
+// Parallel implementation: control-reads-library.
 pub fn list_pending_reviews(
     params: &Option<Value>,
     ctx: &MethodContext,
@@ -539,6 +548,7 @@ pub fn list_pending_reviews(
     to_value(&page)
 }
 
+// Parallel implementation: control-reads-library.
 pub fn list_paper_metadata(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: ListMetadataParams = parse(params, "library.list_paper_metadata")?;
     let handle = resolve(ctx, p.library.as_deref())?;
@@ -558,6 +568,7 @@ pub fn list_paper_metadata(params: &Option<Value>, ctx: &MethodContext) -> Resul
     to_value(&page)
 }
 
+// Parallel implementation: control-reads-library.
 pub fn list_paper_pending_reviews(
     params: &Option<Value>,
     ctx: &MethodContext,
@@ -573,6 +584,7 @@ pub fn list_paper_pending_reviews(
     to_value(&page)
 }
 
+// Parallel implementation: control-reads-library.
 pub fn show_audit_trail(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: BookIdParams = parse(params, "library.show_audit_trail")?;
     let handle = resolve(ctx, p.library.as_deref())?;
@@ -628,6 +640,7 @@ pub async fn search(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
     to_value(&hits)
 }
 
+// Parallel implementation: control-reads-library.
 pub async fn search_in_book(
     params: &Option<Value>,
     ctx: &MethodContext,
@@ -648,6 +661,7 @@ pub async fn search_in_book(
     }
 }
 
+// Parallel implementation: control-reads-library.
 pub fn list_papers(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: PageParams = parse(params, "library.list_papers")?;
     let handle = resolve(ctx, p.library.as_deref())?;
@@ -657,6 +671,7 @@ pub fn list_papers(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
     to_value(&page)
 }
 
+// Parallel implementation: control-reads-library.
 pub fn find_papers(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: FindPapersParams = parse(params, "library.find_papers")?;
     let handle = resolve(ctx, p.library.as_deref())?;
@@ -682,6 +697,7 @@ pub fn find_papers(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
     to_value(&page)
 }
 
+// Parallel implementation: control-reads-library.
 pub fn show_paper(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: BookIdParams = parse(params, "library.show_paper")?;
     let handle = resolve(ctx, p.library.as_deref())?;
@@ -692,6 +708,7 @@ pub fn show_paper(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
     }
 }
 
+// Parallel implementation: control-reads-library.
 pub fn show_paper_toc(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: ShowTocParams = parse(params, "library.show_paper_toc")?;
     let handle = resolve(ctx, p.library.as_deref())?;
@@ -702,6 +719,7 @@ pub fn show_paper_toc(params: &Option<Value>, ctx: &MethodContext) -> Result<Val
     }
 }
 
+// Parallel implementation: control-reads-library.
 pub async fn search_in_paper(
     params: &Option<Value>,
     ctx: &MethodContext,

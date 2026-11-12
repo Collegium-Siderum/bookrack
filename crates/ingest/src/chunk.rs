@@ -120,6 +120,7 @@ enum Snap {
 /// Leaves are grouped into maximal runs sharing a parent; each group is
 /// concatenated and split independently, so no chunk spans two organizing
 /// nodes. Empty leaves and empty groups produce no chunks.
+// Parallel implementation: pipeline-chunk-plan.
 pub(crate) fn plan_chunks(leaves: &[ChunkLeaf<'_>], params: &ChunkParams) -> Vec<ChunkPlan> {
     let config = ChunkConfig::new(params.target_chars)
         .with_overlap(params.overlap_chars)
