@@ -295,3 +295,36 @@ from = "glean"
 to = "text-splitter"
 reason = "transitional"
 exit = "the text crate owns the splitter"
+
+# Files outside the text crate that write a CJK code point as a predicate.
+
+[[codepoint]]
+paths = [
+  "crates/diagnose/src/scrub.rs",
+  "crates/glean/src/audit/signals.rs",
+  "crates/metadata/src/signals.rs",
+]
+reason = "transitional"
+exit = "the text crate names the predicate"
+
+[[codepoint]]
+paths = [
+  "crates/ingest/src/sentences.rs",
+]
+reason = "transitional"
+exit = "the text crate owns the terminator table"
+
+[[codepoint]]
+paths = [
+  "crates/extract/src/pdf_paper.rs",
+  "crates/extract/src/quality.rs",
+]
+reason = "stamp-isolation"
+exit = "the next EXTRACTOR_VERSION bump"
+
+[[codepoint]]
+paths = [
+  "crates/distill/src/splitter.rs",
+]
+reason = "stamp-isolation"
+exit = "the reference splitter's next behaviour change, which already rebuilds every distilled book"

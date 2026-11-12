@@ -15,6 +15,14 @@
 #      `bookrack_<crate>::`, must be listed. Exceptions: [[file]].
 #   3  text libraries. Only the text crate depends directly on a
 #      segmentation or normalization library. Exceptions: [[text_dep]].
+#   4  code-point predicates. Outside the text crate, a production file
+#      that writes a CJK code point as a character literal `'\u{H}'` or
+#      as a hexadecimal integer `0xH` must be listed. H counts when it
+#      falls in U+2E80-DFFF, U+F900-FAFF, U+FF00-FFEF, or
+#      U+20000-31FFF; `_` separators are ignored. A code point inside a
+#      double-quoted string does not count: word lists and patterns are
+#      data, a predicate is written as a character or an integer.
+#      Exceptions: [[codepoint]].
 #
 # Production lines are what checks read from Rust sources: tracked files
 # under `crates/*/src`, minus every item under a column-0 `#[cfg(test)]`
@@ -115,6 +123,7 @@ awk -F '\t' -v reg="$reg" -v reasons="$REASONS" '
     keys["edge"] = "from to reason exit"; need["edge"] = "from to reason"
     keys["file"] = "paths reason exit"; need["file"] = "paths reason"
     keys["text_dep"] = "from to reason exit"; need["text_dep"] = "from to reason"
+    keys["codepoint"] = "paths reason exit"; need["codepoint"] = "paths reason"
     split(reasons, r, " "); for (i in r) known_reason[r[i]] = 1
   }
   function say(at, msg) { print reg ": [[" t "]] entry " e " (line " at "): " msg; bad = 1 }
@@ -129,8 +138,8 @@ awk -F '\t' -v reg="$reg" -v reasons="$REASONS" '
     if (!listed($4, keys[t])) { say($3, "unknown key \"" $4 "\""); next }
     if ($5 == "") say($3, "key \"" $4 "\" is empty")
     if ($4 == "paths") {
-      if ($5 in seen_path) say($3, "\"" $5 "\" is registered twice")
-      seen_path[$5] = 1
+      if ((t, $5) in seen_path) say($3, "\"" $5 "\" is registered twice")
+      seen_path[t, $5] = 1
     } else if ((id SUBSEP $4) in has) {
       say($3, "key \"" $4 "\" given twice")
     }
@@ -144,7 +153,7 @@ awk -F '\t' -v reg="$reg" -v reasons="$REASONS" '
       for (i = 1; i <= m; i++) if (!((id SUBSEP a[i]) in has)) say(at, "missing \"" a[i] "\"")
       if (val[id SUBSEP "reason"] == "transitional" && !((id SUBSEP "exit") in has))
         say(at, "a transitional entry needs an \"exit\"")
-      if (t != "file" && (id SUBSEP "from") in has && (id SUBSEP "to") in has) {
+      if ((id SUBSEP "from") in has && (id SUBSEP "to") in has) {
         pair = t SUBSEP val[id SUBSEP "from"] SUBSEP val[id SUBSEP "to"]
         if (pair in seen_pair) say(at, "\"" val[id SUBSEP "from"] " -> " val[id SUBSEP "to"] "\" is registered twice")
         seen_pair[pair] = 1
@@ -162,6 +171,11 @@ pairs() {
     $4 == "to" { to[$2] = $5 }
     END { for (e in from) if (e in to) print from[e] "\t" to[e] }
   ' "$tmp/reg.tsv"
+}
+
+# The `paths` of every entry of table $1.
+paths() {
+  awk -F '\t' -v want="$1" '$1 == want && $4 == "paths" { print $5 }' "$tmp/reg.tsv"
 }
 
 # --- dependency graph -----------------------------------------------
@@ -275,7 +289,7 @@ production() {
 
 # Check 2. The crates a tier may not name follow from the tier table.
 git ls-files 'crates/*/src/*.rs' > "$tmp/sources"
-awk -F '\t' -v want=paths '$1 == "file" && $4 == want { print $5 }' "$tmp/reg.tsv" > "$tmp/file.waived"
+paths file > "$tmp/file.waived"
 : > "$tmp/file.hits"
 for crate in $(echo "$TIERS" | awk '$1 == "host" || $1 == "front" { for (i = 2; i <= NF; i++) print $i }'); do
   below=$(echo "$TIERS" | awk -v crate="$crate" '
@@ -314,6 +328,54 @@ awk -v waived="$tmp/file.waived" '
     exit bad
   }
 ' "$tmp/file.hits" || fail=1
+
+# Check 4.
+paths codepoint > "$tmp/codepoint.waived"
+grep -v "^crates/$TEXT_CRATE/" "$tmp/sources" > "$tmp/outside.sources" || true
+# shellcheck disable=SC2046
+production $(cat "$tmp/outside.sources") |
+  awk '
+    function hex(digits,    i, v) {
+      v = 0
+      for (i = 1; i <= length(digits); i++) v = v * 16 + index("0123456789abcdef", tolower(substr(digits, i, 1))) - 1
+      return v
+    }
+    function cjk(v) {
+      return (v >= 11904 && v <= 57343) || (v >= 63744 && v <= 64255) ||
+        (v >= 65280 && v <= 65519) || (v >= 131072 && v <= 204799)
+    }
+    {
+      file = $0; sub(/:.*/, "", file)
+      body = $0; sub(/^[^:]*:[^:]*:/, "", body)
+      # A quote written as a character or byte literal would otherwise
+      # pair up with another one and hide what stands between them.
+      gsub(/b?\047\\?"\047/, " ", body)
+      gsub(/r#+"([^"]|"[^#])*"#+/, " ", body)
+      gsub(/"([^"\\]|\\.)*"/, " ", body)
+      while (match(body, /\047\\u\{[0-9A-Fa-f_]+\}\047|0x[0-9A-Fa-f_]+/)) {
+        literal = substr(body, RSTART, RLENGTH)
+        body = substr(body, RSTART + RLENGTH)
+        gsub(/^\047\\u\{|^0x|\}\047$|_/, "", literal)
+        if (length(literal) <= 6 && cjk(hex(literal))) { hit[file] = 1; break }
+      }
+    }
+    END { for (f in hit) print f }
+  ' | LC_ALL=C sort > "$tmp/codepoint.hits"
+awk -v waived="$tmp/codepoint.waived" -v owner="$TEXT_CRATE" '
+  BEGIN { while ((getline line < waived) > 0) waiver[line] = 1 }
+  { hit[$0] = 1 }
+  !($0 in waiver) {
+    print "STRUCTURE: " $0 " writes a CJK code point as a predicate outside " owner " and is not registered in [[codepoint]]"
+    bad = 1
+  }
+  END {
+    for (f in waiver) if (!(f in hit)) {
+      print "STRUCTURE: stale waiver [[codepoint]] " f ": it holds no code-point predicate, or is gone -- delete it"
+      bad = 1
+    }
+    exit bad
+  }
+' "$tmp/codepoint.hits" || fail=1
 
 [ "$fail" -eq 0 ] && echo "structure-check: clean"
 exit "$fail"
