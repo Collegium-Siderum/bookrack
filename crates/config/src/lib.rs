@@ -101,7 +101,7 @@ pub const RERANKER_URL_ENV: &str = "BOOKRACK_RERANKER_URL";
 /// Rerank (`--pooling rank`) requires each query+document pair to fit
 /// inside one physical batch, and the server rejects a pair larger than
 /// `-ub` outright, failing the whole query. Chunked passages are capped
-/// at 1000 characters (`ChunkParams::default` in the ingest crate),
+/// at 1000 characters (`ChunkParams::default` in the text crate),
 /// which tokenizes to ~1300 tokens in the CJK worst case; 2048 covers
 /// that with headroom to spare.
 // setting: reranker.server_batch_size

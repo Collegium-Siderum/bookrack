@@ -23,9 +23,9 @@ use bookrack_embed::Embedder;
 use bookrack_extract::EXTRACTOR_VERSION;
 use bookrack_vectors::{ChunkReader, ChunkRow};
 
-use crate::chunk::ChunkPlan;
 use crate::embed_run::{EmbedRunReport, embed_book_chunks};
 use crate::{IngestError, Result, audit_as, maintenance_run_id};
+use bookrack_text::ChunkPlan;
 
 /// A planned per-book reembed: what would happen if [`reembed_book`]
 /// ran on this `intake_id`.

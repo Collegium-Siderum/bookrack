@@ -17,8 +17,8 @@
 //! separator, the splitter version, or trimming — changes that identity
 //! and so must bump [`CHUNK_VERSION`].
 
+use crate::norm_text_sha256;
 use bookrack_core::NodeId;
-use bookrack_text::norm_text_sha256;
 use text_splitter::{ChunkConfig, TextSplitter};
 
 /// Version of the chunking behaviour.
@@ -96,9 +96,12 @@ pub struct ChunkPlan {
 }
 
 /// One prose leaf, in document order, as input to [`plan_chunks`].
-pub(crate) struct ChunkLeaf<'a> {
+pub struct ChunkLeaf<'a> {
+    /// The leaf node.
     pub node_id: NodeId,
+    /// Its parent; consecutive leaves sharing one form a group.
     pub parent_id: Option<NodeId>,
+    /// The leaf text; an empty one contributes nothing.
     pub text: &'a str,
 }
 
@@ -123,7 +126,7 @@ enum Snap {
 /// concatenated and split independently, so no chunk spans two organizing
 /// nodes. Empty leaves and empty groups produce no chunks.
 // Parallel implementation: pipeline-chunk-plan.
-pub(crate) fn plan_chunks(leaves: &[ChunkLeaf<'_>], params: &ChunkParams) -> Vec<ChunkPlan> {
+pub fn plan_chunks(leaves: &[ChunkLeaf<'_>], params: &ChunkParams) -> Vec<ChunkPlan> {
     let config = ChunkConfig::new(params.target_chars)
         .with_overlap(params.overlap_chars)
         .expect("chunk overlap must be smaller than the target length");

@@ -2,7 +2,7 @@
 # Fail if a behaviour-sensitive dependency moved in Cargo.lock while the
 # frozen value its version stamp is pinned to did not.
 #
-# `tests/dep_hash.rs` in extract, normalize, ingest, and glean check the
+# `tests/dep_hash.rs` in extract, text, and glean check the
 # same thing, but a commit that changes only Cargo.lock touches no crate,
 # so a gate narrowed to touched crates never runs them. This script reads
 # Cargo.lock and the frozen constants straight from source, compiles
@@ -115,8 +115,8 @@ check_hash extract '^(cssparser|encoding_rs|html5ever|markup5ever|pdfium-render|
   crates/extract/src/lib.rs FROZEN_DEPS_HASH bookrack_extract::EXTRACTOR_VERSION
 check_hash normalize '^unicode-normalization$' \
   crates/text/src/normalize.rs FROZEN_DEPS_HASH bookrack_text::NORMALIZE_VERSION
-check_list ingest '^(text-splitter|icu_.*)$' \
-  crates/ingest/src/chunk.rs FROZEN_SPLITTER_DEPS bookrack_ingest::CHUNK_VERSION
+check_list chunk '^(text-splitter|icu_.*)$' \
+  crates/text/src/chunk.rs FROZEN_SPLITTER_DEPS bookrack_text::CHUNK_VERSION
 check_list glean '^(text-splitter|icu_.*)$' \
   crates/glean/src/lib.rs FROZEN_SPLITTER_DEPS bookrack_glean::CHUNK_VERSION
 

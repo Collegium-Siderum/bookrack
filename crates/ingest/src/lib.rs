@@ -14,7 +14,6 @@
 //! re-ingest of the same file reproduces identical ids; STRUCTURE first
 //! drops any prior tree for the intake, making the operation idempotent.
 
-mod chunk;
 mod dryrun;
 mod embed_run;
 pub mod ocr;
@@ -26,7 +25,7 @@ pub mod sentences;
 mod structure;
 
 pub use bookrack_corpus::IndexStamps;
-pub use chunk::{CHUNK_VERSION, ChunkParams, ChunkPlan, FROZEN_SPLITTER_DEPS};
+pub use bookrack_text::{CHUNK_VERSION, ChunkParams, ChunkPlan};
 pub use dryrun::{
     BiblioOut, ChunkStatsOut, DryrunBookReport, DryrunParams, DryrunSummary, FieldOut,
     StructureOut, TocStatsOut, collect_files, dryrun_book, dryrun_path, summarize,
@@ -280,7 +279,7 @@ pub fn ingest_structure(
 /// Plan the chunks for one already-ingested book.
 ///
 /// Reads the book's prose leaves from `corpus`, orders them by document
-/// position, and chunks them with the pure [`chunk`] planner. The chunks
+/// position, and chunks them with the pure [`bookrack_text::plan_chunks`] planner. The chunks
 /// are the embed stage's input; this only reads — nothing is written.
 // Parallel implementation: pipeline-chunk-plan.
 pub fn plan_book_chunks(
@@ -294,17 +293,19 @@ pub fn plan_book_chunks(
         .filter(|n| n.node_type.is_prose_leaf())
         .collect();
     leaves.sort_by_key(|n| n.toc_lo.unwrap_or_else(|| n.node_id.get()));
-    let chunk_leaves: Vec<chunk::ChunkLeaf<'_>> = leaves
+    let chunk_leaves: Vec<bookrack_text::ChunkLeaf<'_>> = leaves
         .iter()
         .filter_map(|n| {
-            n.text_content.as_deref().map(|text| chunk::ChunkLeaf {
-                node_id: n.node_id,
-                parent_id: n.parent_id,
-                text,
-            })
+            n.text_content
+                .as_deref()
+                .map(|text| bookrack_text::ChunkLeaf {
+                    node_id: n.node_id,
+                    parent_id: n.parent_id,
+                    text,
+                })
         })
         .collect();
-    Ok(chunk::plan_chunks(&chunk_leaves, params))
+    Ok(bookrack_text::plan_chunks(&chunk_leaves, params))
 }
 
 /// Tuning for one [`ingest_book`] run: the STRUCTURE, CHUNK, and EMBED

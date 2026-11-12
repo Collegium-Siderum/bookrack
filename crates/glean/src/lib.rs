@@ -2229,7 +2229,7 @@ mod tests {
 
     #[test]
     fn chunk_boundaries_match_the_golden_digests() {
-        let cases = golden_cases(include_str!("../../ingest/tests/fixtures/chunk/golden.txt"));
+        let cases = golden_cases(include_str!("../../text/tests/fixtures/chunk/golden.txt"));
         let leaf = NodeId::new(7);
         let mut actual = Vec::new();
         for &(target_chars, overlap_chars) in GOLDEN_CONFIGS {

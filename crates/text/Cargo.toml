@@ -9,3 +9,6 @@ repository.workspace = true
 bookrack-core = { path = "../core" }
 unicode-normalization.workspace = true
 sha2.workspace = true
+# Unicode-aware chunk splitting. Behaviour-sensitive: a version move
+# shifts chunk boundaries, so it is frozen with `CHUNK_VERSION`.
+text-splitter.workspace = true

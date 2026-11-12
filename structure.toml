@@ -285,12 +285,6 @@ exit = "ops re-exports the PDFium pin and the envelope reader"
 # Direct dependencies on a text library outside the text crate.
 
 [[text_dep]]
-from = "ingest"
-to = "text-splitter"
-reason = "transitional"
-exit = "the text crate owns the splitter"
-
-[[text_dep]]
 from = "glean"
 to = "text-splitter"
 reason = "transitional"
@@ -936,7 +930,7 @@ exit = "the paper dry run takes the book side's approach"
 id = "pipeline-chunk-plan"
 summary = "chunk planning over a leaf's text"
 sites = [
-  "crates/ingest/src/chunk.rs::plan_chunks",
+  "crates/text/src/chunk.rs::plan_chunks",
   "crates/ingest/src/lib.rs::plan_book_chunks",
   "crates/glean/src/lib.rs::plan_chunks",
 ]
@@ -1043,8 +1037,8 @@ exit = "the pipelines merge"
 id = "chunk-version"
 summary = "the chunk version and the frozen splitter dependencies behind it"
 sites = [
-  "crates/ingest/src/chunk.rs::CHUNK_VERSION",
-  "crates/ingest/src/chunk.rs::FROZEN_SPLITTER_DEPS",
+  "crates/text/src/chunk.rs::CHUNK_VERSION",
+  "crates/text/src/chunk.rs::FROZEN_SPLITTER_DEPS",
   "crates/glean/src/lib.rs::CHUNK_VERSION",
   "crates/glean/src/lib.rs::FROZEN_SPLITTER_DEPS",
 ]
@@ -1058,7 +1052,6 @@ summary = "the frozen dependency values behind each version stamp"
 sites = [
   "crates/extract/tests/dep_hash.rs",
   "crates/text/tests/dep_hash.rs",
-  "crates/ingest/tests/dep_hash.rs",
   "crates/glean/tests/dep_hash.rs",
   "scripts/dep-stamp-check.sh",
 ]

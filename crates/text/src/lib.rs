@@ -10,7 +10,13 @@
 //!
 //! - `normalize`: the frozen canonical form of prose and its content
 //!   hash, versioned by [`NORMALIZE_VERSION`].
+//! - `chunk`: grouping prose leaves and splitting them into the
+//!   retrieval units that get embedded, versioned by [`CHUNK_VERSION`].
 
+mod chunk;
 mod normalize;
 
+pub use chunk::{
+    CHUNK_VERSION, ChunkLeaf, ChunkParams, ChunkPlan, FROZEN_SPLITTER_DEPS, plan_chunks,
+};
 pub use normalize::{FROZEN_DEPS_HASH, NORMALIZE_VERSION, norm_text_sha256, normalize};

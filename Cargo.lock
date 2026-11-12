@@ -917,7 +917,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
- "text-splitter",
  "thiserror",
  "tokio",
  "tracing",
@@ -1152,6 +1151,7 @@ version = "0.15.0-dev"
 dependencies = [
  "bookrack-core",
  "sha2",
+ "text-splitter",
  "unicode-normalization",
 ]
 

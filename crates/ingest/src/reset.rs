@@ -30,9 +30,9 @@ use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_vectors::ChunkStore;
 
-use crate::chunk::ChunkParams;
 use crate::embed_run::embed_book_chunks;
 use crate::{Result, audit_as, maintenance_run_id, plan_book_chunks};
+use bookrack_text::ChunkParams;
 
 /// What one [`reset_and_rechunk`] call produced.
 #[derive(Debug, Clone, Default)]
