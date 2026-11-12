@@ -38,7 +38,6 @@ impl std::fmt::Debug for FtsComposer {
 
 /// Normalization strategy for the lookup key. The key form follows
 /// the script of the headword.
-// Parallel implementation: latin-fallback-key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyNormalizer {
     /// Lower-case and strip non-alphanumeric characters; suited for
@@ -53,11 +52,7 @@ impl KeyNormalizer {
     /// Project a headword into its stable lookup key form.
     pub fn normalize(self, headword: &str) -> String {
         match self {
-            KeyNormalizer::NormalizeLatinKey => headword
-                .to_lowercase()
-                .chars()
-                .filter(|c| c.is_alphanumeric())
-                .collect(),
+            KeyNormalizer::NormalizeLatinKey => bookrack_text::latin_key(headword),
             KeyNormalizer::NormalizeCjkKey => headword.trim().to_string(),
         }
     }

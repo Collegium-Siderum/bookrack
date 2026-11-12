@@ -354,7 +354,7 @@ impl Refs {
     ///
     /// Fallback rules:
     /// - When the exact query yields no hit, the query is projected
-    ///   through [`latin_fallback_key`] and, if the projection differs
+    ///   through [`bookrack_text::latin_key`] and, if the projection differs
     ///   from the original and is non-empty, looked up once more.
     /// - The projection keeps every alphanumeric character — CJK
     ///   included, since those characters count as alphanumeric — so a
@@ -383,7 +383,7 @@ impl Refs {
         if !direct.hits.is_empty() {
             return Ok(direct);
         }
-        let fallback = latin_fallback_key(entry_key);
+        let fallback = bookrack_text::latin_key(entry_key);
         if fallback == entry_key || fallback.is_empty() {
             return Ok(direct);
         }
@@ -454,19 +454,6 @@ impl Refs {
     pub fn register_book(&mut self, book_slug: &str, specs: &[IndexSpec]) -> RefsResult<()> {
         indexes::apply(&self.conn, book_slug, specs)
     }
-}
-
-/// Project a query string into the latin lookup-key form: lower-case
-/// with every non-alphanumeric character removed. Mirrors the distill
-/// side's `KeyNormalizer::NormalizeLatinKey`; a cli-side test pins the
-/// two together.
-// Parallel implementation: latin-fallback-key.
-pub fn latin_fallback_key(query: &str) -> String {
-    query
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .collect()
 }
 
 /// Serialize a string array to its FTS sidecar / overlay JSON form, or
@@ -1185,17 +1172,6 @@ mod refs_tests {
                 .map(|h| h.entry_key.as_str())
                 .collect::<Vec<_>>()
         );
-    }
-
-    #[test]
-    fn latin_fallback_key_keeps_cjk_characters() {
-        // `char::is_alphanumeric` is true for CJK, so the projection
-        // lowercases and strips punctuation but keeps the characters:
-        // a spaced CJK query projects onto its compact form, while an
-        // already-compact CJK key projects to itself.
-        assert_eq!(latin_fallback_key("Foo-Bar"), "foobar");
-        assert_eq!(latin_fallback_key("\u{6C49} \u{5B57}"), "\u{6C49}\u{5B57}");
-        assert_eq!(latin_fallback_key("\u{6C49}\u{5B57}"), "\u{6C49}\u{5B57}");
     }
 
     #[test]

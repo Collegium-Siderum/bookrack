@@ -1128,22 +1128,6 @@ mod tests {
         );
     }
 
-    /// Pins the refs-side lookup fallback projection to the distill-side
-    /// key normalizer. The two crates do not depend on each other; this
-    /// crate depends on both, so the equivalence is asserted here.
-    #[test]
-    fn latin_fallback_key_matches_the_distill_key_normalizer() {
-        use bookrack_distill::finalize::KeyNormalizer;
-
-        for sample in ["Objet a", "Dasein!", "  jouissance  "] {
-            assert_eq!(
-                bookrack_refs::latin_fallback_key(sample),
-                KeyNormalizer::NormalizeLatinKey.normalize(sample),
-                "projection diverged for {sample:?}"
-            );
-        }
-    }
-
     use bookrack_test_support::fixtures::{DISTILL_TINY_BOOK_TOML, DISTILL_TINY_SOURCE};
 
     fn seed_book_dir(root: &Path, slug: &str) -> PathBuf {

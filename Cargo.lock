@@ -820,6 +820,7 @@ version = "0.15.0-dev"
 dependencies = [
  "bookrack-audit-profile",
  "bookrack-core",
+ "bookrack-text",
  "regex",
  "serde",
  "serde_json",
@@ -1036,6 +1037,7 @@ version = "0.15.0-dev"
 dependencies = [
  "bookrack-core",
  "bookrack-dbkit",
+ "bookrack-text",
  "rusqlite",
  "rusqlite_migration",
  "serde",

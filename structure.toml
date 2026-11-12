@@ -1012,19 +1012,6 @@ agreement = "pinned"
 pin = "scripts/dep-stamp-check.sh"
 
 [[parallel]]
-id = "latin-fallback-key"
-summary = "Latin key folding for reference entries"
-sites = [
-  "crates/distill/src/finalize.rs::KeyNormalizer",
-  "crates/refs/src/lib.rs::latin_fallback_key",
-]
-reason = "dependency-direction"
-detail = "distill is a pure transform and refs a store; neither tier may depend on the other"
-agreement = "pinned"
-pin = "crates/cli/src/distill_cmd.rs::latin_fallback_key_matches_the_distill_key_normalizer"
-exit = "both call the text crate"
-
-[[parallel]]
 id = "page-marker"
 summary = "finding page markers in recognised text"
 sites = [
