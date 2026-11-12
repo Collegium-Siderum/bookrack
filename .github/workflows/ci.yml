@@ -168,3 +168,7 @@ jobs:
       - run: ./scripts/leak-check.sh
       - run: ./scripts/error-boundary-check.sh
       - run: ./scripts/dep-stamp-check.sh
+      # `cargo metadata` is the one thing here that needs a toolchain;
+      # nothing is compiled.
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - run: ./scripts/structure-check.sh

@@ -1,0 +1,297 @@
+# Known exceptions to the workspace's structure rules, read by
+# scripts/structure-check.sh. The rules themselves are in that script.
+#
+# Every entry carries a `reason` from a closed set:
+#   dependency-direction  sharing would need an edge the tier table forbids
+#   stamp-isolation       the copies feed different version stamps
+#   compile-boundary      the build structure keeps the code apart
+#   wire-pin              a test restates a wire value on purpose
+#   external-constraint   a third-party API wants one copy per site
+#   transitional          the move is planned; `exit` names what ends it
+#
+# An entry the code no longer needs fails the check: delete it in the
+# commit that makes it stale.
+#
+# The format is a rigid subset of TOML: one `key = "value"` per line,
+# and one array element per line.
+
+# Dependency edges the tier table forbids.
+
+[[edge]]
+from = "cli"
+to = "dbkit"
+reason = "transitional"
+exit = "the configuration inventories live in ops"
+
+[[edge]]
+from = "cli"
+to = "embed"
+reason = "transitional"
+exit = "the configuration inventories live in ops"
+
+[[edge]]
+from = "cli"
+to = "extract"
+reason = "transitional"
+exit = "the configuration inventories live in ops"
+
+[[edge]]
+from = "cli"
+to = "ingest"
+reason = "transitional"
+exit = "the configuration inventories live in ops"
+
+[[edge]]
+from = "cli"
+to = "query"
+reason = "transitional"
+exit = "the configuration inventories live in ops"
+
+[[edge]]
+from = "cli"
+to = "rerank"
+reason = "transitional"
+exit = "the configuration inventories live in ops"
+
+[[edge]]
+from = "cli"
+to = "search"
+reason = "transitional"
+exit = "the configuration inventories live in ops"
+
+[[edge]]
+from = "cli"
+to = "catalog"
+reason = "transitional"
+exit = "run and retrieval records are read through ops, and the distill build runs in the daemon's worker"
+
+[[edge]]
+from = "cli"
+to = "refs"
+reason = "transitional"
+exit = "the distill build runs in the daemon's worker"
+
+[[edge]]
+from = "cli"
+to = "distill"
+reason = "transitional"
+exit = "the distill build runs in the daemon's worker"
+
+[[edge]]
+from = "cli"
+to = "diagnose"
+reason = "transitional"
+exit = "diagnose is called through ops"
+
+[[edge]]
+from = "mcp"
+to = "refs"
+reason = "transitional"
+exit = "reference reads and writes go through ops and the write session"
+
+[[edge]]
+from = "mcp"
+to = "distill"
+reason = "transitional"
+exit = "reference reads and writes go through ops and the write session"
+
+[[edge]]
+from = "mcp"
+to = "query"
+reason = "transitional"
+exit = "ops supplies the context radius and the embedding client type"
+
+[[edge]]
+from = "mcp"
+to = "embed"
+reason = "transitional"
+exit = "ops supplies the context radius and the embedding client type"
+
+[[edge]]
+from = "runtime"
+to = "ingest"
+reason = "transitional"
+exit = "the ingest and glean pipelines live in ops"
+
+[[edge]]
+from = "runtime"
+to = "glean"
+reason = "transitional"
+exit = "the ingest and glean pipelines live in ops"
+
+[[edge]]
+from = "runtime"
+to = "catalog"
+reason = "transitional"
+exit = "command bodies live in ops, and store facts are read through ops"
+
+[[edge]]
+from = "runtime"
+to = "corpus"
+reason = "transitional"
+exit = "command bodies live in ops, and store facts are read through ops"
+
+[[edge]]
+from = "runtime"
+to = "vectors"
+reason = "transitional"
+exit = "command bodies live in ops, and store facts are read through ops"
+
+[[edge]]
+from = "runtime"
+to = "refs"
+reason = "transitional"
+exit = "command bodies live in ops, and store facts are read through ops"
+
+[[edge]]
+from = "runtime"
+to = "dbkit"
+reason = "transitional"
+exit = "command bodies live in ops, and store facts are read through ops"
+
+[[edge]]
+from = "runtime"
+to = "query"
+reason = "transitional"
+exit = "command bodies live in ops, and store facts are read through ops"
+
+[[edge]]
+from = "runtime"
+to = "diagnose"
+reason = "transitional"
+exit = "command bodies live in ops, and store facts are read through ops"
+
+[[edge]]
+from = "runtime"
+to = "metadata"
+reason = "transitional"
+exit = "command bodies live in ops, and store facts are read through ops"
+
+[[edge]]
+from = "runtime"
+to = "extract"
+reason = "transitional"
+exit = "ops re-exports the PDFium pin and the envelope reader"
+
+[[edge]]
+from = "metadata"
+to = "catalog"
+reason = "transitional"
+exit = "the effective-attributes type lives outside catalog"
+
+# Files of the host and the front ends that name a crate below their tier.
+
+[[file]]
+paths = [
+  "crates/cli/src/config_effective.rs",
+  "crates/cli/src/config_fixed.rs",
+]
+reason = "transitional"
+exit = "the configuration inventories live in ops"
+
+[[file]]
+paths = [
+  "crates/cli/src/retrieval_cmd.rs",
+  "crates/cli/src/runs_cmd.rs",
+]
+reason = "transitional"
+exit = "run and retrieval records are read through ops"
+
+[[file]]
+paths = [
+  "crates/cli/src/distill_cmd.rs",
+]
+reason = "transitional"
+exit = "the distill build runs in the daemon's worker"
+
+[[file]]
+paths = [
+  "crates/cli/src/main.rs",
+]
+reason = "transitional"
+exit = "diagnose is called through ops"
+
+[[file]]
+paths = [
+  "crates/mcp/src/lib.rs",
+  "crates/mcp/src/reference.rs",
+]
+reason = "transitional"
+exit = "reference reads and writes go through ops and the write session; ops supplies the context radius and the embedding client type"
+
+[[file]]
+paths = [
+  "crates/runtime/src/cmd/corpus.rs",
+  "crates/runtime/src/cmd/diagnose.rs",
+  "crates/runtime/src/cmd/dryrun.rs",
+  "crates/runtime/src/cmd/index_profile.rs",
+  "crates/runtime/src/cmd/ingest.rs",
+  "crates/runtime/src/cmd/intake_ocr.rs",
+  "crates/runtime/src/cmd/libraries.rs",
+  "crates/runtime/src/cmd/metadata.rs",
+  "crates/runtime/src/cmd/papers_corpus.rs",
+  "crates/runtime/src/cmd/papers_dryrun.rs",
+  "crates/runtime/src/cmd/papers_stamps.rs",
+  "crates/runtime/src/cmd/papers_vectors.rs",
+  "crates/runtime/src/cmd/remove.rs",
+  "crates/runtime/src/cmd/remove_paper.rs",
+  "crates/runtime/src/cmd/stamps.rs",
+  "crates/runtime/src/cmd/vectors.rs",
+  "crates/runtime/src/cmd/verify.rs",
+]
+reason = "transitional"
+exit = "command bodies live in ops"
+
+[[file]]
+paths = [
+  "crates/runtime/src/control/error_map.rs",
+  "crates/runtime/src/control/methods/diagnose.rs",
+  "crates/runtime/src/control/methods/papers_metadata.rs",
+  "crates/runtime/src/control/methods/papers_remove.rs",
+  "crates/runtime/src/control/methods/reads_library.rs",
+  "crates/runtime/src/control/methods/remove.rs",
+]
+reason = "transitional"
+exit = "handlers call ops methods and map ops errors only"
+
+[[file]]
+paths = [
+  "crates/runtime/src/audit_helpers.rs",
+  "crates/runtime/src/daemon.rs",
+  "crates/runtime/src/pipeline_run_helpers.rs",
+  "crates/runtime/src/profile.rs",
+  "crates/runtime/src/queue.rs",
+  "crates/runtime/src/render.rs",
+]
+reason = "transitional"
+exit = "the ingest and glean pipelines live in ops"
+
+[[file]]
+paths = [
+  "crates/runtime/src/doctor.rs",
+  "crates/runtime/src/open_runs.rs",
+  "crates/runtime/src/wizard/runner.rs",
+]
+reason = "transitional"
+exit = "store facts are read through ops"
+
+[[file]]
+paths = [
+  "crates/runtime/src/pdfium_install.rs",
+]
+reason = "transitional"
+exit = "ops re-exports the PDFium pin and the envelope reader"
+
+# Direct dependencies on a text library outside the text crate.
+
+[[text_dep]]
+from = "ingest"
+to = "text-splitter"
+reason = "transitional"
+exit = "the text crate owns the splitter"
+
+[[text_dep]]
+from = "glean"
+to = "text-splitter"
+reason = "transitional"
+exit = "the text crate owns the splitter"

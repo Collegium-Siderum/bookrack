@@ -12,7 +12,6 @@ bookrack-core = { path = "../core" }
 bookrack-embed = { path = "../embed" }
 bookrack-obs = { path = "../obs" }
 bookrack-ops = { path = "../ops" }
-bookrack-catalog = { path = "../catalog" }
 bookrack-runtime = { path = "../runtime" }
 # The reference-book read store opened on every `reference.lookup`
 # / `reference.overlay_set` call; phase 9 of the v2 distill rollout.
@@ -40,6 +39,8 @@ serde_json.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# Catalog fixtures and error values the mapping tests build by hand.
+bookrack-catalog = { path = "../catalog" }
 # Stamp a `user_version` the build does not read onto a fixture
 # reference store, so the schema-mismatch mapping is exercised end to
 # end.
