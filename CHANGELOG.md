@@ -65,6 +65,17 @@ release workflow extracts the matching section verbatim from this file.
   open.** The book registry, the overlay table and the new meta table
   are verified; the entry table is not, because each book's
   `[[indexes]]` grow it.
+- **A diagnostic bundle redacts more ideographs.** The scrubber hashed
+  runs of the common CJK Unified Ideographs, kana, and Hangul
+  syllables, and let the compatibility ideographs and the
+  supplementary-plane extensions (B through F) through as written. It
+  now hashes those too.
+- **The paper audit counts supplementary-plane ideographs as CJK.**
+  The check that compares a paper's declared language with the script
+  of its body counted an ideograph of Extensions B through F as
+  neither CJK nor Latin. It now counts as CJK, so a body written in
+  such characters agrees with a CJK language tag and disagrees with a
+  Latin one.
 
 ### Fixed
 

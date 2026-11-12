@@ -104,7 +104,8 @@ mod tests {
         let ranges: Vec<(u32, u32)> = [HAN, KANA, HANGUL].concat();
         assert!(
             census(is_cjk_script) == 99_840 && holds_exactly_at_the_edges(is_cjk_script, &ranges),
-            "is_cjk_script changed; a set that differs on purpose gets a new name instead."
+            "is_cjk_script changed. Diagnostic redaction and the paper audit's script share \
+             decide with it; a set that differs on purpose gets a new name instead."
         );
     }
 

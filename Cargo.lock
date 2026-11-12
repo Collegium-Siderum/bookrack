@@ -799,6 +799,7 @@ dependencies = [
  "bookrack-corpus",
  "bookrack-refs",
  "bookrack-test-support",
+ "bookrack-text",
  "bookrack-vectors",
  "chrono",
  "dirs",

@@ -410,7 +410,9 @@ fn hash_cjk_runs(input: &str) -> String {
     let mut run = String::new();
     let mut held = 0usize;
     for c in input.chars() {
-        if is_cjk(c) {
+        // Han ideographs, kana, and Hangul syllables; text in any other
+        // script passes through unredacted.
+        if bookrack_text::is_cjk_script(c) {
             run.push(c);
             held = 0;
         } else if c == char::REPLACEMENT_CHARACTER && !run.is_empty() {
@@ -459,19 +461,6 @@ fn sha8(input: &str) -> String {
         hex.push_str(&format!("{byte:02x}"));
     }
     hex
-}
-
-fn is_cjk(c: char) -> bool {
-    let n = c as u32;
-    // CJK Unified Ideographs and Extension A, plus Hiragana, Katakana,
-    // and the most common Hangul syllable block. These cover the
-    // languages a Chinese-leaning library is likely to surface; books
-    // in Latin alphabets pass through unredacted.
-    (0x4E00..=0x9FFF).contains(&n)
-        || (0x3400..=0x4DBF).contains(&n)
-        || (0x3040..=0x309F).contains(&n)
-        || (0x30A0..=0x30FF).contains(&n)
-        || (0xAC00..=0xD7A3).contains(&n)
 }
 
 #[cfg(test)]
@@ -553,6 +542,20 @@ mod tests {
         assert!(!a.contains(CJK_RUN));
     }
 
+    /// A run of compatibility ideographs, or of ideographs from the
+    /// supplementary-plane extensions, is a title like any other.
+    #[test]
+    fn compatibility_and_extension_ideographs_are_hashed() {
+        let s = scrubber();
+        for run in ["\u{F900}\u{F901}", "\u{20000}\u{20001}"] {
+            let out = s.scrub_string(&format!("title: {run}"));
+            assert!(
+                out.contains("<cjk:") && !out.contains(run),
+                "{run:?} rode through unhashed: {out}"
+            );
+        }
+    }
+
     /// A lossy decode replaces damaged bytes with U+FFFD, which can
     /// land in the middle of a run. Treated as a run boundary it would
     /// leave two single characters, and rule 5 hashes neither — the
@@ -565,7 +568,7 @@ mod tests {
         let pair = "\u{7532}\u{4E59}";
         let out = s.scrub_string("\u{7532}\u{FFFD}\u{4E59}");
         assert!(
-            !out.chars().any(is_cjk),
+            !out.chars().any(bookrack_text::is_cjk_script),
             "a CJK character rode through unhashed: {out}"
         );
         assert!(out.contains("<cjk:"), "got: {out}");

@@ -288,14 +288,6 @@ exit = "ops re-exports the PDFium pin and the envelope reader"
 
 [[codepoint]]
 paths = [
-  "crates/diagnose/src/scrub.rs",
-  "crates/glean/src/audit/signals.rs",
-]
-reason = "transitional"
-exit = "the text crate names the predicate"
-
-[[codepoint]]
-paths = [
   "crates/extract/src/pdf_paper.rs",
 ]
 reason = "stamp-isolation"

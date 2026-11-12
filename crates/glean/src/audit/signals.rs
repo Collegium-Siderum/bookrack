@@ -483,14 +483,7 @@ fn script_ratios(text: &str) -> (f64, f64) {
             continue;
         }
         total += 1;
-        let cp = c as u32;
-        let is_cjk = (0x3400..=0x4DBF).contains(&cp)
-            || (0x4E00..=0x9FFF).contains(&cp)
-            || (0xF900..=0xFAFF).contains(&cp)
-            || (0x3040..=0x309F).contains(&cp)
-            || (0x30A0..=0x30FF).contains(&cp)
-            || (0xAC00..=0xD7AF).contains(&cp);
-        if is_cjk {
+        if bookrack_text::is_cjk_script(c) {
             cjk += 1;
         } else if c.is_ascii_alphabetic() {
             latin += 1;
@@ -1239,6 +1232,53 @@ mod tests {
             "{field:?}"
         );
         assert_eq!(field.grade, PaperFieldGrade::Strong);
+    }
+
+    #[test]
+    fn supplementary_plane_ideographs_count_as_cjk_in_the_body_script() {
+        let data = PaperAuditData::empty();
+        let biblio = empty_biblio();
+        let provenance = empty_provenance();
+        let profile = PaperAuditProfile::default_profile();
+        // Eight ideographs of Extension B, outside the Basic Multilingual
+        // Plane.
+        let extension_body =
+            "\u{20000}\u{20001}\u{20002}\u{20003}\u{20004}\u{20005}\u{20006}\u{20007}";
+
+        // A declared Latin language over a body of such ideographs.
+        let latin_declared = effective_with(|attrs| attrs.language = Some("en".to_string()));
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &latin_declared,
+            body_sample: extension_body,
+            source_stem: None,
+        };
+        let report = audit_paper(&input, &profile, &data);
+        let lang = report.fields.get("language").expect("language graded");
+        assert!(
+            lang.flags.contains(&PaperFlag::LangMismatchesBody),
+            "{lang:?}"
+        );
+
+        // A declared CJK language over a mostly Latin body whose CJK
+        // share is carried by two such ideographs alone: 2 of 9 counted
+        // characters, above the minimum share.
+        let cjk_declared = effective_with(|attrs| attrs.language = Some("zh".to_string()));
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &cjk_declared,
+            body_sample: "\u{20000}\u{20001} abcdefg",
+            source_stem: None,
+        };
+        let report = audit_paper(&input, &profile, &data);
+        let lang = report.fields.get("language").expect("language graded");
+        assert!(
+            !lang.flags.contains(&PaperFlag::LangMismatchesBody),
+            "{lang:?}"
+        );
+        assert_eq!(lang.grade, PaperFieldGrade::Strong, "{lang:?}");
     }
 
     #[test]

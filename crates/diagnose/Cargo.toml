@@ -10,6 +10,7 @@ bookrack-audit-profile.workspace = true
 bookrack-catalog = { path = "../catalog" }
 bookrack-config = { path = "../config" }
 bookrack-core = { path = "../core" }
+bookrack-text = { path = "../text" }
 bookrack-corpus = { path = "../corpus" }
 bookrack-refs = { path = "../refs" }
 bookrack-vectors = { path = "../vectors" }
