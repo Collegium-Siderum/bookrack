@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use bookrack_normalize::{FROZEN_DEPS_HASH, NORMALIZE_VERSION};
+use bookrack_text::{FROZEN_DEPS_HASH, NORMALIZE_VERSION};
 use sha2::{Digest, Sha256};
 
 const BEHAVIOR_SENSITIVE_CRATES: &[&str] = &["unicode-normalization"];
@@ -43,7 +43,7 @@ fn behavior_sensitive_deps_hash_matches_frozen_value() {
     assert_eq!(
         actual, FROZEN_DEPS_HASH,
         "behaviour-sensitive deps changed; Cargo.lock now holds {entries:?}. Either keep \
-         the previous versions in Cargo.lock, or bump bookrack_normalize::NORMALIZE_VERSION \
+         the previous versions in Cargo.lock, or bump bookrack_text::NORMALIZE_VERSION \
          and refresh FROZEN_DEPS_HASH to {actual} (see docs/UPGRADE.md)"
     );
 }

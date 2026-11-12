@@ -30,7 +30,7 @@ use std::fmt::Write as _;
 use bookrack_core::NodeType;
 use bookrack_corpus::{NewNode, NodeId};
 use bookrack_extract::{BlockKind, Extraction};
-use bookrack_normalize::{norm_text_sha256, normalize};
+use bookrack_text::{norm_text_sha256, normalize};
 use sha2::{Digest, Sha256};
 
 use bookrack_audit_profile::TocShapeToggles;

@@ -1057,7 +1057,7 @@ id = "dep-hash-guards"
 summary = "the frozen dependency values behind each version stamp"
 sites = [
   "crates/extract/tests/dep_hash.rs",
-  "crates/normalize/tests/dep_hash.rs",
+  "crates/text/tests/dep_hash.rs",
   "crates/ingest/tests/dep_hash.rs",
   "crates/glean/tests/dep_hash.rs",
   "scripts/dep-stamp-check.sh",

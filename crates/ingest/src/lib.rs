@@ -69,7 +69,7 @@ pub fn current_index_stamps(embed_model: impl Into<String>, vector_dim: u32) -> 
         embed_model: embed_model.into(),
         vector_dim,
         chunk_version: CHUNK_VERSION,
-        normalize_version: bookrack_normalize::NORMALIZE_VERSION,
+        normalize_version: bookrack_text::NORMALIZE_VERSION,
     }
 }
 
@@ -832,7 +832,7 @@ fn on_file(
     let stored_normalize = corpus
         .meta_get(bookrack_corpus::NORMALIZE_VERSION_KEY)?
         .and_then(|v| v.parse::<u32>().ok());
-    if stored_normalize != Some(bookrack_normalize::NORMALIZE_VERSION) {
+    if stored_normalize != Some(bookrack_text::NORMALIZE_VERSION) {
         return Ok(OnFile::Rerun);
     }
     if intake.extractor_version != bookrack_extract::EXTRACTOR_VERSION {
@@ -2068,7 +2068,7 @@ mod tests {
     use bookrack_extract::{
         Biblio, Block, BlockKind, Extraction, Provenance, TextLayerQuality, Toc, TocEntry,
     };
-    use bookrack_normalize::norm_text_sha256;
+    use bookrack_text::norm_text_sha256;
 
     fn body(text: &str, unit: u32) -> Block {
         Block {
@@ -2493,7 +2493,7 @@ mod tests {
             assert!(!plan.text.is_empty());
             assert_eq!(
                 plan.norm_chunk_sha256,
-                bookrack_normalize::norm_text_sha256(&plan.text)
+                bookrack_text::norm_text_sha256(&plan.text)
             );
         }
     }
@@ -2659,7 +2659,7 @@ mod book_pipeline_tests {
             corpus
                 .meta_get(bookrack_corpus::NORMALIZE_VERSION_KEY)
                 .expect("get"),
-            Some(bookrack_normalize::NORMALIZE_VERSION.to_string())
+            Some(bookrack_text::NORMALIZE_VERSION.to_string())
         );
 
         // Every rooted stage logged a row, with the non-blocking metadata

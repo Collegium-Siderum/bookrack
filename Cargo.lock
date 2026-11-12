@@ -872,7 +872,7 @@ dependencies = [
  "bookrack-corpus",
  "bookrack-embed",
  "bookrack-extract",
- "bookrack-normalize",
+ "bookrack-text",
  "bookrack-vectors",
  "chrono",
  "regex",
@@ -909,7 +909,7 @@ dependencies = [
  "bookrack-embed",
  "bookrack-extract",
  "bookrack-metadata",
- "bookrack-normalize",
+ "bookrack-text",
  "bookrack-vectors",
  "chrono",
  "regex",
@@ -967,15 +967,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bookrack-normalize"
-version = "0.15.0-dev"
-dependencies = [
- "bookrack-core",
- "sha2",
- "unicode-normalization",
-]
-
-[[package]]
 name = "bookrack-obs"
 version = "0.15.0-dev"
 dependencies = [
@@ -1028,8 +1019,8 @@ dependencies = [
  "bookrack-embed",
  "bookrack-extract",
  "bookrack-ingest",
- "bookrack-normalize",
  "bookrack-search",
+ "bookrack-text",
  "bookrack-vectors",
  "serde",
  "tempfile",
@@ -1153,6 +1144,15 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "bookrack-text"
+version = "0.15.0-dev"
+dependencies = [
+ "bookrack-core",
+ "sha2",
+ "unicode-normalization",
 ]
 
 [[package]]

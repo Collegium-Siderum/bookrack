@@ -399,7 +399,7 @@ mod tests {
             end_node_id: node,
             end_char_offset: text.chars().count() as i32,
             text: text.to_string(),
-            norm_chunk_sha256: bookrack_normalize::norm_text_sha256(text),
+            norm_chunk_sha256: bookrack_text::norm_text_sha256(text),
         }
     }
 

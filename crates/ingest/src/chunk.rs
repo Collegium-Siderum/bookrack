@@ -18,7 +18,7 @@
 //! and so must bump [`CHUNK_VERSION`].
 
 use bookrack_core::NodeId;
-use bookrack_normalize::norm_text_sha256;
+use bookrack_text::norm_text_sha256;
 use text_splitter::{ChunkConfig, TextSplitter};
 
 /// Version of the chunking behaviour.

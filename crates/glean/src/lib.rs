@@ -30,7 +30,7 @@ use bookrack_extract::{
     Block, BlockKind, Contributor, ContributorRole, ExtractOutcome, envelope_filename,
     write_envelope,
 };
-use bookrack_normalize::{NORMALIZE_VERSION, norm_text_sha256};
+use bookrack_text::{NORMALIZE_VERSION, norm_text_sha256};
 use bookrack_vectors::{ChunkRow, ChunkStore};
 use sha2::{Digest, Sha256};
 

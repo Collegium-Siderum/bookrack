@@ -114,7 +114,7 @@ check_list() {
 check_hash extract '^(cssparser|encoding_rs|html5ever|markup5ever|pdfium-render|percent-encoding|quick-xml|rbook|scraper|selectors|tendril|web_atoms|zip)$' \
   crates/extract/src/lib.rs FROZEN_DEPS_HASH bookrack_extract::EXTRACTOR_VERSION
 check_hash normalize '^unicode-normalization$' \
-  crates/normalize/src/lib.rs FROZEN_DEPS_HASH bookrack_normalize::NORMALIZE_VERSION
+  crates/text/src/normalize.rs FROZEN_DEPS_HASH bookrack_text::NORMALIZE_VERSION
 check_list ingest '^(text-splitter|icu_.*)$' \
   crates/ingest/src/chunk.rs FROZEN_SPLITTER_DEPS bookrack_ingest::CHUNK_VERSION
 check_list glean '^(text-splitter|icu_.*)$' \

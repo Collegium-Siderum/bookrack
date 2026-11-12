@@ -21,10 +21,10 @@ use bookrack_catalog::Catalog;
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::{Corpus, IndexStamps};
 use bookrack_embed::Embedder;
-use bookrack_normalize::NORMALIZE_VERSION;
 use bookrack_search::{
     cite, embed_query, env_overrides, recall_with, retrieve_with, retrieve_with_partition,
 };
+use bookrack_text::NORMALIZE_VERSION;
 use bookrack_vectors::ChunkReader;
 pub use bookrack_vectors::SearchOptions;
 use tokio::sync::RwLock;
@@ -448,7 +448,7 @@ async fn probe_dimension<E: Embedder>(embedder: &E) -> Result<usize> {
 /// Assemble the [`IndexStamps`] this serve binary expects, given the
 /// embed model and dimension known to the warm library and the
 /// chunk-algorithm stamp the calling pipeline owns. `normalize_version`
-/// comes from the workspace `bookrack-normalize` constant, since both
+/// comes from the workspace `bookrack-text` constant, since both
 /// pipelines share it.
 fn current_stamps(embed_model: &str, vector_dim: u32, chunk_version: u32) -> IndexStamps {
     IndexStamps {

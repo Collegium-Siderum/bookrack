@@ -7,7 +7,7 @@
 //! swap; see `runtime::cmd::papers_stamps`.
 
 use bookrack_corpus::IndexStamps;
-use bookrack_normalize::NORMALIZE_VERSION;
+use bookrack_text::NORMALIZE_VERSION;
 
 use crate::CHUNK_VERSION;
 

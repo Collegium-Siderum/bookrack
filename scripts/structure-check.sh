@@ -83,7 +83,7 @@ reg=${1:-structure.toml}
 
 # Tier of each workspace crate, by directory name under crates/.
 TIERS='
-base   core config obs session audit-profile index-profile cli-grammar control-client test-support normalize
+base   core config obs session audit-profile index-profile cli-grammar control-client test-support text
 pure   extract distill metadata
 store  catalog corpus vectors refs dbkit
 client embed rerank
@@ -105,7 +105,7 @@ front  base center host front
 '
 # The crate that owns text segmentation and normalization, and the
 # libraries only it may depend on directly, as an anchored regex.
-TEXT_CRATE=normalize
+TEXT_CRATE=text
 TEXT_LIBS='^(text-splitter|unicode-normalization|unicode-segmentation|icu_.*)$'
 # Crates whose functions are paired as if they were one crate.
 ONE_GROUP='ingest glean'

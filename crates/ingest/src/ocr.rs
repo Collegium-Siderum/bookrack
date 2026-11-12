@@ -475,7 +475,7 @@ fn ocr_noop_if_up_to_date(
     let stored_normalize = corpus
         .meta_get(bookrack_corpus::NORMALIZE_VERSION_KEY)?
         .and_then(|v| v.parse::<u32>().ok());
-    if stored_normalize != Some(bookrack_normalize::NORMALIZE_VERSION) {
+    if stored_normalize != Some(bookrack_text::NORMALIZE_VERSION) {
         return Ok(None);
     }
     let stored_path = match ocr_intake.stored_path.as_deref() {

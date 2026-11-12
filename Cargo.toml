@@ -123,7 +123,7 @@ rmcp = { version = "3.5", default-features = false, features = [
 # alongside rmcp; hyper comes in transitively.
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 sha2 = "0.10"
-# NFKC for the `normalize` crate. Behaviour-sensitive: a bundled Unicode
+# NFKC for the `text` crate. Behaviour-sensitive: a bundled Unicode
 # data update can shift normalized output. Pinned via Cargo.lock.
 unicode-normalization = "0.1"
 # `.env` file loading for the `config` crate.

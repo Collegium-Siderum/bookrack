@@ -13,7 +13,7 @@ bookrack-core = { path = "../core" }
 bookrack-corpus = { path = "../corpus" }
 bookrack-embed = { path = "../embed" }
 bookrack-extract = { path = "../extract" }
-bookrack-normalize = { path = "../normalize" }
+bookrack-text = { path = "../text" }
 bookrack-vectors = { path = "../vectors" }
 chrono.workspace = true
 regex.workspace = true
