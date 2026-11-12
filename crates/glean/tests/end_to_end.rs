@@ -16,7 +16,7 @@ use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, Result as EmbedResult};
 use bookrack_extract::EXTRACTOR_VERSION;
 use bookrack_glean::{GleanParams, glean_paper};
-use bookrack_vectors::ChunkStore;
+use bookrack_vectors::ChunkReader;
 
 /// A constant-vector embedder. The pipeline calls `embed_batch`
 /// twice: once for the dimension probe and once for the abstract
@@ -278,7 +278,7 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
     );
 
     // The vector store has at least one row for this intake.
-    let store = ChunkStore::try_open(&lancedb_dir)
+    let store = ChunkReader::open(&lancedb_dir)
         .await
         .expect("open store")
         .expect("store must exist after a successful chunk write");

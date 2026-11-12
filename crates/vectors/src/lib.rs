@@ -3,7 +3,8 @@
 //! `vectors`: the LanceDB `chunks` table — the dense vector store.
 //!
 //! This crate owns the read and write side of the slim chunks table:
-//! a flat seven-column schema holding one row per embedded chunk. It
+//! a flat seven-column schema holding one row per embedded chunk,
+//! read through [`ChunkReader`] and written through [`ChunkStore`]. It
 //! is the persistence half of the EMBED stage — the `embed` crate
 //! produces vectors, this crate stores and searches them.
 //!
@@ -16,7 +17,7 @@
 //!
 //! Scope: this is the store. The IVF-PQ approximate index and the
 //! jieba full-text index are deliberate follow-ons — at pilot scale a
-//! brute-force [`ChunkStore::search`] is both exact and fast, and the
+//! brute-force [`ChunkReader::search`] is both exact and fast, and the
 //! index is only worth building past tens of thousands of rows.
 
 pub mod meta;
@@ -281,7 +282,7 @@ const PQ_DEFAULT_NUM_BITS: u32 = 8;
 
 /// The ANN index family attached to the chunks table. `BruteForce` is
 /// the explicit "no index" state — distinct from "no meta file yet,"
-/// which [`ChunkStore`] surfaces as `None`.
+/// which [`ChunkReader::current_ann_cfg`] surfaces as `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnnKind {
     /// IVF with no quantization. Default — C1 recommendation.
@@ -613,7 +614,7 @@ pub struct ChunkRow {
     pub norm_chunk_sha256: String,
 }
 
-/// Per-query overrides for [`ChunkStore::search_with`]. All fields are
+/// Per-query overrides for [`ChunkReader::search_with`]. All fields are
 /// optional and default to "no override" — at the LanceDB layer this
 /// means the index uses its built-in defaults.
 #[derive(Debug, Default, Clone)]
@@ -633,8 +634,8 @@ pub struct SearchOptions {
     ///
     /// Three properties of the mechanism:
     ///
-    /// * Only [`ChunkStore::search_with`] honours it.
-    ///   [`ChunkStore::search_partition_with`] ignores it, since a
+    /// * Only [`ChunkReader::search_with`] honours it.
+    ///   [`ChunkReader::search_partition_with`] ignores it, since a
     ///   search already confined to one partition has nothing to
     ///   exclude.
     /// * The exclusion is a metadata filter over the candidates the
@@ -673,7 +674,7 @@ fn exclusion_predicate(excluded: &[PartitionIdx]) -> String {
         .join(" AND ")
 }
 
-/// One hit from a [`ChunkStore::search`], carrying the slim row plus
+/// One hit from a [`ChunkReader::search`], carrying the slim row plus
 /// its distance to the query. The vector itself is not returned — it is
 /// heavy and the search side never needs it.
 #[derive(Debug, Clone, PartialEq)]
@@ -695,13 +696,32 @@ pub struct SearchHit {
     pub distance: f32,
 }
 
-/// A handle to the LanceDB `chunks` table.
+/// A read handle to the LanceDB `chunks` table.
 ///
-/// All reads and writes of the dense store go through this type;
-/// callers never assemble LanceDB queries themselves.
-pub struct ChunkStore {
+/// Every read of the dense store goes through this type; callers never
+/// assemble LanceDB queries themselves. Opening one creates neither the
+/// directory nor the table, and the handle exposes the read methods
+/// only.
+pub struct ChunkReader {
     table: lancedb::Table,
     dim: usize,
+}
+
+/// A write handle to the LanceDB `chunks` table.
+///
+/// Adds the writes — append, partition delete, index build and drop,
+/// optimize — to the reads of the [`ChunkReader`] it dereferences to.
+/// Opening one creates the table when none is on disk.
+pub struct ChunkStore {
+    reader: ChunkReader,
+}
+
+impl std::ops::Deref for ChunkStore {
+    type Target = ChunkReader;
+
+    fn deref(&self) -> &ChunkReader {
+        &self.reader
+    }
 }
 
 /// Open a LanceDB connection on `lancedb_dir` with strong read
@@ -722,17 +742,17 @@ async fn connect(lancedb_dir: &Path) -> Result<lancedb::Connection> {
         .await?)
 }
 
-impl ChunkStore {
+impl ChunkReader {
     /// Open the existing chunks table under `lancedb_dir`, or return
     /// `None` if no such table is on disk.
     ///
-    /// Unlike [`ChunkStore::open_for_write`] this method never creates the table
-    /// — a missing directory or a directory without the `chunks` table
-    /// is reported as `Ok(None)` rather than silently established
+    /// Unlike [`ChunkStore::open_for_write`] this never creates the
+    /// table — a missing directory or a directory without the `chunks`
+    /// table is reported as `Ok(None)` rather than silently established
     /// with a placeholder dimension. The reader-version guard still
     /// runs before the table is opened, so a sidecar written by a
     /// newer binary refuses the open.
-    pub async fn try_open(lancedb_dir: &Path) -> Result<Option<ChunkStore>> {
+    pub async fn open(lancedb_dir: &Path) -> Result<Option<ChunkReader>> {
         ensure_lance_env();
         // `lancedb::connect` materializes the directory it is pointed at,
         // even when the table is missing. Short-circuit so a read-only
@@ -756,9 +776,189 @@ impl ChunkStore {
         }
         let table = conn.open_table(TABLE).execute().await?;
         let dim = vector_dim_from_schema(table.schema().await?.as_ref())?;
-        Ok(Some(ChunkStore { table, dim }))
+        Ok(Some(ChunkReader { table, dim }))
     }
 
+    /// The embedding dimension this store holds.
+    pub fn dimension(&self) -> usize {
+        self.dim
+    }
+
+    /// Total number of chunk rows in the table.
+    pub async fn count_rows(&self) -> Result<usize> {
+        Ok(self.table.count_rows(None).await?)
+    }
+
+    /// Read every chunk row of one book back, vectors included.
+    ///
+    /// The partition is named by [`PartitionIdx`]; the filter mirrors
+    /// [`ChunkStore::delete_partition`] so the same `start_node_id` range that
+    /// would clear the partition's rows scans them. Rows are returned in
+    /// whatever order LanceDB walks the underlying fragments — callers
+    /// that care about a deterministic order must sort themselves.
+    pub async fn scan_partition(&self, partition: PartitionIdx) -> Result<Vec<ChunkRow>> {
+        let (lo, hi) = partition_bounds(partition);
+        let batches: Vec<RecordBatch> = self
+            .table
+            .query()
+            .only_if(format!("start_node_id BETWEEN {lo} AND {hi}"))
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+        let mut rows = Vec::new();
+        for batch in &batches {
+            read_chunk_rows(batch, self.dim, &mut rows)?;
+        }
+        Ok(rows)
+    }
+
+    /// Names of all indices LanceDB has on the chunks table. Empty for
+    /// a freshly opened, brute-force store.
+    pub async fn list_indices(&self) -> Result<Vec<String>> {
+        Ok(self
+            .table
+            .list_indices()
+            .await?
+            .into_iter()
+            .map(|cfg| cfg.name)
+            .collect())
+    }
+
+    /// Statistics for the named index, or `None` if no index by that
+    /// name exists.
+    ///
+    /// The headline field is [`IndexStatistics::num_unindexed_rows`]:
+    /// the count of rows the table holds that are not yet covered by
+    /// the index. When `> 0` the index is "behind" and a call to
+    /// [`ChunkStore::optimize`] will catch it up.
+    pub async fn index_stats(&self, name: &str) -> Result<Option<IndexStatistics>> {
+        Ok(self.table.index_stats(name).await?)
+    }
+
+    /// Read the persisted [`AnnConfig`] from
+    /// `<lancedb_dir>/vectors_meta.json`. Returns `Ok(None)` when no
+    /// meta file is present — the "legacy / fresh library" state — and
+    /// an error if the file is unparseable or carries an unknown kind.
+    ///
+    /// Reads through to disk every call; the meta is < 1 KB and writes
+    /// are rare, so caching would buy little and complicate invalidation.
+    pub fn current_ann_cfg(&self, lancedb_dir: &Path) -> Result<Option<AnnConfig>> {
+        match meta::load(lancedb_dir)? {
+            None => Ok(None),
+            Some(m) => Ok(Some(AnnConfig::from_meta(&m)?)),
+        }
+    }
+
+    /// Return the `top_k` chunks nearest `query` under cosine distance,
+    /// nearest first.
+    ///
+    /// Defaults to "no overrides" — equivalent to
+    /// [`Self::search_with(query, top_k, SearchOptions::default())`].
+    pub async fn search(&self, query: &[f32], top_k: usize) -> Result<Vec<SearchHit>> {
+        self.search_with(query, top_k, SearchOptions::default())
+            .await
+    }
+
+    /// Return the `top_k` chunks nearest `query` with explicit ANN
+    /// overrides.
+    ///
+    /// `opts.nprobes` and `opts.refine_factor` adjust the IVF query
+    /// fan-out and PQ refinement for this call; `opts.bypass_index`
+    /// forces a brute-force scan even when an index is present (an
+    /// AB-testing escape hatch). When no override is set the index's
+    /// built-in defaults apply.
+    ///
+    /// `opts.exclude_partitions` drops the named books' rows from the
+    /// result through a `start_node_id` range predicate; an empty list
+    /// attaches no predicate at all.
+    pub async fn search_with(
+        &self,
+        query: &[f32],
+        top_k: usize,
+        opts: SearchOptions,
+    ) -> Result<Vec<SearchHit>> {
+        let mut q = self
+            .table
+            .vector_search(query)?
+            .distance_type(DistanceType::Cosine);
+        if !opts.exclude_partitions.is_empty() {
+            q = q.only_if(exclusion_predicate(&opts.exclude_partitions));
+        }
+        if opts.bypass_index {
+            q = q.bypass_vector_index();
+        }
+        if let Some(np) = opts.nprobes {
+            q = q.nprobes(np);
+        }
+        if let Some(rf) = opts.refine_factor {
+            q = q.refine_factor(rf);
+        }
+        let batches: Vec<RecordBatch> = q.limit(top_k).execute().await?.try_collect().await?;
+        let mut hits = Vec::new();
+        for batch in &batches {
+            read_hits(batch, &mut hits)?;
+        }
+        Ok(hits)
+    }
+
+    /// Return the `top_k` chunks nearest `query`, restricted to one
+    /// book's partition.
+    ///
+    /// Pairs the ANN query with the same `start_node_id BETWEEN ...`
+    /// metadata predicate [`Self::scan_partition`] uses, so the
+    /// retrieval covers exactly the chunks owned by `partition` and no
+    /// others. Empty partitions return an empty `Vec`. Defaults to "no
+    /// ANN overrides" — equivalent to
+    /// `search_partition_with(query, partition, top_k, SearchOptions::default())`.
+    pub async fn search_by_partition(
+        &self,
+        query: &[f32],
+        partition: PartitionIdx,
+        top_k: usize,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_partition_with(query, partition, top_k, SearchOptions::default())
+            .await
+    }
+
+    /// [`Self::search_by_partition`] with explicit ANN overrides.
+    ///
+    /// `opts.exclude_partitions` is ignored here: the query is already
+    /// confined to `partition`, so excluding other books changes
+    /// nothing and excluding `partition` itself would make the call
+    /// pointless.
+    pub async fn search_partition_with(
+        &self,
+        query: &[f32],
+        partition: PartitionIdx,
+        top_k: usize,
+        opts: SearchOptions,
+    ) -> Result<Vec<SearchHit>> {
+        let (lo, hi) = partition_bounds(partition);
+        let mut q = self
+            .table
+            .vector_search(query)?
+            .distance_type(DistanceType::Cosine)
+            .only_if(format!("start_node_id BETWEEN {lo} AND {hi}"));
+        if opts.bypass_index {
+            q = q.bypass_vector_index();
+        }
+        if let Some(np) = opts.nprobes {
+            q = q.nprobes(np);
+        }
+        if let Some(rf) = opts.refine_factor {
+            q = q.refine_factor(rf);
+        }
+        let batches: Vec<RecordBatch> = q.limit(top_k).execute().await?.try_collect().await?;
+        let mut hits = Vec::new();
+        for batch in &batches {
+            read_hits(batch, &mut hits)?;
+        }
+        Ok(hits)
+    }
+}
+
+impl ChunkStore {
     /// Drop the chunks table under `lancedb_dir` and remove the
     /// `vectors_meta.json` sidecar in the same call.
     ///
@@ -780,7 +980,7 @@ impl ChunkStore {
     /// at the moment of drop is invalidated by the drop anyway.
     pub async fn drop_chunks_table(lancedb_dir: &Path) -> Result<()> {
         ensure_lance_env();
-        // Mirror try_open's short-circuit: `lancedb::connect` materializes
+        // Mirror `ChunkReader::open`'s short-circuit: `lancedb::connect` materializes
         // the directory it points at, so an absent dir would otherwise be
         // re-established as an empty lance layout — visible side effect on
         // a no-op.
@@ -841,12 +1041,9 @@ impl ChunkStore {
                 dim,
             )
         };
-        Ok(ChunkStore { table, dim })
-    }
-
-    /// The embedding dimension this store holds.
-    pub fn dimension(&self) -> usize {
-        self.dim
+        Ok(ChunkStore {
+            reader: ChunkReader { table, dim },
+        })
     }
 
     /// Append chunk rows to the table in one batch. Returns the number
@@ -890,35 +1087,6 @@ impl ChunkStore {
             .delete(&format!("start_node_id BETWEEN {lo} AND {hi}"))
             .await?;
         Ok(())
-    }
-
-    /// Total number of chunk rows in the table.
-    pub async fn count_rows(&self) -> Result<usize> {
-        Ok(self.table.count_rows(None).await?)
-    }
-
-    /// Read every chunk row of one book back, vectors included.
-    ///
-    /// The partition is named by [`PartitionIdx`]; the filter mirrors
-    /// [`Self::delete_partition`] so the same `start_node_id` range that
-    /// would clear the partition's rows scans them. Rows are returned in
-    /// whatever order LanceDB walks the underlying fragments — callers
-    /// that care about a deterministic order must sort themselves.
-    pub async fn scan_partition(&self, partition: PartitionIdx) -> Result<Vec<ChunkRow>> {
-        let (lo, hi) = partition_bounds(partition);
-        let batches: Vec<RecordBatch> = self
-            .table
-            .query()
-            .only_if(format!("start_node_id BETWEEN {lo} AND {hi}"))
-            .execute()
-            .await?
-            .try_collect()
-            .await?;
-        let mut rows = Vec::new();
-        for batch in &batches {
-            read_chunk_rows(batch, self.dim, &mut rows)?;
-        }
-        Ok(rows)
     }
 
     /// Build an ANN index over the chunks table according to `cfg`,
@@ -1069,43 +1237,6 @@ impl ChunkStore {
         Ok(())
     }
 
-    /// Names of all indices LanceDB has on the chunks table. Empty for
-    /// a freshly opened, brute-force store.
-    pub async fn list_indices(&self) -> Result<Vec<String>> {
-        Ok(self
-            .table
-            .list_indices()
-            .await?
-            .into_iter()
-            .map(|cfg| cfg.name)
-            .collect())
-    }
-
-    /// Statistics for the named index, or `None` if no index by that
-    /// name exists.
-    ///
-    /// The headline field is [`IndexStatistics::num_unindexed_rows`]:
-    /// the count of rows the table holds that are not yet covered by
-    /// the index. When `> 0` the index is "behind" and a call to
-    /// [`Self::optimize`] will catch it up.
-    pub async fn index_stats(&self, name: &str) -> Result<Option<IndexStatistics>> {
-        Ok(self.table.index_stats(name).await?)
-    }
-
-    /// Read the persisted [`AnnConfig`] from
-    /// `<lancedb_dir>/vectors_meta.json`. Returns `Ok(None)` when no
-    /// meta file is present — the "legacy / fresh library" state — and
-    /// an error if the file is unparseable or carries an unknown kind.
-    ///
-    /// Reads through to disk every call; the meta is < 1 KB and writes
-    /// are rare, so caching would buy little and complicate invalidation.
-    pub fn current_ann_cfg(&self, lancedb_dir: &Path) -> Result<Option<AnnConfig>> {
-        match meta::load(lancedb_dir)? {
-            None => Ok(None),
-            Some(m) => Ok(Some(AnnConfig::from_meta(&m)?)),
-        }
-    }
-
     /// Run table-level maintenance: compact small fragments, prune
     /// versions older than the LanceDB default retention, and absorb any
     /// freshly-appended rows into existing indices.
@@ -1133,113 +1264,6 @@ impl ChunkStore {
             "optimized chunks table"
         );
         Ok(())
-    }
-
-    /// Return the `top_k` chunks nearest `query` under cosine distance,
-    /// nearest first.
-    ///
-    /// Defaults to "no overrides" — equivalent to
-    /// [`Self::search_with(query, top_k, SearchOptions::default())`].
-    pub async fn search(&self, query: &[f32], top_k: usize) -> Result<Vec<SearchHit>> {
-        self.search_with(query, top_k, SearchOptions::default())
-            .await
-    }
-
-    /// Return the `top_k` chunks nearest `query` with explicit ANN
-    /// overrides.
-    ///
-    /// `opts.nprobes` and `opts.refine_factor` adjust the IVF query
-    /// fan-out and PQ refinement for this call; `opts.bypass_index`
-    /// forces a brute-force scan even when an index is present (an
-    /// AB-testing escape hatch). When no override is set the index's
-    /// built-in defaults apply.
-    ///
-    /// `opts.exclude_partitions` drops the named books' rows from the
-    /// result through a `start_node_id` range predicate; an empty list
-    /// attaches no predicate at all.
-    pub async fn search_with(
-        &self,
-        query: &[f32],
-        top_k: usize,
-        opts: SearchOptions,
-    ) -> Result<Vec<SearchHit>> {
-        let mut q = self
-            .table
-            .vector_search(query)?
-            .distance_type(DistanceType::Cosine);
-        if !opts.exclude_partitions.is_empty() {
-            q = q.only_if(exclusion_predicate(&opts.exclude_partitions));
-        }
-        if opts.bypass_index {
-            q = q.bypass_vector_index();
-        }
-        if let Some(np) = opts.nprobes {
-            q = q.nprobes(np);
-        }
-        if let Some(rf) = opts.refine_factor {
-            q = q.refine_factor(rf);
-        }
-        let batches: Vec<RecordBatch> = q.limit(top_k).execute().await?.try_collect().await?;
-        let mut hits = Vec::new();
-        for batch in &batches {
-            read_hits(batch, &mut hits)?;
-        }
-        Ok(hits)
-    }
-
-    /// Return the `top_k` chunks nearest `query`, restricted to one
-    /// book's partition.
-    ///
-    /// Pairs the ANN query with the same `start_node_id BETWEEN ...`
-    /// metadata predicate [`Self::scan_partition`] uses, so the
-    /// retrieval covers exactly the chunks owned by `partition` and no
-    /// others. Empty partitions return an empty `Vec`. Defaults to "no
-    /// ANN overrides" — equivalent to
-    /// `search_partition_with(query, partition, top_k, SearchOptions::default())`.
-    pub async fn search_by_partition(
-        &self,
-        query: &[f32],
-        partition: PartitionIdx,
-        top_k: usize,
-    ) -> Result<Vec<SearchHit>> {
-        self.search_partition_with(query, partition, top_k, SearchOptions::default())
-            .await
-    }
-
-    /// [`Self::search_by_partition`] with explicit ANN overrides.
-    ///
-    /// `opts.exclude_partitions` is ignored here: the query is already
-    /// confined to `partition`, so excluding other books changes
-    /// nothing and excluding `partition` itself would make the call
-    /// pointless.
-    pub async fn search_partition_with(
-        &self,
-        query: &[f32],
-        partition: PartitionIdx,
-        top_k: usize,
-        opts: SearchOptions,
-    ) -> Result<Vec<SearchHit>> {
-        let (lo, hi) = partition_bounds(partition);
-        let mut q = self
-            .table
-            .vector_search(query)?
-            .distance_type(DistanceType::Cosine)
-            .only_if(format!("start_node_id BETWEEN {lo} AND {hi}"));
-        if opts.bypass_index {
-            q = q.bypass_vector_index();
-        }
-        if let Some(np) = opts.nprobes {
-            q = q.nprobes(np);
-        }
-        if let Some(rf) = opts.refine_factor {
-            q = q.refine_factor(rf);
-        }
-        let batches: Vec<RecordBatch> = q.limit(top_k).execute().await?.try_collect().await?;
-        let mut hits = Vec::new();
-        for batch in &batches {
-            read_hits(batch, &mut hits)?;
-        }
-        Ok(hits)
     }
 }
 
@@ -1555,10 +1579,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_open_on_a_missing_dir_returns_none_without_materializing_it() {
+    async fn reader_open_on_a_missing_dir_returns_none_without_materializing_it() {
         let dir = tempfile::tempdir().expect("temp dir");
         let lancedb_dir = dir.path().join("lancedb");
-        let opened = ChunkStore::try_open(&lancedb_dir).await.expect("try_open");
+        let opened = ChunkReader::open(&lancedb_dir).await.expect("open reader");
         assert!(opened.is_none(), "no table on disk must read as None");
         assert!(
             !lancedb_dir.exists(),
@@ -1567,7 +1591,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_open_refuses_a_meta_stamp_above_this_binarys_reader_version() {
+    async fn reader_open_on_a_dir_without_the_table_returns_none_and_creates_no_table() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let opened = ChunkReader::open(dir.path()).await.expect("open reader");
+        assert!(
+            opened.is_none(),
+            "a dir without the table must read as None"
+        );
+        assert!(
+            !dir.path().join(format!("{TABLE}.lance")).exists(),
+            "the read door must not create the table it did not find"
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_open_refuses_a_meta_stamp_above_this_binarys_reader_version() {
         let dir = tempfile::tempdir().expect("temp dir");
         let too_new = bookrack_dbkit::READER_VERSION + 1;
         // Only the sidecar exists — no chunks table. The reader-version
@@ -1589,8 +1627,8 @@ mod tests {
         };
         meta::store(dir.path(), &forged).expect("store forged meta");
 
-        let Err(err) = ChunkStore::try_open(dir.path()).await else {
-            panic!("try_open must refuse a too-new reader stamp")
+        let Err(err) = ChunkReader::open(dir.path()).await else {
+            panic!("the read door must refuse a too-new reader stamp")
         };
         assert!(
             matches!(err, VectorsError::ReaderTooOld { required, current }
@@ -1600,7 +1638,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_open_finds_the_existing_table_and_its_dimension() {
+    async fn reader_open_finds_the_existing_table_and_its_dimension() {
         let dir = tempfile::tempdir().expect("temp dir");
         {
             let store = ChunkStore::open_for_write(dir.path(), DIM)
@@ -1611,9 +1649,9 @@ mod tests {
                 .await
                 .expect("append");
         }
-        let store = ChunkStore::try_open(dir.path())
+        let store = ChunkReader::open(dir.path())
             .await
-            .expect("try_open")
+            .expect("open reader")
             .expect("table present");
         assert_eq!(store.dimension(), DIM);
         assert_eq!(store.count_rows().await.expect("count"), 1);
@@ -2251,9 +2289,9 @@ mod tests {
             .expect("drop");
 
         assert!(
-            ChunkStore::try_open(dir.path())
+            ChunkReader::open(dir.path())
                 .await
-                .expect("try_open")
+                .expect("open reader")
                 .is_none(),
             "chunks table must be gone",
         );

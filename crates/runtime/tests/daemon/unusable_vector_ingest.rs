@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_test_support::{EmbedFailure, EmbedStub, ProcessEnv, process_env};
-use bookrack_vectors::ChunkStore;
+use bookrack_vectors::ChunkReader;
 use eyre::{ContextCompat, Result, eyre};
 use serde_json::{Value, json};
 
@@ -112,12 +112,10 @@ async fn run_to_end(reader: &mut Reader, w: &mut Writer, side: Side, path: &Path
 }
 
 async fn chunk_rows(root: &Path, side: Side) -> Result<usize> {
-    Ok(
-        match ChunkStore::try_open(&root.join(side.lancedb)).await? {
-            Some(store) => store.count_rows().await?,
-            None => 0,
-        },
-    )
+    Ok(match ChunkReader::open(&root.join(side.lancedb)).await? {
+        Some(store) => store.count_rows().await?,
+        None => 0,
+    })
 }
 
 fn embedded(root: &Path, side: Side) -> Result<usize> {

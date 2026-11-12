@@ -30,7 +30,7 @@ use bookrack_corpus::{
     CHUNK_VERSION_KEY, Corpus, EMBED_MODEL_KEY, NORMALIZE_VERSION_KEY, VECTOR_DIM_KEY,
 };
 use bookrack_test_support::{EmbedStub, ProcessEnv, process_env};
-use bookrack_vectors::{ChunkStore, META_FILENAME};
+use bookrack_vectors::{ChunkReader, META_FILENAME};
 use eyre::{ContextCompat, Result, eyre};
 use serde_json::{Value, json};
 
@@ -189,7 +189,7 @@ fn intakes(root: &Path, side: Side, status: IntakeStatus) -> Result<Vec<i64>> {
 }
 
 async fn chunk_rows(root: &Path, side: Side) -> Result<usize> {
-    Ok(ChunkStore::try_open(&root.join(side.lancedb))
+    Ok(ChunkReader::open(&root.join(side.lancedb))
         .await?
         .context("the chunks table exists")?
         .count_rows()
@@ -197,7 +197,7 @@ async fn chunk_rows(root: &Path, side: Side) -> Result<usize> {
 }
 
 async fn chunk_rows_of(root: &Path, side: Side, intake_id: i64) -> Result<usize> {
-    Ok(ChunkStore::try_open(&root.join(side.lancedb))
+    Ok(ChunkReader::open(&root.join(side.lancedb))
         .await?
         .context("the chunks table exists")?
         .scan_partition(PartitionIdx::new(intake_id))
@@ -461,7 +461,7 @@ async fn reset_resume_reports_this_runs_share_only(
 /// The index names on `side`'s chunks table and its sidecar bytes.
 async fn index_state(root: &Path, side: Side) -> Result<(Vec<String>, Vec<u8>)> {
     let dir = root.join(side.lancedb);
-    let indices = ChunkStore::try_open(&dir)
+    let indices = ChunkReader::open(&dir)
         .await?
         .context("the chunks table exists")?
         .list_indices()

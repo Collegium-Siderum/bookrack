@@ -16,7 +16,7 @@ use bookrack_core::{NodeId, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_extract::EXTRACTOR_VERSION;
-use bookrack_vectors::ChunkStore;
+use bookrack_vectors::ChunkReader;
 
 use crate::{GleanError, PlannedChunk, Result, audit_as, embed_and_write_chunks, new_run_id};
 
@@ -85,7 +85,7 @@ pub async fn plan_reembed(
     if targets.is_empty() {
         return Ok(plans);
     }
-    let Some(store) = ChunkStore::try_open(lancedb_dir).await? else {
+    let Some(store) = ChunkReader::open(lancedb_dir).await? else {
         return Ok(plans);
     };
     for intake in targets {
@@ -249,7 +249,7 @@ async fn read_chunk_plans(
     lancedb_dir: &Path,
     partition: PartitionIdx,
 ) -> Result<Vec<PlannedChunk>> {
-    let Some(store) = ChunkStore::try_open(lancedb_dir).await? else {
+    let Some(store) = ChunkReader::open(lancedb_dir).await? else {
         return Ok(Vec::new());
     };
     let rows = store.scan_partition(partition).await?;
@@ -274,7 +274,7 @@ mod tests {
     use bookrack_catalog::NewIntake;
     use bookrack_core::ItemKind;
     use bookrack_embed::{EmbedError, Result as EmbedResult};
-    use bookrack_vectors::ChunkRow;
+    use bookrack_vectors::{ChunkRow, ChunkStore};
 
     /// A toy embedder whose vector encodes its call generation, so
     /// tests can prove the vectors changed.

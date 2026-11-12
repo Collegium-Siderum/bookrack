@@ -4,7 +4,7 @@
 //! without re-extracting or re-chunking any source file.
 //!
 //! Each book's existing [`ChunkRow`]s are read back via
-//! [`ChunkStore::scan_partition`], mapped to [`ChunkPlan`]s by dropping
+//! [`ChunkReader::scan_partition`], mapped to [`ChunkPlan`]s by dropping
 //! the vector column, and fed back through [`embed_book_chunks`]. The
 //! latter owns the delete-then-append / churn-bump / cold-start ANN
 //! decisions, so reembed inherits them automatically — stamps mismatch
@@ -21,7 +21,7 @@ use bookrack_core::{PartitionIdx, error_chain};
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_extract::EXTRACTOR_VERSION;
-use bookrack_vectors::{ChunkRow, ChunkStore};
+use bookrack_vectors::{ChunkReader, ChunkRow};
 
 use crate::chunk::ChunkPlan;
 use crate::embed_run::{EmbedRunReport, embed_book_chunks};
@@ -95,7 +95,7 @@ pub async fn plan_reembed(
     if targets.is_empty() {
         return Ok(plans);
     }
-    let Some(store) = ChunkStore::try_open(lancedb_dir).await? else {
+    let Some(store) = ChunkReader::open(lancedb_dir).await? else {
         return Ok(plans);
     };
     for intake in targets {
@@ -270,7 +270,7 @@ fn collect_pinned_targets(catalog: &Catalog, ids: &[i64]) -> Result<Vec<Intake>>
 /// Scan the partition and drop the vector column. With no chunks table
 /// on disk there is nothing to read and none is created.
 async fn read_chunk_plans(lancedb_dir: &Path, partition: PartitionIdx) -> Result<Vec<ChunkPlan>> {
-    let Some(store) = ChunkStore::try_open(lancedb_dir).await? else {
+    let Some(store) = ChunkReader::open(lancedb_dir).await? else {
         return Ok(Vec::new());
     };
     let rows = store.scan_partition(partition).await?;
@@ -296,7 +296,7 @@ mod tests {
     use bookrack_catalog::NewIntake;
     use bookrack_core::ItemKind;
     use bookrack_embed::{EmbedError, Embedder, Result as EmbedResult};
-    use bookrack_vectors::ChunkRow;
+    use bookrack_vectors::{ChunkRow, ChunkStore};
 
     use crate::current_index_stamps;
 

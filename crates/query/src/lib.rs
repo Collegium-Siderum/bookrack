@@ -25,7 +25,7 @@ use bookrack_normalize::NORMALIZE_VERSION;
 use bookrack_search::{
     cite, embed_query, env_overrides, recall_with, retrieve_with, retrieve_with_partition,
 };
-use bookrack_vectors::ChunkStore;
+use bookrack_vectors::ChunkReader;
 pub use bookrack_vectors::SearchOptions;
 use tokio::sync::RwLock;
 
@@ -85,7 +85,7 @@ pub type Result<T> = std::result::Result<T, QueryError>;
 /// database file is cheap, and it keeps this type free to be shared across
 /// concurrent requests behind an `Arc`.
 pub struct Library<E: Embedder> {
-    store: RwLock<Option<ChunkStore>>,
+    store: RwLock<Option<ChunkReader>>,
     embed_model: String,
     probed_dim: usize,
     embedder: E,
@@ -128,7 +128,7 @@ impl<E: Embedder> Library<E> {
         chunk_version: u32,
     ) -> Result<Library<E>> {
         let probed_dim = probe_dimension(&embedder).await?;
-        let store = ChunkStore::try_open(lancedb_dir).await?;
+        let store = ChunkReader::open(lancedb_dir).await?;
         if let Some(s) = &store
             && s.count_rows().await? > 0
         {
@@ -179,7 +179,7 @@ impl<E: Embedder> Library<E> {
     /// store's stamps against the warm embedder for the same reason
     /// [`Self::open`] does.
     pub async fn refresh_store(&self) -> Result<()> {
-        let fresh = ChunkStore::try_open(&self.lancedb_dir).await?;
+        let fresh = ChunkReader::open(&self.lancedb_dir).await?;
         if let Some(s) = &fresh
             && s.count_rows().await? > 0
         {
@@ -205,7 +205,7 @@ impl<E: Embedder> Library<E> {
         if self.store.read().await.is_some() {
             return Ok(());
         }
-        let fresh = ChunkStore::try_open(&self.lancedb_dir).await?;
+        let fresh = ChunkReader::open(&self.lancedb_dir).await?;
         let Some(s) = fresh else {
             return Ok(());
         };

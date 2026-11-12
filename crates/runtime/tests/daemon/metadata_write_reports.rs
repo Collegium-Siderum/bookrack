@@ -20,7 +20,7 @@ use std::time::Duration;
 use bookrack_catalog::{Catalog, NewIntake};
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_test_support::{ProcessEnv, process_env};
-use bookrack_vectors::ChunkStore;
+use bookrack_vectors::ChunkReader;
 use eyre::{ContextCompat, Result, eyre};
 use serde_json::{Value, json};
 
@@ -84,7 +84,7 @@ fn audit_row_exists(root: &Path, reply: &Value) -> Result<bool> {
 
 /// The chunk rows the vector store holds for one book.
 async fn chunk_rows_of(root: &Path, book: i64) -> Result<usize> {
-    Ok(ChunkStore::try_open(&root.join("lancedb"))
+    Ok(ChunkReader::open(&root.join("lancedb"))
         .await?
         .context("the chunks table exists")?
         .scan_partition(PartitionIdx::new(book))

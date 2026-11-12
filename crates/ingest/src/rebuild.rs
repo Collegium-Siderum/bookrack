@@ -24,7 +24,7 @@ use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_core::NodeType;
 use bookrack_corpus::Corpus;
 use bookrack_extract::EXTRACTOR_VERSION;
-use bookrack_vectors::ChunkStore;
+use bookrack_vectors::ChunkReader;
 
 use crate::{IngestError, Result, StructureParams, current_index_stamps, ingest_structure};
 use bookrack_extract::envelope::{self, EnvelopeError};
@@ -192,7 +192,7 @@ pub async fn stamp_index_from_existing_chunks(
     lancedb_dir: &Path,
     embed_model: &str,
 ) -> Result<bool> {
-    let Some(store) = ChunkStore::try_open(lancedb_dir).await? else {
+    let Some(store) = ChunkReader::open(lancedb_dir).await? else {
         return Ok(false);
     };
     if store.count_rows().await? == 0 {
@@ -264,6 +264,7 @@ mod tests {
     use bookrack_extract::{
         Biblio, Block, BlockKind, Extraction, Provenance, TextLayerQuality, Toc,
     };
+    use bookrack_vectors::ChunkStore;
     use tempfile::tempdir;
 
     use bookrack_extract::envelope::{envelope_filename, write_envelope};

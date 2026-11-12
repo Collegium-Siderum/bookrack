@@ -24,7 +24,7 @@ use bookrack_index_profile::{
     Advice, Finding, IndexProfile, ProfileOrigin, RerankerKind, Severity, builtin_toml, has_errors,
     list_profiles, resolve, validate,
 };
-use bookrack_vectors::ChunkStore;
+use bookrack_vectors::ChunkReader;
 use eyre::{Result, bail};
 
 use crate::profile::{
@@ -894,7 +894,7 @@ pub fn advice_line(advice: &Advice) -> String {
 /// locked store, a reader-version refusal) degrades to "no count"
 /// rather than blocking the plan.
 async fn count_chunks(lancedb_dir: &Path) -> Option<usize> {
-    let store = ChunkStore::try_open(lancedb_dir).await.ok().flatten()?;
+    let store = ChunkReader::open(lancedb_dir).await.ok().flatten()?;
     store.count_rows().await.ok()
 }
 

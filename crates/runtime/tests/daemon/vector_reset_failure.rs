@@ -35,7 +35,7 @@ use bookrack_corpus::{
 };
 use bookrack_index_profile::USER_PROFILE_DIR_NAME;
 use bookrack_test_support::{EmbedFailure, EmbedStub, ProcessEnv, process_env};
-use bookrack_vectors::ChunkStore;
+use bookrack_vectors::ChunkReader;
 use eyre::{ContextCompat, Result, eyre};
 use serde_json::{Value, json};
 
@@ -234,7 +234,7 @@ async fn side_state(root: &Path, side: Side) -> Result<SideState> {
     let lancedb = root.join(side.lancedb);
     let ann_meta =
         std::fs::read_to_string(lancedb.join(bookrack_vectors::meta::META_FILENAME)).ok();
-    let chunks = match ChunkStore::try_open(&lancedb).await? {
+    let chunks = match ChunkReader::open(&lancedb).await? {
         Some(store) => store.count_rows().await?,
         None => 0,
     };

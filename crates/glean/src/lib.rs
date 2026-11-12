@@ -1301,10 +1301,7 @@ pub(crate) async fn embed_and_write_chunks<E: Embedder>(
         normalize_version: NORMALIZE_VERSION,
     };
     corpus.reconcile_index_stamps(&stamps)?;
-    let store = match ChunkStore::try_open(lancedb_dir).await? {
-        Some(s) => s,
-        None => ChunkStore::open_for_write(lancedb_dir, dim).await?,
-    };
+    let store = ChunkStore::open_for_write(lancedb_dir, dim).await?;
     // Drop the previous rows for this intake so a re-glean replaces
     // them rather than duplicating.
     store.delete_partition(PartitionIdx::new(intake_id)).await?;

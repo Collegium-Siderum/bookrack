@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use bookrack_corpus::{Corpus, VECTOR_DIM_KEY};
 use bookrack_embed::Embedder;
-use bookrack_vectors::ChunkStore;
+use bookrack_vectors::ChunkReader;
 
 use crate::Ops;
 use crate::Result;
@@ -19,7 +19,7 @@ use crate::recorder::record_call_async;
 
 /// Snapshot the vector store. Read-only end to end: opens the corpus
 /// read-only, attaches to the lancedb directory through
-/// `ChunkStore::try_open` — which never creates the directory or the
+/// `ChunkReader::open` — which never creates the directory or the
 /// chunks table — and walks every enumerated index for its per-shard
 /// statistics.
 ///
@@ -44,7 +44,7 @@ pub async fn status<E: Embedder>(ops: &Ops<E>) -> Result<VectorsStatus> {
         drop(corpus);
 
         let lancedb_dir = ops.lancedb_dir();
-        let Some(store) = ChunkStore::try_open(lancedb_dir).await? else {
+        let Some(store) = ChunkReader::open(lancedb_dir).await? else {
             return Ok(empty_status());
         };
         let row_count = store.count_rows().await?;

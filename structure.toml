@@ -357,18 +357,6 @@ site = "crates/glean/src/lib.rs::embed_and_write_chunks"
 access = "write"
 
 [[write_door]]
-site = "crates/glean/src/rebuild.rs::stamp_index_from_existing_chunks"
-access = "write"
-
-[[write_door]]
-site = "crates/glean/src/reembed.rs::plan_reembed"
-access = "write"
-
-[[write_door]]
-site = "crates/glean/src/reembed.rs::read_chunk_plans"
-access = "write"
-
-[[write_door]]
 site = "crates/glean/src/reset.rs::reset_and_rechunk"
 access = "write"
 
@@ -377,31 +365,11 @@ site = "crates/ingest/src/embed_run.rs::embed_book_chunks_with_progress"
 access = "write"
 
 [[write_door]]
-site = "crates/ingest/src/rebuild.rs::stamp_index_from_existing_chunks"
-access = "write"
-
-[[write_door]]
-site = "crates/ingest/src/reembed.rs::plan_reembed"
-access = "write"
-
-[[write_door]]
-site = "crates/ingest/src/reembed.rs::read_chunk_plans"
-access = "write"
-
-[[write_door]]
 site = "crates/ingest/src/reset.rs::reset_and_rechunk"
 access = "write"
 
 [[write_door]]
 site = "crates/mcp/src/lib.rs::reference_overlay_set"
-access = "write"
-
-[[write_door]]
-site = "crates/ops/src/reads/info.rs::read_current_chunk_count"
-access = "write"
-
-[[write_door]]
-site = "crates/ops/src/reads/vectors.rs::status"
 access = "write"
 
 [[write_door]]
@@ -501,18 +469,6 @@ site = "crates/ops/src/writes/papers_metadata.rs::void_paper_metadata_field"
 access = "write"
 
 [[write_door]]
-site = "crates/query/src/lib.rs::ensure_store"
-access = "write"
-
-[[write_door]]
-site = "crates/query/src/lib.rs::open"
-access = "write"
-
-[[write_door]]
-site = "crates/query/src/lib.rs::refresh_store"
-access = "write"
-
-[[write_door]]
 site = "crates/runtime/src/cmd/corpus.rs::execute_rebuild_from_plan"
 access = "write"
 
@@ -523,10 +479,6 @@ access = "bookkeeping"
 [[write_door]]
 site = "crates/runtime/src/cmd/dryrun.rs::open_dryrun_pipeline_run"
 access = "bookkeeping"
-
-[[write_door]]
-site = "crates/runtime/src/cmd/index_profile.rs::count_chunks"
-access = "write"
 
 [[write_door]]
 site = "crates/runtime/src/cmd/ingest.rs::run"
@@ -577,15 +529,7 @@ site = "crates/runtime/src/cmd/papers_vectors.rs::reset"
 access = "write"
 
 [[write_door]]
-site = "crates/runtime/src/cmd/remove.rs::derive_remove_plan"
-access = "write"
-
-[[write_door]]
 site = "crates/runtime/src/cmd/remove.rs::execute_remove_from_plan"
-access = "write"
-
-[[write_door]]
-site = "crates/runtime/src/cmd/remove_paper.rs::derive_remove_plan"
 access = "write"
 
 [[write_door]]

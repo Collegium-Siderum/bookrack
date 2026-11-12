@@ -195,6 +195,7 @@ mod tests {
     use bookrack_catalog::Catalog;
     use bookrack_corpus::{Corpus, EMBED_MODEL_KEY, VECTOR_DIM_KEY};
     use bookrack_embed::{EmbedError, Embedder, Result as EmbedResult};
+    use bookrack_vectors::ChunkReader;
 
     use crate::{IngestError, IngestParams, ingest_book};
 
@@ -356,9 +357,9 @@ mod tests {
         );
 
         // The on-disk table is at the new dim.
-        let store = ChunkStore::try_open(&lancedb_dir)
+        let store = ChunkReader::open(&lancedb_dir)
             .await
-            .expect("try_open")
+            .expect("open reader")
             .expect("table must exist after reset");
         assert_eq!(store.dimension(), NEW_DIM);
 
@@ -392,9 +393,9 @@ mod tests {
         // a dim because the embedder failed before any commit).
         assert_eq!(corpus.meta_get(EMBED_MODEL_KEY).expect("get"), None);
         assert!(
-            ChunkStore::try_open(&lancedb_dir)
+            ChunkReader::open(&lancedb_dir)
                 .await
-                .expect("try_open")
+                .expect("open reader")
                 .is_none()
         );
         for id in &intake_ids {

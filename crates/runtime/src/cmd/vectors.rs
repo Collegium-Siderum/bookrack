@@ -9,7 +9,7 @@
 use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_config::Config;
 use bookrack_corpus::Corpus;
-use bookrack_vectors::{AnnConfig, AnnKind, ChunkStore};
+use bookrack_vectors::{AnnConfig, AnnKind, ChunkReader, ChunkStore};
 use eyre::{Context, Result};
 use serde::Serialize;
 
@@ -122,7 +122,7 @@ async fn open_ann_store_for_write(cfg: &Config, not_ingested: CmdInputError) -> 
         .ok_or(not_ingested)?
         .parse::<usize>()
         .context("parse vector_dim stamp")?;
-    if ChunkStore::try_open(&lancedb_dir)
+    if ChunkReader::open(&lancedb_dir)
         .await
         .context("open vector store")?
         .is_none()

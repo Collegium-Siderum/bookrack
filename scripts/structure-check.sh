@@ -27,10 +27,11 @@
 #      that opens a store for writing must be listed. A door is a call
 #      to `open_for_write`, to any function whose name ends in
 #      `_for_write` or `_for_write_unbacked`, to `open_for_bookkeeping`,
-#      to `drop_chunks_table`, or to `ChunkStore::try_open`. A function
-#      outside the store crates that opens a door and hands the handle
-#      on is named `*_for_write`, so its callers are held to the list
-#      too. The enclosing function is the nearest `fn` above the call
+#      or to `drop_chunks_table`. A function outside the store crates
+#      that opens a door and hands the handle on is named `*_for_write`,
+#      so its callers are held to the list too. A read handle
+#      (`ChunkReader::open`, a store's read-only `open`) is not a door.
+#      The enclosing function is the nearest `fn` above the call
 #      with a smaller indent, which rustfmt makes reliable and which
 #      sees through closures and macro bodies. A site registered with
 #      `access = "bookkeeping"` may take the bookkeeping door only.
@@ -484,7 +485,7 @@ production $(cat "$tmp/door.sources") |
     BEGIN {
       while ((getline line < listed) > 0) { split(line, f, "\t"); access[f[1]] = f[2] }
       define = "^ *(pub(\\([^)]*\\))? )?(const )?(async )?(unsafe )?fn [A-Za-z0-9_]+"
-      door = "(^|[^A-Za-z0-9_])(open_for_bookkeeping|drop_chunks_table|[A-Za-z0-9_]*_for_write(_unbacked)?|ChunkStore::try_open)([^A-Za-z0-9_]|$)"
+      door = "(^|[^A-Za-z0-9_])(open_for_bookkeeping|drop_chunks_table|[A-Za-z0-9_]*_for_write(_unbacked)?)([^A-Za-z0-9_]|$)"
     }
     {
       file = $0; sub(/:.*/, "", file)

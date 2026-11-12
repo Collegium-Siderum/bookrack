@@ -15,7 +15,7 @@ use bookrack_corpus::{
     CHUNK_VERSION_KEY, Corpus, EMBED_MODEL_KEY, NORMALIZE_VERSION_KEY, VECTOR_DIM_KEY,
 };
 use bookrack_embed::Embedder;
-use bookrack_vectors::ChunkStore;
+use bookrack_vectors::ChunkReader;
 
 use crate::Ops;
 use crate::Result;
@@ -189,7 +189,7 @@ fn read_corpus_stamps(corpus_db: &Path) -> Result<CorpusStamps> {
 /// posing as missing. A count failure on an open store stays
 /// best-effort.
 async fn read_current_chunk_count(lancedb_dir: &Path) -> (Option<usize>, Option<String>) {
-    match ChunkStore::try_open(lancedb_dir).await {
+    match ChunkReader::open(lancedb_dir).await {
         Ok(Some(store)) => (store.count_rows().await.ok(), None),
         Ok(None) => (None, None),
         Err(e) => (None, Some(e.to_string())),

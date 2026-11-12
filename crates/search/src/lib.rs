@@ -26,7 +26,7 @@ use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, build_query_input};
 pub use bookrack_vectors::SearchOptions;
 
-use bookrack_vectors::{AnnKind, ChunkStore, SearchHit};
+use bookrack_vectors::{AnnKind, ChunkReader, SearchHit};
 use serde::Serialize;
 
 /// Separator between breadcrumb segments.
@@ -130,7 +130,7 @@ pub async fn search<E: Embedder>(
     query: &str,
     corpus: &Corpus,
     catalog: &Catalog,
-    store: &ChunkStore,
+    store: &ChunkReader,
     embedder: &E,
     lancedb_dir: &Path,
     top_k: usize,
@@ -155,7 +155,7 @@ pub async fn search_with<E: Embedder>(
     query: &str,
     corpus: &Corpus,
     catalog: &Catalog,
-    store: &ChunkStore,
+    store: &ChunkReader,
     embedder: &E,
     lancedb_dir: &Path,
     overrides: SearchOptions,
@@ -170,7 +170,7 @@ pub async fn search_with<E: Embedder>(
 /// store, never the corpus, so its future is `Send`.
 pub async fn retrieve<E: Embedder>(
     query: &str,
-    store: &ChunkStore,
+    store: &ChunkReader,
     embedder: &E,
     lancedb_dir: &Path,
     top_k: usize,
@@ -195,7 +195,7 @@ pub async fn retrieve<E: Embedder>(
 /// of meta.
 pub async fn retrieve_with<E: Embedder>(
     query: &str,
-    store: &ChunkStore,
+    store: &ChunkReader,
     embedder: &E,
     lancedb_dir: &Path,
     overrides: SearchOptions,
@@ -239,7 +239,7 @@ pub async fn embed_query<E: Embedder>(query: &str, embedder: &E) -> Result<Vec<f
 /// width recalls silently wrong passages.
 pub async fn recall_with(
     query_vector: &[f32],
-    store: &ChunkStore,
+    store: &ChunkReader,
     lancedb_dir: &Path,
     overrides: SearchOptions,
     top_k: usize,
@@ -264,7 +264,7 @@ pub async fn recall_with(
 /// returns an empty `Vec` rather than an error.
 pub async fn retrieve_with_partition<E: Embedder>(
     query: &str,
-    store: &ChunkStore,
+    store: &ChunkReader,
     embedder: &E,
     lancedb_dir: &Path,
     overrides: SearchOptions,
@@ -459,7 +459,7 @@ fn merge_options(overrides: SearchOptions, base: SearchOptions) -> SearchOptions
 /// "brute-force"` returns `SearchOptions::default()` — lancedb already
 /// runs brute-force when no index is present, and the explicit
 /// brute-force kind has no useful overrides.
-fn options_from_meta(store: &ChunkStore, lancedb_dir: &Path) -> Result<SearchOptions> {
+fn options_from_meta(store: &ChunkReader, lancedb_dir: &Path) -> Result<SearchOptions> {
     let cfg = match store.current_ann_cfg(lancedb_dir)? {
         Some(c) if c.kind != AnnKind::BruteForce => c,
         _ => return Ok(SearchOptions::default()),
@@ -692,7 +692,7 @@ mod tests {
         Biblio, Block, BlockKind, Extraction, Provenance, TextLayerQuality, Toc, TocEntry,
     };
     use bookrack_ingest::{StructureParams, ingest_structure};
-    use bookrack_vectors::ChunkRow;
+    use bookrack_vectors::{ChunkRow, ChunkStore};
     use std::future::Future;
 
     const DIM: usize = 4;

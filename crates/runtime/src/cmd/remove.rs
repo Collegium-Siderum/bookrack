@@ -27,7 +27,7 @@ use bookrack_catalog::{Catalog, Intake, ItemRemovalCounts};
 use bookrack_config::Config;
 use bookrack_core::{NodeId, PartitionIdx};
 use bookrack_corpus::Corpus;
-use bookrack_vectors::ChunkStore;
+use bookrack_vectors::{ChunkReader, ChunkStore};
 use eyre::{Context, Result};
 use sha2::{Digest, Sha256};
 
@@ -98,10 +98,10 @@ async fn derive_remove_plan(cfg: &Config, catalog: &Catalog, intake: Intake) -> 
         .map(|p| std::path::Path::new(p).exists())
         .unwrap_or(false);
 
-    // `try_open` reads the dimension off the table's own schema and
+    // The read handle takes the dimension off the table's own schema and
     // reports a store that is not on disk as absent, so the plan
     // needs neither the corpus stamp nor a creating open.
-    let vector_rows = match ChunkStore::try_open(&cfg.lancedb_dir())
+    let vector_rows = match ChunkReader::open(&cfg.lancedb_dir())
         .await
         .context("open vector store")?
     {
@@ -199,7 +199,7 @@ pub async fn execute_remove_from_plan(
     }
 
     if let Some(dim) = corpus_vector_dim(cfg)?
-        && ChunkStore::try_open(&cfg.lancedb_dir())
+        && ChunkReader::open(&cfg.lancedb_dir())
             .await
             .context("open vector store")?
             .is_some()
@@ -348,7 +348,7 @@ fn corpus_vector_dim(cfg: &Config) -> Result<Option<usize>> {
 }
 
 async fn count_vector_rows(
-    store: &ChunkStore,
+    store: &ChunkReader,
     partition: PartitionIdx,
 ) -> std::result::Result<usize, bookrack_vectors::VectorsError> {
     Ok(store.scan_partition(partition).await?.len())

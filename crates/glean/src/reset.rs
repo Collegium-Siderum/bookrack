@@ -166,6 +166,7 @@ mod tests {
     use bookrack_catalog::NewIntake;
     use bookrack_corpus::{EMBED_MODEL_KEY, VECTOR_DIM_KEY};
     use bookrack_embed::{EmbedError, Result as EmbedResult};
+    use bookrack_vectors::ChunkReader;
 
     use crate::{GleanError, build_structure};
 
@@ -261,9 +262,9 @@ mod tests {
     }
 
     async fn partition_tags(lancedb_dir: &Path, intake_id: i64) -> Vec<f32> {
-        let store = ChunkStore::try_open(lancedb_dir)
+        let store = ChunkReader::open(lancedb_dir)
             .await
-            .expect("try_open")
+            .expect("open reader")
             .expect("chunks table");
         store
             .scan_partition(PartitionIdx::new(intake_id))
