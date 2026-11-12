@@ -290,7 +290,6 @@ exit = "ops re-exports the PDFium pin and the envelope reader"
 paths = [
   "crates/diagnose/src/scrub.rs",
   "crates/glean/src/audit/signals.rs",
-  "crates/metadata/src/signals.rs",
 ]
 reason = "transitional"
 exit = "the text crate names the predicate"
@@ -298,7 +297,6 @@ exit = "the text crate names the predicate"
 [[codepoint]]
 paths = [
   "crates/extract/src/pdf_paper.rs",
-  "crates/extract/src/quality.rs",
 ]
 reason = "stamp-isolation"
 exit = "the next EXTRACTOR_VERSION bump"

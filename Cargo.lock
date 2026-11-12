@@ -846,6 +846,7 @@ dependencies = [
  "bookrack-audit-profile",
  "bookrack-config",
  "bookrack-core",
+ "bookrack-text",
  "chrono",
  "encoding_rs",
  "pdfium-render",

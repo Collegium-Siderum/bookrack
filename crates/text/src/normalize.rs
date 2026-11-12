@@ -190,8 +190,8 @@ fn delete_cjk_flanked_space(s: &str) -> String {
         let cjk_flanked = c == ' '
             && i > 0
             && i + 1 < chars.len()
-            && is_cjk(chars[i - 1])
-            && is_cjk(chars[i + 1]);
+            && is_cjk_text_char(chars[i - 1])
+            && is_cjk_text_char(chars[i + 1]);
         if !cjk_flanked {
             out.push(c);
         }
@@ -202,7 +202,7 @@ fn delete_cjk_flanked_space(s: &str) -> String {
 /// The "CJK character" set for the step 7 adjacency test: ideographs
 /// (BMP, extension A, compatibility, and the supplementary planes),
 /// hiragana and katakana, and the CJK symbols and punctuation block.
-fn is_cjk(c: char) -> bool {
+fn is_cjk_text_char(c: char) -> bool {
     matches!(
         u32::from(c),
         0x3000..=0x303F

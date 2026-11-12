@@ -842,10 +842,10 @@ impl BracketPair {
     fn delimiters(self) -> (char, char) {
         match self {
             BracketPair::AsciiParen => ('(', ')'),
-            BracketPair::FullwidthParen => ('\u{FF08}', '\u{FF09}'),
+            BracketPair::FullwidthParen => bookrack_text::FULLWIDTH_PARENS,
             BracketPair::Square => ('[', ']'),
-            BracketPair::FullwidthSquare => ('\u{FF3B}', '\u{FF3D}'),
-            BracketPair::Lenticular => ('\u{3010}', '\u{3011}'),
+            BracketPair::FullwidthSquare => bookrack_text::FULLWIDTH_SQUARE_BRACKETS,
+            BracketPair::Lenticular => bookrack_text::LENTICULAR_BRACKETS,
         }
     }
 }
@@ -1022,13 +1022,16 @@ fn body_matches_language(
     }
     let counted: Vec<char> = body
         .chars()
-        .filter(|c| c.is_alphabetic() || is_cjk(*c))
+        .filter(|c| c.is_alphabetic() || bookrack_text::is_han(*c))
         .take(2048)
         .collect();
     if counted.is_empty() {
         return true;
     }
-    let cjk = counted.iter().filter(|c| is_cjk(**c)).count();
+    let cjk = counted
+        .iter()
+        .filter(|c| bookrack_text::is_han(**c))
+        .count();
     let latin = counted.iter().filter(|c| c.is_ascii_alphabetic()).count();
     let total = counted.len();
     let cjk_ratio = cjk as f64 / total as f64;
@@ -1048,14 +1051,6 @@ fn body_matches_language(
         return false;
     }
     true
-}
-
-/// A CJK ideograph (the common ranges). Kept private here to avoid
-/// pulling extract's internal `quality` module into the public surface.
-fn is_cjk(ch: char) -> bool {
-    matches!(ch as u32,
-        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
-        | 0x2_0000..=0x2_A6DF | 0x2_A700..=0x2_EBEF)
 }
 
 /// Validate an ISBN-10 or ISBN-13 by checksum. Hyphens and spaces are

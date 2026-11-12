@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 bookrack-config = { path = "../config" }
 bookrack-core = { path = "../core" }
+bookrack-text = { path = "../text" }
 bookrack-audit-profile.workspace = true
 # `ExtractionEnvelope.captured_at` is a wall-clock RFC 3339 timestamp.
 chrono.workspace = true

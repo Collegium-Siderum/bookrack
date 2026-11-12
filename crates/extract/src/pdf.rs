@@ -1001,7 +1001,7 @@ fn append_line(current: &mut String, line: &str) {
         // A Latin word hyphenated across the break — drop the hyphen.
         current.pop();
         current.push_str(line);
-    } else if quality::is_cjk(prev) && quality::is_cjk(next) {
+    } else if bookrack_text::is_han(prev) && bookrack_text::is_han(next) {
         // A CJK line break carries no space.
         current.push_str(line);
     } else {

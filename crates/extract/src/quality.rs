@@ -133,7 +133,7 @@ pub fn assess(
             }
             if ch.is_ascii_digit() {
                 digit += 1;
-            } else if is_cjk(ch) {
+            } else if bookrack_text::is_han(ch) {
                 cjk += 1;
             } else if ch.is_ascii_alphabetic() {
                 latin += 1;
@@ -142,8 +142,8 @@ pub fn assess(
             if ch == ' '
                 && i > 0
                 && i + 1 < chars.len()
-                && is_cjk(chars[i - 1])
-                && is_cjk(chars[i + 1])
+                && bookrack_text::is_han(chars[i - 1])
+                && bookrack_text::is_han(chars[i + 1])
             {
                 cjk_space += 1;
             }
@@ -270,13 +270,6 @@ fn decide(r: &QualityReport, t: &QualityThresholds) -> QualityDecision {
 /// but carries no meaningful Unicode.
 pub fn is_pua(ch: char) -> bool {
     matches!(ch as u32, 0xE000..=0xF8FF | 0xF_0000..=0xF_FFFD | 0x10_0000..=0x10_FFFD)
-}
-
-/// A CJK ideograph (the common ranges).
-pub fn is_cjk(ch: char) -> bool {
-    matches!(ch as u32,
-        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
-        | 0x2_0000..=0x2_A6DF | 0x2_A700..=0x2_EBEF)
 }
 
 #[cfg(test)]
