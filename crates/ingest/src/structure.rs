@@ -308,7 +308,7 @@ pub(crate) fn plan_tree(
             title: None,
             text: Some(block.text.clone()),
             char_count: Some(block.text.chars().count() as i64),
-            sentence_count: Some(crate::sentences::count_sentences(&block.text)),
+            sentence_count: Some(bookrack_text::count_sentences(&block.text)),
             leaf_page: Some(i64::from(block.source_unit)),
             doc_order: Some(doc_order),
             stable_anchor: anchor,

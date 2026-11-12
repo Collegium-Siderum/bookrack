@@ -21,7 +21,6 @@ pub mod reaudit;
 pub mod rebuild;
 pub mod reembed;
 pub mod reset;
-pub mod sentences;
 mod structure;
 
 pub use bookrack_corpus::IndexStamps;

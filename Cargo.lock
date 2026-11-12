@@ -958,6 +958,7 @@ dependencies = [
  "bookrack-catalog",
  "bookrack-core",
  "bookrack-extract",
+ "bookrack-text",
  "serde",
  "tempfile",
  "toml",

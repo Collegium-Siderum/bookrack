@@ -297,13 +297,6 @@ exit = "the text crate names the predicate"
 
 [[codepoint]]
 paths = [
-  "crates/ingest/src/sentences.rs",
-]
-reason = "transitional"
-exit = "the text crate owns the terminator table"
-
-[[codepoint]]
-paths = [
   "crates/extract/src/pdf_paper.rs",
   "crates/extract/src/quality.rs",
 ]
@@ -1027,18 +1020,6 @@ reason = "compile-boundary"
 detail = "the gate script runs without compiling anything, and each test lives in the crate whose stamp it guards"
 agreement = "pinned"
 pin = "scripts/dep-stamp-check.sh"
-
-[[parallel]]
-id = "sentence-terminators"
-summary = "the characters that end a sentence"
-sites = [
-  "crates/ingest/src/sentences.rs::is_terminator",
-  "crates/metadata/src/signals.rs::is_sentence_terminator",
-]
-reason = "transitional"
-detail = "the audit signal's set leaves out the ASCII full stop and semicolon that the sentence counter takes"
-agreement = "divergent"
-exit = "the text crate owns the terminator table"
 
 [[parallel]]
 id = "latin-fallback-key"

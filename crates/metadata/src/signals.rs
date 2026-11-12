@@ -951,7 +951,10 @@ fn subtype_for(
     if pos == BracketPosition::Tail && matches!(pair, BracketPair::Lenticular) {
         return BracketSubtype::Marketing;
     }
-    if inner.chars().any(is_sentence_terminator) {
+    // Only the terminators with no second reading: inside a title's
+    // bracket a full stop abbreviates and a semicolon lists, so neither
+    // marks a sentence.
+    if inner.chars().any(bookrack_text::is_unambiguous_terminator) {
         return BracketSubtype::Marketing;
     }
     BracketSubtype::Series
@@ -974,17 +977,6 @@ fn is_volume_marker(inner: &str, volume_tokens: &[String]) -> bool {
     volume_tokens
         .iter()
         .any(|token| !token.is_empty() && trimmed.ends_with(token.as_str()))
-}
-
-/// Sentence-end punctuation used to spot marketing copy: CJK fullwidth
-/// `\u{3002}` / `\u{FF01}` / `\u{FF1F}` / `\u{2026}` and the ASCII
-/// equivalents `.` / `!` / `?`.
-// Parallel implementation: sentence-terminators.
-fn is_sentence_terminator(c: char) -> bool {
-    matches!(
-        c,
-        '\u{3002}' | '\u{FF01}' | '\u{FF1F}' | '\u{2026}' | '!' | '?'
-    )
 }
 
 /// Light BCP-47 syntactic check: a primary subtag plus an optional
@@ -1200,6 +1192,25 @@ mod tests {
         // punctuation reads as marketing copy, not a series name.
         let title = include_str!("../tests/fixtures/titles/sentence_punct_marketing.txt").trim();
         assert_eq!(classify(title), Some(BracketSubtype::Marketing));
+    }
+
+    #[test]
+    fn bracketed_segment_reads_a_full_stop_or_semicolon_as_series_punctuation() {
+        // An abbreviation's full stop and a list's semicolon, ASCII or
+        // fullwidth, do not make a bracketed block marketing copy.
+        assert_eq!(
+            classify("A Book (Studies in Logic, Vol. 12; New Series)"),
+            Some(BracketSubtype::Series)
+        );
+        assert_eq!(
+            classify("A Book (Studies in Logic\u{FF1B} New Series)"),
+            Some(BracketSubtype::Series)
+        );
+        // An unambiguous terminator in the same block still does.
+        assert_eq!(
+            classify("A Book (Studies in Logic! New Series)"),
+            Some(BracketSubtype::Marketing)
+        );
     }
 
     #[test]
