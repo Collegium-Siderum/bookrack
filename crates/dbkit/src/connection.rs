@@ -57,10 +57,11 @@ pub fn open_production(path: &Path) -> rusqlite::Result<Connection> {
 /// Open a strictly read-only SQLite connection at `path`.
 ///
 /// Uses `SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX`, so the file
-/// must already exist and the connection cannot create the WAL
-/// sidecars itself. Suitable for stores that already promise this
-/// contract to their callers. Also installs `query_only = ON` as a
-/// defence-in-depth against PRAGMA mutations and a `busy_timeout`.
+/// must already exist. Against a WAL database the connection still
+/// creates the `-shm` / `-wal` sidecars when they are absent; the
+/// database file itself is never written. Also installs
+/// `query_only = ON` as a defence-in-depth against PRAGMA mutations and
+/// a `busy_timeout`.
 pub fn open_production_strict_read_only(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open_with_flags(
         path,

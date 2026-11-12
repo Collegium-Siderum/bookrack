@@ -5,9 +5,9 @@
 //! This crate holds the parts of the database access layer that carry no
 //! knowledge of any particular table: the [`TableSpec`] descriptor types,
 //! the DDL renderer, the schema-conformance check, and the key/value
-//! meta-table helpers. Each database-owning crate (`corpus`, `catalog`)
-//! declares its own table specs and keeps all of its SQL; `dbkit` only
-//! provides the machinery they share.
+//! meta-table helpers, and the one sequence a store is opened through.
+//! Each database-owning crate declares its own table specs and keeps all
+//! of its SQL; `dbkit` only provides the machinery they share.
 //!
 //! The design it serves: a table's structure is declared once, as a
 //! [`TableSpec`]; its `CREATE TABLE` text is rendered from that spec, so
@@ -20,21 +20,29 @@ mod meta;
 mod open;
 mod row;
 mod spec;
+mod store;
 mod timing;
 mod verify;
 
-pub use backup::backup_database;
+pub use backup::{backup_database, now_iso};
 pub use connection::{open_production, open_production_strict_read_only};
 pub use ddl::render_ddl;
 pub use meta::{apply_schema, meta_get, meta_set};
 pub use open::{OpenDecision, READER_VERSION, reader_version_decision};
 pub use row::decode;
 pub use spec::{ColumnSpec, ForeignKey, IndexSpec, OnDelete, PkRole, SqlType, TableSpec};
+pub use store::{
+    Access, OpenError, Opened, ReaderStamp, SchemaAxis, StoreSpec, open_existing, open_in_memory,
+    open_store,
+};
 pub use timing::{DEFAULT_SLOW_QUERY_THRESHOLD, TimedConnection};
 pub use verify::{SchemaMismatch, VerifyError, verify_all, verify_table};
 
 bookrack_core::fixed_settings! {
     owner = "dbkit";
+    "db.backups_kept" = backup::BACKUP_KEEP,
+        "pre-migration backups of one database kept under the backup directory before the oldest is pruned",
+        acts on "how far back a restore can reach";
     "db.busy_timeout" = connection::BUSY_TIMEOUT,
         "how long a statement waits on a lock another connection holds",
         acts on "every read and write against a database another process is writing";

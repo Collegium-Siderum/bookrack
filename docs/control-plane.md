@@ -326,8 +326,9 @@ onto.
   store error bare or a pipeline wrapper carried it
   (`OpsError::Query(QueryError::Vectors(..))` included).
 - **A store this build cannot serve** (`-32018`): a catalog or corpus
-  from a newer schema or demanding a newer reader
-  (`CatalogError::{SchemaTooNew, ReaderTooOld}`,
+  from a newer schema or demanding a newer reader, a catalog behind
+  this build's schema met by a read, which never migrates
+  (`CatalogError::{SchemaTooNew, SchemaTooOld, ReaderTooOld}`,
   `CorpusError::{SchemaMismatch, ReaderTooOld}`), an index without
   build stamps or with stamps that disagree with this build
   (`CorpusError::{IndexNotStamped, IndexStampMismatch}`), and a vector

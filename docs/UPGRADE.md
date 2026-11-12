@@ -336,13 +336,13 @@ than reads:
 
 ### The snapshot a migration takes
 
-Before a catalog migration runs on a database that already holds rows,
-the binary writes a complete copy of it with `VACUUM INTO` into the
+Before a catalog migration runs on a database that already holds
+tables, the binary writes a complete copy of it with `VACUUM INTO` into the
 backup directory: `BOOKRACK_BACKUP_DIR`, or `<data root>/backup/` when
 that is unset — `bookrack doctor` reports which. The copy is named
 `<stem>-<timestamp>-from-v<N>.bak`, where `<stem>` is `catalog` or
 `papers_catalog` and `<N>` the schema it was migrated from, and the
-five newest per stem are kept. A fresh or empty database takes no
+five newest per stem are kept. A file with no tables in it takes no
 snapshot, and nothing else is snapshotted: the corpus, the vector store
 and the reference store are derived, and the way back for them is a
 rebuild.

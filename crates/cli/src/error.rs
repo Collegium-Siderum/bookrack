@@ -276,6 +276,15 @@ pub enum BookrackCliError {
     #[error("{}", .problem.summary)]
     RootIdentityRefused { problem: Problem },
 
+    /// A command that opens a store itself, with no daemon in between,
+    /// found it in a state this build cannot serve — a schema or stamp
+    /// from another build. The counterpart of
+    /// [`BookrackCliError::RpcStateUnusable`] for a failure that never
+    /// crossed the control socket: exit 2, and the reporter draws the
+    /// three parts.
+    #[error("{}", .problem.summary)]
+    StateUnusable { problem: Problem },
+
     /// `libraries detect <path>` determined the path is not a confirmed
     /// or probable bookrack data root — a plain not-a-library verdict or
     /// an unreadable manifest. The renderer already printed the verdict;
@@ -308,7 +317,8 @@ impl BookrackCliError {
             | Self::FilterOffItsSide { .. }
             | Self::InitRefused { .. }
             | Self::QueueWaitRefused { .. }
-            | Self::RootIdentityRefused { .. } => 2,
+            | Self::RootIdentityRefused { .. }
+            | Self::StateUnusable { .. } => 2,
             Self::DetectNegative(_) => 1,
         }
     }
@@ -392,7 +402,8 @@ impl BookrackCliError {
             | Self::FilterOffItsSide { problem }
             | Self::InitRefused { problem }
             | Self::QueueWaitRefused { problem }
-            | Self::RootIdentityRefused { problem } => {
+            | Self::RootIdentityRefused { problem }
+            | Self::StateUnusable { problem } => {
                 return Some(problem.data.clone());
             }
             Self::DaemonNotRunning => {
@@ -485,7 +496,8 @@ impl CliReportCause<'_> {
 
 /// Walk an `eyre::Report` chain for a typed CLI error, an unwrapped
 /// JSON-RPC error from the control client, a wizard refusal, or an
-/// offline write's identity refusal.
+/// offline write's identity refusal; failing those, read the chain for
+/// a store in a state this build cannot serve.
 pub fn classify_eyre(err: &eyre::Report) -> Option<CliReportCause<'_>> {
     for cause in err.chain() {
         if let Some(cli_err) = cause.downcast_ref::<BookrackCliError>() {
@@ -516,12 +528,51 @@ pub fn classify_eyre(err: &eyre::Report) -> Option<CliReportCause<'_>> {
             ));
         }
     }
-    None
+    bookrack_runtime::control::error_map::state_refusal(err)
+        .map(|problem| CliReportCause::Classified(BookrackCliError::StateUnusable { problem }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A store refusal met with no daemon in between reads as the
+    /// daemon would word it, without an RPC prefix, and exits 2.
+    #[test]
+    fn a_store_state_refusal_met_offline_is_drawn_in_three_parts() {
+        let err = eyre::Report::from(bookrack_catalog::CatalogError::SchemaTooOld {
+            found: 16,
+            expected: 17,
+        })
+        .wrap_err("open /some/where/catalog.db");
+
+        let Some(CliReportCause::Classified(cli_err)) = classify_eyre(&err) else {
+            panic!("a state refusal must be classified");
+        };
+        assert!(
+            matches!(cli_err, BookrackCliError::StateUnusable { .. }),
+            "{cli_err:?}"
+        );
+        assert_eq!(cli_err.exit_code(), 2);
+        let line = cli_err.to_string();
+        assert!(
+            line.starts_with("catalog schema is behind this build:") && !line.contains("rpc error"),
+            "{line}"
+        );
+        let data = cli_err.problem_data().expect("three parts");
+        assert!(data.hint.is_some(), "the operator's next step");
+    }
+
+    /// An error with no next step keeps its cause chain: it is not
+    /// classified, so the reporter prints the chain and exits 1.
+    #[test]
+    fn a_store_failure_with_no_next_step_stays_unclassified() {
+        let err = eyre::Report::from(bookrack_catalog::CatalogError::Io(std::io::Error::other(
+            "backup directory is not writable",
+        )))
+        .wrap_err("open /some/where/catalog.db");
+        assert!(classify_eyre(&err).is_none());
+    }
 
     /// The stale-lock message is three parts: a one-line summary that
     /// states only what the probe established, a detail naming the

@@ -2,10 +2,10 @@
 
 //! The `catalog.db` connection handle and schema.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use bookrack_dbkit::{
-    OpenDecision, READER_VERSION, TableSpec, TimedConnection, reader_version_decision,
+    Access, OpenError, Opened, ReaderStamp, SchemaAxis, StoreSpec, TableSpec, TimedConnection,
 };
 use rusqlite::Connection;
 
@@ -38,11 +38,6 @@ pub const MIN_READER_VERSION: u32 = 1;
 /// `catalog_meta` key under which [`MIN_READER_VERSION`] is recorded.
 const MIN_READER_VERSION_KEY: &str = "min_reader_version";
 
-/// How many database backups to retain in the backup directory; older
-/// ones are pruned after a successful backup.
-// setting: catalog.backups_kept
-pub(crate) const BACKUP_KEEP: usize = 5;
-
 /// Every `catalog.db` table that has a table module of its own, in a
 /// stable order. The live schema is conformance-checked against these
 /// specs on every open; they are the source of truth for the *current*
@@ -74,231 +69,179 @@ const SPECS: &[&TableSpec] = &[
     &crate::retrieval_call_hits::SPEC,
 ];
 
+/// `catalog.db` as the open protocol sees it. Both catalogs of a
+/// library share it; a backup is named after the file it snapshots.
+const STORE: StoreSpec = StoreSpec {
+    label: "catalog",
+    tables: SPECS,
+    schema: SchemaAxis::Migrated {
+        target: TARGET_VERSION,
+        migrate: migrate_to_latest,
+    },
+    reader_stamp: ReaderStamp {
+        table: "catalog_meta",
+        key: MIN_READER_VERSION_KEY,
+        write_version: MIN_READER_VERSION,
+    },
+};
+
+fn migrate_to_latest(conn: &mut Connection) -> std::result::Result<(), rusqlite_migration::Error> {
+    migrations().to_latest(conn)
+}
+
+impl From<OpenError> for CatalogError {
+    fn from(e: OpenError) -> CatalogError {
+        match e {
+            OpenError::TooOld { found, target } => CatalogError::SchemaTooOld {
+                found,
+                expected: target,
+            },
+            OpenError::TooNew { found, target } => CatalogError::SchemaTooNew {
+                found,
+                expected: target,
+            },
+            OpenError::ReaderTooOld { required, current } => {
+                CatalogError::ReaderTooOld { required, current }
+            }
+            OpenError::Verify(e) => CatalogError::Verify(e),
+            OpenError::Migrate(e) => CatalogError::Migrate(e),
+            OpenError::Sqlite(e) => CatalogError::Sqlite(e),
+            OpenError::Io(e) => CatalogError::Io(e),
+            OpenError::Rederive { .. } => unreachable!("catalog.db is migrated, never rederived"),
+        }
+    }
+}
+
 /// A handle to one `catalog.db` database.
 ///
-/// Owns a single SQLite connection. Construct with [`Catalog::open_for_write_unbacked`]
-/// for a file-backed database or [`Catalog::open_in_memory`] for an
-/// ephemeral one (useful in tests).
+/// Owns a single SQLite connection. Three kinds of door produce one:
+/// [`Catalog::open`] and [`Catalog::open_read_only`] look,
+/// [`Catalog::open_for_bookkeeping`] writes into a catalog that is
+/// already current, and [`Catalog::open_for_write`] creates or migrates.
+/// [`Catalog::open_in_memory`] gives an ephemeral one.
 pub struct Catalog {
     pub(crate) conn: TimedConnection,
     read_only: bool,
 }
 
 impl Catalog {
-    /// Open the `catalog.db` at `path`, creating and initializing it if it
-    /// does not exist, without taking a pre-migration backup.
+    /// Open the `catalog.db` at `path` read-only, if there is one.
     ///
-    /// Use [`Catalog::open_for_write`] for the production path, which
-    /// snapshots an existing database before migrating it. This variant is
-    /// for callers that manage backups themselves or do not need them.
-    pub fn open_for_write_unbacked(path: &Path) -> Result<Catalog> {
-        Catalog::from_connection(bookrack_dbkit::open_production(path)?, None)
+    /// A pipeline's catalog is created by that pipeline's first write,
+    /// so a library may legitimately have no file at `path` yet:
+    /// `Ok(None)` when the filesystem reports none. Looking never
+    /// creates the file, never migrates it, and never writes a stamp.
+    ///
+    /// A catalog behind this build is refused with
+    /// [`CatalogError::SchemaTooOld`], one ahead of it with
+    /// [`CatalogError::SchemaTooNew`]; a file whose tables differ from
+    /// the compiled-in specs with [`CatalogError::Verify`].
+    pub fn open(path: &Path) -> Result<Option<Catalog>> {
+        match bookrack_dbkit::open_store(&STORE, path, Access::Read, None)? {
+            Opened::Ready(conn) => Ok(Some(Catalog::reading(conn))),
+            Opened::Missing | Opened::Declined => Ok(None),
+        }
     }
 
-    /// Open the `catalog.db` at `path`, backing it up into `backup_dir`
-    /// before applying any pending migration.
+    /// Open the `catalog.db` at `path` read-only, requiring the file.
     ///
-    /// Only an existing, populated database that is actually about to be
-    /// migrated is backed up; a freshly created one is not. Fails with
-    /// [`CatalogError::SchemaTooNew`] if the file was written by a newer
-    /// schema revision than this binary understands.
-    pub fn open_for_write(path: &Path, backup_dir: &Path) -> Result<Catalog> {
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("catalog")
-            .to_string();
-        Catalog::from_connection(
-            bookrack_dbkit::open_production(path)?,
-            Some((backup_dir, stem.as_str())),
-        )
+    /// The checks of [`Catalog::open`], with a missing file reported as
+    /// the SQLite open failure it is rather than as `None`. Any write
+    /// through the resulting handle is rejected by SQLite.
+    pub fn open_read_only(path: &Path) -> Result<Catalog> {
+        Ok(Catalog::reading(bookrack_dbkit::open_existing(
+            &STORE, path,
+        )?))
     }
 
     /// Open the `catalog.db` at `path` for writing, but only when its
-    /// schema is already at this binary's revision.
+    /// schema is already at this build's revision.
     ///
     /// `Ok(None)` means the database is not one this call may write:
-    /// either no file is there, or the file is behind and opening it
-    /// through [`Catalog::open_for_write_unbacked`] would migrate it. Migration is
-    /// forward-only, so a caller whose write is incidental to its real
-    /// work — a preview recording that it ran, a probe noting its own
-    /// pass — has no business triggering one; it takes the `None` and
-    /// does without the row. A database newer than this binary is
-    /// still an error, not a `None`: that one no caller can proceed on.
+    /// either no file is there, or the file is behind and a write door
+    /// would migrate it. Migration is forward-only, so a caller whose
+    /// write is incidental to its real work — a preview recording that
+    /// it ran, a probe noting its own pass — has no business triggering
+    /// one; it takes the `None` and does without the row. A database
+    /// newer than this build is still an error, not a `None`: that one
+    /// no caller can proceed on.
     pub fn open_for_bookkeeping(path: &Path) -> Result<Option<Catalog>> {
-        if !path.exists() {
-            return Ok(None);
+        match bookrack_dbkit::open_store(&STORE, path, Access::Bookkeeping, None)? {
+            Opened::Ready(conn) => Catalog::writing(conn).map(Some),
+            Opened::Missing | Opened::Declined => Ok(None),
         }
-        let conn = bookrack_dbkit::open_production(path)?;
-        let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        match decide(current) {
-            OpenDecision::Migrate { .. } => Ok(None),
-            _ => Catalog::from_connection(conn, None).map(Some),
-        }
+    }
+
+    /// Open the `catalog.db` at `path` for writing, creating it if it
+    /// does not exist and backing it up into `backup_dir` before
+    /// applying any pending migration.
+    ///
+    /// Only an existing database that holds tables and is actually about
+    /// to be migrated is backed up; a freshly created one is not. Fails
+    /// with [`CatalogError::SchemaTooNew`] if the file was written by a
+    /// newer schema revision than this build understands.
+    pub fn open_for_write(path: &Path, backup_dir: &Path) -> Result<Catalog> {
+        Catalog::ready(bookrack_dbkit::open_store(
+            &STORE,
+            path,
+            Access::Write,
+            Some(backup_dir),
+        )?)
+    }
+
+    /// Open the `catalog.db` at `path` for writing, creating it if it
+    /// does not exist, without taking a pre-migration backup.
+    ///
+    /// Use [`Catalog::open_for_write`] for the production path, which
+    /// snapshots an existing database before migrating it.
+    pub fn open_for_write_unbacked(path: &Path) -> Result<Catalog> {
+        Catalog::ready(bookrack_dbkit::open_store(
+            &STORE,
+            path,
+            Access::Write,
+            None,
+        )?)
     }
 
     /// Open an ephemeral, private `catalog.db` held entirely in memory.
     /// The database vanishes when the handle is dropped.
     pub fn open_in_memory() -> Result<Catalog> {
-        Catalog::from_connection(Connection::open_in_memory()?, None)
+        Catalog::writing(bookrack_dbkit::open_in_memory(&STORE)?)
     }
 
-    /// Migrate the schema to the current revision and return a handle.
-    ///
-    /// `user_version` is authoritative: a database newer than this binary
-    /// is refused, a database behind is backed up (when `backup_dir` is
-    /// given and it already holds data) and migrated forward, and one
-    /// already current opens unchanged. After migrating, the live schema
-    /// is verified against the specs and the version mirror is rewritten.
-    fn from_connection(mut conn: Connection, backup: Option<(&Path, &str)>) -> Result<Catalog> {
-        let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        match decide(current) {
-            OpenDecision::Refuse { .. } => {
-                return Err(CatalogError::SchemaTooNew {
-                    found: current,
-                    expected: TARGET_VERSION,
-                });
+    fn ready(opened: Opened) -> Result<Catalog> {
+        match opened {
+            Opened::Ready(conn) => Catalog::writing(conn),
+            Opened::Missing | Opened::Declined => {
+                unreachable!("a write door creates and migrates")
             }
-            OpenDecision::Migrate { .. } => {
-                // Snapshot only a file-backed database that already holds
-                // data and is about to be migrated. A fresh or in-memory
-                // database has nothing worth saving.
-                if let Some((dir, stem)) = backup
-                    && has_user_tables(&conn)?
-                {
-                    backup_catalog(&conn, dir, stem, current)?;
-                }
-                // Foreign keys are switched off for the migration: a
-                // 12-step table rebuild needs them off, and `PRAGMA
-                // foreign_keys` is a no-op within the migration's
-                // transaction. The unconditional enable below restores
-                // enforcement once the migration has committed.
-                conn.pragma_update(None, "foreign_keys", "OFF")?;
-                migrations()
-                    .to_latest(&mut conn)
-                    .map_err(CatalogError::Migrate)?;
-            }
-            OpenDecision::Match => {}
-            // `catalog.db` is source-of-truth and never produces this
-            // verdict: the migration framework advances any older revision
-            // forward, and there is no derived-stamp axis to disagree on.
-            OpenDecision::Rederive { .. } => unreachable!("catalog.db is never rederived"),
         }
+    }
 
-        // `foreign_keys` is a per-connection PRAGMA whose default is a
-        // compile-time option of the linked SQLite: the bundled build
-        // sets `SQLITE_DEFAULT_FOREIGN_KEYS=1`, stock SQLite defaults
-        // to off. The schema declares `ON DELETE CASCADE` edges
-        // (distill stage rows, pipeline run summaries, retrieval calls
-        // and hits), so enable enforcement explicitly on every open
-        // rather than relying on the vendored build flag.
-        conn.pragma_update(None, "foreign_keys", "ON")?;
+    fn reading(conn: Connection) -> Catalog {
+        Catalog {
+            conn: TimedConnection::new(conn, STORE.label),
+            read_only: true,
+        }
+    }
 
-        // Acceptance gate, run on every open: `rusqlite_migration` advances
-        // `user_version` but does not check the resulting schema shape.
-        bookrack_dbkit::verify_all(&conn, SPECS).map_err(CatalogError::Verify)?;
-
+    /// Wrap a writable connection and mirror the schema version into
+    /// `catalog_meta`, for audit and for any tool still reading the
+    /// stamp. `user_version` stays the authority.
+    fn writing(conn: Connection) -> Result<Catalog> {
         let catalog = Catalog {
-            conn: TimedConnection::new(conn, "catalog"),
+            conn: TimedConnection::new(conn, STORE.label),
             read_only: false,
         };
-
-        // Reader-version axis: refuse a stamp this build cannot meet,
-        // seed the stamp when missing. Runs after `verify_all` so the
-        // `catalog_meta` table is guaranteed to exist.
-        let stored = catalog.read_min_reader_version()?;
-        match reader_version_decision(stored) {
-            OpenDecision::Refuse { .. } => {
-                return Err(CatalogError::ReaderTooOld {
-                    required: stored.expect("Refuse implies a stamp was present"),
-                    current: READER_VERSION,
-                });
-            }
-            OpenDecision::Match => {
-                if stored.is_none() {
-                    catalog.meta_set(MIN_READER_VERSION_KEY, &MIN_READER_VERSION.to_string())?;
-                }
-            }
-            OpenDecision::Migrate { .. } | OpenDecision::Rederive { .. } => {
-                unreachable!("reader_version_decision emits only Match or Refuse")
-            }
-        }
-
-        // Mirror the authoritative version into `catalog_meta` for audit.
         catalog.meta_set(SCHEMA_VERSION_KEY, &SCHEMA_VERSION.to_string())?;
         Ok(catalog)
     }
 
-    /// Read the recorded `min_reader_version` stamp from `catalog_meta`,
-    /// returning `None` if no row has been written yet.
-    fn read_min_reader_version(&self) -> Result<Option<u32>> {
-        Ok(self
-            .meta_get(MIN_READER_VERSION_KEY)?
-            .and_then(|s| s.parse::<u32>().ok()))
-    }
-
-    /// Open the `catalog.db` at `path` for read-only access.
-    ///
-    /// Skips the migration step entirely — the file must already be at
-    /// the current schema revision — and opens with the strict
-    /// read-only flags plus `PRAGMA query_only = ON`, so any write
-    /// through the resulting handle is rejected by SQLite with
-    /// `SQLITE_READONLY` and a missing file is an open failure rather
-    /// than an empty database materialised on disk.
-    ///
-    /// Designed for daemon-side query consumers that share one schema
-    /// migration owned by a separate read-write entry point at process
-    /// start. The `verify_all(SPECS)` acceptance gate still runs, so an
-    /// unmigrated or schema-drifted database is refused at open rather
-    /// than discovered halfway through a query.
-    pub fn open_read_only(path: &Path) -> Result<Catalog> {
-        let conn = bookrack_dbkit::open_production_strict_read_only(path)?;
-        let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if current > TARGET_VERSION {
-            return Err(CatalogError::SchemaTooNew {
-                found: current,
-                expected: TARGET_VERSION,
-            });
-        }
-        bookrack_dbkit::verify_all(&conn, SPECS).map_err(CatalogError::Verify)?;
-        let catalog = Catalog {
-            conn: TimedConnection::new(conn, "catalog"),
-            read_only: true,
-        };
-        // Reader-version axis: refuse a stamp this build cannot meet.
-        // The seed step from the read-write path is intentionally
-        // skipped here — the read-only contract forbids mutating the
-        // database. A missing stamp resolves to Match and the open
-        // proceeds, leaving seeding to the next read-write open.
-        let stored = catalog.read_min_reader_version()?;
-        if let OpenDecision::Refuse { .. } = reader_version_decision(stored) {
-            return Err(CatalogError::ReaderTooOld {
-                required: stored.expect("Refuse implies a stamp was present"),
-                current: READER_VERSION,
-            });
-        }
-        Ok(catalog)
-    }
-
-    /// Probe for a catalog at `path` and open it read-only.
-    ///
-    /// A pipeline's catalog is created by that pipeline's first write,
-    /// so a library may legitimately have no file at `path` yet.
-    /// `Ok(None)` when there is no file there; otherwise exactly
-    /// [`Catalog::open_read_only`], so a file that exists but cannot be
-    /// read still reports its reason. The probe touches nothing on disk.
-    pub fn try_open_read_only(path: &Path) -> Result<Option<Catalog>> {
-        if !path.is_file() {
-            return Ok(None);
-        }
-        Catalog::open_read_only(path).map(Some)
-    }
-
     /// Whether this handle was opened read-only.
     ///
-    /// `true` only for handles produced by [`Catalog::open_read_only`].
-    /// Diagnostic — the actual write barrier is the SQLite
-    /// `query_only` PRAGMA, not this flag.
+    /// `true` for handles produced by [`Catalog::open`] and
+    /// [`Catalog::open_read_only`]. Diagnostic — the actual write
+    /// barrier is the SQLite `query_only` PRAGMA, not this flag.
     pub fn is_read_only(&self) -> bool {
         self.read_only
     }
@@ -307,95 +250,15 @@ impl Catalog {
     /// clock so timestamps the crate writes share one source with the
     /// `ts` columns the table inserts generate themselves.
     pub fn now_iso(&self) -> Result<String> {
-        Ok(now_iso_from(&self.conn)?)
+        Ok(bookrack_dbkit::now_iso(&self.conn)?)
     }
-}
-
-/// The current UTC time as a Zulu ISO-8601 string, read from a raw
-/// connection (before a [`Catalog`] handle exists, e.g. while naming a
-/// backup file).
-// Parallel implementation: rfc3339-now.
-fn now_iso_from(conn: &Connection) -> rusqlite::Result<String> {
-    conn.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |row| {
-        row.get(0)
-    })
-}
-
-/// Classify a catalog database whose `user_version` is `current` into one
-/// of the four self-check verdicts the protocol distinguishes.
-///
-/// `catalog.db` is source-of-truth and rebuildable only by hand, so its
-/// decision tree is the minimal one: anything newer is refused, anything
-/// older is migrated forward, an exact match is opened unchanged. The
-/// rederive verdict is never produced — there is no derived-stamp axis
-/// for this store to disagree on.
-fn decide(current: i64) -> OpenDecision {
-    use std::cmp::Ordering;
-    match current.cmp(&TARGET_VERSION) {
-        Ordering::Greater => OpenDecision::Refuse {
-            reason: "catalog schema version newer than this binary",
-        },
-        Ordering::Less => OpenDecision::Migrate {
-            from: current,
-            to: TARGET_VERSION,
-        },
-        Ordering::Equal => OpenDecision::Match,
-    }
-}
-
-/// Whether the database holds any non-internal table — i.e. it is not a
-/// freshly created, empty file.
-fn has_user_tables(conn: &Connection) -> rusqlite::Result<bool> {
-    let count: i64 = conn.query_row(
-        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
-        [],
-        |row| row.get(0),
-    )?;
-    Ok(count > 0)
-}
-
-/// Snapshot the catalog database into `dir` with `VACUUM INTO`, naming
-/// the file with the source database's stem, a Zulu timestamp and the
-/// version it is migrating from, then prune all but the newest
-/// [`BACKUP_KEEP`] backups in the same prefix cluster. Sharing a
-/// directory between two catalog databases (e.g. `catalog.db` and
-/// `papers_catalog.db`) is safe: each prunes only its own snapshots.
-fn backup_catalog(conn: &Connection, dir: &Path, db_stem: &str, from_version: i64) -> Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let ts = now_iso_from(conn)?.replace(':', "-");
-    let path = dir.join(format!("{db_stem}-{ts}-from-v{from_version}.bak"));
-    let target = path.display().to_string().replace('\'', "''");
-    conn.execute(&format!("VACUUM INTO '{target}'"), [])?;
-    prune_old_backups(dir, db_stem, BACKUP_KEEP)?;
-    Ok(())
-}
-
-/// Keep the `keep` newest backups whose filename leads with
-/// `<db_stem>-` in `dir`, deleting the rest. Backup filenames embed a
-/// sortable timestamp after the stem prefix, so lexical order within
-/// one cluster is chronological.
-fn prune_old_backups(dir: &Path, db_stem: &str, keep: usize) -> Result<()> {
-    let prefix = format!("{db_stem}-");
-    let mut backups: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".bak"))
-        })
-        .collect();
-    backups.sort();
-    let excess = backups.len().saturating_sub(keep);
-    for path in &backups[..excess] {
-        std::fs::remove_file(path)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use bookrack_core::ItemKind;
+    use bookrack_dbkit::READER_VERSION;
 
     #[test]
     fn fresh_database_stamps_the_schema_version() {
@@ -615,88 +478,6 @@ mod tests {
     }
 
     #[test]
-    fn pruning_keeps_only_the_newest_backups() {
-        let dir = unique_dir("prune");
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        // Timestamp-led names sort chronologically; make seven.
-        for i in 0..7 {
-            let name = format!("catalog-2026-05-31T00-00-0{i}Z-from-v0.bak");
-            std::fs::write(dir.join(name), b"x").expect("write backup");
-        }
-        prune_old_backups(&dir, "catalog", 5).expect("prune");
-        let mut remaining: Vec<String> = std::fs::read_dir(&dir)
-            .expect("read dir")
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        remaining.sort();
-        assert_eq!(remaining.len(), 5);
-        // The two oldest (seconds 00, 01) are gone; 02..06 remain.
-        assert!(
-            remaining
-                .iter()
-                .all(|n| !n.contains("-00Z-") && !n.contains("-01Z-"))
-        );
-        assert!(remaining.iter().any(|n| n.contains("-06Z-")));
-
-        std::fs::remove_dir_all(&dir).expect("cleanup");
-    }
-
-    #[test]
-    fn pruning_only_touches_its_own_prefix_cluster() {
-        // Two catalog databases sharing a backup directory must each
-        // keep `BACKUP_KEEP` of their own snapshots without evicting
-        // the other's. The fixture seeds seven backups per prefix.
-        let dir = unique_dir("prune-cluster");
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        for prefix in ["catalog", "papers_catalog"] {
-            for i in 0..7 {
-                let name = format!("{prefix}-2026-05-31T00-00-0{i}Z-from-v0.bak");
-                std::fs::write(dir.join(name), b"x").expect("write backup");
-            }
-        }
-        prune_old_backups(&dir, "catalog", 5).expect("prune catalog");
-        let remaining: Vec<String> = std::fs::read_dir(&dir)
-            .expect("read dir")
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        let catalog: Vec<&String> = remaining
-            .iter()
-            .filter(|n| n.starts_with("catalog-"))
-            .collect();
-        let papers: Vec<&String> = remaining
-            .iter()
-            .filter(|n| n.starts_with("papers_catalog-"))
-            .collect();
-        assert_eq!(catalog.len(), 5, "pruning catalog must keep five");
-        assert_eq!(
-            papers.len(),
-            7,
-            "the papers cluster must not be touched by pruning catalog"
-        );
-
-        prune_old_backups(&dir, "papers_catalog", 5).expect("prune papers_catalog");
-        let remaining: Vec<String> = std::fs::read_dir(&dir)
-            .expect("read dir")
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        let catalog: Vec<&String> = remaining
-            .iter()
-            .filter(|n| n.starts_with("catalog-"))
-            .collect();
-        let papers: Vec<&String> = remaining
-            .iter()
-            .filter(|n| n.starts_with("papers_catalog-"))
-            .collect();
-        assert_eq!(catalog.len(), 5, "the catalog cluster must remain intact");
-        assert_eq!(papers.len(), 5, "pruning papers_catalog must keep five");
-
-        std::fs::remove_dir_all(&dir).expect("cleanup");
-    }
-
-    #[test]
     fn the_contributor_index_migration_is_applied() {
         // The first real migration (M[1]) adds idx_contrib_node on top of
         // the frozen baseline; a freshly opened database must carry it.
@@ -738,33 +519,68 @@ mod tests {
     }
 
     #[test]
-    fn try_open_read_only_reports_a_missing_file_as_absent_without_creating_it() {
+    fn open_reports_a_missing_file_as_absent_without_creating_it() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("catalog.db");
 
-        let opened = Catalog::try_open_read_only(&path).expect("a missing file is not an error");
+        let opened = Catalog::open(&path).expect("a missing file is not an error");
         assert!(opened.is_none(), "missing file must probe as absent");
         assert!(!path.exists(), "the probe must not create catalog.db");
     }
 
     #[test]
-    fn try_open_read_only_opens_an_existing_file_read_only() {
+    fn open_opens_an_existing_file_read_only() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("catalog.db");
         drop(Catalog::open_for_write_unbacked(&path).expect("seed"));
 
-        let opened = Catalog::try_open_read_only(&path).expect("open");
+        let opened = Catalog::open(&path).expect("open");
         assert!(opened.is_some_and(|c| c.is_read_only()));
     }
 
     #[test]
-    fn try_open_read_only_still_refuses_an_unmigrated_file() {
+    fn open_still_refuses_an_unmigrated_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("catalog.db");
         std::fs::write(&path, b"").expect("seed an uninitialised file");
 
-        let Err(err) = Catalog::try_open_read_only(&path) else {
+        let Err(err) = Catalog::open(&path) else {
             panic!("an unmigrated file must report its reason, not probe as absent")
+        };
+        assert!(
+            matches!(err, CatalogError::SchemaTooOld { found: 0, expected } if expected == TARGET_VERSION),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn open_reports_a_directory_in_the_files_place_as_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("catalog.db");
+        std::fs::create_dir(&path).expect("a directory where the file belongs");
+
+        assert!(
+            Catalog::open(&path).is_err(),
+            "a directory is not a missing catalog"
+        );
+    }
+
+    #[test]
+    fn open_refuses_a_current_catalog_whose_tables_differ_from_the_specs() {
+        // `user_version` says current, one column says otherwise: only
+        // the conformance check can tell.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("catalog.db");
+        {
+            let catalog = Catalog::open_for_write_unbacked(&path).expect("create");
+            catalog
+                .conn
+                .execute_batch("ALTER TABLE intake RENAME COLUMN source_sha256 TO renamed;")
+                .expect("rename a column");
+        }
+
+        let Err(err) = Catalog::open(&path) else {
+            panic!("a drifted catalog must be refused")
         };
         assert!(matches!(err, CatalogError::Verify(_)), "{err:?}");
     }
@@ -819,9 +635,8 @@ mod tests {
 
     #[test]
     fn open_read_only_refuses_an_unmigrated_older_schema() {
-        // A file stopped at an early revision: user_version is below
-        // target, so only the spec-conformance gate can catch it — the
-        // read-only path never migrates forward.
+        // A file stopped at an early revision: the read-only door names
+        // the revision it found and never migrates forward.
         let dir = unique_dir("read-only-older");
         let path = dir.join("catalog.db");
         {
@@ -834,7 +649,10 @@ mod tests {
         let Err(err) = Catalog::open_read_only(&path) else {
             panic!("an old-revision file must be refused")
         };
-        assert!(matches!(err, CatalogError::Verify(_)), "{err:?}");
+        assert!(
+            matches!(err, CatalogError::SchemaTooOld { found: 2, expected } if expected == TARGET_VERSION),
+            "{err:?}"
+        );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

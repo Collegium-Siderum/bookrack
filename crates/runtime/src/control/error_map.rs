@@ -124,21 +124,39 @@ pub fn handler_err(method: &str, err: Report) -> RpcError {
 /// surfaces word one failure alike — and the flattened chain otherwise.
 pub(crate) fn report_problem(err: &Report) -> Problem {
     match classify(err) {
-        Some(rpc) => {
-            let data = rpc
-                .data
-                .and_then(|data| serde_json::from_value::<bookrack_core::ProblemData>(data).ok())
-                .unwrap_or(bookrack_core::ProblemData {
-                    detail: None,
-                    hint: None,
-                    retryable: false,
-                });
-            Problem {
-                summary: rpc.message,
-                data,
-            }
-        }
+        Some(rpc) => problem_of(rpc),
         None => Problem::from_error_chain(err.as_ref()),
+    }
+}
+
+/// The three-part reading of `err` when a store it depends on is in a
+/// state this build cannot serve, and `None` for every other error.
+///
+/// For a command that opens a store itself, with no daemon in between:
+/// such a refusal names the store, the versions, and the operator's
+/// next step, and reads the same as the daemon's reply for it. Nothing
+/// else is let through, so an error with no next step keeps the cause
+/// chain its caller attached.
+pub fn state_refusal(err: &Report) -> Option<Problem> {
+    classify(err)
+        .filter(|rpc| rpc.code == STATE_UNUSABLE)
+        .map(problem_of)
+}
+
+/// The problem an envelope was built from: the inverse of
+/// [`rpc_from_problem`].
+fn problem_of(rpc: RpcError) -> Problem {
+    let data = rpc
+        .data
+        .and_then(|data| serde_json::from_value::<bookrack_core::ProblemData>(data).ok())
+        .unwrap_or(bookrack_core::ProblemData {
+            detail: None,
+            hint: None,
+            retryable: false,
+        });
+    Problem {
+        summary: rpc.message,
+        data,
     }
 }
 
@@ -683,6 +701,13 @@ fn from_catalog(e: &CatalogError) -> RpcError {
             problem.hint(format!(
                 "Run a bookrack build at reader version v{required} or newer."
             )),
+        ),
+        CatalogError::SchemaTooOld { .. } => rpc_from_problem(
+            STATE_UNUSABLE,
+            problem.hint(
+                "Start the daemon once with `bookrack run`: mounting the library backs the \
+                 catalog up and migrates it to this build's schema.",
+            ),
         ),
         CatalogError::DerivedFromConflict { .. } => rpc_from_problem(
             INVALID_PARAMS,
@@ -1570,6 +1595,68 @@ mod tests {
             );
             assert!(!data.retryable, "{label}");
         }
+    }
+
+    /// A catalog behind this build, met through a door that does not
+    /// migrate, is a state the operator resolves: the state code, a
+    /// summary naming the store and both versions, and the step.
+    #[test]
+    fn a_catalog_behind_this_build_takes_the_state_code_and_names_both_versions() {
+        use bookrack_catalog::CatalogError;
+        let behind = || CatalogError::SchemaTooOld {
+            found: 16,
+            expected: 17,
+        };
+        for (label, err) in [
+            ("bare", Report::from(behind())),
+            ("ops", OpsError::Catalog(behind()).into()),
+        ] {
+            let rpc = handler_err("library.list_books", err);
+            assert_eq!(rpc.code, STATE_UNUSABLE, "{label}: {}", rpc.message);
+            assert!(
+                rpc.message
+                    .starts_with("catalog schema is behind this build")
+                    && rpc.message.contains("v16")
+                    && rpc.message.contains("v17"),
+                "{label}: {}",
+                rpc.message
+            );
+            let data: bookrack_core::ProblemData =
+                serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
+            assert!(
+                data.hint.unwrap_or_default().contains("bookrack run"),
+                "{label}: the hint names the step that migrates it"
+            );
+        }
+    }
+
+    /// The exit for a command that opens a store itself lets a state
+    /// refusal through with its three parts and nothing else.
+    #[test]
+    fn state_refusal_passes_state_refusals_and_nothing_else() {
+        use bookrack_catalog::CatalogError;
+        let refused: Report = Report::from(CatalogError::SchemaTooNew {
+            found: 99,
+            expected: 17,
+        })
+        .wrap_err("open /some/where/catalog.db");
+        let problem = state_refusal(&refused).expect("a state refusal");
+        assert!(
+            problem.summary.starts_with("catalog schema is newer"),
+            "{}",
+            problem.summary
+        );
+        assert!(problem.data.hint.is_some());
+
+        let caller_input: Report = OpsError::IntakeNotFound { intake_id: 7 }.into();
+        assert!(
+            handler_err("m", OpsError::IntakeNotFound { intake_id: 7 }.into()).code
+                != STATE_UNUSABLE
+        );
+        assert!(state_refusal(&caller_input).is_none());
+
+        let unclassified = eyre::eyre!("disk on fire");
+        assert!(state_refusal(&unclassified).is_none());
     }
 
     /// The two read-shape refusals the read proxies used to hand-pick

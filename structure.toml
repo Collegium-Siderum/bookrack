@@ -1456,7 +1456,7 @@ sites = [
   "crates/diagnose/src/manifest.rs::iso8601_z",
   "crates/cli/src/distill_cmd.rs::format_iso8601",
   "crates/extract/src/envelope.rs::write_envelope",
-  "crates/catalog/src/db.rs::now_iso_from",
+  "crates/dbkit/src/backup.rs::now_iso",
   "crates/catalog/src/pipeline_runs.rs::open_pipeline_run",
 ]
 reason = "transitional"

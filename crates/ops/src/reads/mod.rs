@@ -34,7 +34,7 @@ pub mod vectors;
 /// counts, or an unknown intake. Looking never creates the file.
 // Parallel implementation: ops-open-catalog.
 pub(crate) fn open_book_catalog<E: Embedder>(ops: &Ops<E>) -> Result<Option<Catalog>> {
-    Ok(Catalog::try_open_read_only(ops.catalog_db())?)
+    Ok(Catalog::open(ops.catalog_db())?)
 }
 
 /// Open the paper catalog attached to `ops` read-only, if there is one
@@ -51,5 +51,5 @@ pub(crate) fn open_papers_catalog<E: Embedder>(ops: &Ops<E>) -> Result<Option<Ca
     let papers_db = ops
         .papers_catalog_db()
         .ok_or(OpsError::PapersBackendNotConfigured)?;
-    Ok(Catalog::try_open_read_only(papers_db)?)
+    Ok(Catalog::open(papers_db)?)
 }

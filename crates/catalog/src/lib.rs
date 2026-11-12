@@ -26,6 +26,8 @@ mod db;
 mod diagnostic_text;
 mod effective;
 mod expressions;
+#[doc(hidden)]
+pub mod fixtures;
 mod intake;
 mod item_pipeline_audit;
 mod item_state;
@@ -91,13 +93,6 @@ pub use run_lock::{
 };
 pub use works::{NewWork, Work};
 
-bookrack_core::fixed_settings! {
-    owner = "catalog";
-    "catalog.backups_kept" = db::BACKUP_KEEP,
-        "database backups kept under the backup directory before the oldest is pruned",
-        acts on "how far back a restore can reach";
-}
-
 /// Convert a SQLite `COUNT(*)` (which the driver hands back as `i64`)
 /// into the unsigned width every catalog `count_*` API returns.
 /// `COUNT(*)` is non-negative by definition, so a negative result here
@@ -150,6 +145,21 @@ pub enum CatalogError {
         /// `user_version` recorded in the opened database.
         found: i64,
         /// Highest schema version this binary defines.
+        expected: i64,
+    },
+
+    /// The database is behind this build and was opened through a door
+    /// that does not migrate: its `user_version` is below the revision
+    /// this build reads. A write door brings it forward; a read never
+    /// does.
+    #[error(
+        "catalog schema is behind this build: database is at v{found}, \
+         this build reads v{expected}"
+    )]
+    SchemaTooOld {
+        /// `user_version` recorded in the opened database.
+        found: i64,
+        /// The schema version this build reads.
         expected: i64,
     },
 

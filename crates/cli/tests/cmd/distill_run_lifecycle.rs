@@ -250,7 +250,7 @@ async fn a_dry_run_does_not_migrate_the_catalog_it_records_into() {
         .err()
         .expect("the dry run migrated catalog.db");
     assert!(
-        matches!(err, bookrack_catalog::CatalogError::Verify(_)),
+        matches!(err, bookrack_catalog::CatalogError::SchemaTooOld { .. }),
         "{err:?}"
     );
 }

@@ -8,6 +8,33 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Reading a catalog that is behind this build names the versions.**
+  A read never migrates. A `catalog.db` or `papers_catalog.db` whose
+  schema is older than the build used to be refused as a table-shape
+  mismatch; it is now refused as `catalog schema is behind this build`,
+  with the version found and the version this build reads, and the
+  control plane answers `-32018` with a hint to start the daemon, whose
+  mount backs the catalog up and migrates it. A catalog one revision
+  behind whose tables happened to match was read; it is refused too. A
+  directory sitting where the catalog file belongs is an error rather
+  than "no catalog yet".
+- **A store this build cannot serve is reported in three parts when no
+  daemon is in between.** A command that opens a store itself, such as
+  `runs`, `retrieval`, or `doctor`'s offline fallback, and finds a
+  schema or stamp from another build prints the summary, the detail,
+  and the hint the daemon would send, and exits `2`. It used to print a
+  debug cause chain and exit `1`. Every other failure keeps its chain.
+- **`corpus.db` is checked against its table declarations on every
+  write open.** The check ran in debug builds only. The schema stamp
+  and the reader stamp are now compared before any table is created, so
+  a corpus left by another build is refused with the rebuild hint
+  before this build's tables and indexes reach it.
+- **`bookrack config fixed` lists the backup retention as
+  `db.backups_kept`**, formerly `catalog.backups_kept`. The value is
+  unchanged.
+
 ### Removed
 
 - **`bookrack papers ingest`; use `bookrack glean`.** Deprecated in

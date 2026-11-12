@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use bookrack_dbkit::{
-    OpenDecision, READER_VERSION, TableSpec, TimedConnection, apply_schema, reader_version_decision,
+    Access, OpenError, Opened, ReaderStamp, SchemaAxis, StoreSpec, TableSpec, TimedConnection,
 };
 use rusqlite::Connection;
 
@@ -47,167 +47,127 @@ const SPECS: &[&TableSpec] = &[
     &crate::index_meta::SPEC,
 ];
 
+/// `corpus.db` as the open protocol sees it.
+const STORE: StoreSpec = StoreSpec {
+    label: "corpus",
+    tables: SPECS,
+    schema: SchemaAxis::Stamped {
+        key: SCHEMA_VERSION_KEY,
+        value: SCHEMA_VERSION_STAMP,
+    },
+    reader_stamp: ReaderStamp {
+        table: "index_meta",
+        key: MIN_READER_VERSION_KEY,
+        write_version: MIN_READER_VERSION,
+    },
+};
+
+/// [`SCHEMA_VERSION`] as it is written to `index_meta`.
+const SCHEMA_VERSION_STAMP: &str = "1";
+
+impl From<OpenError> for CorpusError {
+    fn from(e: OpenError) -> CorpusError {
+        match e {
+            OpenError::Rederive { found, .. } => CorpusError::SchemaMismatch {
+                found,
+                expected: SCHEMA_VERSION,
+            },
+            OpenError::ReaderTooOld { required, current } => {
+                CorpusError::ReaderTooOld { required, current }
+            }
+            OpenError::Verify(e) => CorpusError::Verify(e),
+            OpenError::Sqlite(e) => CorpusError::Sqlite(e),
+            OpenError::TooOld { .. } | OpenError::TooNew { .. } | OpenError::Migrate(_) => {
+                unreachable!("corpus.db is stamped, never migrated")
+            }
+            OpenError::Io(_) => unreachable!("corpus.db takes no backup"),
+        }
+    }
+}
+
 /// A handle to one `corpus.db` database.
 ///
-/// Owns a single SQLite connection. Construct with [`Corpus::open_for_write`] for
-/// a file-backed database or [`Corpus::open_in_memory`] for an
+/// Owns a single SQLite connection. [`Corpus::open`] and
+/// [`Corpus::open_read_only`] look, [`Corpus::open_for_write`] creates
+/// the file if it is missing, and [`Corpus::open_in_memory`] gives an
 /// ephemeral one (useful in tests and for throwaway processing).
 pub struct Corpus {
     pub(crate) conn: TimedConnection,
 }
 
 impl Corpus {
-    /// Open the `corpus.db` at `path`, creating and initializing it if
-    /// it does not exist.
+    /// Open the `corpus.db` at `path` read-only, if there is one.
+    ///
+    /// `Ok(None)` when the filesystem reports no file at `path`.
+    /// Looking never creates the file and never writes a stamp. A file
+    /// stamped with another schema revision is refused with
+    /// [`CorpusError::SchemaMismatch`].
+    pub fn open(path: &Path) -> Result<Option<Corpus>> {
+        match bookrack_dbkit::open_store(&STORE, path, Access::Read, None)? {
+            Opened::Ready(conn) => Ok(Some(Corpus::wrap(conn))),
+            Opened::Missing | Opened::Declined => Ok(None),
+        }
+    }
+
+    /// Open the `corpus.db` at `path` for writing, creating and
+    /// initializing it if it does not exist.
     ///
     /// Fails with [`CorpusError::SchemaMismatch`] if the file exists but
-    /// was built by an incompatible schema revision.
+    /// was built by an incompatible schema revision. The stamps are
+    /// compared before any table is created, so a refused file gains
+    /// nothing from the attempt.
     pub fn open_for_write(path: &Path) -> Result<Corpus> {
-        Corpus::from_connection(bookrack_dbkit::open_production(path)?)
+        match bookrack_dbkit::open_store(&STORE, path, Access::Write, None)? {
+            Opened::Ready(conn) => Ok(Corpus::wrap(conn)),
+            Opened::Missing | Opened::Declined => unreachable!("a write door creates"),
+        }
     }
 
     /// Open an ephemeral, private `corpus.db` held entirely in memory.
     /// The database vanishes when the handle is dropped.
     pub fn open_in_memory() -> Result<Corpus> {
-        Corpus::from_connection(Connection::open_in_memory()?)
+        Ok(Corpus::wrap(bookrack_dbkit::open_in_memory(&STORE)?))
     }
 
-    /// Open the `corpus.db` at `path` without creating it and without
-    /// writing through the connection.
+    /// Open the `corpus.db` at `path` read-only, requiring the file.
     ///
     /// Mirrors [`Catalog::open_read_only`][bookrack_catalog::Catalog::open_read_only]:
-    /// the `query_only` PRAGMA blocks writes and the stamp *writers* are
-    /// skipped, but every read-side check the read-write path runs still
-    /// runs here — the table-spec conformance check, the `schema_version`
-    /// stamp, and the `min_reader_version` stamp — so a drifted or
-    /// incompatible file is refused at open. A missing file is reported as
-    /// a SQLite open failure rather than silently materialized.
+    /// the `query_only` PRAGMA blocks writes and no stamp is written,
+    /// but every check the write door runs still runs here — the
+    /// `schema_version` stamp, the `min_reader_version` stamp, and the
+    /// table-spec conformance check — so a drifted or incompatible file
+    /// is refused at open. A missing file is reported as a SQLite open
+    /// failure rather than silently materialized.
     pub fn open_read_only(path: &Path) -> Result<Corpus> {
-        let conn = bookrack_dbkit::open_production_strict_read_only(path)?;
-        bookrack_dbkit::verify_all(&conn, SPECS).map_err(CorpusError::Verify)?;
-        let corpus = Corpus {
-            conn: TimedConnection::new(conn, "corpus"),
-        };
-        // Verify the schema-version stamp without writing: a missing stamp
-        // (fresh file) is accepted as-is, a differing revision is refused.
-        let found = corpus.meta_get(SCHEMA_VERSION_KEY)?;
-        if let OpenDecision::Rederive { .. } = decide(found.as_deref()) {
-            return Err(CorpusError::SchemaMismatch {
-                found: found.unwrap_or_default(),
-                expected: SCHEMA_VERSION,
-            });
-        }
-        let stored = corpus.read_min_reader_version()?;
-        if let OpenDecision::Refuse { .. } = reader_version_decision(stored) {
-            return Err(CorpusError::ReaderTooOld {
-                required: stored.expect("Refuse implies a stamp was present"),
-                current: READER_VERSION,
-            });
-        }
-        Ok(corpus)
+        Ok(Corpus::wrap(bookrack_dbkit::open_existing(&STORE, path)?))
     }
 
-    /// Apply per-connection pragmas, ensure the schema is present, and
-    /// reconcile the schema version.
-    fn from_connection(conn: Connection) -> Result<Corpus> {
-        // Foreign keys are off by default and the setting is not
-        // persisted, so it must be re-enabled on every connection.
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        apply_schema(&conn, SPECS)?;
-        // In debug builds, fail loudly if an existing file's schema has
-        // drifted from the specs. A freshly built database always
-        // conforms, so this only bites on a stale file — which a release
-        // build instead catches through the version stamp.
-        #[cfg(debug_assertions)]
-        bookrack_dbkit::verify_all(&conn, SPECS).expect("corpus.db schema conformance");
-        let corpus = Corpus {
-            conn: TimedConnection::new(conn, "corpus"),
-        };
-        corpus.reconcile_schema_version()?;
-        corpus.reconcile_reader_version()?;
-        Ok(corpus)
-    }
-
-    /// Refuse a `min_reader_version` stamp this build cannot meet, and
-    /// seed the stamp when missing.
-    fn reconcile_reader_version(&self) -> Result<()> {
-        let stored = self.read_min_reader_version()?;
-        match reader_version_decision(stored) {
-            OpenDecision::Refuse { .. } => Err(CorpusError::ReaderTooOld {
-                required: stored.expect("Refuse implies a stamp was present"),
-                current: READER_VERSION,
-            }),
-            OpenDecision::Match => {
-                if stored.is_none() {
-                    self.meta_set(MIN_READER_VERSION_KEY, &MIN_READER_VERSION.to_string())?;
-                }
-                Ok(())
-            }
-            OpenDecision::Migrate { .. } | OpenDecision::Rederive { .. } => {
-                unreachable!("reader_version_decision emits only Match or Refuse")
-            }
+    fn wrap(conn: Connection) -> Corpus {
+        Corpus {
+            conn: TimedConnection::new(conn, STORE.label),
         }
-    }
-
-    /// Read the recorded `min_reader_version` stamp from `index_meta`,
-    /// returning `None` if no row has been written yet.
-    fn read_min_reader_version(&self) -> Result<Option<u32>> {
-        Ok(self
-            .meta_get(MIN_READER_VERSION_KEY)?
-            .and_then(|s| s.parse::<u32>().ok()))
-    }
-
-    /// Stamp the schema version on a fresh database, or verify it on an
-    /// existing one.
-    fn reconcile_schema_version(&self) -> Result<()> {
-        let found = self.meta_get(SCHEMA_VERSION_KEY)?;
-        match decide(found.as_deref()) {
-            OpenDecision::Match => {
-                if found.is_none() {
-                    self.meta_set(SCHEMA_VERSION_KEY, &SCHEMA_VERSION.to_string())?;
-                }
-                Ok(())
-            }
-            OpenDecision::Rederive { .. } => Err(CorpusError::SchemaMismatch {
-                found: found.unwrap_or_default(),
-                expected: SCHEMA_VERSION,
-            }),
-            // `corpus.db` is rebuildable from sources and carries no
-            // forward-only migration sequence, so a mismatch is resolved
-            // by `bookrack corpus rebuild`, not by migrating forward;
-            // and there is no separate axis for the open path to refuse
-            // on at this point.
-            OpenDecision::Migrate { .. } | OpenDecision::Refuse { .. } => {
-                unreachable!("corpus.db open path emits only Match or Rederive")
-            }
-        }
-    }
-}
-
-/// Classify a corpus database carrying the optional stamped
-/// `schema_version` value `found` into one of the four self-check
-/// verdicts.
-///
-/// `corpus.db` is rebuildable from sources, so its decision tree is
-/// the rebuildable-store shape: a missing stamp means a fresh database
-/// (open as [`OpenDecision::Match`], the caller will stamp it); an
-/// equal stamp also matches; anything else is a [`OpenDecision::Rederive`]
-/// — the resolution is `bookrack corpus rebuild`, not a migration.
-fn decide(found: Option<&str>) -> OpenDecision {
-    match found {
-        None => OpenDecision::Match,
-        Some(value) if value.parse::<u32>().is_ok_and(|v| v == SCHEMA_VERSION) => {
-            OpenDecision::Match
-        }
-        Some(_) => OpenDecision::Rederive {
-            reason: "corpus schema version disagrees with this binary",
-        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bookrack_dbkit::READER_VERSION;
+
+    /// A fresh directory under the system temp dir, unique to this
+    /// process and `tag`.
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("bookrack-corpus-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    #[test]
+    fn the_stamp_the_protocol_compares_is_the_schema_version() {
+        assert_eq!(SCHEMA_VERSION_STAMP, SCHEMA_VERSION.to_string());
+    }
 
     #[test]
     fn fresh_database_stamps_the_schema_version() {
@@ -277,14 +237,48 @@ mod tests {
 
     #[test]
     fn a_foreign_schema_version_is_rejected() {
-        let corpus = Corpus::open_in_memory().expect("open");
-        corpus
+        let dir = scratch_dir("foreign");
+        let path = dir.join("corpus.db");
+        Corpus::open_for_write(&path)
+            .expect("create")
             .meta_set(SCHEMA_VERSION_KEY, "999")
             .expect("overwrite version");
-        // A second open of the same in-memory connection is not
-        // possible, so re-run the check directly.
-        let err = corpus.reconcile_schema_version().expect_err("must reject");
-        assert!(matches!(err, CorpusError::SchemaMismatch { .. }));
+
+        let Err(err) = Corpus::open_for_write(&path) else {
+            panic!("a foreign revision must be refused")
+        };
+        assert!(
+            matches!(&err, CorpusError::SchemaMismatch { found, expected }
+                if found == "999" && *expected == SCHEMA_VERSION),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn open_reports_a_missing_file_as_absent_without_creating_it() {
+        let dir = scratch_dir("absent");
+        let path = dir.join("corpus.db");
+
+        let opened = Corpus::open(&path).expect("a missing file is not an error");
+        assert!(opened.is_none());
+        assert!(!path.exists(), "looking must not create corpus.db");
+    }
+
+    #[test]
+    fn open_reads_an_existing_corpus_and_rejects_writes() {
+        let dir = scratch_dir("reads");
+        let path = dir.join("corpus.db");
+        drop(Corpus::open_for_write(&path).expect("create"));
+
+        let corpus = Corpus::open(&path).expect("open").expect("present");
+        assert_eq!(
+            corpus.meta_get(SCHEMA_VERSION_KEY).expect("read"),
+            Some(SCHEMA_VERSION.to_string())
+        );
+        assert!(
+            corpus.meta_set("probe", "x").is_err(),
+            "a handle from the read door must not write"
+        );
     }
 
     #[test]

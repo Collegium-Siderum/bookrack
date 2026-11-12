@@ -33,7 +33,6 @@ use crate::render::table::RowTable;
 /// rather than going quiet.
 pub const REGISTRIES: &[&[FixedSetting]] = &[
     crate::FIXED_SETTINGS,
-    bookrack_catalog::FIXED_SETTINGS,
     bookrack_config::FIXED_SETTINGS,
     bookrack_control_client::FIXED_SETTINGS,
     bookrack_diagnose::FIXED_SETTINGS,

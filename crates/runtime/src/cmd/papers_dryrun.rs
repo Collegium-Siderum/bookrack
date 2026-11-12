@@ -460,7 +460,7 @@ mod tests {
             .err()
             .expect("preview migrated papers_catalog.db");
         assert!(
-            matches!(err, bookrack_catalog::CatalogError::Verify(_)),
+            matches!(err, bookrack_catalog::CatalogError::SchemaTooOld { .. }),
             "{err:?}"
         );
     }

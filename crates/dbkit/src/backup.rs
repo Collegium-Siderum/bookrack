@@ -10,9 +10,14 @@
 //! materializes a fully consistent destination database, regardless of
 //! concurrent writers.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
+
+/// How many pre-migration backups of one database to keep in a backup
+/// directory; older ones are pruned after a successful backup.
+// setting: db.backups_kept
+pub(crate) const BACKUP_KEEP: usize = 5;
 
 /// Copy the SQLite database at `src` into a fresh file at `dst`,
 /// producing a consistent snapshot even while `src` is being written.
@@ -30,12 +35,144 @@ pub fn backup_database(src: &Path, dst: &Path) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// The current UTC time as a Zulu ISO-8601 string, read from SQLite's
+/// clock so that it shares one source with the timestamps a table's
+/// own inserts generate.
+// Parallel implementation: rfc3339-now.
+pub fn now_iso(conn: &Connection) -> rusqlite::Result<String> {
+    conn.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |row| {
+        row.get(0)
+    })
+}
+
+/// Whether the database holds any table of its own, as opposed to
+/// being a freshly created, empty file.
+pub(crate) fn has_user_tables(conn: &Connection) -> rusqlite::Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+/// Snapshot the database behind `conn` into `dir` before it migrates.
+///
+/// The file is named `<stem>-<timestamp>-from-v<version>.bak`. Once it
+/// is written, all but the newest [`BACKUP_KEEP`] snapshots that lead
+/// with the same stem are pruned, so two databases sharing a directory
+/// each keep their own.
+pub(crate) fn backup_before_migration(
+    conn: &Connection,
+    dir: &Path,
+    stem: &str,
+    from_version: i64,
+) -> Result<(), crate::store::OpenError> {
+    std::fs::create_dir_all(dir)?;
+    let ts = now_iso(conn)?.replace(':', "-");
+    let path = dir.join(format!("{stem}-{ts}-from-v{from_version}.bak"));
+    conn.execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()])?;
+    prune_old_backups(dir, stem, BACKUP_KEEP)?;
+    Ok(())
+}
+
+/// Keep the `keep` newest backups whose filename leads with `<stem>-`
+/// in `dir`, deleting the rest. A backup filename carries a sortable
+/// timestamp after the stem, so lexical order within one stem is
+/// chronological.
+fn prune_old_backups(dir: &Path, stem: &str, keep: usize) -> std::io::Result<()> {
+    let prefix = format!("{stem}-");
+    let mut backups: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".bak"))
+        })
+        .collect();
+    backups.sort();
+    let excess = backups.len().saturating_sub(keep);
+    for path in &backups[..excess] {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use rusqlite::Connection;
     use tempfile::tempdir;
+
+    fn file_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn pruning_keeps_only_the_newest_backups() {
+        let dir = tempdir().unwrap();
+        // Timestamp-led names sort chronologically; make seven.
+        for i in 0..7 {
+            let name = format!("catalog-2026-05-31T00-00-0{i}Z-from-v0.bak");
+            std::fs::write(dir.path().join(name), b"x").expect("write backup");
+        }
+        prune_old_backups(dir.path(), "catalog", 5).expect("prune");
+        let remaining = file_names(dir.path());
+        assert_eq!(remaining.len(), 5);
+        // The two oldest (seconds 00, 01) are gone; 02..06 remain.
+        assert!(
+            remaining
+                .iter()
+                .all(|n| !n.contains("-00Z-") && !n.contains("-01Z-"))
+        );
+        assert!(remaining.iter().any(|n| n.contains("-06Z-")));
+    }
+
+    #[test]
+    fn pruning_only_touches_its_own_prefix_cluster() {
+        // Two databases sharing a backup directory each keep their own
+        // snapshots without evicting the other's.
+        let dir = tempdir().unwrap();
+        for prefix in ["catalog", "papers_catalog"] {
+            for i in 0..7 {
+                let name = format!("{prefix}-2026-05-31T00-00-0{i}Z-from-v0.bak");
+                std::fs::write(dir.path().join(name), b"x").expect("write backup");
+            }
+        }
+        let count = |lead: &str| {
+            file_names(dir.path())
+                .iter()
+                .filter(|n| n.starts_with(lead))
+                .count()
+        };
+
+        prune_old_backups(dir.path(), "catalog", 5).expect("prune catalog");
+        assert_eq!(count("catalog-"), 5, "pruning catalog must keep five");
+        assert_eq!(
+            count("papers_catalog-"),
+            7,
+            "the papers cluster must not be touched by pruning catalog"
+        );
+
+        prune_old_backups(dir.path(), "papers_catalog", 5).expect("prune papers_catalog");
+        assert_eq!(
+            count("catalog-"),
+            5,
+            "the catalog cluster must remain intact"
+        );
+        assert_eq!(
+            count("papers_catalog-"),
+            5,
+            "pruning papers_catalog must keep five"
+        );
+    }
 
     #[test]
     fn backup_database_copies_committed_rows() {

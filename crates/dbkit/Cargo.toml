@@ -8,6 +8,9 @@ repository.workspace = true
 [dependencies]
 bookrack-core = { path = "../core" }
 rusqlite.workspace = true
+# The error type a store's migration function returns through the open
+# protocol.
+rusqlite_migration.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

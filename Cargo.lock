@@ -781,6 +781,7 @@ version = "0.15.0-dev"
 dependencies = [
  "bookrack-core",
  "rusqlite",
+ "rusqlite_migration",
  "tempfile",
  "thiserror",
  "tracing",

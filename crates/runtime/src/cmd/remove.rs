@@ -566,8 +566,8 @@ mod tests {
             let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).expect("corpus");
             seed_book(&cfg, &mut catalog, &mut corpus, "sha-stale").0
         };
-        // Present the catalog as one revision behind: a read-write open
-        // would back it up and migrate it, a read-only open must not.
+        // Present the catalog as one revision behind: a write door would
+        // back it up and migrate it, the read door refuses it as it is.
         let stale = user_version(&cfg.catalog_db()) - 1;
         set_user_version(&cfg.catalog_db(), stale);
 
@@ -592,9 +592,50 @@ mod tests {
             stale,
             "plan-only migrated the catalog",
         );
+        let err = planned.expect_err("a catalog behind this build must not be planned against");
+        assert!(
+            err.chain().any(|cause| matches!(
+                cause.downcast_ref::<bookrack_catalog::CatalogError>(),
+                Some(bookrack_catalog::CatalogError::SchemaTooOld { .. })
+            )),
+            "{err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_of_a_current_catalog_takes_no_backup() {
+        let (_tmp, cfg) = temp_cfg();
+        let intake_id = {
+            let mut catalog = Catalog::open_for_write_unbacked(&cfg.catalog_db()).expect("catalog");
+            let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).expect("corpus");
+            seed_book(&cfg, &mut catalog, &mut corpus, "sha-stale").0
+        };
+        let current = user_version(&cfg.catalog_db());
+
+        let planned = plan_remove(
+            &cfg,
+            &RemoveArgs {
+                intake_id: Some(intake_id),
+                sha: None,
+                dry_run: true,
+                yes: true,
+            },
+        )
+        .await;
+
+        assert!(
+            dir_entries(&cfg.backup_dir()).is_empty(),
+            "plan-only wrote a catalog backup: {:?}",
+            dir_entries(&cfg.backup_dir()),
+        );
+        assert_eq!(
+            user_version(&cfg.catalog_db()),
+            current,
+            "plan-only migrated the catalog",
+        );
         assert!(
             planned.is_ok(),
-            "a schema-conformant catalog must still plan: {:?}",
+            "a current catalog must plan: {:?}",
             planned.err(),
         );
     }

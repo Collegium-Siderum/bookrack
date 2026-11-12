@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The four-state self-check protocol every store's `open()` follows.
+//! The four verdicts an open can reach, and the reader version.
 //!
-//! Each store-owning crate inspects the on-disk state, computes one
-//! [`OpenDecision`], and acts on it. The variants name the four possible
-//! outcomes the protocol distinguishes:
+//! `catalog.db` and `corpus.db` are opened through the one sequence in
+//! the `store` module, which reaches these verdicts itself and reports
+//! them as `OpenError` variants. A store that still inspects its own
+//! on-disk state computes one [`OpenDecision`] and acts on it. The
+//! variants name the four possible outcomes:
 //!
 //! - [`OpenDecision::Match`]: the on-disk state matches this binary; the
 //!   open proceeds.

@@ -370,7 +370,7 @@ fn papers_stats_if_configured<E: Embedder>(
     let Some(papers_db) = ops.papers_catalog_db() else {
         return Ok(None);
     };
-    let papers = Catalog::try_open_read_only(papers_db)?;
+    let papers = Catalog::open(papers_db)?;
     let mut intake_counts_by_status = BTreeMap::new();
     for status in IntakeStatus::ALL {
         let n = match &papers {
