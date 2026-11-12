@@ -153,14 +153,12 @@ pub(crate) fn reference_lookup_logic(
 // reference.overlay_set
 // ---------------------------------------------------------------------------
 
-/// Validate the overlay payload against the property catalog and
-/// upsert it. Returns the timestamp stamped onto the row.
-pub(crate) fn reference_overlay_set_logic(
-    refs: &Refs,
+/// Check the overlay payload against the property catalog: it is a
+/// JSON object and every key of it is a catalog key. Reads no store.
+pub(crate) fn validate_overlay_args(
     catalogs: &Catalogs,
     args: &ReferenceOverlaySetArgs,
-    edited_at: String,
-) -> Result<ReferenceOverlaySetResult, ReferenceError> {
+) -> Result<(), ReferenceError> {
     let obj = args.overlay.as_object().ok_or_else(|| {
         ReferenceError::InvalidArgument(
             "overlay must be a JSON object whose keys are property catalog keys".to_string(),
@@ -171,7 +169,16 @@ pub(crate) fn reference_overlay_set_logic(
             return Err(ReferenceError::UnknownOverlayProperty { key: key.clone() });
         }
     }
+    Ok(())
+}
 
+/// Upsert an overlay payload [`validate_overlay_args`] has accepted.
+/// Returns the timestamp stamped onto the row.
+pub(crate) fn reference_overlay_set_logic(
+    refs: &Refs,
+    args: &ReferenceOverlaySetArgs,
+    edited_at: String,
+) -> Result<ReferenceOverlaySetResult, ReferenceError> {
     let overlay = NewOverlay {
         book_slug: args.book_slug.clone(),
         entry_key: args.entry_key.clone(),
@@ -437,31 +444,46 @@ mod tests {
         assert!(!payload.contains_key("bio_annotation"));
     }
 
-    #[test]
-    fn overlay_set_rejects_a_non_catalog_property_key() {
-        let refs = Refs::open_in_memory().expect("refs");
-        refs.upsert_book(&book("book_a", 10, "2026-06-25T00:00:00Z"))
-            .unwrap();
-        refs.upsert_entry(&entry("book_a", "smith", json!({"country": "USA"}), vec![]))
-            .unwrap();
-
-        let cats = Catalogs::load_all().unwrap();
-        let args = ReferenceOverlaySetArgs {
+    fn overlay_args(overlay: serde_json::Value) -> ReferenceOverlaySetArgs {
+        ReferenceOverlaySetArgs {
             library: "lib".to_string(),
             book_slug: "book_a".to_string(),
             entry_key: "smith".to_string(),
-            overlay: json!({"random_key": "value"}),
+            overlay,
             reason: "test".to_string(),
-        };
-        let err =
-            reference_overlay_set_logic(&refs, &cats, &args, "2026-06-25T01:00:00Z".to_string())
-                .unwrap_err();
+        }
+    }
+
+    #[test]
+    fn overlay_validation_rejects_a_non_catalog_property_key() {
+        let cats = Catalogs::load_all().unwrap();
+        let err = validate_overlay_args(&cats, &overlay_args(json!({"random_key": "value"})))
+            .unwrap_err();
         match err {
             ReferenceError::UnknownOverlayProperty { key } => {
                 assert_eq!(key, "random_key");
             }
             other => panic!("expected UnknownOverlayProperty, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn overlay_validation_rejects_a_payload_that_is_not_an_object() {
+        let cats = Catalogs::load_all().unwrap();
+        for overlay in [json!("United Kingdom"), json!(["country"]), json!(null)] {
+            let err = validate_overlay_args(&cats, &overlay_args(overlay.clone())).unwrap_err();
+            assert!(
+                matches!(err, ReferenceError::InvalidArgument(_)),
+                "{overlay}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn overlay_validation_accepts_catalog_property_keys() {
+        let cats = Catalogs::load_all().unwrap();
+        validate_overlay_args(&cats, &overlay_args(json!({"country": "United States"})))
+            .expect("a catalog key is accepted");
     }
 
     #[test]
@@ -480,9 +502,9 @@ mod tests {
             overlay: json!({"country": "United States"}),
             reason: "fix the OCR confusion".to_string(),
         };
+        validate_overlay_args(&cats, &args).expect("the payload is accepted");
         let receipt =
-            reference_overlay_set_logic(&refs, &cats, &args, "2026-06-25T01:00:00Z".to_string())
-                .unwrap();
+            reference_overlay_set_logic(&refs, &args, "2026-06-25T01:00:00Z".to_string()).unwrap();
         assert_eq!(receipt.book_slug, "book_a");
         assert_eq!(receipt.entry_key, "smith");
 

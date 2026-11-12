@@ -331,7 +331,11 @@ onto.
   from a newer schema or demanding a newer reader, a catalog behind
   this build's schema met by a read, which never migrates
   (`CatalogError::{SchemaTooNew, SchemaTooOld, ReaderTooOld}`,
-  `CorpusError::{SchemaMismatch, ReaderTooOld}`), an index without
+  `CorpusError::{SchemaMismatch, ReaderTooOld}`), a reference store in
+  any of those three states
+  (`RefsError::{SchemaTooNew, SchemaTooOld, ReaderTooOld}`; found at
+  mount, it keeps the library from mounting, as a catalog does), an
+  index without
   build stamps or with stamps that disagree with this build
   (`CorpusError::{IndexNotStamped, IndexStampMismatch}`), and a vector
   store whose sidecar names an unknown ANN kind, whose dimension does
@@ -1166,9 +1170,13 @@ defined profile, or an embedding model the backend does not hold is
   and `redirect_followed` names the key a redirect left from. A library
   with no reference store answers no hits rather than an error: the
   request is validated first, so a bad argument is `-32602` whatever
-  the store's state; a store at a schema this build does not read is
-  `-32018`, with the direction of the mismatch in the hint; a store
-  that exists but cannot be inspected or opened is `-32603`.
+  the store's state; a store at a schema this build does not read, or
+  stamped for a newer reader, is `-32018`, with the direction of the
+  mismatch in the hint; a store that exists but cannot be inspected or
+  opened is `-32603`. The MCP tool `reference.overlay_set` answers the
+  same three states with the same code, judges its arguments before it
+  opens the store, and snapshots a store that is behind before
+  migrating it.
 
 ## MCP tool surface
 

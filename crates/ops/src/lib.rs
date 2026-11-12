@@ -389,7 +389,9 @@ impl<E: Embedder> Ops<E> {
         &self.books_dir
     }
 
-    pub(crate) fn backup_dir(&self) -> &Path {
+    /// The directory a store of this library is snapshotted into
+    /// before a migration.
+    pub fn backup_dir(&self) -> &Path {
         &self.backup_dir
     }
 

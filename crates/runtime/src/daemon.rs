@@ -1345,8 +1345,9 @@ impl Candidate {
 
 /// Build one library's warm [`LibraryHandle`]: resolve the library's
 /// effective embed configuration, construct the books and papers
-/// embedding clients, preflight both catalog schemas, open both query
-/// libraries, and assemble the [`Ops`] the handle wraps.
+/// embedding clients, preflight both catalog schemas and the reference
+/// store's, open both query libraries, and assemble the [`Ops`] the
+/// handle wraps.
 ///
 /// Inputs are one per-library [`Config`] plus process-level shared
 /// state: the reranker stage (when the daemon brought one up; it is
@@ -1393,6 +1394,13 @@ pub(crate) async fn build_library_handle(
     if cfg.papers_catalog_db().exists() {
         Catalog::open_for_write(&cfg.papers_catalog_db(), &cfg.backup_dir())
             .context("preflight papers catalog schema check failed")?;
+    }
+    // The reference store takes the same step: its reads go through a
+    // door that refuses a store behind this build, so one an earlier
+    // release wrote is migrated here, after a snapshot of its overlays.
+    if cfg.reference_db().exists() {
+        bookrack_refs::Refs::open_for_write(&cfg.reference_db(), &cfg.backup_dir())
+            .context("preflight reference store schema check failed")?;
     }
 
     // Library::open — books + papers. Each pipeline owns its

@@ -226,15 +226,13 @@ async fn verify_judges_a_root_holding_only_a_reference_store() {
     let readable = sandbox.data_root("reference-root");
     let behind = sandbox.data_root("reference-behind-root");
     let stores = |root: &PathBuf| {
-        drop(Refs::open_for_write(&root.join("reference.db")).expect("create reference.db"));
+        drop(
+            Refs::open_for_write(&root.join("reference.db"), &root.join("backup"))
+                .expect("create reference.db"),
+        );
     };
     stores(&readable);
     stores(&behind);
-    let conn =
-        bookrack_dbkit::open_production(&behind.join("reference.db")).expect("open reference.db");
-    conn.pragma_update(None, "user_version", 0)
-        .expect("stamp an older version");
-    drop(conn);
     sandbox.write_registry_entries(
         Some("reference"),
         &[
@@ -265,6 +263,14 @@ async fn verify_judges_a_root_holding_only_a_reference_store() {
     assert_eq!(report["reference_schema_ok"], true, "{report}");
 
     // The finding: the same store at a version the read path refuses.
+    // The version is rewritten under the running daemon: mounting the
+    // library migrates a store that is behind, so one that still is can
+    // only have fallen behind afterwards.
+    let conn =
+        bookrack_dbkit::open_production(&behind.join("reference.db")).expect("open reference.db");
+    conn.pragma_update(None, "user_version", 0)
+        .expect("stamp an older version");
+    drop(conn);
     let (code, stdout, stderr) =
         run_verify(&sandbox, &["--library", "reference-behind", "verify"]).await;
     assert_eq!(

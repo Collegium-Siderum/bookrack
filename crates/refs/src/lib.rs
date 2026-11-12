@@ -15,14 +15,19 @@
 
 use std::path::Path;
 
+use bookrack_dbkit::{Access, Opened};
 use rusqlite::{Connection, params};
 use serde_json::Value as JsonValue;
 
+#[doc(hidden)]
+pub mod fixtures;
 pub mod indexes;
 pub mod migrate;
+mod store;
 pub mod types;
 
 pub use migrate::TARGET_VERSION;
+pub use store::MIN_READER_VERSION;
 pub use types::{IndexKind, IndexSpec, LookupResult, NewBook, NewEntry, NewOverlay, ResolvedEntry};
 
 /// Quality flag stamped on the hits of a self-cancelling redirect
@@ -33,33 +38,50 @@ pub const REDIRECT_LOOP_FLAG: &str = "redirect_loop";
 /// Errors from opening, migrating, or querying `reference.db`.
 #[derive(Debug, thiserror::Error)]
 pub enum RefsError {
-    #[error("sqlite error: {0}")]
+    /// The underlying SQLite layer reported an error.
+    #[error("reference.db database error")]
     Sqlite(#[from] rusqlite::Error),
 
-    #[error("migration error: {0}")]
+    /// A schema migration failed to apply.
+    #[error("reference.db migration failed")]
     Migration(#[from] rusqlite_migration::Error),
 
-    #[error("json error: {0}")]
+    /// A JSON column could not be written or read back.
+    #[error("reference.db json error")]
     Json(#[from] serde_json::Error),
 
-    /// A read-only open found a `user_version` past [`TARGET_VERSION`]:
-    /// the file was written by a newer schema this build cannot read.
-    /// The writable [`Refs::open_for_write`] would migrate forward; the read path
-    /// refuses rather than touch a database it does not understand.
+    /// The file carries a `user_version` past [`TARGET_VERSION`]: it
+    /// was written by a newer schema this build cannot read. Every door
+    /// refuses it.
     #[error(
         "reference.db schema is newer than this build supports: found user_version {found}, supports {supported}"
     )]
     SchemaTooNew { found: i64, supported: i64 },
 
     /// A read-only open found a `user_version` short of
-    /// [`TARGET_VERSION`]: the file exists but the migrations that
-    /// build the tables the read path queries have not run. The
-    /// writable [`Refs::open_for_write`] would migrate it forward; the read path
-    /// refuses rather than write to a database a read command opened.
+    /// [`TARGET_VERSION`]. [`Refs::open_for_write`] migrates such a
+    /// file forward; a read refuses rather than write to a database a
+    /// read command opened.
     #[error(
         "reference.db schema is behind this build: found user_version {found}, expects {supported}"
     )]
     SchemaTooOld { found: i64, supported: i64 },
+
+    /// The file carries a `min_reader_version` stamp above this build.
+    /// The writer required a reader at version `required` or higher;
+    /// this build is at `current`.
+    #[error(
+        "reference.db requires a newer reader: stamp demands v{required}, this build is at v{current}"
+    )]
+    ReaderTooOld { required: u32, current: u32 },
+
+    /// The tables in the file differ from the compiled-in specs.
+    #[error("reference.db schema verification failed")]
+    Verify(#[from] bookrack_dbkit::VerifyError),
+
+    /// A filesystem error while writing or pruning a database backup.
+    #[error("reference.db backup error")]
+    Io(#[from] std::io::Error),
 
     /// A slug or field path failed identifier validation before being
     /// interpolated into a DDL statement.
@@ -86,53 +108,65 @@ pub enum RefsError {
 pub type RefsResult<T> = Result<T, RefsError>;
 
 /// The reference-store handle.
+///
+/// Two kinds of door produce one: [`Refs::open`] and
+/// [`Refs::open_read_only`] look, and [`Refs::open_for_write`] creates
+/// or migrates. [`Refs::open_in_memory`] gives an ephemeral one.
 pub struct Refs {
     conn: Connection,
 }
 
 impl Refs {
-    /// Open `reference.db` at `path` and bring it to [`TARGET_VERSION`].
-    pub fn open_for_write(path: &Path) -> RefsResult<Self> {
-        let mut conn = bookrack_dbkit::open_production(path)?;
-        migrate::migrations().to_latest(&mut conn)?;
+    /// Open the `reference.db` at `path` read-only, if there is one.
+    ///
+    /// A library holds no reference store until its first distill
+    /// build, so `Ok(None)` when the filesystem reports no file.
+    /// Looking never creates the file, never migrates it, and never
+    /// writes a stamp.
+    ///
+    /// A store behind this build is refused with
+    /// [`RefsError::SchemaTooOld`], one ahead of it with
+    /// [`RefsError::SchemaTooNew`], one stamped for a newer reader with
+    /// [`RefsError::ReaderTooOld`], and one whose tables differ from the
+    /// compiled-in specs with [`RefsError::Verify`].
+    pub fn open(path: &Path) -> RefsResult<Option<Self>> {
+        match bookrack_dbkit::open_store(&store::STORE, path, Access::Read, None)? {
+            Opened::Ready(conn) => Ok(Some(Self { conn })),
+            Opened::Missing | Opened::Declined => Ok(None),
+        }
+    }
+
+    /// Open the `reference.db` at `path` read-only, requiring the file.
+    ///
+    /// The checks of [`Refs::open`], with a missing file reported as the
+    /// SQLite open failure it is rather than as `None`. Any write
+    /// through the resulting handle is rejected by SQLite.
+    pub fn open_read_only(path: &Path) -> RefsResult<Self> {
+        let conn = bookrack_dbkit::open_existing(&store::STORE, path)?;
         Ok(Self { conn })
     }
 
-    /// Open the `reference.db` at `path` for reading without creating it
-    /// and without writing through the connection.
+    /// Open the `reference.db` at `path` for writing, creating it if it
+    /// does not exist and backing it up into `backup_dir` before
+    /// applying any pending migration.
     ///
-    /// Mirrors the corpus read-only door in intent: the strict read-only
-    /// flags block writes and refuse a missing file rather than
-    /// materialize an empty schema, and no migration runs. Both
-    /// directions of a `user_version` that is not [`TARGET_VERSION`] are
-    /// refused — [`RefsError::SchemaTooNew`] for a file this build
-    /// cannot read, [`RefsError::SchemaTooOld`] for one whose tables
-    /// have not been built yet — because the alternative is a query
-    /// against a schema the caller was not promised. The writable
-    /// [`Refs::open_for_write`] is the only path that migrates.
-    pub fn open_read_only(path: &Path) -> RefsResult<Self> {
-        let conn = bookrack_dbkit::open_production_strict_read_only(path)?;
-        let found: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if found > TARGET_VERSION {
-            return Err(RefsError::SchemaTooNew {
-                found,
-                supported: TARGET_VERSION,
-            });
+    /// Only an existing database that holds tables and is about to be
+    /// migrated is backed up; a freshly created one is not. Fails with
+    /// [`RefsError::SchemaTooNew`] if the file was written by a newer
+    /// schema revision than this build understands.
+    pub fn open_for_write(path: &Path, backup_dir: &Path) -> RefsResult<Self> {
+        match bookrack_dbkit::open_store(&store::STORE, path, Access::Write, Some(backup_dir))? {
+            Opened::Ready(conn) => Ok(Self { conn }),
+            Opened::Missing | Opened::Declined => {
+                unreachable!("a write door creates and migrates")
+            }
         }
-        if found < TARGET_VERSION {
-            return Err(RefsError::SchemaTooOld {
-                found,
-                supported: TARGET_VERSION,
-            });
-        }
-        Ok(Self { conn })
     }
 
     /// Open `reference.db` in memory. Convenience for tests and the
     /// `distill verify` dry-run path.
     pub fn open_in_memory() -> RefsResult<Self> {
-        let mut conn = Connection::open_in_memory()?;
-        migrate::migrations().to_latest(&mut conn)?;
+        let conn = bookrack_dbkit::open_in_memory(&store::STORE)?;
         Ok(Self { conn })
     }
 
@@ -1289,7 +1323,7 @@ mod read_only_tests {
     fn open_read_only_reads_existing_and_blocks_writes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("reference.db");
-        drop(Refs::open_for_write(&path).expect("build reference.db"));
+        drop(Refs::open_for_write(&path, &dir.path().join("backup")).expect("build reference.db"));
 
         let refs = Refs::open_read_only(&path).expect("open existing read-only");
         let count: i64 = refs
@@ -1340,7 +1374,8 @@ mod read_only_tests {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("reference.db");
         {
-            let refs = Refs::open_for_write(&path).expect("build reference.db");
+            let refs = Refs::open_for_write(&path, &dir.path().join("backup"))
+                .expect("build reference.db");
             refs.connection()
                 .pragma_update(None, "user_version", TARGET_VERSION + 1)
                 .expect("bump user_version");
@@ -1359,5 +1394,334 @@ mod read_only_tests {
             ),
             "expected SchemaTooNew, got {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod door_tests {
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+    use tempfile::tempdir;
+
+    /// The snapshots of `reference.db` under `backup_dir`.
+    fn snapshots(backup_dir: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(backup_dir) else {
+            return Vec::new();
+        };
+        entries
+            .map(|entry| entry.expect("read backup dir").path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("reference-") && name.ends_with(".bak"))
+            })
+            .collect()
+    }
+
+    /// One book, one entry and one overlay written with plain SQL, so
+    /// the rows exist in a store this build's handle would refuse.
+    fn seed_overlay(path: &Path) {
+        let conn = Connection::open(path).expect("open the fixture");
+        conn.execute_batch(
+            "INSERT INTO reference_books (book_slug, schema_name, schema_version, \
+               parser_version, title_zh, authority_rank, built_at) \
+             VALUES ('book_a', 'name_translation', 1, '0.1.0', 'Book A', 10, \
+                     '2026-06-25T00:00:00Z'); \
+             INSERT INTO reference_entries (book_slug, entry_key, headword, payload_json, \
+               fts_text, source_json) \
+             VALUES ('book_a', 'smith', 'Smith', '{\"country\":\"USA\"}', 'Smith', '{}'); \
+             INSERT INTO reference_entry_overlays (book_slug, entry_key, overlay_json, \
+               edit_reason, edited_at) \
+             VALUES ('book_a', 'smith', '{\"country\":\"UK\"}', 'corrected', \
+                     '2026-06-26T00:00:00Z');",
+        )
+        .expect("seed the fixture");
+    }
+
+    fn overlay_json(refs: &Refs) -> String {
+        refs.connection()
+            .query_row(
+                "SELECT overlay_json FROM reference_entry_overlays \
+                 WHERE book_slug = 'book_a' AND entry_key = 'smith'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read the overlay row")
+    }
+
+    #[test]
+    fn open_reports_a_missing_file_as_absent_without_creating_it() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("reference.db");
+
+        assert!(
+            Refs::open(&path)
+                .expect("a missing file is not an error")
+                .is_none()
+        );
+        assert!(!path.exists(), "looking must not create reference.db");
+    }
+
+    #[test]
+    fn open_reads_a_current_store_and_rejects_writes() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("reference.db");
+        drop(Refs::open_for_write(&path, &dir.path().join("backup")).expect("build"));
+
+        let refs = Refs::open(&path).expect("open").expect("the file is there");
+        let err = refs
+            .connection()
+            .execute("CREATE TABLE t (x INTEGER)", [])
+            .expect_err("a read-only connection must reject writes");
+        assert!(
+            format!("{err}").to_lowercase().contains("readonly"),
+            "{err}"
+        );
+    }
+
+    /// A store an earlier release wrote is refused by both read doors
+    /// and left at the revision it was found at.
+    #[test]
+    fn the_read_doors_refuse_a_store_one_revision_behind_and_leave_it_there() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("reference.db");
+        fixtures::create_at_version(&path, TARGET_VERSION - 1);
+
+        for (door, result) in [
+            ("open", Refs::open(&path).map(drop)),
+            ("open_read_only", Refs::open_read_only(&path).map(drop)),
+        ] {
+            let err = result.expect_err("a store behind this build must be refused");
+            assert!(
+                matches!(
+                    err,
+                    RefsError::SchemaTooOld { found, supported }
+                        if found == TARGET_VERSION - 1 && supported == TARGET_VERSION
+                ),
+                "{door}: expected SchemaTooOld, got {err}"
+            );
+        }
+        assert_eq!(fixtures::user_version(&path), TARGET_VERSION - 1);
+    }
+
+    /// The write door brings a store an earlier release wrote to this
+    /// build's revision, snapshots it first, and keeps the overlay rows.
+    #[test]
+    fn the_write_door_snapshots_a_behind_store_migrates_it_and_keeps_its_overlays() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("reference.db");
+        let backup_dir = dir.path().join("backup");
+        fixtures::create_at_version(&path, TARGET_VERSION - 1);
+        seed_overlay(&path);
+
+        let refs = Refs::open_for_write(&path, &backup_dir).expect("migrate");
+
+        assert_eq!(overlay_json(&refs), r#"{"country":"UK"}"#);
+        let stamp: String = refs
+            .connection()
+            .query_row(
+                "SELECT value FROM reference_meta WHERE key = 'min_reader_version'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the reader stamp is recorded");
+        assert_eq!(stamp, MIN_READER_VERSION.to_string());
+        drop(refs);
+        assert_eq!(fixtures::user_version(&path), TARGET_VERSION);
+
+        let taken = snapshots(&backup_dir);
+        assert_eq!(taken.len(), 1, "one snapshot: {taken:?}");
+        let name = taken[0].file_name().unwrap().to_str().unwrap();
+        let suffix = format!("-from-v{}.bak", TARGET_VERSION - 1);
+        assert!(name.ends_with(&suffix), "{name}");
+        // The snapshot is the store as it was: behind, overlay included.
+        assert_eq!(fixtures::user_version(&taken[0]), TARGET_VERSION - 1);
+        let kept: i64 = Connection::open(&taken[0])
+            .expect("open the snapshot")
+            .query_row("SELECT count(*) FROM reference_entry_overlays", [], |row| {
+                row.get(0)
+            })
+            .expect("count overlays in the snapshot");
+        assert_eq!(kept, 1);
+
+        // A second open finds nothing to migrate and takes no snapshot.
+        drop(Refs::open_for_write(&path, &backup_dir).expect("reopen"));
+        assert_eq!(snapshots(&backup_dir).len(), 1);
+    }
+
+    /// Neither a store the door creates nor a file with no tables in it
+    /// has anything to snapshot.
+    #[test]
+    fn a_store_with_no_tables_takes_no_snapshot() {
+        let dir = tempdir().expect("tempdir");
+        let backup_dir = dir.path().join("backup");
+
+        let created = dir.path().join("created.db");
+        drop(Refs::open_for_write(&created, &backup_dir).expect("create"));
+
+        let empty = dir.path().join("empty.db");
+        std::fs::File::create(&empty).expect("create an empty file");
+        drop(Refs::open_for_write(&empty, &backup_dir).expect("migrate an empty file"));
+        assert_eq!(fixtures::user_version(&empty), TARGET_VERSION);
+
+        assert!(
+            !backup_dir.exists() || std::fs::read_dir(&backup_dir).unwrap().next().is_none(),
+            "nothing was there to snapshot"
+        );
+    }
+
+    /// Registering a book with `[[indexes]]` grows `reference_entries`
+    /// by a generated column and an explicit index. Every door still
+    /// opens the store afterwards, and the indexed field still answers.
+    #[test]
+    fn a_store_with_per_book_indexes_reopens_through_every_door() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("reference.db");
+        let backup_dir = dir.path().join("backup");
+        {
+            let mut refs = Refs::open_for_write(&path, &backup_dir).expect("create");
+            refs.register_book(
+                "book_a",
+                &[IndexSpec {
+                    field: "country".to_string(),
+                    kind: IndexKind::Btree,
+                }],
+            )
+            .expect("register the book's indexes");
+        }
+        seed_overlay(&path);
+
+        let doors: [(&str, RefsResult<Refs>); 3] = [
+            (
+                "open",
+                Refs::open(&path).map(|refs| refs.expect("the file is there")),
+            ),
+            ("open_read_only", Refs::open_read_only(&path)),
+            ("open_for_write", Refs::open_for_write(&path, &backup_dir)),
+        ];
+        for (door, result) in doors {
+            let refs = match result {
+                Ok(refs) => refs,
+                Err(err) => panic!("{door}: {}", bookrack_core::error_chain(&err)),
+            };
+            let key: String = refs
+                .connection()
+                .query_row(
+                    "SELECT entry_key FROM reference_entries \
+                     WHERE book_slug = 'book_a' AND gencol__book_ua__country = 'USA'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|err| panic!("{door}: query by the indexed field: {err}"));
+            assert_eq!(key, "smith", "{door}");
+        }
+    }
+
+    /// A reader stamp above this build is refused by every door.
+    #[test]
+    fn every_door_refuses_a_store_stamped_for_a_newer_reader() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("reference.db");
+        let backup_dir = dir.path().join("backup");
+        let required = bookrack_dbkit::READER_VERSION + 1;
+        {
+            let refs = Refs::open_for_write(&path, &backup_dir).expect("create");
+            refs.connection()
+                .execute(
+                    "UPDATE reference_meta SET value = ?1 WHERE key = 'min_reader_version'",
+                    [required.to_string()],
+                )
+                .expect("raise the reader stamp");
+        }
+
+        for (door, result) in [
+            ("open", Refs::open(&path).map(drop)),
+            ("open_read_only", Refs::open_read_only(&path).map(drop)),
+            (
+                "open_for_write",
+                Refs::open_for_write(&path, &backup_dir).map(drop),
+            ),
+        ] {
+            let err = result.expect_err("a newer reader stamp must be refused");
+            assert!(
+                matches!(
+                    err,
+                    RefsError::ReaderTooOld { required: r, current }
+                        if r == required && current == bookrack_dbkit::READER_VERSION
+                ),
+                "{door}: expected ReaderTooOld, got {err}"
+            );
+        }
+    }
+
+    /// A current store whose verified tables differ from the specs is
+    /// refused, and the refusal names the table.
+    #[test]
+    fn a_current_store_whose_overlay_table_drifted_is_refused() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("reference.db");
+        {
+            let refs = Refs::open_for_write(&path, &dir.path().join("backup")).expect("create");
+            refs.connection()
+                .execute_batch("ALTER TABLE reference_entry_overlays ADD COLUMN stray TEXT")
+                .expect("add a column no spec declares");
+        }
+
+        let err = Refs::open_read_only(&path)
+            .map(drop)
+            .expect_err("a drifted table must be refused");
+        assert!(matches!(err, RefsError::Verify(_)), "{err}");
+        let chain = bookrack_core::error_chain(&err);
+        assert!(
+            chain.starts_with("reference.db schema verification failed")
+                && chain.contains("reference_entry_overlays")
+                && chain.contains("stray"),
+            "{chain}"
+        );
+    }
+
+    /// The write door hands out a connection that enforces foreign
+    /// keys, so deleting a book cascades to its entries.
+    #[test]
+    fn the_write_door_enforces_foreign_keys() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("reference.db");
+        let backup_dir = dir.path().join("backup");
+        drop(Refs::open_for_write(&path, &backup_dir).expect("create"));
+
+        for handle in [
+            Refs::open_for_write(&path, &backup_dir).expect("reopen"),
+            Refs::open_in_memory().expect("in memory"),
+        ] {
+            let on: i64 = handle
+                .connection()
+                .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+                .expect("read foreign_keys");
+            assert_eq!(on, 1, "foreign_keys must be on for a writable handle");
+        }
+    }
+
+    /// A wrapped cause is printed once: the variant names the store and
+    /// the flattened chain appends the cause.
+    #[test]
+    fn a_wrapped_cause_appears_once_in_the_flattened_chain() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("reference.db");
+        std::fs::write(&path, b"this is not a sqlite database, only some text")
+            .expect("write a foreign file");
+
+        let err = Refs::open_read_only(&path)
+            .map(drop)
+            .expect_err("a foreign file must not open");
+        let chain = bookrack_core::error_chain(&err);
+        let cause = bookrack_core::error_chain(
+            std::error::Error::source(&err).expect("the variant carries its cause"),
+        );
+        assert!(
+            chain.starts_with("reference.db database error: "),
+            "{chain}"
+        );
+        assert_eq!(chain.matches(cause.as_str()).count(), 1, "{chain}");
     }
 }

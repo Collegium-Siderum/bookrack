@@ -633,7 +633,10 @@ mod tests {
     fn a_reference_only_root_is_verified_rather_than_reported_uninitialised() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cfg = config_for(dir.path());
-        drop(Refs::open_for_write(&cfg.reference_db()).expect("create reference.db"));
+        drop(
+            Refs::open_for_write(&cfg.reference_db(), &cfg.backup_dir())
+                .expect("create reference.db"),
+        );
         let before = db_files(dir.path());
 
         let report = report_json(&cfg);
@@ -667,7 +670,10 @@ mod tests {
         ] {
             let dir = tempfile::tempdir().expect("tempdir");
             let cfg = config_for(dir.path());
-            drop(Refs::open_for_write(&cfg.reference_db()).expect("create reference.db"));
+            drop(
+                Refs::open_for_write(&cfg.reference_db(), &cfg.backup_dir())
+                    .expect("create reference.db"),
+            );
             let conn = bookrack_dbkit::open_production(&cfg.reference_db()).expect("open");
             conn.pragma_update(None, "user_version", found)
                 .expect("stamp the version");

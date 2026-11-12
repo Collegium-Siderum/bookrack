@@ -742,7 +742,9 @@ fn collect_summarises_the_reference_store_without_its_titles() {
     isolate_daemon_state_dir();
     let fx = Fixture::build();
     {
-        let refs = bookrack_refs::Refs::open_for_write(&fx.cfg.reference_db()).unwrap();
+        let refs =
+            bookrack_refs::Refs::open_for_write(&fx.cfg.reference_db(), &fx.cfg.backup_dir())
+                .unwrap();
         refs.upsert_book(&bookrack_refs::NewBook {
             book_slug: "ref-fixture".to_string(),
             schema_name: "glossary".to_string(),

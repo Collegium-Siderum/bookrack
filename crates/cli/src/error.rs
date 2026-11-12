@@ -563,6 +563,35 @@ mod tests {
         assert!(data.hint.is_some(), "the operator's next step");
     }
 
+    /// A reference store behind this build, met by a command that reads
+    /// it with no daemon in between, is drawn the same way.
+    #[test]
+    fn a_reference_store_behind_this_build_met_offline_is_drawn_in_three_parts() {
+        let err = eyre::Report::from(bookrack_refs::RefsError::SchemaTooOld {
+            found: 1,
+            supported: 2,
+        })
+        .wrap_err("open /some/where/reference.db");
+
+        let Some(CliReportCause::Classified(cli_err)) = classify_eyre(&err) else {
+            panic!("a state refusal must be classified");
+        };
+        assert!(
+            matches!(cli_err, BookrackCliError::StateUnusable { .. }),
+            "{cli_err:?}"
+        );
+        assert_eq!(cli_err.exit_code(), 2);
+        let line = cli_err.to_string();
+        assert!(
+            line.starts_with("reference.db schema is behind this build:")
+                && !line.contains("rpc error")
+                && !line.contains("/some/where"),
+            "{line}"
+        );
+        let data = cli_err.problem_data().expect("three parts");
+        assert!(data.hint.is_some(), "the operator's next step");
+    }
+
     /// An error with no next step keeps its cause chain: it is not
     /// classified, so the reporter prints the chain and exits 1.
     #[test]

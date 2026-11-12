@@ -104,6 +104,7 @@ earlier ones already happened.
 | `unicode-normalization`, `bookrack_normalize::NORMALIZE_VERSION` | `normalize_version` | chunks → vectors | `bookrack vectors reembed` (books); `bookrack papers vectors reembed` (papers) |
 | Embedding model name or vector width | `embed_model` / `vector_dim` | chunks → vectors | `bookrack libraries fork` (try it side by side) or `bookrack vectors reset` + `bookrack papers vectors reset` (in place) — see [Switching the embedding model](#switching-the-embedding-model) |
 | `catalog.db` / `papers_catalog.db` schema bump | catalog `user_version` | none — migrated forward in place (one exception: the v14 OCR-derivation edge, see below) | open the library (migration is automatic); after upgrading a library that predates v14, run `bookrack doctor --backfill-ocr-derivation` once |
+| `reference.db` schema bump | reference store `user_version` | none — migrated forward in place, after a snapshot | open the library (migration is automatic); `bookrack distill build` and the `reference.overlay_set` tool migrate it too. A read never does: `bookrack distill list` and `bookrack distill verify` refuse a store that is behind, naming both versions |
 | `corpus.db` schema bump | corpus `schema_version` | corpus tree | `bookrack corpus rebuild` |
 | `papers_corpus.db` schema bump | papers corpus `schema_version` | papers corpus tree | `bookrack papers corpus rebuild` |
 | A `bookrack-distill` stage's behaviour, or a book's `parser.stages` | that book's `parser_version` (declared in its `book.toml`, bumped by hand) | the book's distilled entries in `reference.db` | `bookrack distill verify <path>` to see the diff, then `bookrack distill build <path>` |
@@ -315,9 +316,9 @@ one embedding pass per book.
 The matrix above describes moving forward. Going back is not a
 supported operation: a store whose schema was rolled forward in place
 refuses an older binary, and this document has no command that reverses
-a migration. What there is instead is the snapshot a catalog migration
-takes before it runs, and the derived stores, which an older binary
-rebuilds from the intake store.
+a migration. What there is instead is the snapshot a catalog or
+reference-store migration takes before it runs, and the derived stores,
+which an older binary rebuilds from the intake store.
 
 ### What an older binary refuses
 
@@ -329,23 +330,24 @@ than reads:
 | `catalog.db`, `papers_catalog.db` | `user_version` is above the binary's target | `catalog schema version newer than this binary` |
 | every SQLite store and the vector sidecar | `min_reader_version` is above the binary's `READER_VERSION` | `ReaderTooOld` |
 | `corpus.db`, `papers_corpus.db` | `schema_version` differs from the binary's, in either direction | a schema mismatch; `bookrack corpus rebuild` writes the binary's own |
-| `reference.db` | `user_version` is above the binary's target | a read refuses it |
+| `reference.db` | `user_version` is above the binary's target | `reference.db schema is newer than this build supports`; the library is not mounted. A binary before 0.15.0 mounts it and refuses the reference reads |
 | `bookrack-library.toml` | `format_version` is above the binary's | the root is not recognised as a library |
 | `queue.json` | `schema_version` is above the binary's | the daemon starts nothing, naming both versions |
 | an index-profile file | `schema_version` is above the binary's | the profile does not load, naming both versions |
 
 ### The snapshot a migration takes
 
-Before a catalog migration runs on a database that already holds
-tables, the binary writes a complete copy of it with `VACUUM INTO` into the
-backup directory: `BOOKRACK_BACKUP_DIR`, or `<data root>/backup/` when
-that is unset — `bookrack doctor` reports which. The copy is named
-`<stem>-<timestamp>-from-v<N>.bak`, where `<stem>` is `catalog` or
-`papers_catalog` and `<N>` the schema it was migrated from, and the
-five newest per stem are kept. A file with no tables in it takes no
-snapshot, and nothing else is snapshotted: the corpus, the vector store
-and the reference store are derived, and the way back for them is a
-rebuild.
+Before a catalog or reference-store migration runs on a database that
+already holds tables, the binary writes a complete copy of it with
+`VACUUM INTO` into the backup directory: `BOOKRACK_BACKUP_DIR`, or
+`<data root>/backup/` when that is unset — `bookrack doctor` reports
+which. The copy is named `<stem>-<timestamp>-from-v<N>.bak`, where
+`<stem>` is `catalog`, `papers_catalog` or `reference` and `<N>` the
+schema it was migrated from, and the five newest per stem are kept. A
+file with no tables in it takes no snapshot. The reference store is
+snapshotted because it holds the overlay edits, which no rebuild
+restores. Nothing else is snapshotted: the corpus and the vector store
+are derived, and the way back for them is a rebuild.
 
 ### Going back
 
@@ -355,13 +357,18 @@ rebuild.
    snapshot whose `from-v<N>` matches the older binary's schema to
    `catalog.db`. The two siblings go too: a write-ahead log left beside
    a restored copy is replayed over it on the next open. Repeat for
-   `papers_catalog.db`.
+   `papers_catalog.db`, and for `reference.db` with its
+   `reference-…-from-v<N>.bak` snapshot: restoring it brings the overlay
+   edits back as they were when the snapshot was taken.
 3. Anything ingested after the snapshot was taken is not known to the
    restored catalog; ingest those sources again.
 4. Run the older binary's `bookrack doctor`. A corpus or vector store it
    refuses is rebuilt with `bookrack corpus rebuild` and `bookrack
-   vectors rebuild` (and the `bookrack papers` forms); `reference.db`
-   with `bookrack distill build <path>` per book.
+   vectors rebuild` (and the `bookrack papers` forms). A reference
+   book distilled after the snapshot was taken is not in the restored
+   `reference.db`; build it again with `bookrack distill build <path>`.
+   Do not rebuild `reference.db` from nothing in place of restoring it:
+   that drops every overlay edit.
 
 ### The queue document
 

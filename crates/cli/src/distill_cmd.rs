@@ -476,7 +476,7 @@ fn run_books(
             continue;
         }
 
-        let mut refs = Refs::open_for_write(&paths.refs_path)
+        let mut refs = Refs::open_for_write(&paths.refs_path, &paths.backup_dir)
             .with_context(|| format!("open {}", paths.refs_path.display()))?;
         register_book_indexes(&mut refs, &book.slug, &parsed)?;
         upsert_book_row(&refs, &parsed, distill_run_id)?;
@@ -1250,6 +1250,102 @@ mod tests {
         );
     }
 
+    /// A store an earlier release wrote is refused by `list` and
+    /// `verify` as a state the operator resolves, and left at the
+    /// revision it was found at.
+    #[test]
+    fn list_and_verify_refuse_a_reference_store_behind_this_build_as_a_state() {
+        use crate::error::{BookrackCliError, CliReportCause, classify_eyre};
+        use bookrack_refs::{TARGET_VERSION, fixtures};
+        let tmp = TempDir::new().expect("tmp");
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
+        let paths = make_paths(tmp.path());
+        if let Some(parent) = paths.refs_path.parent() {
+            fs::create_dir_all(parent).expect("mkdir refs parent");
+        }
+        fixtures::create_at_version(&paths.refs_path, TARGET_VERSION - 1);
+
+        let refusals = [
+            ("list", list(&paths, DistillListArgs {}).map(drop)),
+            (
+                "verify",
+                verify(&paths, verify_args(vec![book_dir])).map(drop),
+            ),
+        ];
+        for (command, result) in refusals {
+            let err = result.expect_err("a store behind this build must be refused");
+            let Some(CliReportCause::Classified(cli_err)) = classify_eyre(&err) else {
+                panic!("{command}: the refusal is not classified: {err:?}");
+            };
+            assert!(
+                matches!(cli_err, BookrackCliError::StateUnusable { .. }),
+                "{command}: {cli_err:?}"
+            );
+            assert!(
+                cli_err
+                    .to_string()
+                    .starts_with("reference.db schema is behind this build"),
+                "{command}: {cli_err}"
+            );
+        }
+        assert_eq!(
+            fixtures::user_version(&paths.refs_path),
+            TARGET_VERSION - 1,
+            "a read migrated the store",
+        );
+        assert!(!paths.backup_dir.exists(), "a read took a snapshot");
+    }
+
+    /// `build` migrates a store an earlier release wrote, after a
+    /// snapshot into the backup directory, and keeps its overlay rows.
+    #[test]
+    fn build_snapshots_a_reference_store_behind_this_build_before_migrating() {
+        use bookrack_refs::{TARGET_VERSION, fixtures};
+        let tmp = TempDir::new().expect("tmp");
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
+        let paths = make_paths(tmp.path());
+        if let Some(parent) = paths.refs_path.parent() {
+            fs::create_dir_all(parent).expect("mkdir refs parent");
+        }
+        fixtures::create_at_version(&paths.refs_path, TARGET_VERSION - 1);
+        bookrack_dbkit::open_production(&paths.refs_path)
+            .expect("open the fixture")
+            .execute(
+                "INSERT INTO reference_entry_overlays (book_slug, entry_key, overlay_json, edited_at) \
+                 VALUES ('tiny', 'smith', '{}', '2026-06-26T00:00:00Z')",
+                [],
+            )
+            .expect("seed an overlay");
+
+        build(&paths, build_args(vec![book_dir], false, false)).expect("build");
+
+        assert_eq!(fixtures::user_version(&paths.refs_path), TARGET_VERSION);
+        let snapshots: Vec<String> = fs::read_dir(&paths.backup_dir)
+            .expect("the backup directory exists")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.starts_with("reference-"))
+            .collect();
+        assert_eq!(snapshots.len(), 1, "one snapshot: {snapshots:?}");
+        assert!(
+            snapshots[0].ends_with(&format!("-from-v{}.bak", TARGET_VERSION - 1)),
+            "{snapshots:?}"
+        );
+        let refs = Refs::open_read_only(&paths.refs_path).expect("open refs");
+        let overlays: i64 = refs
+            .connection()
+            .query_row("SELECT count(*) FROM reference_entry_overlays", [], |r| {
+                r.get(0)
+            })
+            .expect("count overlays");
+        assert_eq!(overlays, 1, "the overlay row survives the migration");
+    }
+
     #[test]
     fn build_writes_book_and_entries_into_reference_db() {
         let tmp = TempDir::new().expect("tmp");
@@ -1258,7 +1354,7 @@ mod tests {
 
         build(&paths, build_args(vec![book_dir], false, false)).expect("build");
 
-        let refs = Refs::open_for_write(&paths.refs_path).expect("open refs");
+        let refs = Refs::open_for_write(&paths.refs_path, &paths.backup_dir).expect("open refs");
         let conn = refs.connection();
         let book_rows: i64 = conn
             .query_row(
@@ -1432,7 +1528,7 @@ mod tests {
             .expect("build recursive root");
 
         let count = |paths: &DistillPaths| -> i64 {
-            let refs = Refs::open_for_write(&paths.refs_path).expect("open");
+            let refs = Refs::open_for_write(&paths.refs_path, &paths.backup_dir).expect("open");
             let conn = refs.connection();
             conn.query_row(
                 "SELECT COUNT(*) FROM reference_entries WHERE book_slug = 'tiny'",
@@ -1457,7 +1553,8 @@ mod tests {
         assert!(diffs[0].added.is_empty());
         assert!(diffs[0].removed.is_empty());
         assert!(diffs[0].changed.is_empty());
-        let refs = Refs::open_for_write(&paths.refs_path).expect("open after verify");
+        let refs =
+            Refs::open_for_write(&paths.refs_path, &paths.backup_dir).expect("open after verify");
         let _ = refs
             .lookup_resolved(None, "smith", &[])
             .expect("lookup post-verify");
@@ -1470,7 +1567,7 @@ mod tests {
         let paths = make_paths(tmp.path());
         build(&paths, build_args(vec![book_dir.clone()], false, false)).expect("build");
 
-        let refs = Refs::open_for_write(&paths.refs_path).expect("open");
+        let refs = Refs::open_for_write(&paths.refs_path, &paths.backup_dir).expect("open");
         refs.connection()
             .execute(
                 "UPDATE reference_entries SET payload_json = '{\"manual\":true}' \
@@ -1555,7 +1652,7 @@ mod tests {
         // must carry the registered book with its live entry count
         // (the tiny fixture drafts two headwords).
         list(&paths, DistillListArgs::default()).expect("list");
-        let refs = Refs::open_for_write(&paths.refs_path).expect("open");
+        let refs = Refs::open_for_write(&paths.refs_path, &paths.backup_dir).expect("open");
         let rows = read_list_rows(&refs).expect("rows");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].slug, "tiny");

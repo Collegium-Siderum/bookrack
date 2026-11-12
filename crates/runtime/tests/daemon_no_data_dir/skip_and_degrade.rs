@@ -263,6 +263,130 @@ async fn a_library_whose_catalog_this_build_cannot_read_is_skipped() -> Result<(
     stop(runtime).await
 }
 
+/// The snapshots bring-up took of the reference store under `root`.
+fn reference_snapshots(root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root.join("backup")) else {
+        return Vec::new();
+    };
+    entries
+        .map(|entry| {
+            entry
+                .expect("read the backup directory")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.starts_with("reference-") && name.ends_with(".bak"))
+        .collect()
+}
+
+/// A reference store an earlier release wrote is brought to this
+/// build's schema when its library comes up, after a snapshot, so the
+/// reads against it are served rather than refused as behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reference_store_behind_this_build_is_migrated_at_bring_up() -> Result<()> {
+    use bookrack_refs::{TARGET_VERSION, fixtures};
+    let sandbox = world();
+    let alpha = sandbox.data_root("alpha-root");
+    sandbox.write_registry_entries(Some("alpha"), &[("alpha", alpha.as_path())]);
+    let store = alpha.join("reference.db");
+    fixtures::create_at_version(&store, TARGET_VERSION - 1);
+    let runtime_root = tempfile::tempdir()?;
+
+    let runtime = start("alpha", runtime_root.path(), false).await?;
+    assert!(
+        runtime.registry.get(Some("alpha")).is_ok(),
+        "alpha is served"
+    );
+    assert_eq!(fixtures::user_version(&store), TARGET_VERSION);
+    let snapshots = reference_snapshots(&alpha);
+    assert_eq!(snapshots.len(), 1, "one snapshot: {snapshots:?}");
+    assert!(
+        snapshots[0].ends_with(&format!("-from-v{}.bak", TARGET_VERSION - 1)),
+        "{snapshots:?}"
+    );
+    bookrack_refs::Refs::open_read_only(&store).expect("a read is served after bring-up");
+    stop(runtime).await
+}
+
+/// A reference store newer than this build keeps its library from
+/// coming up, as a catalog newer than this build does: the skip names
+/// the store and both versions from the store's own words, carries the
+/// step to take closed by the mount command, and a runtime mount
+/// refuses as `-32018` with that hint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_library_whose_reference_store_is_newer_than_this_build_is_skipped() -> Result<()> {
+    use bookrack_refs::TARGET_VERSION;
+    let sandbox = world();
+    let alpha = sandbox.data_root("alpha-root");
+    let beta = sandbox.data_root("beta-root");
+    sandbox.write_registry_entries(
+        Some("alpha"),
+        &[("alpha", alpha.as_path()), ("beta", beta.as_path())],
+    );
+    let store = beta.join("reference.db");
+    drop(bookrack_refs::Refs::open_for_write(&store, &beta.join("backup")).expect("seed"));
+    bookrack_dbkit::open_production(&store)
+        .expect("open the reference store")
+        .pragma_update(None, "user_version", TARGET_VERSION + 1)
+        .expect("advance user_version");
+    let runtime_root = tempfile::tempdir()?;
+
+    let runtime = start("alpha", runtime_root.path(), false).await?;
+    assert!(
+        runtime.registry.get(Some("alpha")).is_ok(),
+        "alpha is served"
+    );
+    let record = skip_record(&runtime, "beta")?;
+    let summary = record.reason().summary.clone();
+    assert!(
+        summary.starts_with("reference.db schema is newer than this build supports")
+            && summary.contains(&(TARGET_VERSION + 1).to_string())
+            && summary.contains(&TARGET_VERSION.to_string()),
+        "{summary}"
+    );
+    assert!(
+        !summary.contains("preflight") && !summary.contains(&beta.display().to_string()),
+        "the summary is the store's own words, with no context and no path: {summary}"
+    );
+    let hint = record.reason().data.hint.clone().unwrap_or_default();
+    assert!(
+        hint.ends_with(" Then run `bookrack libraries mount beta`."),
+        "the store's hint closed with the mount: {hint:?}"
+    );
+    assert!(
+        reference_snapshots(&beta).is_empty(),
+        "nothing was migrated"
+    );
+
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        let resp = call(
+            &mut reader,
+            &mut w,
+            1,
+            "library.mount",
+            json!({ "name": "beta" }),
+        )
+        .await?;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(-32018),
+            "a store this build cannot serve is state-unusable: {resp}"
+        );
+        assert_eq!(
+            resp["error"]["data"]["hint"].as_str(),
+            Some(hint.as_str()),
+            "the mount's hint is the skip's hint, word for word: {resp}"
+        );
+        let _ = call(&mut reader, &mut w, 99, "daemon.shutdown", Value::Null).await?;
+        Ok::<(), eyre::Report>(())
+    });
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_library_whose_root_another_process_holds_is_skipped() -> Result<()> {
     let sandbox = world();

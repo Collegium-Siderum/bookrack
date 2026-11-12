@@ -48,6 +48,9 @@ struct Fixture {
     _tmp: tempfile::TempDir,
     /// Root of `with`, the library that carries a reference store.
     with_root: PathBuf,
+    /// Root of `without`, the library that starts with no reference
+    /// store.
+    without_root: PathBuf,
     registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     queue_state: Arc<Mutex<QueueState>>,
     addr: SocketAddr,
@@ -122,6 +125,7 @@ impl Fixture {
         Fixture {
             _tmp: tmp,
             with_root,
+            without_root,
             registry,
             queue_state,
             addr,
@@ -264,7 +268,8 @@ fn entry(slug: &str, key: &str, payload: Value, flags: &[&str]) -> NewEntry {
 /// to `smith` in `book_a`; `ashgrovewren` is reachable from its
 /// headword through the latin fallback.
 fn seed(path: &Path) {
-    let refs = Refs::open_for_write(path).expect("create reference.db");
+    let refs =
+        Refs::open_for_write(path, &path.with_file_name("backup")).expect("create reference.db");
     refs.upsert_book(&book("book_a", 10)).unwrap();
     refs.upsert_book(&book("book_b", 5)).unwrap();
     refs.upsert_entry(&entry(
@@ -480,6 +485,188 @@ async fn a_newer_store_is_unusable_to_the_overlay_as_to_the_lookup() {
             .expect_err("the lookup cannot open a newer store"),
     );
     assert_eq!(lookup.code, ErrorCode(STATE_UNUSABLE), "{lookup:?}");
+
+    client.cancel().await.expect("client shutdown");
+    fx.stop().await;
+}
+
+/// The overlay call a test sends to `library`, with `overlay` as its
+/// payload.
+fn overlay_call(library: &str, overlay: Value) -> CallToolRequestParams {
+    call(
+        "reference.overlay_set",
+        json!({
+            "library": library,
+            "book_slug": "book_a",
+            "entry_key": "smith",
+            "overlay": overlay,
+            "reason": "test",
+        }),
+    )
+}
+
+/// The snapshots of the reference store under `root`.
+fn reference_snapshots(root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root.join("backup")) else {
+        return Vec::new();
+    };
+    entries
+        .map(|entry| {
+            entry
+                .expect("read the backup directory")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.starts_with("reference-") && name.ends_with(".bak"))
+        .collect()
+}
+
+/// An overlay whose arguments are refused is refused before the store
+/// is opened: a library with no reference store still has none.
+#[tokio::test]
+async fn a_refused_overlay_argument_leaves_no_store_behind() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+    let store = fx.without_root.join("reference.db");
+
+    for (label, overlay) in [
+        ("not an object", json!("United Kingdom")),
+        (
+            "a key outside the property catalog",
+            json!({ "random_key": "value" }),
+        ),
+    ] {
+        let refused = rpc_error(
+            client
+                .call_tool(overlay_call("without", overlay))
+                .await
+                .expect_err("the overlay must be refused"),
+        );
+        assert_eq!(
+            refused.code,
+            ErrorCode(INVALID_PARAMS),
+            "{label}: {refused:?}"
+        );
+        assert!(
+            !store.exists(),
+            "{label}: a refused argument created {}",
+            store.display()
+        );
+    }
+
+    client.cancel().await.expect("client shutdown");
+    fx.stop().await;
+}
+
+/// A file at the store's path that is not a database is an internal
+/// error whose message carries the cause.
+#[tokio::test]
+async fn an_overlay_on_a_file_that_is_no_store_reports_the_cause() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+    std::fs::write(
+        fx.without_root.join("reference.db"),
+        b"this is not a sqlite database, only some text",
+    )
+    .expect("write a foreign file");
+
+    let failed = rpc_error(
+        client
+            .call_tool(overlay_call(
+                "without",
+                json!({ "country": "United Kingdom" }),
+            ))
+            .await
+            .expect_err("a foreign file cannot be opened"),
+    );
+    assert_eq!(failed.code, ErrorCode::INTERNAL_ERROR, "{failed:?}");
+    assert!(
+        failed.message.contains("reference.db database error")
+            && failed.message.contains("file is not a database"),
+        "the message names the store and carries the cause: {failed:?}"
+    );
+    assert_eq!(
+        failed.data,
+        Some(json!({ "retryable": false })),
+        "{failed:?}"
+    );
+
+    client.cancel().await.expect("client shutdown");
+    fx.stop().await;
+}
+
+/// An overlay written to a store an earlier release left behind
+/// migrates it, after a snapshot into the library's backup directory.
+#[tokio::test]
+async fn an_overlay_on_a_store_behind_this_build_snapshots_it_before_migrating() {
+    use bookrack_refs::{TARGET_VERSION, fixtures};
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+    let store = fx.without_root.join("reference.db");
+    fixtures::create_at_version(&store, TARGET_VERSION - 1);
+
+    client
+        .call_tool(overlay_call(
+            "without",
+            json!({ "country": "United Kingdom" }),
+        ))
+        .await
+        .expect("the overlay is written");
+
+    assert_eq!(fixtures::user_version(&store), TARGET_VERSION);
+    let snapshots = reference_snapshots(&fx.without_root);
+    assert_eq!(snapshots.len(), 1, "one snapshot: {snapshots:?}");
+    assert!(
+        snapshots[0].ends_with(&format!("-from-v{}.bak", TARGET_VERSION - 1)),
+        "{snapshots:?}"
+    );
+
+    client.cancel().await.expect("client shutdown");
+    fx.stop().await;
+}
+
+/// A store stamped for a newer reader is unusable to the overlay as it
+/// is to the lookup, and the reply says which reader it needs.
+#[tokio::test]
+async fn a_store_stamped_for_a_newer_reader_is_unusable_to_the_overlay_as_to_the_lookup() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+    let required = bookrack_dbkit::READER_VERSION + 1;
+    bookrack_dbkit::open_production(&fx.with_root.join("reference.db"))
+        .expect("open reference.db")
+        .execute(
+            "UPDATE reference_meta SET value = ?1 WHERE key = 'min_reader_version'",
+            [required.to_string()],
+        )
+        .expect("raise the reader stamp");
+
+    let overlay = rpc_error(
+        client
+            .call_tool(overlay_call("with", json!({ "country": "United Kingdom" })))
+            .await
+            .expect_err("the overlay cannot open the store"),
+    );
+    let lookup = rpc_error(
+        client
+            .call_tool(call(
+                "reference.lookup",
+                json!({ "library": "with", "book": "book_a", "entry_key": "smith" }),
+            ))
+            .await
+            .expect_err("the lookup cannot open the store"),
+    );
+    for (surface, err) in [("overlay", &overlay), ("lookup", &lookup)] {
+        assert_eq!(err.code, ErrorCode(STATE_UNUSABLE), "{surface}: {err:?}");
+        let data = err.data.clone().expect("detail and hint");
+        assert!(
+            data["detail"]
+                .as_str()
+                .is_some_and(|d| d.contains(&format!("reader version {required}"))),
+            "{surface}: {err:?}"
+        );
+    }
+    assert_eq!(overlay.message, lookup.message);
 
     client.cancel().await.expect("client shutdown");
     fx.stop().await;

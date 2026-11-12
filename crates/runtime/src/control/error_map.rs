@@ -200,6 +200,9 @@ fn classify(err: &Report) -> Option<RpcError> {
         if let Some(e) = cause.downcast_ref::<CorpusError>() {
             return Some(from_corpus(e));
         }
+        if let Some(e) = cause.downcast_ref::<RefsError>() {
+            return from_refs(e);
+        }
     }
     None
 }
@@ -283,9 +286,24 @@ pub fn reference_lookup_err(e: ReferenceLookupError) -> RpcError {
         } => rpc_from_problem(
             STATE_UNUSABLE,
             reference_schema_problem(path, *found, *supported).hint(
-                "Run `bookrack distill build` with this build to rewrite the store at \
-                 its schema.",
+                "Run `bookrack distill build` with this build, or start the daemon once \
+                 with `bookrack run`: either one migrates the store to this build's schema.",
             ),
+        ),
+        ReferenceLookupError::Open {
+            path,
+            source: RefsError::ReaderTooOld { required, current },
+        } => rpc_from_problem(
+            STATE_UNUSABLE,
+            Problem::new("cannot read the reference store")
+                .detail(format!(
+                    "The store at {} requires reader version {required}; this build is at \
+                     reader version {current}.",
+                    path.display()
+                ))
+                .hint(format!(
+                    "Run a bookrack build at reader version v{required} or newer."
+                )),
         ),
         ReferenceLookupError::Open { .. }
         | ReferenceLookupError::Store(_)
@@ -723,6 +741,35 @@ fn from_catalog(e: &CatalogError) -> RpcError {
         ),
         _ => rpc_from_problem(INTERNAL_ERROR, problem),
     }
+}
+
+/// The envelope of a `RefsError` that says the reference store is in a
+/// state this build cannot serve, and `None` for every other one.
+///
+/// The summary is the leaf's own text, which names the store and both
+/// versions; a context wrapped around it is not part of it. A variant
+/// with no next step is left to the residual channel, which keeps that
+/// context.
+fn from_refs(e: &RefsError) -> Option<RpcError> {
+    let hint = match e {
+        RefsError::SchemaTooNew { supported, .. } => format!(
+            "Run a newer bookrack build (this one reads reference store schemas up to \
+             v{supported}), or restore reference.db from a backup this build wrote."
+        ),
+        RefsError::SchemaTooOld { .. } => String::from(
+            "Run `bookrack distill build` with this build, or start the daemon once with \
+             `bookrack run`: either one backs the reference store up and migrates it to \
+             this build's schema.",
+        ),
+        RefsError::ReaderTooOld { required, .. } => {
+            format!("Run a bookrack build at reader version v{required} or newer.")
+        }
+        _ => return None,
+    };
+    Some(rpc_from_problem(
+        STATE_UNUSABLE,
+        Problem::from_error_chain(e).hint(hint),
+    ))
 }
 
 /// Map a leaf `CorpusError` onto its wire code. Same contract as
@@ -1651,6 +1698,158 @@ mod tests {
                 "{label}: the hint names the step that migrates it"
             );
         }
+    }
+
+    /// A reference store this build cannot serve is a state the
+    /// operator resolves, wherever on the chain it sits: the state code,
+    /// a summary that names the store from the leaf's own words, and a
+    /// next step. The context a caller wrapped it in stays out of the
+    /// summary.
+    #[test]
+    fn a_reference_store_this_build_cannot_serve_takes_the_state_code_and_names_the_store() {
+        let cases: Vec<(&str, RefsError, &str, &[&str])> = vec![
+            (
+                "SchemaTooNew",
+                RefsError::SchemaTooNew {
+                    found: 3,
+                    supported: 2,
+                },
+                "reference.db schema is newer than this build supports",
+                &["3", "2"],
+            ),
+            (
+                "SchemaTooOld",
+                RefsError::SchemaTooOld {
+                    found: 1,
+                    supported: 2,
+                },
+                "reference.db schema is behind this build",
+                &["1", "2"],
+            ),
+            (
+                "ReaderTooOld",
+                RefsError::ReaderTooOld {
+                    required: 9,
+                    current: 3,
+                },
+                "reference.db requires a newer reader",
+                &["v9", "v3"],
+            ),
+        ];
+        for (label, leaf, opening, numbers) in cases {
+            let err = Report::from(leaf).wrap_err("preflight reference store schema check failed");
+            let rpc = handler_err("library.mount", err);
+            assert_eq!(rpc.code, STATE_UNUSABLE, "{label}: {}", rpc.message);
+            assert!(rpc.message.starts_with(opening), "{label}: {}", rpc.message);
+            assert!(
+                numbers.iter().all(|n| rpc.message.contains(n)),
+                "{label}: both versions are named: {}",
+                rpc.message
+            );
+            assert!(
+                !rpc.message.contains("preflight"),
+                "{label}: {}",
+                rpc.message
+            );
+            let data: bookrack_core::ProblemData =
+                serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
+            let hint = data.hint.unwrap_or_default();
+            assert!(
+                hint.ends_with('.') && !hint.contains("libraries mount"),
+                "{label}: a full sentence that names the repair and no retry: {hint:?}"
+            );
+            assert!(!data.retryable, "{label}");
+        }
+    }
+
+    /// A reference store fault with no next step is not classified: it
+    /// keeps the residual code and the context its caller attached.
+    #[test]
+    fn a_reference_store_fault_with_no_next_step_keeps_its_context() {
+        let err = Report::from(RefsError::Io(std::io::Error::other(
+            "backup directory is not writable",
+        )))
+        .wrap_err("preflight reference store schema check failed");
+        assert!(state_refusal(&err).is_none());
+        let rpc = handler_err("library.mount", err);
+        assert_eq!(rpc.code, INTERNAL_ERROR, "{}", rpc.message);
+        assert!(
+            rpc.message
+                .contains("preflight reference store schema check failed")
+                && rpc.message.contains("backup directory is not writable"),
+            "{}",
+            rpc.message
+        );
+    }
+
+    /// A reference store behind this build, met by a command that opens
+    /// it itself, reads as the daemon's reply for it would.
+    #[test]
+    fn state_refusal_passes_a_reference_store_behind_this_build() {
+        let err = Report::from(RefsError::SchemaTooOld {
+            found: 1,
+            supported: 2,
+        })
+        .wrap_err("open /some/where/reference.db");
+        let problem = state_refusal(&err).expect("a state refusal");
+        assert!(
+            problem
+                .summary
+                .starts_with("reference.db schema is behind this build"),
+            "{}",
+            problem.summary
+        );
+        let hint = problem.data.hint.unwrap_or_default();
+        assert!(
+            hint.contains("bookrack run") && hint.contains("bookrack distill build"),
+            "the hint names both steps that migrate it: {hint}"
+        );
+    }
+
+    /// The lookup's own classifier answers a store stamped for a newer
+    /// reader with the state code and says which reader it needs.
+    #[test]
+    fn a_lookup_on_a_store_stamped_for_a_newer_reader_takes_the_state_code() {
+        let rpc = reference_lookup_err(ReferenceLookupError::Open {
+            path: std::path::PathBuf::from("/some/where/reference.db"),
+            source: RefsError::ReaderTooOld {
+                required: 9,
+                current: 3,
+            },
+        });
+        assert_eq!(rpc.code, STATE_UNUSABLE, "{}", rpc.message);
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
+        let detail = data.detail.unwrap_or_default();
+        assert!(
+            detail.contains("reader version 9") && detail.contains("reader version 3"),
+            "the detail names both reader versions: {detail}"
+        );
+        assert!(
+            data.hint.unwrap_or_default().contains("v9"),
+            "the hint names the reader version to run"
+        );
+    }
+
+    /// A store behind this build is migrated by a distill build or by
+    /// mounting the library; the lookup's hint names both.
+    #[test]
+    fn a_lookup_on_a_store_behind_this_build_names_both_steps_that_migrate_it() {
+        let rpc = reference_lookup_err(ReferenceLookupError::Open {
+            path: std::path::PathBuf::from("/some/where/reference.db"),
+            source: RefsError::SchemaTooOld {
+                found: 1,
+                supported: 2,
+            },
+        });
+        assert_eq!(rpc.code, STATE_UNUSABLE, "{}", rpc.message);
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
+        let hint = data.hint.unwrap_or_default();
+        assert!(
+            hint.contains("bookrack distill build") && hint.contains("bookrack run"),
+            "{hint}"
+        );
     }
 
     /// The exit for a command that opens a store itself lets a state

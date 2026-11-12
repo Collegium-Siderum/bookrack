@@ -15,13 +15,16 @@
 //! three triggers that keep that sidecar synchronised with the base
 //! table. Later changes layer on as their own migrations and never edit
 //! the baseline text.
+//!
+//! `M[1]` adds `reference_meta`, the key/value table the store keeps
+//! its `min_reader_version` stamp in.
 
 use rusqlite_migration::{M, Migrations};
 
 /// The target `user_version` of `reference.db`. Bumps in lockstep with
 /// the migration vector.
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
-pub const TARGET_VERSION: i64 = 1;
+pub const TARGET_VERSION: i64 = 2;
 
 /// `M[0]` — the frozen baseline schema. Immutable: never edit this text;
 /// add a new migration instead.
@@ -138,9 +141,18 @@ CREATE TRIGGER reference_entries_au AFTER UPDATE ON reference_entries BEGIN
 END;
 "#;
 
+/// `M[1]` — the store's key/value scalars. A writable open records the
+/// `min_reader_version` stamp here; the migration itself writes no row.
+const META_DDL: &str = r#"
+CREATE TABLE reference_meta (
+    key               TEXT PRIMARY KEY,
+    value             TEXT NOT NULL
+);
+"#;
+
 /// The migration sequence applied to `reference.db` on open.
 pub fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(BASELINE_DDL)])
+    Migrations::new(vec![M::up(BASELINE_DDL), M::up(META_DDL)])
 }
 
 #[cfg(test)]
@@ -189,15 +201,16 @@ mod tests {
     }
 
     #[test]
-    fn baseline_creates_every_expected_object() {
+    fn the_sequence_creates_every_expected_object() {
         let conn = open_and_migrate();
 
-        // Three user tables plus the FTS5 virtual table all appear as
+        // Four user tables plus the FTS5 virtual table all appear as
         // `type='table'` in sqlite_master.
         for table in [
             "reference_books",
             "reference_entries",
             "reference_entry_overlays",
+            "reference_meta",
             "reference_entries_fts",
         ] {
             assert!(

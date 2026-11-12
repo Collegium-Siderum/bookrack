@@ -42,8 +42,43 @@ release workflow extracts the matching section verbatim from this file.
   `vectors reset`. A library with nothing ingested is still answered
   `-32602`, and no longer gets a `corpus.db` created for the answer.
 
+- **`reference.db` moves to schema 2 and is migrated when its library
+  is mounted, after a snapshot.** The new revision adds the
+  reader-version stamp the other stores carry. A store an earlier
+  release wrote is brought forward by mounting the library, by
+  `distill build`, or by the `reference.overlay_set` tool; each writes
+  `reference-<timestamp>-from-v1.bak` into the backup directory first,
+  because the overlay edits cannot be rebuilt. A read never migrates:
+  `distill list` and `distill verify` answer a store that is behind
+  with `reference.db schema is behind this build`, both versions and a
+  hint, and exit `2`. An earlier release cannot open a migrated store;
+  [UPGRADE.md](docs/UPGRADE.md) describes the way back.
+- **A `reference.db` this build cannot serve keeps its library from
+  mounting.** A store from a newer schema, or stamped for a newer
+  reader, used to leave the library mounted and fail only the
+  reference reads. The library is now skipped at bring-up, and
+  `libraries mount` answers `-32018` with the build to run, as for a
+  catalog in the same state. `reference.lookup` and
+  `reference.overlay_set` answer a store stamped for a newer reader
+  with `-32018` as well.
+- **`reference.db` is checked against its table declarations on every
+  open.** The book registry, the overlay table and the new meta table
+  are verified; the entry table is not, because each book's
+  `[[indexes]]` grow it.
+
 ### Fixed
 
+- **`reference.overlay_set` judges its arguments before it opens the
+  store.** A call refused for a payload that is not an object, or for
+  a key outside the property catalog, used to create `reference.db` on
+  a library that had none. A store the tool cannot open is now reported
+  with its cause chain and the code the lookup gives it.
+- **A `reference.db` failure names the store and prints its cause
+  once.** The SQLite, migration and JSON failures of the reference
+  store printed their cause twice in a flattened message and did not
+  say which store failed; they now read `reference.db database error`,
+  `reference.db migration failed` and `reference.db json error`,
+  followed by the cause.
 - **A dry run, a plan, and the execution of an empty plan no longer
   create or migrate a store.** `corpus rebuild --dry-run` and
   `vectors reembed --dry-run`, their `papers` counterparts, and a
