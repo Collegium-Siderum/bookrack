@@ -281,7 +281,6 @@ pub fn ingest_structure(
 /// Reads the book's prose leaves from `corpus`, orders them by document
 /// position, and chunks them with the pure [`bookrack_text::plan_chunks`] planner. The chunks
 /// are the embed stage's input; this only reads — nothing is written.
-// Parallel implementation: pipeline-chunk-plan.
 pub fn plan_book_chunks(
     corpus: &Corpus,
     book_root_id: NodeId,

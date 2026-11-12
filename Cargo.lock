@@ -879,7 +879,6 @@ dependencies = [
  "serde",
  "sha2",
  "tempfile",
- "text-splitter",
  "thiserror",
  "tokio",
  "toml",

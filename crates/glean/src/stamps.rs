@@ -12,8 +12,8 @@ use bookrack_text::NORMALIZE_VERSION;
 use crate::CHUNK_VERSION;
 
 /// Build the [`IndexStamps`] this binary writes into `papers_corpus`'s
-/// `index_meta` table. Uses the paper-pipeline's compiled-in
-/// [`CHUNK_VERSION`] and the workspace-wide [`NORMALIZE_VERSION`],
+/// `index_meta` table. Uses the workspace-wide
+/// [`CHUNK_VERSION`] and [`NORMALIZE_VERSION`],
 /// the embed model name comes from the live runtime configuration, and
 /// the vector dimension from a live probe against the embedder.
 // Parallel implementation: pipeline-stamps.

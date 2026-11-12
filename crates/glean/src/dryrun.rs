@@ -25,7 +25,9 @@ use bookrack_core::NodeId;
 use bookrack_extract::{Block, BlockKind, ExtractError, ExtractOutcome};
 use serde::{Deserialize, Serialize};
 
-use crate::{AbstractStrategy, ChunkParams, identify, plan_chunks};
+use bookrack_text::{ChunkLeaf, plan_chunks};
+
+use crate::{AbstractStrategy, ChunkParams, identify};
 
 /// Knobs for one dryrun.
 #[derive(Debug, Clone, Default)]
@@ -272,8 +274,16 @@ pub fn dryrun_paper(file: &Path, params: &DryrunPaperParams) -> DryrunPaperRepor
         record.predicted_chunks = Some(match abstract_text.as_deref() {
             Some(text) if !text.trim().is_empty() => {
                 // `plan_chunks` is a pure function — the leaf id is
-                // only stamped onto each PlannedChunk, never dereferenced.
-                plan_chunks(NodeId::new(0), text, &params.chunk).len()
+                // only stamped onto each planned chunk, never dereferenced.
+                plan_chunks(
+                    &[ChunkLeaf {
+                        node_id: NodeId::new(0),
+                        parent_id: None,
+                        text,
+                    }],
+                    &params.chunk,
+                )
+                .len()
             }
             _ => 0,
         });

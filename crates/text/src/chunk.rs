@@ -29,14 +29,15 @@ use text_splitter::{ChunkConfig, TextSplitter};
 /// text feeds `norm_chunk_sha256`, so a change is a re-embedding
 /// commitment. The companion test `tests/dep_hash.rs` fails until
 /// [`FROZEN_SPLITTER_DEPS`] is restated, forcing a deliberate bump.
-// Parallel implementation: chunk-version.
+///
+/// The book store and the papers store both record this value as their
+/// `chunk_version` stamp.
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const CHUNK_VERSION: u32 = 1;
 
 /// `name@version` of `text-splitter` and every `icu_*` crate in
 /// `Cargo.lock`, sorted bytewise. Restated in lockstep with
 /// [`CHUNK_VERSION`]. See `tests/dep_hash.rs` for the selection rule.
-// Parallel implementation: chunk-version.
 pub const FROZEN_SPLITTER_DEPS: &[&str] = &[
     "icu_collections@2.2.0",
     "icu_locale@2.2.0",
@@ -125,7 +126,6 @@ enum Snap {
 /// Leaves are grouped into maximal runs sharing a parent; each group is
 /// concatenated and split independently, so no chunk spans two organizing
 /// nodes. Empty leaves and empty groups produce no chunks.
-// Parallel implementation: pipeline-chunk-plan.
 pub fn plan_chunks(leaves: &[ChunkLeaf<'_>], params: &ChunkParams) -> Vec<ChunkPlan> {
     let config = ChunkConfig::new(params.target_chars)
         .with_overlap(params.overlap_chars)

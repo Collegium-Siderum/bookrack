@@ -30,7 +30,7 @@ use bookrack_extract::{
     Block, BlockKind, Contributor, ContributorRole, ExtractOutcome, envelope_filename,
     write_envelope,
 };
-use bookrack_text::{NORMALIZE_VERSION, norm_text_sha256};
+use bookrack_text::{ChunkLeaf, ChunkPlan, NORMALIZE_VERSION, norm_text_sha256, plan_chunks};
 use bookrack_vectors::{ChunkRow, ChunkStore};
 use sha2::{Digest, Sha256};
 
@@ -43,57 +43,7 @@ pub mod reembed;
 pub mod reset;
 pub mod stamps;
 
-/// Chunking-behaviour stamp the paper pipeline writes into the vector
-/// store's index_meta. Independent of `bookrack_ingest::CHUNK_VERSION`:
-/// the two pipelines have separate fleets and bump on their own
-/// cadence.
-///
-/// Bump on any change that moves a chunk boundary, including the
-/// version of `text-splitter` or of any `icu_*` crate it segments with.
-/// Both pipelines share those crates, so a change there moves both
-/// stamps. The companion test `tests/dep_hash.rs` fails until
-/// [`FROZEN_SPLITTER_DEPS`] is restated, forcing a deliberate bump.
-// Parallel implementation: chunk-version.
-// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
-pub const CHUNK_VERSION: u32 = 1;
-
-/// `name@version` of `text-splitter` and every `icu_*` crate in
-/// `Cargo.lock`, sorted bytewise. Restated in lockstep with
-/// [`CHUNK_VERSION`]. See `tests/dep_hash.rs` for the selection rule.
-// Parallel implementation: chunk-version.
-pub const FROZEN_SPLITTER_DEPS: &[&str] = &[
-    "icu_collections@2.2.0",
-    "icu_locale@2.2.0",
-    "icu_locale_core@2.2.0",
-    "icu_locale_data@2.2.0",
-    "icu_normalizer@2.2.0",
-    "icu_normalizer_data@2.2.0",
-    "icu_properties@2.2.0",
-    "icu_properties_data@2.2.0",
-    "icu_provider@2.2.0",
-    "icu_segmenter@2.2.0",
-    "icu_segmenter_data@2.2.0",
-    "text-splitter@0.30.1",
-];
-
-/// Tuning parameters for chunking the abstract. The defaults are the
-/// same target / overlap pair the book pipeline uses; the abstract is
-/// usually short enough to produce a single chunk under these
-/// settings.
-#[derive(Debug, Clone)]
-pub struct ChunkParams {
-    pub target_chars: usize,
-    pub overlap_chars: usize,
-}
-
-impl Default for ChunkParams {
-    fn default() -> Self {
-        Self {
-            target_chars: 1000,
-            overlap_chars: 100,
-        }
-    }
-}
+pub use bookrack_text::{CHUNK_VERSION, ChunkParams};
 
 /// Which way the IDENTIFY pass picks the abstract body. Only
 /// [`AbstractStrategy::HeadingFirst`] is implemented; the other variants
@@ -627,7 +577,14 @@ pub async fn glean_paper<E: Embedder>(
     let chunks_written = if let Some(leaf_id) = structure.leaf_node_id
         && let Some(text) = structure.leaf_text.as_deref()
     {
-        let plans = plan_chunks(leaf_id, text, &params.chunk);
+        let plans = plan_chunks(
+            &[ChunkLeaf {
+                node_id: leaf_id,
+                parent_id: None,
+                text,
+            }],
+            &params.chunk,
+        );
         embed_and_write_chunks(
             corpus,
             lancedb_dir,
@@ -1235,49 +1192,6 @@ fn role_str(role: ContributorRole) -> &'static str {
     }
 }
 
-/// Plan the chunks for an abstract leaf. The abstract is almost always
-/// one chunk under the default 1000-character target.
-///
-/// Each chunk's char offsets locate it within `text`: the splitter
-/// reports the byte position of the trimmed chunk, so overlap with the
-/// previous chunk and whitespace trimmed between chunks are both
-/// accounted for, and slicing `text` by the offsets reproduces the
-/// chunk text.
-// Parallel implementation: pipeline-chunk-plan.
-pub(crate) fn plan_chunks(leaf_id: NodeId, text: &str, params: &ChunkParams) -> Vec<PlannedChunk> {
-    let splitter = text_splitter::TextSplitter::new(
-        text_splitter::ChunkConfig::new(params.target_chars)
-            .with_overlap(params.overlap_chars)
-            .expect("valid chunk config"),
-    );
-    let mut out = Vec::new();
-    for (byte_start, chunk) in splitter.chunk_indices(text) {
-        if chunk.is_empty() {
-            continue;
-        }
-        let start = text[..byte_start].chars().count() as i32;
-        let end = start + chunk.chars().count() as i32;
-        out.push(PlannedChunk {
-            start_node_id: leaf_id,
-            start_char_offset: start,
-            end_node_id: leaf_id,
-            end_char_offset: end,
-            text: chunk.to_string(),
-            norm_chunk_sha256: norm_text_sha256(chunk),
-        });
-    }
-    out
-}
-
-pub(crate) struct PlannedChunk {
-    pub(crate) start_node_id: NodeId,
-    pub(crate) start_char_offset: i32,
-    pub(crate) end_node_id: NodeId,
-    pub(crate) end_char_offset: i32,
-    pub(crate) text: String,
-    pub(crate) norm_chunk_sha256: String,
-}
-
 /// Embed each planned chunk and append the rows to the paper vector
 /// store. Reconciles the store's index_meta with this pipeline's
 /// stamps on the first write into an empty dir.
@@ -1288,7 +1202,7 @@ pub(crate) async fn embed_and_write_chunks<E: Embedder>(
     embedder: &E,
     cfg: &EmbedConfig,
     intake_id: i64,
-    plans: &[PlannedChunk],
+    plans: &[ChunkPlan],
 ) -> Result<usize> {
     if plans.is_empty() {
         return Ok(0);
@@ -1941,42 +1855,6 @@ mod tests {
         assert_eq!(kinds, vec![NodeType::Subsection]);
     }
 
-    #[test]
-    fn plan_chunks_offsets_reconstruct_every_chunk_of_a_long_abstract() {
-        // An abstract past the default target splits into overlapping
-        // chunks whose boundaries fall on trimmed whitespace; slicing the
-        // leaf text by each chunk's recorded char offsets must reproduce
-        // that chunk's text. Multi-byte characters keep byte and char
-        // positions apart.
-        let text: String = (0..60)
-            .map(|i| format!("Sentence {i} of the r\u{e9}sum\u{e9} keeps going.  "))
-            .collect();
-        let text = text.trim_end();
-        let leaf = NodeId::new(7);
-        let plans = plan_chunks(leaf, text, &ChunkParams::default());
-        assert!(
-            plans.len() > 2,
-            "the abstract must split into several chunks, got {}",
-            plans.len()
-        );
-        let chars: Vec<char> = text.chars().collect();
-        for (i, p) in plans.iter().enumerate() {
-            assert_eq!(p.start_node_id, leaf);
-            assert_eq!(p.end_node_id, leaf);
-            let (start, end) = (p.start_char_offset as usize, p.end_char_offset as usize);
-            assert!(
-                start <= end && end <= chars.len(),
-                "chunk {i}: span {start}..{end} lies outside the {}-char leaf",
-                chars.len()
-            );
-            let slice: String = chars[start..end].iter().collect();
-            assert_eq!(
-                slice, p.text,
-                "chunk {i}: offsets {start}..{end} do not reproduce the chunk text"
-            );
-        }
-    }
-
     /// The token a human review write records in `reviewed_by`.
     const HUMAN_REVIEWER: &str = "human:reviewer";
 
@@ -2138,226 +2016,5 @@ mod tests {
             "the report must be the latest run's: {:?}",
             review.notes,
         );
-    }
-
-    /// Configurations the golden fixture runs under: the production pair,
-    /// then two small targets that cut every case many times, so a change
-    /// in sentence, word, or grapheme segmentation moves a boundary.
-    const GOLDEN_CONFIGS: &[(usize, usize)] = &[(1000, 100), (200, 50), (40, 10)];
-
-    /// Digest of each case's planned chunks per configuration, recorded
-    /// with the crates in `FROZEN_SPLITTER_DEPS`. A match says only that
-    /// these inputs chunk as before; it does not show that a dependency
-    /// move leaves every input's boundaries in place.
-    const GOLDEN: &[(&str, &str)] = &[
-        ("1000/100/lines-en", "2d9288a95bd51a8e"),       // 3 chunks
-        ("1000/100/para-zh", "963a0b80c5f34061"),        // 2 chunks
-        ("1000/100/para-en", "5ee262ac117496c0"),        // 3 chunks
-        ("1000/100/runon-zh", "0878d9cc38e53f59"),       // 2 chunks
-        ("1000/100/runon-en-colon", "ebc2123fc657ed37"), // 4 chunks
-        ("1000/100/colon-chain", "4ba33433ce574507"),    // 2 chunks
-        ("1000/100/runon-th", "823f558873348b9f"),       // 7 chunks
-        ("1000/100/mixed", "437f40034bdfb377"),          // 4 chunks
-        ("1000/100/grapheme", "dc739d05a00d26a8"),       // 2 chunks
-        ("1000/100/parents", "a21f468ac4166eef"),        // 4 chunks
-        ("1000/100/empty-leaves", "335bf8a126043c2f"),   // 2 chunks
-        ("1000/100/compat-forms", "86eb55102799b15b"),   // 2 chunks
-        ("200/50/lines-en", "bad6c58fb2e4bc92"),         // 15 chunks
-        ("200/50/para-zh", "9da66acfa7f197c4"),          // 12 chunks
-        ("200/50/para-en", "9b077a0340a56e5b"),          // 14 chunks
-        ("200/50/runon-zh", "61c8f22df91748cc"),         // 12 chunks
-        ("200/50/runon-en-colon", "5fc94aeaff419e13"),   // 22 chunks
-        ("200/50/colon-chain", "d1d969cc0f54f6db"),      // 11 chunks
-        ("200/50/runon-th", "2e70fa7bd138af7b"),         // 41 chunks
-        ("200/50/mixed", "5a4b570e29e27148"),            // 19 chunks
-        ("200/50/grapheme", "c1a9ddfa704ceb22"),         // 10 chunks
-        ("200/50/parents", "985173d29929e553"),          // 27 chunks
-        ("200/50/empty-leaves", "3fef15b36e2c772a"),     // 11 chunks
-        ("200/50/compat-forms", "8853a80fc206f832"),     // 11 chunks
-        ("40/10/lines-en", "07268d181c219bbb"),          // 90 chunks
-        ("40/10/para-zh", "5d4a2a732c9b328c"),           // 60 chunks
-        ("40/10/para-en", "34b41b0b948943fc"),           // 61 chunks
-        ("40/10/runon-zh", "50f63be7196b6a8c"),          // 60 chunks
-        ("40/10/runon-en-colon", "6e63047e319c83f5"),    // 105 chunks
-        ("40/10/colon-chain", "aec52421e47d7924"),       // 53 chunks
-        ("40/10/runon-th", "7ac359d7ad0c76d2"),          // 207 chunks
-        ("40/10/mixed", "141be3b89aaeb1e4"),             // 101 chunks
-        ("40/10/grapheme", "80622037f1f0f354"),          // 47 chunks
-        ("40/10/parents", "502e3686f3d9c5fc"),           // 127 chunks
-        ("40/10/empty-leaves", "941ba151fb7b8815"),      // 47 chunks
-        ("40/10/compat-forms", "20a1f14d9dc5b476"),      // 51 chunks
-    ];
-
-    /// The book pipeline's chunk fixture as `(label, text)`: each case's
-    /// non-empty leaves joined into one abstract-sized text.
-    fn golden_cases(fixture: &str) -> Vec<(&str, String)> {
-        let mut cases: Vec<(&str, Vec<&str>)> = Vec::new();
-        for line in fixture.lines() {
-            if line.is_empty() || line.starts_with('#') || line == "---" || line == "<empty>" {
-                continue;
-            }
-            if let Some(label) = line.strip_prefix("=== ") {
-                cases.push((label, Vec::new()));
-            } else {
-                let case = cases.last_mut().expect("a leaf before the first case");
-                case.1.push(line);
-            }
-        }
-        cases
-            .into_iter()
-            .map(|(label, leaves)| (label, leaves.join("\n\n")))
-            .collect()
-    }
-
-    /// First 8 bytes, as hex, of a SHA-256 over every plan's offsets, raw
-    /// text, and normalized-text hash, in order.
-    fn golden_digest(plans: &[PlannedChunk]) -> String {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        for p in plans {
-            h.update(format!("{}-{}\n", p.start_char_offset, p.end_char_offset).as_bytes());
-            h.update(p.text.as_bytes());
-            h.update(b"\0");
-            h.update(p.norm_chunk_sha256.as_bytes());
-            h.update(b"\n");
-        }
-        h.finalize()[..8]
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
-    }
-
-    #[test]
-    fn chunk_boundaries_match_the_golden_digests() {
-        let cases = golden_cases(include_str!("../../text/tests/fixtures/chunk/golden.txt"));
-        let leaf = NodeId::new(7);
-        let mut actual = Vec::new();
-        for &(target_chars, overlap_chars) in GOLDEN_CONFIGS {
-            let params = ChunkParams {
-                target_chars,
-                overlap_chars,
-            };
-            for (label, text) in &cases {
-                let key = format!("{target_chars}/{overlap_chars}/{label}");
-                let chars: Vec<char> = text.chars().collect();
-                let plans = plan_chunks(leaf, text, &params);
-                for (i, p) in plans.iter().enumerate() {
-                    let span = p.start_char_offset as usize..p.end_char_offset as usize;
-                    assert_eq!(
-                        chars[span].iter().collect::<String>(),
-                        p.text,
-                        "{key}: chunk {i}'s offsets do not select its text"
-                    );
-                }
-                actual.push((key, golden_digest(&plans), plans.len()));
-            }
-        }
-        let moved: Vec<&str> = actual
-            .iter()
-            .filter(|(k, d, _)| !GOLDEN.contains(&(k.as_str(), d.as_str())))
-            .map(|(k, _, _)| k.as_str())
-            .collect();
-        let restated: String = actual
-            .iter()
-            .map(|(k, d, n)| format!("        (\"{k}\", \"{d}\"), // {n} chunks\n"))
-            .collect();
-        assert!(
-            moved.is_empty() && actual.len() == GOLDEN.len(),
-            "chunk boundaries moved for {moved:?}. A chunking dependency or setting changed \
-             what plan_chunks produces: keep the previous dependency versions in Cargo.lock, or \
-             bump CHUNK_VERSION and restate GOLDEN as\n{restated}"
-        );
-    }
-
-    /// The text crate's chunker, given a paper's abstract as a lone
-    /// leaf, plans the same chunks as [`plan_chunks`]: the golden cases
-    /// and a set of inputs they leave out, under every golden
-    /// configuration, field by field.
-    #[test]
-    fn the_shared_chunker_plans_a_lone_leaf_as_the_paper_chunker_does() {
-        let mut inputs: Vec<(String, String)> =
-            golden_cases(include_str!("../../text/tests/fixtures/chunk/golden.txt"))
-                .into_iter()
-                .map(|(label, text)| (label.to_string(), text))
-                .collect();
-        for (label, text) in [
-            ("empty", String::new()),
-            ("blank", "   \n\t  \n ".to_string()),
-            (
-                "padded",
-                format!("  \n {}  \n\n ", "Padded sentence here. ".repeat(80)),
-            ),
-            ("unbroken", "x".repeat(3000)),
-            (
-                "blank-lines",
-                "First part.\n\nSecond part.\n\n\n\nThird part. ".repeat(60),
-            ),
-            (
-                "cjk",
-                "\u{4f60}\u{597d}\u{4e16}\u{754c}\u{3002}".repeat(400),
-            ),
-            (
-                "marks",
-                "e\u{301}galite\u{301} \u{1f469}\u{200d}\u{1f52c} fin. ".repeat(120),
-            ),
-        ] {
-            inputs.push((label.to_string(), text));
-        }
-        let leaf = NodeId::new(7);
-        let mut compared = 0;
-        for &(target_chars, overlap_chars) in GOLDEN_CONFIGS {
-            let params = ChunkParams {
-                target_chars,
-                overlap_chars,
-            };
-            let shared_params = bookrack_text::ChunkParams {
-                target_chars,
-                overlap_chars,
-            };
-            for (label, text) in &inputs {
-                let paper = plan_chunks(leaf, text, &params);
-                let shared = bookrack_text::plan_chunks(
-                    &[bookrack_text::ChunkLeaf {
-                        node_id: leaf,
-                        parent_id: None,
-                        text,
-                    }],
-                    &shared_params,
-                );
-                let paper: Vec<_> = paper
-                    .iter()
-                    .map(|p| {
-                        (
-                            p.start_node_id,
-                            p.start_char_offset,
-                            p.end_node_id,
-                            p.end_char_offset,
-                            p.text.as_str(),
-                            p.norm_chunk_sha256.as_str(),
-                        )
-                    })
-                    .collect();
-                let shared: Vec<_> = shared
-                    .iter()
-                    .map(|p| {
-                        (
-                            p.start_node_id,
-                            p.start_char_offset,
-                            p.end_node_id,
-                            p.end_char_offset,
-                            p.text.as_str(),
-                            p.norm_chunk_sha256.as_str(),
-                        )
-                    })
-                    .collect();
-                assert_eq!(
-                    shared, paper,
-                    "{target_chars}/{overlap_chars}/{label}: the shared chunker plans a lone \
-                     leaf differently from the paper chunker"
-                );
-                compared += paper.len();
-            }
-        }
-        assert!(compared > 1000, "only {compared} chunks were compared");
     }
 }

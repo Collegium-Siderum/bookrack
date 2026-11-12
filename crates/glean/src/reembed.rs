@@ -18,7 +18,9 @@ use bookrack_embed::Embedder;
 use bookrack_extract::EXTRACTOR_VERSION;
 use bookrack_vectors::ChunkReader;
 
-use crate::{GleanError, PlannedChunk, Result, audit_as, embed_and_write_chunks, new_run_id};
+use bookrack_text::ChunkPlan;
+
+use crate::{GleanError, Result, audit_as, embed_and_write_chunks, new_run_id};
 
 /// A planned per-paper reembed: what would happen if [`reembed_paper`]
 /// ran on this `intake_id`.
@@ -245,17 +247,14 @@ fn collect_pinned_targets(catalog: &Catalog, ids: &[i64]) -> Result<Vec<bookrack
 
 /// Scan the partition and drop the vector column. With no chunks table
 /// on disk there is nothing to read and none is created.
-async fn read_chunk_plans(
-    lancedb_dir: &Path,
-    partition: PartitionIdx,
-) -> Result<Vec<PlannedChunk>> {
+async fn read_chunk_plans(lancedb_dir: &Path, partition: PartitionIdx) -> Result<Vec<ChunkPlan>> {
     let Some(store) = ChunkReader::open(lancedb_dir).await? else {
         return Ok(Vec::new());
     };
     let rows = store.scan_partition(partition).await?;
     Ok(rows
         .into_iter()
-        .map(|row| PlannedChunk {
+        .map(|row| ChunkPlan {
             start_node_id: NodeId::new(row.start_node_id.get()),
             start_char_offset: row.start_char_offset,
             end_node_id: NodeId::new(row.end_node_id.get()),

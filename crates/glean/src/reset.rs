@@ -18,7 +18,9 @@ use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_vectors::ChunkStore;
 
-use crate::{ChunkParams, Result, audit_as, embed_and_write_chunks, new_run_id, plan_chunks};
+use bookrack_text::{ChunkLeaf, plan_chunks};
+
+use crate::{ChunkParams, Result, audit_as, embed_and_write_chunks, new_run_id};
 
 /// What one [`reset_and_rechunk`] call produced.
 #[derive(Debug, Clone, Default)]
@@ -95,7 +97,14 @@ pub async fn reset_and_rechunk<E: Embedder>(
         };
         let leaf_id = leaf.node_id;
         let abstract_text = leaf.text_content.clone().unwrap_or_default();
-        let plans = plan_chunks(leaf_id, &abstract_text, &chunk_params);
+        let plans = plan_chunks(
+            &[ChunkLeaf {
+                node_id: leaf_id,
+                parent_id: None,
+                text: &abstract_text,
+            }],
+            &chunk_params,
+        );
         audit_as(
             catalog,
             "glean-reset",
@@ -242,7 +251,14 @@ mod tests {
         let result =
             build_structure(corpus, intake_id, Some(ABSTRACT.to_string()), &[]).expect("structure");
         let leaf_id = result.leaf_node_id.expect("abstract leaf");
-        let plans = plan_chunks(leaf_id, ABSTRACT, &ChunkParams::default());
+        let plans = plan_chunks(
+            &[ChunkLeaf {
+                node_id: leaf_id,
+                parent_id: None,
+                text: ABSTRACT,
+            }],
+            &ChunkParams::default(),
+        );
         assert!(!plans.is_empty(), "seed needs at least one chunk plan");
         let written = embed_and_write_chunks(
             corpus,
