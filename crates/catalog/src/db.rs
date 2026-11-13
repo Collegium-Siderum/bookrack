@@ -77,7 +77,7 @@ const STORE: StoreSpec = StoreSpec {
     schema: SchemaAxis::Migrated {
         target: TARGET_VERSION,
         migrate: migrate_to_latest,
-        retired: None,
+        retired: Some(crate::retired::retired_labels),
     },
     reader_stamp: ReaderStamp {
         table: "catalog_meta",
@@ -109,8 +109,21 @@ impl From<OpenError> for CatalogError {
             OpenError::Sqlite(e) => CatalogError::Sqlite(e),
             OpenError::Io(e) => CatalogError::Io(e),
             OpenError::Rederive { .. } => unreachable!("catalog.db is migrated, never rederived"),
-            OpenError::Retired { .. } => unreachable!("catalog.db names no retired-value check"),
+            OpenError::Retired { .. } => {
+                unreachable!("a refusal for retired labels is converted with its path")
+            }
         }
+    }
+}
+
+/// Convert a refusal to open the file at `path`.
+fn refused(path: &Path) -> impl FnOnce(OpenError) -> CatalogError + '_ {
+    move |e| match e {
+        OpenError::Retired { hits, .. } => CatalogError::RetiredLabels {
+            path: path.to_path_buf(),
+            hits,
+        },
+        other => other.into(),
     }
 }
 
@@ -135,11 +148,13 @@ impl Catalog {
     /// creates the file, never migrates it, and never writes a stamp.
     ///
     /// A catalog behind this build is refused with
-    /// [`CatalogError::SchemaTooOld`], one ahead of it with
+    /// [`CatalogError::RetiredLabels`] when it holds rows carrying
+    /// retired labels and with [`CatalogError::SchemaTooOld`]
+    /// otherwise, one ahead of it with
     /// [`CatalogError::SchemaTooNew`]; a file whose tables differ from
     /// the compiled-in specs with [`CatalogError::Verify`].
     pub fn open(path: &Path) -> Result<Option<Catalog>> {
-        match bookrack_dbkit::open_store(&STORE, path, Access::Read, None)? {
+        match bookrack_dbkit::open_store(&STORE, path, Access::Read, None).map_err(refused(path))? {
             Opened::Ready(conn) => Ok(Some(Catalog::reading(conn))),
             Opened::Missing | Opened::Declined => Ok(None),
         }
@@ -151,9 +166,9 @@ impl Catalog {
     /// the SQLite open failure it is rather than as `None`. Any write
     /// through the resulting handle is rejected by SQLite.
     pub fn open_read_only(path: &Path) -> Result<Catalog> {
-        Ok(Catalog::reading(bookrack_dbkit::open_existing(
-            &STORE, path,
-        )?))
+        Ok(Catalog::reading(
+            bookrack_dbkit::open_existing(&STORE, path).map_err(refused(path))?,
+        ))
     }
 
     /// Open the `catalog.db` at `path` for writing, but only when its
@@ -168,7 +183,9 @@ impl Catalog {
     /// newer than this build is still an error, not a `None`: that one
     /// no caller can proceed on.
     pub fn open_for_bookkeeping(path: &Path) -> Result<Option<Catalog>> {
-        match bookrack_dbkit::open_store(&STORE, path, Access::Bookkeeping, None)? {
+        match bookrack_dbkit::open_store(&STORE, path, Access::Bookkeeping, None)
+            .map_err(refused(path))?
+        {
             Opened::Ready(conn) => Catalog::writing(conn).map(Some),
             Opened::Missing | Opened::Declined => Ok(None),
         }
@@ -181,14 +198,14 @@ impl Catalog {
     /// Only an existing database that holds tables and is actually about
     /// to be migrated is backed up; a freshly created one is not. Fails
     /// with [`CatalogError::SchemaTooNew`] if the file was written by a
-    /// newer schema revision than this build understands.
+    /// newer schema revision than this build understands, and with
+    /// [`CatalogError::RetiredLabels`], before the backup, if a file
+    /// behind this build holds rows carrying retired labels.
     pub fn open_for_write(path: &Path, backup_dir: &Path) -> Result<Catalog> {
-        Catalog::ready(bookrack_dbkit::open_store(
-            &STORE,
-            path,
-            Access::Write,
-            Some(backup_dir),
-        )?)
+        Catalog::ready(
+            bookrack_dbkit::open_store(&STORE, path, Access::Write, Some(backup_dir))
+                .map_err(refused(path))?,
+        )
     }
 
     /// Open the `catalog.db` at `path` for writing, creating it if it
@@ -200,12 +217,9 @@ impl Catalog {
     /// before migrating it.
     #[doc(hidden)]
     pub fn open_for_write_unbacked(path: &Path) -> Result<Catalog> {
-        Catalog::ready(bookrack_dbkit::open_store(
-            &STORE,
-            path,
-            Access::Write,
-            None,
-        )?)
+        Catalog::ready(
+            bookrack_dbkit::open_store(&STORE, path, Access::Write, None).map_err(refused(path))?,
+        )
     }
 
     /// Open an ephemeral, private `catalog.db` held entirely in memory.
@@ -609,7 +623,7 @@ mod tests {
 
         // The existing row is still readable.
         let by_sha = read_only
-            .intake_by_sha("sha-rw")
+            .intake_by_sha(ItemKind::Book, "sha-rw")
             .expect("read existing")
             .expect("present");
         assert_eq!(by_sha.status, IntakeStatus::Pending);
@@ -794,5 +808,175 @@ mod tests {
             std::env::temp_dir().join(format!("bookrack-catalog-{}-{tag}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         dir
+    }
+    /// A file at `path` one revision behind, holding one intake row per
+    /// `sha`, with the last one then removed so the AUTOINCREMENT
+    /// counter sits above every surviving id.
+    fn seed_behind(path: &Path, shas: &[&str]) {
+        crate::fixtures::create_at_version(path, TARGET_VERSION - 1);
+        let conn = Connection::open(path).expect("open fixture");
+        for sha in shas {
+            conn.execute(
+                "INSERT INTO intake (source_sha256, intake_at, status) \
+                 VALUES (?1, '2026-01-01T00:00:00Z', 'embedded')",
+                [sha],
+            )
+            .expect("seed row");
+        }
+        conn.execute(
+            "DELETE FROM intake WHERE source_sha256 = ?1",
+            [shas[shas.len() - 1]],
+        )
+        .expect("remove the last row");
+    }
+
+    fn kinds(path: &Path) -> Vec<(String, i64)> {
+        let conn = Connection::open(path).expect("reopen");
+        let mut stmt = conn
+            .prepare("SELECT kind, COUNT(*) FROM intake GROUP BY kind ORDER BY kind")
+            .expect("prepare");
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows")
+    }
+
+    #[test]
+    fn migrating_labels_the_rows_of_a_papers_catalog_paper_by_its_file_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let papers = dir.path().join(crate::PAPERS_CATALOG_FILE);
+        let books = dir.path().join("catalog.db");
+        seed_behind(&papers, &["p1", "p2", "p3"]);
+        seed_behind(&books, &["b1", "b2", "b3"]);
+        // The write door itself, with no paper-side code in between.
+        drop(Catalog::open_for_write_unbacked(&papers).expect("open papers catalog"));
+        drop(Catalog::open_for_write_unbacked(&books).expect("open books catalog"));
+        assert_eq!(kinds(&papers), vec![("paper".to_string(), 2)]);
+        assert_eq!(kinds(&books), vec![("book".to_string(), 2)]);
+
+        let papers = Catalog::open_read_only(&papers).expect("reopen papers");
+        assert_eq!(papers.count_intakes(ItemKind::Paper).expect("count"), 2);
+        assert_eq!(papers.count_intakes(ItemKind::Book).expect("count"), 0);
+        assert!(
+            papers
+                .intake_by_sha(ItemKind::Paper, "p1")
+                .expect("lookup")
+                .is_some()
+        );
+        assert!(
+            papers
+                .intake_by_sha(ItemKind::Book, "p1")
+                .expect("lookup")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_doors_that_do_not_migrate_leave_a_behind_papers_catalog_unlabelled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let papers = dir.path().join(crate::PAPERS_CATALOG_FILE);
+        seed_behind(&papers, &["p1", "p2"]);
+
+        assert!(matches!(
+            Catalog::open(&papers),
+            Err(CatalogError::SchemaTooOld { .. })
+        ));
+        assert!(
+            Catalog::open_for_bookkeeping(&papers)
+                .expect("declined")
+                .is_none()
+        );
+        assert_eq!(
+            crate::fixtures::user_version(&papers),
+            TARGET_VERSION - 1,
+            "neither door migrates"
+        );
+        let conn = Connection::open(&papers).expect("reopen");
+        let has_kind: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('intake') WHERE name = 'kind'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("columns");
+        assert_eq!(has_kind, 0);
+    }
+
+    #[test]
+    fn migrating_keeps_the_autoincrement_counter_above_a_removed_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("catalog.db");
+        seed_behind(&path, &["a", "b", "c"]);
+        let mut catalog = Catalog::open_for_write_unbacked(&path).expect("open");
+        let fresh = catalog
+            .register_intake(ItemKind::Book, &crate::NewIntake::new("d"))
+            .expect("register")
+            .into_intake();
+        assert_eq!(
+            fresh.intake_id, 4,
+            "id 3 was issued before and must not return"
+        );
+    }
+
+    #[test]
+    fn the_same_bytes_hold_one_row_per_kind_and_never_two_of_one_kind() {
+        let mut catalog = Catalog::open_in_memory().expect("open");
+        let book = catalog
+            .register_intake(ItemKind::Book, &crate::NewIntake::new("same"))
+            .expect("book");
+        let reference = catalog
+            .register_intake(ItemKind::Reference, &crate::NewIntake::new("same"))
+            .expect("reference");
+        assert!(book.is_new() && reference.is_new());
+        assert_ne!(book.intake().intake_id, reference.intake().intake_id);
+
+        let again = catalog
+            .register_intake(ItemKind::Book, &crate::NewIntake::new("same"))
+            .expect("book again");
+        assert!(!again.is_new());
+        assert_eq!(again.intake().intake_id, book.intake().intake_id);
+        assert_eq!(
+            catalog
+                .intake_by_sha(ItemKind::Book, "same")
+                .expect("lookup")
+                .expect("present")
+                .intake_id,
+            book.intake().intake_id
+        );
+        assert_eq!(catalog.count_intakes(ItemKind::Book).expect("count"), 1);
+        assert_eq!(
+            catalog.count_intakes(ItemKind::Reference).expect("count"),
+            1
+        );
+
+        let dup = catalog.conn.execute(
+            "INSERT INTO intake (source_sha256, intake_at, status, kind) \
+             VALUES ('same', '2026-01-01T00:00:00Z', 'pending', 'book')",
+            [],
+        );
+        assert!(dup.is_err(), "a second (book, same) row must be refused");
+    }
+
+    #[test]
+    fn a_rule_fingerprint_is_absent_until_set_and_reads_back() {
+        let mut catalog = Catalog::open_in_memory().expect("open");
+        let id = catalog
+            .register_intake(ItemKind::Book, &crate::NewIntake::new("ruled"))
+            .expect("register")
+            .into_intake()
+            .intake_id;
+        let read = |catalog: &Catalog| {
+            catalog
+                .intake_by_id(id)
+                .expect("lookup")
+                .expect("present")
+                .rule_fingerprint
+        };
+        assert_eq!(read(&catalog), None);
+        assert!(catalog.set_rule_fingerprint(id, "fp-1").expect("set"));
+        assert_eq!(read(&catalog).as_deref(), Some("fp-1"));
+        assert!(catalog.set_rule_fingerprint(id, "fp-2").expect("replace"));
+        assert_eq!(read(&catalog).as_deref(), Some("fp-2"));
+        assert!(!catalog.set_rule_fingerprint(id + 1, "fp").expect("no row"));
     }
 }

@@ -83,7 +83,7 @@ pub async fn plan_reembed(
         let mut t = collect_targets(catalog, only)?;
         if stale_only {
             let stale: std::collections::HashSet<i64> = catalog
-                .stale_partitions(EXTRACTOR_VERSION)
+                .stale_partitions(bookrack_core::ItemKind::Book, EXTRACTOR_VERSION)
                 .map_err(IngestError::from)?
                 .into_iter()
                 .collect();
@@ -169,7 +169,7 @@ pub async fn reembed_all<E: Embedder>(
         let mut t = collect_targets(catalog, only)?;
         if stale_only {
             let stale: std::collections::HashSet<i64> = catalog
-                .stale_partitions(EXTRACTOR_VERSION)
+                .stale_partitions(bookrack_core::ItemKind::Book, EXTRACTOR_VERSION)
                 .map_err(IngestError::from)?
                 .into_iter()
                 .collect();
@@ -247,7 +247,7 @@ fn collect_targets(catalog: &Catalog, only: Option<i64>) -> Result<Vec<Intake>> 
             vec![intake]
         }
         None => catalog
-            .intakes_with_status(IntakeStatus::Embedded)
+            .intakes_with_status(bookrack_core::ItemKind::Book, IntakeStatus::Embedded)
             .map_err(IngestError::from)?,
     })
 }

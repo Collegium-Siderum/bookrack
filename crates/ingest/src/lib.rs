@@ -493,7 +493,7 @@ pub async fn ingest_book_with_progress<E: Embedder>(
             }
             OnFile::ExtractorBehind(intake) => {
                 tracing::Span::current().record("intake_id", intake.intake_id);
-                Some(intake)
+                Some(*intake)
             }
             OnFile::Rerun => None,
         }
@@ -786,7 +786,7 @@ enum OnFile {
     Current(IngestReport),
     /// Only `extractor_version` is behind: extract, then compare the
     /// result with the envelope on file.
-    ExtractorBehind(bookrack_catalog::Intake),
+    ExtractorBehind(Box<bookrack_catalog::Intake>),
 }
 
 /// Inspect the catalog and book state to decide how much of a re-ingest
@@ -805,7 +805,7 @@ fn on_file(
     source_sha: &str,
     embed_model: &str,
 ) -> Result<OnFile> {
-    let Some(intake) = catalog.intake_by_sha(source_sha)? else {
+    let Some(intake) = catalog.intake_by_sha(bookrack_core::ItemKind::Book, source_sha)? else {
         return Ok(OnFile::Rerun);
     };
     if intake.status != IntakeStatus::Embedded {
@@ -838,7 +838,7 @@ fn on_file(
         if intake.adapter.as_deref() == Some(bookrack_extract::ocr::ADAPTER) {
             return Ok(OnFile::Rerun);
         }
-        return Ok(OnFile::ExtractorBehind(intake));
+        return Ok(OnFile::ExtractorBehind(Box::new(intake)));
     }
     let (audit_verdict, audit_confidence) = stored_audit_outcome(catalog, intake.intake_id)?;
     Ok(OnFile::Current(IngestReport {
@@ -2881,7 +2881,10 @@ mod book_pipeline_tests {
         );
         assert_eq!(
             catalog
-                .stale_partitions(bookrack_extract::EXTRACTOR_VERSION)
+                .stale_partitions(
+                    bookrack_core::ItemKind::Book,
+                    bookrack_extract::EXTRACTOR_VERSION
+                )
                 .expect("stale partitions"),
             [first.intake_id],
         );
@@ -3037,7 +3040,10 @@ mod book_pipeline_tests {
             assert_eq!(intake.status, IntakeStatus::Embedded, "{case}");
             assert!(
                 catalog
-                    .stale_partitions(bookrack_extract::EXTRACTOR_VERSION)
+                    .stale_partitions(
+                        bookrack_core::ItemKind::Book,
+                        bookrack_extract::EXTRACTOR_VERSION
+                    )
                     .expect("stale partitions")
                     .is_empty(),
                 "{case}"
@@ -3598,13 +3604,16 @@ mod book_pipeline_tests {
         .expect_err("STRUCTURE must fail on a read-only corpus");
         let sha = sha256_hex(&std::fs::read(&file).expect("read sample"));
         let intake = catalog
-            .intake_by_sha(&sha)
+            .intake_by_sha(bookrack_core::ItemKind::Book, &sha)
             .expect("intake")
             .expect("registered");
         assert_eq!(intake.status, IntakeStatus::Extracted);
         assert_eq!(
             catalog
-                .stale_partitions(bookrack_extract::EXTRACTOR_VERSION)
+                .stale_partitions(
+                    bookrack_core::ItemKind::Book,
+                    bookrack_extract::EXTRACTOR_VERSION
+                )
                 .expect("stale partitions"),
             [intake.intake_id],
             "a book whose tree was never built must read as stale"
@@ -3774,7 +3783,10 @@ mod book_pipeline_tests {
         assert_eq!(intake.status, bookrack_catalog::IntakeStatus::Embedded);
         assert!(
             catalog
-                .stale_partitions(bookrack_extract::EXTRACTOR_VERSION)
+                .stale_partitions(
+                    bookrack_core::ItemKind::Book,
+                    bookrack_extract::EXTRACTOR_VERSION
+                )
                 .expect("stale partitions")
                 .is_empty(),
             "the re-ingested intake must no longer read as stale"
@@ -3831,7 +3843,10 @@ mod book_pipeline_tests {
         assert_eq!(intake.extractor_version, stale);
         assert_eq!(
             catalog
-                .stale_partitions(bookrack_extract::EXTRACTOR_VERSION)
+                .stale_partitions(
+                    bookrack_core::ItemKind::Book,
+                    bookrack_extract::EXTRACTOR_VERSION
+                )
                 .expect("stale partitions"),
             [first.intake_id],
             "neither sweep re-extracts, so the intake must still read as stale"

@@ -162,7 +162,7 @@ fn verify_pipeline(findings: &mut PipelineFindings, paths: &PipelinePaths) {
                 // read. Both probes go through the same connection, so
                 // the first reason is kept and the second is dropped
                 // rather than overwriting it.
-                match catalog.count_intakes() {
+                match catalog.count_intakes(paths.kind) {
                     Ok(count) => findings.intake_count = Some(count),
                     // The variants are wrappers, so the chain is
                     // flattened before it crosses the RPC boundary.

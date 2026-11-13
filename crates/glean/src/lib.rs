@@ -1428,7 +1428,7 @@ fn noop_if_up_to_date(
     source_sha: &str,
     embed_model: &str,
 ) -> Result<Option<GleanReport>> {
-    let Some(intake) = catalog.intake_by_sha(source_sha)? else {
+    let Some(intake) = catalog.intake_by_sha(bookrack_core::ItemKind::Paper, source_sha)? else {
         return Ok(None);
     };
     if intake.status != IntakeStatus::Embedded {
@@ -1488,6 +1488,17 @@ pub(crate) fn new_run_id(source_sha: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_catalog_knows_the_papers_catalog_by_the_name_the_config_gives_it() {
+        // The catalog's migration labels existing rows `paper` by this
+        // file name; a rename on one side alone would label them `book`.
+        let cfg = bookrack_config::Config::new("root".into(), String::new());
+        assert_eq!(
+            cfg.papers_catalog_db().file_name(),
+            Some(std::ffi::OsStr::new(bookrack_catalog::PAPERS_CATALOG_FILE))
+        );
+    }
 
     fn body(text: &str, source_unit: u32) -> Block {
         Block {

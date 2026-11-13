@@ -117,7 +117,7 @@ fn walk_rebuild_targets(
         let mut t = collect_targets(catalog, params.only)?;
         if params.stale_only {
             let stale: std::collections::HashSet<i64> = catalog
-                .stale_partitions(EXTRACTOR_VERSION)?
+                .stale_partitions(bookrack_core::ItemKind::Paper, EXTRACTOR_VERSION)?
                 .into_iter()
                 .collect();
             t.retain(|i| stale.contains(&i.intake_id));
@@ -216,7 +216,7 @@ fn collect_targets(catalog: &Catalog, only: Option<i64>) -> Result<Vec<bookrack_
                 IntakeStatus::DedupHold,
                 IntakeStatus::Embedded,
             ] {
-                out.extend(catalog.intakes_with_status(status)?);
+                out.extend(catalog.intakes_with_status(bookrack_core::ItemKind::Paper, status)?);
             }
             out.sort_by_key(|i| i.intake_id);
             out

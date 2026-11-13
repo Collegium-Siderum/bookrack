@@ -19,8 +19,14 @@
 //!   older binary's `INSERT` path remains valid.
 //! - Existing values, once written from a production path, are
 //!   frozen in meaning. The string value sets of `format`, `adapter`,
-//!   and `status` (the `IntakeStatus` enum) are append-only; an
-//!   existing label never changes meaning.
+//!   and `status` (the `IntakeStatus` enum) only grow, and a label
+//!   never changes meaning.
+//! - A label may be retired. A catalog holding a row that carries a
+//!   retired label is refused when it opens behind the revision that
+//!   retired it; the refusal comes with one schema revision and is
+//!   made once. Retired at revision 18: `format = ocr-markdown`,
+//!   `adapter = ocr-pages`, and every writer of `status = aborted`,
+//!   whose value still decodes.
 //! - `intake_id` is permanent and never reused. `source_sha256` is
 //!   permanent and identifies the same bytes for the lifetime of
 //!   the database.
@@ -29,7 +35,8 @@
 //! - `extractor_version` carries the integer in
 //!   `bookrack_extract::EXTRACTOR_VERSION` at the moment the file
 //!   was extracted, and reading the integer back yields the value
-//!   it was written with.
+//!   it was written with. A row carrying the retired labels holds
+//!   the revision of the path that wrote it instead.
 //!
 //! Fields not yet written by any production path — `notes`,
 //! `expression_id`, and `stored_path` together with the opaque-store
@@ -57,8 +64,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
             .comment("long-lived, never reused"),
         ColumnSpec::text("source_sha256")
             .not_null()
-            .unique()
-            .comment("whole-file hash; the identity anchor"),
+            .comment("whole-file hash; with `kind`, the identity anchor"),
         ColumnSpec::text("stored_path")
             .comment("opaque store location; set once the file is stored"),
         ColumnSpec::text("original_path").comment("forensic: where the file came from"),
@@ -101,6 +107,17 @@ pub(crate) const SPEC: TableSpec = TableSpec {
              before this column existed until a repair pass backfills \
              them from the envelope.",
         ),
+        ColumnSpec::text("kind")
+            .not_null()
+            .default("'book'")
+            .comment(
+                "item kind the row belongs to: book / paper / reference. \
+             `(kind, source_sha256)` is unique.",
+            ),
+        ColumnSpec::text("rule_fingerprint").comment(
+            "fingerprint of the rule a rule-read intake was extracted \
+             under. Nullable: NULL on every row no rule produced.",
+        ),
     ],
     composite_pk: None,
     uniques: &[],
@@ -112,6 +129,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
             "idx_intake_derived_status",
             &["derived_from_sha256", "status"],
         ),
+        IndexSpec::on("idx_intake_kind_sha", &["kind", "source_sha256"]).unique(),
     ],
 };
 
@@ -125,9 +143,9 @@ const LIKE_ESCAPE: &str = "\\";
 /// autoincremented or filled by later pipeline stages. Callers append a
 /// `RETURNING` clause built from [`SPEC`].
 const INSERT_INTAKE_SQL: &str = "INSERT INTO intake \
-     (source_sha256, original_path, format, byte_size, intake_at, status) \
+     (source_sha256, original_path, format, byte_size, intake_at, status, kind) \
      VALUES (:source_sha256, :original_path, :format, :byte_size, \
-             strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), :status)";
+             strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), :status, :kind)";
 
 /// A `SELECT` of every intake column with `tail` (a `WHERE` clause)
 /// appended. The column list is derived from [`SPEC`], so it can never
@@ -409,6 +427,8 @@ fn build_filter_fragments(filter: &IntakeFilter<'_>) -> (String, String, Vec<Box
         params.push(Box::new(filter.kind.as_scope_str().to_string()));
     }
 
+    where_parts.push("i.kind = ?".to_string());
+    params.push(Box::new(filter.kind.as_scope_str().to_string()));
     if let Some(needle) = filter.title_substring {
         where_parts.push(format!(
             "{} LIKE ? ESCAPE '{LIKE_ESCAPE}'",
@@ -584,6 +604,9 @@ pub struct Intake {
     /// anchor itself, and for OCR rows written before the column
     /// existed until a repair pass backfills them from the envelope.
     pub derived_from_sha256: Option<String>,
+    /// The fingerprint of the rule the intake was extracted under.
+    /// `None` on a row no rule produced.
+    pub rule_fingerprint: Option<String>,
 }
 
 impl Intake {
@@ -607,6 +630,7 @@ impl Intake {
             page_count: row.get("page_count")?,
             source_pdf_path: row.get("source_pdf_path")?,
             derived_from_sha256: row.get("derived_from_sha256")?,
+            rule_fingerprint: row.get("rule_fingerprint")?,
         })
     }
 }
@@ -699,28 +723,31 @@ impl Registration {
 }
 
 impl Catalog {
-    /// Register a source file, idempotently on its `source_sha256`.
+    /// Register a source file, idempotently on `(kind, source_sha256)`.
     ///
-    /// The `kind` parameter declares which pipeline the caller is
-    /// writing for. The `Catalog` instance itself is already bound to
-    /// one underlying database file (the books catalog or the papers
-    /// catalog), so `kind` does not enter SQL here; it is a
-    /// signature-layer safety belt that promotes a mismatched-pipeline
-    /// call from a runtime symptom to a compile-time error at the call
-    /// site.
+    /// The row is written with `kind`; the same bytes registered under
+    /// another kind get a row of their own.
     ///
-    /// If the hash is already known the existing row is returned as
+    /// The writers below that address a row by `intake_id` take a
+    /// `kind` as well and leave it out of their SQL: an id names one
+    /// row whatever its kind. There the parameter is a signature-layer
+    /// safety belt, which makes the caller state the pipeline it is
+    /// writing for at the call site.
+    ///
+    /// If the pair is already known the existing row is returned as
     /// [`Registration::AlreadyPresent`] and nothing is written;
     /// otherwise a new row is created with status
     /// [`IntakeStatus::Pending`] and returned as
     /// [`Registration::Created`].
     pub fn register_intake(&mut self, kind: ItemKind, new: &NewIntake) -> Result<Registration> {
-        let _ = kind;
         let tx = self.conn.transaction()?;
         let existing = tx
             .query_row(
-                &select_sql("WHERE source_sha256 = :source_sha256"),
-                named_params! { ":source_sha256": new.source_sha256 },
+                &select_sql("WHERE kind = :kind AND source_sha256 = :source_sha256"),
+                named_params! {
+                    ":kind": kind.as_scope_str(),
+                    ":source_sha256": new.source_sha256,
+                },
                 Intake::from_row,
             )
             .optional()?;
@@ -736,6 +763,7 @@ impl Catalog {
                 ":format": new.format,
                 ":byte_size": new.byte_size,
                 ":status": IntakeStatus::Pending.as_str(),
+                ":kind": kind.as_scope_str(),
             },
             Intake::from_row,
         )?;
@@ -743,13 +771,13 @@ impl Catalog {
         Ok(Registration::Created(intake))
     }
 
-    /// Look up an intake by its whole-file hash.
-    pub fn intake_by_sha(&self, source_sha256: &str) -> Result<Option<Intake>> {
+    /// Look up an intake of `kind` by its whole-file hash.
+    pub fn intake_by_sha(&self, kind: ItemKind, source_sha256: &str) -> Result<Option<Intake>> {
         let intake = self
             .conn
             .query_row(
-                &select_sql("WHERE source_sha256 = :source_sha256"),
-                named_params! { ":source_sha256": source_sha256 },
+                &select_sql("WHERE kind = :kind AND source_sha256 = :source_sha256"),
+                named_params! { ":kind": kind.as_scope_str(), ":source_sha256": source_sha256 },
                 Intake::from_row,
             )
             .optional()?;
@@ -772,12 +800,12 @@ impl Catalog {
     /// All intakes carrying `status`, ordered by `intake_id` ascending.
     /// Drives batch operations that walk the intake table by lifecycle
     /// state (corpus rebuild, vectors reembed).
-    pub fn intakes_with_status(&self, status: IntakeStatus) -> Result<Vec<Intake>> {
-        let mut stmt = self
-            .conn
-            .prepare(&select_sql("WHERE status = :status ORDER BY intake_id"))?;
+    pub fn intakes_with_status(&self, kind: ItemKind, status: IntakeStatus) -> Result<Vec<Intake>> {
+        let mut stmt = self.conn.prepare(&select_sql(
+            "WHERE kind = :kind AND status = :status ORDER BY intake_id",
+        ))?;
         let rows = stmt.query_map(
-            named_params! { ":status": status.as_str() },
+            named_params! { ":kind": kind.as_scope_str(), ":status": status.as_str() },
             Intake::from_row,
         )?;
         let mut out = Vec::new();
@@ -791,12 +819,15 @@ impl Catalog {
     /// `NeedsOcr` anchor with no OCR product that reached a
     /// successfully-processed state derived from it. `aborted` OCR
     /// products are deliberately not counted as processed, so a source
-    /// whose OCR attempt failed keeps surfacing here for a re-run.
+    /// whose OCR attempt failed keeps surfacing here for a re-run. Only
+    /// a book row counts as a product: a row of another kind derived
+    /// from the same source leaves the anchor pending.
     const OCR_PENDING_WHERE: &'static str = "\
         WHERE intake.status = 'needs_ocr' \
           AND NOT EXISTS ( \
             SELECT 1 FROM intake child \
             WHERE child.derived_from_sha256 = intake.source_sha256 \
+              AND child.kind = 'book' \
               AND child.status IN ('embedded', 'extracted', 'dedup_hold') \
           )";
 
@@ -978,11 +1009,13 @@ impl Catalog {
         Ok((intakes, total))
     }
 
-    /// Total number of intake rows.
-    pub fn count_intakes(&self) -> Result<u64> {
-        let n: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM intake", [], |row| row.get(0))?;
+    /// Number of intake rows of `kind`.
+    pub fn count_intakes(&self, kind: ItemKind) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM intake WHERE kind = ?1",
+            [kind.as_scope_str()],
+            |row| row.get(0),
+        )?;
         count_as_u64(n)
     }
 
@@ -1000,9 +1033,13 @@ impl Catalog {
 
     /// Number of intake rows whose `status` falls in `statuses`. An empty
     /// slice means "no filter" and counts every row.
-    pub fn count_intakes_by_status(&self, statuses: &[IntakeStatus]) -> Result<u64> {
+    pub fn count_intakes_by_status(
+        &self,
+        kind: ItemKind,
+        statuses: &[IntakeStatus],
+    ) -> Result<u64> {
         if statuses.is_empty() {
-            return self.count_intakes();
+            return self.count_intakes(kind);
         }
         debug_assert!(
             statuses.len() <= 8,
@@ -1010,10 +1047,13 @@ impl Catalog {
             statuses.len()
         );
         let placeholders = vec!["?"; statuses.len()].join(", ");
-        let sql = format!("SELECT COUNT(*) FROM intake WHERE status IN ({placeholders})");
+        let sql =
+            format!("SELECT COUNT(*) FROM intake WHERE kind = ? AND status IN ({placeholders})");
         let n: i64 = self.conn.query_row(
             &sql,
-            params_from_iter(statuses.iter().map(|s| s.as_str())),
+            params_from_iter(
+                std::iter::once(kind.as_scope_str()).chain(statuses.iter().map(|s| s.as_str())),
+            ),
             |row| row.get(0),
         )?;
         count_as_u64(n)
@@ -1041,14 +1081,18 @@ impl Catalog {
     /// non-OCR row's `extractor_version` already equals `current`.
     ///
     /// [`bookrack_extract::EXTRACTOR_VERSION`]: https://docs.rs/bookrack-extract
-    pub fn stale_partitions(&self, current: u32) -> Result<Vec<i64>> {
+    pub fn stale_partitions(&self, kind: ItemKind, current: u32) -> Result<Vec<i64>> {
         let mut stmt = self.conn.prepare(
             "SELECT intake_id FROM intake \
-             WHERE extractor_version != :current \
+             WHERE kind = :kind \
+               AND extractor_version != :current \
                AND (adapter IS NULL OR adapter != 'ocr-pages') \
              ORDER BY intake_id",
         )?;
-        let rows = stmt.query_map(named_params! { ":current": current }, |row| row.get(0))?;
+        let rows = stmt.query_map(
+            named_params! { ":kind": kind.as_scope_str(), ":current": current },
+            |row| row.get(0),
+        )?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -1059,12 +1103,13 @@ impl Catalog {
     /// Number of intakes whose stored `extractor_version` is not equal
     /// to `current`. Shares the WHERE shape with [`Self::stale_partitions`]
     /// so a count and a listing reach the same rows.
-    pub fn count_stale_partitions(&self, current: u32) -> Result<u64> {
+    pub fn count_stale_partitions(&self, kind: ItemKind, current: u32) -> Result<u64> {
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM intake \
-             WHERE extractor_version != :current \
+             WHERE kind = :kind \
+               AND extractor_version != :current \
                AND (adapter IS NULL OR adapter != 'ocr-pages')",
-            named_params! { ":current": current },
+            named_params! { ":kind": kind.as_scope_str(), ":current": current },
             |row| row.get(0),
         )?;
         count_as_u64(n)
@@ -1111,10 +1156,10 @@ impl Catalog {
 
     /// Number of intake rows whose `format` matches `format` exactly.
     /// Rows whose `format` is `NULL` are excluded.
-    pub fn count_intakes_by_format(&self, format: &str) -> Result<u64> {
+    pub fn count_intakes_by_format(&self, kind: ItemKind, format: &str) -> Result<u64> {
         let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM intake WHERE format = :format",
-            named_params! { ":format": format },
+            "SELECT COUNT(*) FROM intake WHERE kind = :kind AND format = :format",
+            named_params! { ":kind": kind.as_scope_str(), ":format": format },
             |row| row.get(0),
         )?;
         count_as_u64(n)
@@ -1240,6 +1285,17 @@ impl Catalog {
                 Ok(true)
             }
         }
+    }
+
+    /// Record the fingerprint of the rule an intake was extracted
+    /// under, replacing the one it holds. Returns whether a row with
+    /// that id existed.
+    pub fn set_rule_fingerprint(&self, intake_id: i64, rule_fingerprint: &str) -> Result<bool> {
+        let affected = self.conn.execute(
+            "UPDATE intake SET rule_fingerprint = :rule_fingerprint WHERE intake_id = :intake_id",
+            named_params! { ":rule_fingerprint": rule_fingerprint, ":intake_id": intake_id },
+        )?;
+        Ok(affected > 0)
     }
 
     /// Stamp the extraction provenance: the adapter that parsed the
@@ -1462,19 +1518,40 @@ mod tests {
         // _c stays at the default version 1.
 
         // Against current = 2, only _c is stale.
-        let stale = catalog.stale_partitions(2).expect("query");
+        let stale = catalog
+            .stale_partitions(bookrack_core::ItemKind::Book, 2)
+            .expect("query");
         assert_eq!(stale, vec![_c]);
-        assert_eq!(catalog.count_stale_partitions(2).expect("count"), 1);
+        assert_eq!(
+            catalog
+                .count_stale_partitions(bookrack_core::ItemKind::Book, 2)
+                .expect("count"),
+            1
+        );
 
         // Against current = 1, _a and _b are stale.
-        let stale = catalog.stale_partitions(1).expect("query");
+        let stale = catalog
+            .stale_partitions(bookrack_core::ItemKind::Book, 1)
+            .expect("query");
         assert_eq!(stale, vec![a, b]);
-        assert_eq!(catalog.count_stale_partitions(1).expect("count"), 2);
+        assert_eq!(
+            catalog
+                .count_stale_partitions(bookrack_core::ItemKind::Book, 1)
+                .expect("count"),
+            2
+        );
 
         // Against current = 3, every row is stale.
-        let stale = catalog.stale_partitions(3).expect("query");
+        let stale = catalog
+            .stale_partitions(bookrack_core::ItemKind::Book, 3)
+            .expect("query");
         assert_eq!(stale, vec![a, b, _c]);
-        assert_eq!(catalog.count_stale_partitions(3).expect("count"), 3);
+        assert_eq!(
+            catalog
+                .count_stale_partitions(bookrack_core::ItemKind::Book, 3)
+                .expect("count"),
+            3
+        );
     }
 
     #[test]
@@ -1539,10 +1616,14 @@ mod tests {
         // Born-digital queries against current = 2: epub_old and pdf_old
         // are stale; epub_new is current; OCR rows are filtered out
         // regardless of their version.
-        let bd_stale = catalog.stale_partitions(2).expect("bd query");
+        let bd_stale = catalog
+            .stale_partitions(bookrack_core::ItemKind::Book, 2)
+            .expect("bd query");
         assert_eq!(bd_stale, vec![epub_old, pdf_old]);
         assert_eq!(
-            catalog.count_stale_partitions(2).expect("bd count"),
+            catalog
+                .count_stale_partitions(bookrack_core::ItemKind::Book, 2)
+                .expect("bd count"),
             bd_stale.len() as u64
         );
 
@@ -1558,7 +1639,9 @@ mod tests {
         // The two queries partition the stale set: their results never
         // overlap. With current = 1 on both, only epub_new (v2) and
         // ocr_new (v2) are stale, on disjoint sides.
-        let bd_v1 = catalog.stale_partitions(1).expect("bd v1");
+        let bd_v1 = catalog
+            .stale_partitions(bookrack_core::ItemKind::Book, 1)
+            .expect("bd v1");
         let ocr_v1 = catalog.stale_ocr_partitions(1).expect("ocr v1");
         assert_eq!(bd_v1, vec![epub_new]);
         assert_eq!(ocr_v1, vec![ocr_new]);
@@ -1594,12 +1677,19 @@ mod tests {
             .expect("register")
             .into_intake();
 
-        let by_sha = catalog.intake_by_sha("sha-find").expect("lookup");
+        let by_sha = catalog
+            .intake_by_sha(bookrack_core::ItemKind::Book, "sha-find")
+            .expect("lookup");
         assert_eq!(by_sha.map(|i| i.intake_id), Some(intake.intake_id));
         let by_id = catalog.intake_by_id(intake.intake_id).expect("lookup");
         assert_eq!(by_id, Some(intake));
 
-        assert!(catalog.intake_by_sha("absent").expect("lookup").is_none());
+        assert!(
+            catalog
+                .intake_by_sha(bookrack_core::ItemKind::Book, "absent")
+                .expect("lookup")
+                .is_none()
+        );
         assert!(catalog.intake_by_id(9999).expect("lookup").is_none());
     }
 
@@ -1839,7 +1929,7 @@ mod tests {
         catalog
             .add_contributor(&NewContributor::new(
                 catalog
-                    .intake_by_sha("sha-a")
+                    .intake_by_sha(bookrack_core::ItemKind::Book, "sha-a")
                     .expect("lookup")
                     .expect("present")
                     .intake_id,
@@ -2198,14 +2288,24 @@ mod tests {
     #[test]
     fn count_intakes_grows_with_each_registration() {
         let mut catalog = catalog();
-        assert_eq!(catalog.count_intakes().expect("count empty"), 0);
+        assert_eq!(
+            catalog
+                .count_intakes(bookrack_core::ItemKind::Book)
+                .expect("count empty"),
+            0
+        );
         catalog
             .register_intake(ItemKind::Book, &NewIntake::new("sha-a"))
             .expect("register");
         catalog
             .register_intake(ItemKind::Book, &NewIntake::new("sha-b"))
             .expect("register");
-        assert_eq!(catalog.count_intakes().expect("count two"), 2);
+        assert_eq!(
+            catalog
+                .count_intakes(bookrack_core::ItemKind::Book)
+                .expect("count two"),
+            2
+        );
     }
 
     #[test]
@@ -2230,19 +2330,22 @@ mod tests {
 
         assert_eq!(
             catalog
-                .count_intakes_by_status(&[IntakeStatus::Pending])
+                .count_intakes_by_status(bookrack_core::ItemKind::Book, &[IntakeStatus::Pending])
                 .expect("count one"),
             1
         );
         assert_eq!(
             catalog
-                .count_intakes_by_status(&[IntakeStatus::Extracted, IntakeStatus::Embedded])
+                .count_intakes_by_status(
+                    bookrack_core::ItemKind::Book,
+                    &[IntakeStatus::Extracted, IntakeStatus::Embedded]
+                )
                 .expect("count in-list"),
             2
         );
         assert_eq!(
             catalog
-                .count_intakes_by_status(&[IntakeStatus::Aborted])
+                .count_intakes_by_status(bookrack_core::ItemKind::Book, &[IntakeStatus::Aborted])
                 .expect("count miss"),
             0
         );
@@ -2259,9 +2362,11 @@ mod tests {
             .expect("register");
         assert_eq!(
             catalog
-                .count_intakes_by_status(&[])
+                .count_intakes_by_status(bookrack_core::ItemKind::Book, &[])
                 .expect("count empty slice"),
-            catalog.count_intakes().expect("count all"),
+            catalog
+                .count_intakes(bookrack_core::ItemKind::Book)
+                .expect("count all"),
         );
     }
 
@@ -2283,16 +2388,20 @@ mod tests {
             .expect("register");
 
         assert_eq!(
-            catalog.count_intakes_by_format("epub").expect("count epub"),
+            catalog
+                .count_intakes_by_format(bookrack_core::ItemKind::Book, "epub")
+                .expect("count epub"),
             2
         );
         assert_eq!(
-            catalog.count_intakes_by_format("pdf").expect("count pdf"),
+            catalog
+                .count_intakes_by_format(bookrack_core::ItemKind::Book, "pdf")
+                .expect("count pdf"),
             1
         );
         assert_eq!(
             catalog
-                .count_intakes_by_format("mobi")
+                .count_intakes_by_format(bookrack_core::ItemKind::Book, "mobi")
                 .expect("count unknown"),
             0
         );
@@ -2762,6 +2871,93 @@ mod tests {
 
         assert!(cat.list_ocr_pending(50, 0).expect("list").is_empty());
         assert_eq!(cat.count_ocr_pending().expect("count"), 0);
+    }
+
+    #[test]
+    fn list_ocr_pending_keeps_an_anchor_whose_only_product_is_of_another_kind() {
+        let mut cat = catalog();
+        let anchor = register_book(&mut cat, "pdf-open", "pdf", IntakeStatus::NeedsOcr);
+        let reference = cat
+            .register_intake(ItemKind::Reference, &NewIntake::new("ref-sha"))
+            .expect("register")
+            .into_intake()
+            .intake_id;
+        cat.set_intake_status(ItemKind::Reference, reference, IntakeStatus::Embedded)
+            .expect("status");
+        cat.set_derived_from(ItemKind::Reference, reference, "pdf-open")
+            .expect("edge");
+
+        let pending = cat.list_ocr_pending(50, 0).expect("list");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].intake.intake_id, anchor);
+        assert_eq!(cat.count_ocr_pending().expect("count"), 1);
+    }
+
+    #[test]
+    fn every_query_that_takes_a_kind_sees_only_the_rows_of_that_kind() {
+        // One book and two references, all `embedded`, all `pdf`, all at
+        // extractor version 1: a query that ignored its kind would
+        // count three.
+        let mut cat = catalog();
+        let book = register_book(&mut cat, "shared", "pdf", IntakeStatus::Embedded);
+        let mut references = Vec::new();
+        for sha in ["shared", "ref-only"] {
+            let id = cat
+                .register_intake(ItemKind::Reference, &NewIntake::new(sha).format("pdf"))
+                .expect("register")
+                .into_intake()
+                .intake_id;
+            cat.set_intake_status(ItemKind::Reference, id, IntakeStatus::Embedded)
+                .expect("status");
+            references.push(id);
+        }
+        let ids = |rows: Vec<Intake>| rows.into_iter().map(|i| i.intake_id).collect::<Vec<_>>();
+
+        for (kind, expected) in [
+            (ItemKind::Book, vec![book]),
+            (ItemKind::Reference, references.clone()),
+            (ItemKind::Paper, Vec::new()),
+        ] {
+            let n = expected.len() as u64;
+            let embedded = [IntakeStatus::Embedded];
+            assert_eq!(
+                ids(cat
+                    .intakes_with_status(kind, IntakeStatus::Embedded)
+                    .unwrap()),
+                expected,
+                "{kind:?}"
+            );
+            assert_eq!(cat.count_intakes(kind).unwrap(), n, "{kind:?}");
+            assert_eq!(
+                cat.count_intakes_by_status(kind, &embedded).unwrap(),
+                n,
+                "{kind:?}"
+            );
+            assert_eq!(
+                cat.count_intakes_by_status(kind, &[]).unwrap(),
+                n,
+                "{kind:?}"
+            );
+            assert_eq!(
+                cat.count_intakes_by_format(kind, "pdf").unwrap(),
+                n,
+                "{kind:?}"
+            );
+            assert_eq!(cat.stale_partitions(kind, 2).unwrap(), expected, "{kind:?}");
+            assert_eq!(cat.count_stale_partitions(kind, 2).unwrap(), n, "{kind:?}");
+            let filter = IntakeFilter {
+                kind,
+                ..IntakeFilter::default()
+            };
+            assert_eq!(
+                ids(cat.find_intakes(&filter, 10, 0).unwrap()),
+                expected,
+                "{kind:?}"
+            );
+            let (page, total) = cat.find_intakes_page(&filter, 10, 0).unwrap();
+            assert_eq!(ids(page), expected, "{kind:?}");
+            assert_eq!(total, n, "{kind:?}");
+        }
     }
 
     #[test]

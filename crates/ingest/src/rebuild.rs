@@ -129,7 +129,7 @@ fn walk_rebuild_targets(
         let mut t = collect_targets(catalog, params.only)?;
         if params.stale_only {
             let stale: std::collections::HashSet<i64> = catalog
-                .stale_partitions(EXTRACTOR_VERSION)
+                .stale_partitions(bookrack_core::ItemKind::Book, EXTRACTOR_VERSION)
                 .map_err(IngestError::from)?
                 .into_iter()
                 .collect();
@@ -239,7 +239,7 @@ fn collect_targets(catalog: &Catalog, only: Option<i64>) -> Result<Vec<bookrack_
             ] {
                 out.extend(
                     catalog
-                        .intakes_with_status(status)
+                        .intakes_with_status(bookrack_core::ItemKind::Book, status)
                         .map_err(IngestError::from)?,
                 );
             }

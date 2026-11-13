@@ -479,7 +479,9 @@ async fn an_intake_stamped_by_an_older_extractor_is_still_served() {
             .set_intake_status(ItemKind::Book, intake_id, IntakeStatus::Embedded)
             .expect("set status");
         assert_eq!(
-            catalog.stale_partitions(EXTRACTOR_VERSION).expect("stale"),
+            catalog
+                .stale_partitions(bookrack_core::ItemKind::Book, EXTRACTOR_VERSION)
+                .expect("stale"),
             vec![1]
         );
     }

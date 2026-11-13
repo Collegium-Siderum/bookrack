@@ -312,7 +312,7 @@ fn resolve_intake(catalog: &Catalog, args: &RemovePaperArgs) -> Result<Intake> {
     } else {
         let sha = args.sha.as_deref().expect("checked by plan_remove");
         catalog
-            .intake_by_sha(sha)
+            .intake_by_sha(bookrack_core::ItemKind::Paper, sha)
             .context("look up intake by sha")?
             .ok_or_else(|| {
                 CmdInputError::UnknownSha {

@@ -102,7 +102,7 @@ earlier ones already happened.
 | `text-splitter`, `icu_*`, `bookrack_text::CHUNK_VERSION` | `chunk_version`, on the book store and the papers store | chunks → vectors, on both | `bookrack vectors reembed` (books); `bookrack papers vectors reset` (papers) |
 | `unicode-normalization`, `bookrack_text::NORMALIZE_VERSION` | `normalize_version` | chunks → vectors | `bookrack vectors reembed` (books); `bookrack papers vectors reembed` (papers) |
 | Embedding model name or vector width | `embed_model` / `vector_dim` | chunks → vectors | `bookrack libraries fork` (try it side by side) or `bookrack vectors reset` + `bookrack papers vectors reset` (in place) — see [Switching the embedding model](#switching-the-embedding-model) |
-| `catalog.db` / `papers_catalog.db` schema bump | catalog `user_version` | none — migrated forward in place (one exception: the v14 OCR-derivation edge, see below) | open the library (migration is automatic); after upgrading a library that predates v14, run `bookrack doctor --backfill-ocr-derivation` once |
+| `catalog.db` / `papers_catalog.db` schema bump | catalog `user_version` | none — migrated forward in place (two exceptions, see below: the v14 OCR-derivation edge, and a catalog below v18 that holds OCR-path rows, which is refused) | open the library (migration is automatic); after upgrading a library that predates v14, run `bookrack doctor --backfill-ocr-derivation` once |
 | `reference.db` schema bump | reference store `user_version` | none — migrated forward in place, after a snapshot | open the library (migration is automatic); `bookrack distill build` and the `reference.overlay_set` tool migrate it too. A read never does: `bookrack distill list` and `bookrack distill verify` refuse a store that is behind, naming both versions |
 | `corpus.db` schema bump | corpus `schema_version` | corpus tree | `bookrack corpus rebuild` |
 | `papers_corpus.db` schema bump | papers corpus `schema_version` | papers corpus tree | `bookrack papers corpus rebuild` |
@@ -297,6 +297,26 @@ may since have been re-judged by another, so the count at close cannot
 be recovered. `bookrack runs show` counts such a run live and labels
 the section `profiles (counted now, not at run close)`; runs closed by
 a v17 binary carry the snapshot.
+
+Catalog v18 gives every intake row an item kind and moves the identity
+of a row from its source hash to the pair of kind and source hash, so
+one file can stand behind a row of each kind. Rows already in
+`catalog.db` become `book` and rows already in `papers_catalog.db`
+become `paper`; `intake_id` values are kept and none is issued twice.
+The same step adds `intake.rule_fingerprint`, NULL on every existing
+row.
+
+v18 is also the revision at which the labels written by the OCR intake
+path are retired. A catalog below v18 that holds any row carrying one
+— `format = ocr-markdown`, `adapter = ocr-pages`, `status = aborted`,
+a publication-attributes row with `source = ocr_marker`, a finished
+OCR-marker stage, or a derivation edge — is not migrated. Every open
+refuses it and names each label with its row count, no pre-migration
+snapshot is taken, and the file is left as it was. There is no
+in-place repair: remove that library with
+`bookrack libraries remove <name> --purge` and ingest its books again,
+or keep a 0.14 binary for it. The search runs only while the catalog
+is below v18; a catalog already at v18 is opened without it.
 
 ## Recommended window
 

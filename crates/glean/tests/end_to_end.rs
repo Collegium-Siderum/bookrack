@@ -240,7 +240,7 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
     let bytes = std::fs::read(fixture_path()).expect("read fixture for sha");
     let source_sha = hex_sha256(&bytes);
     let intake = catalog
-        .intake_by_sha(&source_sha)
+        .intake_by_sha(bookrack_core::ItemKind::Paper, &source_sha)
         .expect("read intake")
         .expect("present");
     assert_eq!(intake.status, IntakeStatus::Embedded);
@@ -383,7 +383,7 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
     );
     assert_eq!(
         catalog
-            .stale_partitions(EXTRACTOR_VERSION)
+            .stale_partitions(bookrack_core::ItemKind::Paper, EXTRACTOR_VERSION)
             .expect("stale partitions"),
         [report.intake_id],
         "neither sweep re-extracts, so the intake must still read as stale"
@@ -417,7 +417,7 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
     assert_eq!(refreshed.status, IntakeStatus::Embedded);
     assert!(
         catalog
-            .stale_partitions(EXTRACTOR_VERSION)
+            .stale_partitions(bookrack_core::ItemKind::Paper, EXTRACTOR_VERSION)
             .expect("stale partitions")
             .is_empty(),
         "the re-gleaned intake must no longer read as stale"
@@ -500,7 +500,7 @@ async fn glean_paper_skips_source_pdf_archive_when_disabled() {
     let bytes = std::fs::read(fixture_path()).expect("read fixture for sha");
     let source_sha = hex_sha256(&bytes);
     let intake = catalog
-        .intake_by_sha(&source_sha)
+        .intake_by_sha(bookrack_core::ItemKind::Paper, &source_sha)
         .expect("read intake")
         .expect("present");
     assert_eq!(intake.source_pdf_path, None);

@@ -88,7 +88,12 @@ fn intake_v1_fixture_round_trips() {
 
     let catalog = Catalog::open_for_write_unbacked(&target).expect("open migrated fixture");
 
-    assert_eq!(catalog.count_intakes().expect("count"), ROWS.len() as u64);
+    assert_eq!(
+        catalog
+            .count_intakes(bookrack_core::ItemKind::Book)
+            .expect("count"),
+        ROWS.len() as u64
+    );
 
     for (index, expected) in ROWS.iter().enumerate() {
         let intake_id = (index as i64) + 1;

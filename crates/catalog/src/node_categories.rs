@@ -364,7 +364,9 @@ mod tests {
         let categorised: u64 = 2;
         assert_eq!(
             categorised + catalog.count_intakes_without_category(KIND).expect("count"),
-            catalog.count_intakes().expect("total")
+            catalog
+                .count_intakes(bookrack_core::ItemKind::Book)
+                .expect("total")
         );
     }
 

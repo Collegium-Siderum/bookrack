@@ -164,7 +164,7 @@ pub fn category_counts<E: Embedder>(ops: &Ops<E>) -> Result<CategoryCounts> {
             })
             .collect();
         let uncategorised = catalog.count_intakes_without_category(ItemKind::Book)?;
-        let total = catalog.count_intakes()?;
+        let total = catalog.count_intakes(bookrack_core::ItemKind::Book)?;
         Ok(CategoryCounts {
             categories,
             uncategorised,
@@ -316,12 +316,15 @@ pub fn show_stats<E: Embedder>(ops: &Ops<E>) -> Result<LibraryStats> {
         };
         let mut intake_counts_by_status = BTreeMap::new();
         for status in IntakeStatus::ALL {
-            let n = catalog.count_intakes_by_status(std::slice::from_ref(&status))?;
+            let n = catalog.count_intakes_by_status(
+                bookrack_core::ItemKind::Book,
+                std::slice::from_ref(&status),
+            )?;
             intake_counts_by_status.insert(status.as_str().to_string(), n);
         }
         let mut intake_count_by_format = BTreeMap::new();
         for format in ["epub", "pdf", "mobi", "azw3", "txt"] {
-            let n = catalog.count_intakes_by_format(format)?;
+            let n = catalog.count_intakes_by_format(bookrack_core::ItemKind::Book, format)?;
             if n > 0 {
                 intake_count_by_format.insert(format.to_string(), n);
             }
@@ -374,7 +377,10 @@ fn papers_stats_if_configured<E: Embedder>(
     let mut intake_counts_by_status = BTreeMap::new();
     for status in IntakeStatus::ALL {
         let n = match &papers {
-            Some(catalog) => catalog.count_intakes_by_status(std::slice::from_ref(&status))?,
+            Some(catalog) => catalog.count_intakes_by_status(
+                bookrack_core::ItemKind::Paper,
+                std::slice::from_ref(&status),
+            )?,
             None => 0,
         };
         intake_counts_by_status.insert(status.as_str().to_string(), n);

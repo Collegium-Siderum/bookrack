@@ -450,7 +450,8 @@ fn ocr_noop_if_up_to_date(
     expected_pages: u32,
     embed_model: &str,
 ) -> Result<Option<OcrIngestReport>> {
-    let Some(ocr_intake) = catalog.intake_by_sha(source_sha_ocr)? else {
+    let Some(ocr_intake) = catalog.intake_by_sha(bookrack_core::ItemKind::Book, source_sha_ocr)?
+    else {
         return Ok(None);
     };
     if ocr_intake.status != IntakeStatus::Embedded {
@@ -859,7 +860,7 @@ mod tests {
         // intake stays NeedsOcr so a corrected re-ingest can pick it up.
         let pdf_id = p
             .catalog
-            .intake_by_sha(&{
+            .intake_by_sha(bookrack_core::ItemKind::Book, &{
                 let bytes = std::fs::read(extract_fixture("sample.pdf")).expect("read pdf");
                 sha256_hex(&bytes)
             })
@@ -870,7 +871,7 @@ mod tests {
         let ocr_bytes = std::fs::read(&ocr_md).expect("read ocr");
         let ocr_intake = p
             .catalog
-            .intake_by_sha(&sha256_hex(&ocr_bytes))
+            .intake_by_sha(bookrack_core::ItemKind::Book, &sha256_hex(&ocr_bytes))
             .expect("lookup")
             .expect("present ocr");
         assert_eq!(ocr_intake.status, IntakeStatus::Aborted);

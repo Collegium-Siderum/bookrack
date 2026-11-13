@@ -89,7 +89,9 @@ pub async fn show_library_info<E: Embedder>(
         } else {
             (None, None)
         };
-        let intake_count = catalog.as_ref().and_then(|c| c.count_intakes().ok());
+        let intake_count = catalog
+            .as_ref()
+            .and_then(|c| c.count_intakes(bookrack_core::ItemKind::Book).ok());
         let ready_book_count = catalog
             .as_ref()
             .and_then(|c| c.count_book_states_by_stage("ready").ok());
@@ -155,7 +157,9 @@ async fn read_papers_info<E: Embedder>(ops: &Ops<E>) -> Option<PapersInfo> {
     } else {
         (None, None)
     };
-    let intake_count = catalog.as_ref().and_then(|c| c.count_intakes().ok());
+    let intake_count = catalog
+        .as_ref()
+        .and_then(|c| c.count_intakes(bookrack_core::ItemKind::Paper).ok());
     Some(PapersInfo {
         corpus_stamps,
         corpus_error,

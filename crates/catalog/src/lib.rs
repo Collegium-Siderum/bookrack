@@ -43,6 +43,7 @@ mod node_reviews;
 mod node_role_takeovers;
 mod pipeline_run_summary;
 mod pipeline_runs;
+mod retired;
 mod retrieval_call_hits;
 mod retrieval_calls;
 mod retrieval_issues;
@@ -70,6 +71,7 @@ pub use item_pipeline_audit::{ItemPipelineAudit, NewItemPipelineAudit};
 pub use item_state::{ItemState, NewItemState};
 pub use mcp_tool_calls::{McpToolCall, NewMcpToolCall};
 pub use metadata_audit::{MetadataAudit, NewMetadataAudit};
+pub use migrate::PAPERS_CATALOG_FILE;
 pub use node_categories::{CategoryCount, NewCategory, NodeCategory};
 pub use node_contributors::{CONTRIBUTOR_ROLES, NewContributor, NodeContributor};
 pub use node_overrides::{NewOverride, NodeOverride};
@@ -177,6 +179,20 @@ pub enum CatalogError {
         required: u32,
         /// [`bookrack_dbkit::READER_VERSION`] this build was compiled at.
         current: u32,
+    },
+
+    /// The database is behind this build and holds rows that carry
+    /// retired labels. It was neither backed up nor migrated.
+    #[error(
+        "catalog \"{}\" holds rows from the removed OCR intake path: {}",
+        path.display(),
+        retired::list(hits)
+    )]
+    RetiredLabels {
+        /// The database file.
+        path: std::path::PathBuf,
+        /// Each retired label found, with the number of rows carrying it.
+        hits: Vec<bookrack_dbkit::RetiredHit>,
     },
 
     /// A schema migration failed to apply.

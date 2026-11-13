@@ -17,11 +17,58 @@ use crate::migrate::{TARGET_VERSION, migrations};
 pub const CURRENT_VERSION: i64 = TARGET_VERSION;
 
 /// Reverses the newest migration on a database that holds its schema.
-const NEWEST_MIGRATION_DOWN: &str = "ALTER TABLE pipeline_run_summary DROP COLUMN profile_buckets;";
+///
+/// It rebuilds `intake` without `kind` and `rule_fingerprint`, with
+/// `source_sha256` unique on its own, and carries the AUTOINCREMENT
+/// counter across. Two rows that share a hash under different kinds
+/// cannot both be kept, and the rebuild fails on them.
+const NEWEST_MIGRATION_DOWN: &str = r#"
+PRAGMA foreign_keys = OFF;
+BEGIN;
+CREATE TABLE intake_old (
+  intake_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_sha256 TEXT NOT NULL UNIQUE,
+  stored_path TEXT,
+  original_path TEXT,
+  format TEXT,
+  byte_size INTEGER,
+  adapter TEXT,
+  extractor_version INTEGER NOT NULL DEFAULT 1,
+  intake_at TEXT NOT NULL,
+  status TEXT NOT NULL,
+  expression_id INTEGER,
+  notes TEXT,
+  page_count INTEGER,
+  source_pdf_path TEXT,
+  derived_from_sha256 TEXT
+);
+INSERT INTO intake_old (
+  intake_id, source_sha256, stored_path, original_path, format, byte_size,
+  adapter, extractor_version, intake_at, status, expression_id, notes,
+  page_count, source_pdf_path, derived_from_sha256
+)
+SELECT
+  intake_id, source_sha256, stored_path, original_path, format, byte_size,
+  adapter, extractor_version, intake_at, status, expression_id, notes,
+  page_count, source_pdf_path, derived_from_sha256
+FROM intake;
+CREATE TEMP TABLE intake_seq AS
+  SELECT COALESCE(MAX(seq), 0) AS seq FROM sqlite_sequence
+  WHERE name IN ('intake', 'intake_old');
+DROP TABLE intake;
+ALTER TABLE intake_old RENAME TO intake;
+DELETE FROM sqlite_sequence WHERE name = 'intake';
+INSERT INTO sqlite_sequence (name, seq) SELECT 'intake', seq FROM intake_seq;
+DROP TABLE intake_seq;
+CREATE INDEX idx_intake_status ON intake(status);
+CREATE INDEX idx_intake_format ON intake(format);
+CREATE INDEX idx_intake_derived_status ON intake(derived_from_sha256, status);
+COMMIT;
+"#;
 
 /// The revision [`NEWEST_MIGRATION_DOWN`] steps back from.
 // setting: internal -- a test fixture's record of the revision it reverses
-const NEWEST_MIGRATION_DOWN_FROM: i64 = 17;
+const NEWEST_MIGRATION_DOWN_FROM: i64 = 18;
 
 /// Create a `catalog.db` at `path` whose schema stops at `version`.
 ///

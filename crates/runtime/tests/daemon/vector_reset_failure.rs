@@ -54,6 +54,7 @@ struct Side {
     lancedb: &'static str,
     /// The `pipeline_runs.command` a reset registers under.
     reset_run: &'static str,
+    kind: bookrack_core::ItemKind,
 }
 
 const BOOKS: Side = Side {
@@ -61,6 +62,7 @@ const BOOKS: Side = Side {
     reset: "vectors.reset",
     reembed: "vectors.reembed",
     catalog: "catalog.db",
+    kind: bookrack_core::ItemKind::Book,
     corpus: "corpus.db",
     lancedb: "lancedb",
     reset_run: "reset",
@@ -71,6 +73,7 @@ const PAPERS: Side = Side {
     reset: "papers.vectors_reset",
     reembed: "papers.vectors_reembed",
     catalog: "papers_catalog.db",
+    kind: bookrack_core::ItemKind::Paper,
     corpus: "papers_corpus.db",
     lancedb: "lancedb_papers",
     reset_run: "papers_reset",
@@ -229,8 +232,12 @@ async fn side_state(root: &Path, side: Side) -> Result<SideState> {
         *slot = corpus.meta_get(key)?;
     }
     let catalog = Catalog::open_read_only(&root.join(side.catalog))?;
-    let embedded = catalog.intakes_with_status(IntakeStatus::Embedded)?.len();
-    let extracted = catalog.intakes_with_status(IntakeStatus::Extracted)?.len();
+    let embedded = catalog
+        .intakes_with_status(side.kind, IntakeStatus::Embedded)?
+        .len();
+    let extracted = catalog
+        .intakes_with_status(side.kind, IntakeStatus::Extracted)?
+        .len();
     let lancedb = root.join(side.lancedb);
     let ann_meta =
         std::fs::read_to_string(lancedb.join(bookrack_vectors::meta::META_FILENAME)).ok();

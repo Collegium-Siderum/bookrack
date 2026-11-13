@@ -314,7 +314,7 @@ fn resolve_intake(catalog: &Catalog, args: &RemoveArgs) -> Result<Intake> {
     } else {
         let sha = args.sha.as_deref().expect("checked by run()");
         catalog
-            .intake_by_sha(sha)
+            .intake_by_sha(bookrack_core::ItemKind::Book, sha)
             .context("look up intake by sha")?
             .ok_or_else(|| {
                 CmdInputError::UnknownSha {

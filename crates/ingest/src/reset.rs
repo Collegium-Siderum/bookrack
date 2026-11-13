@@ -77,7 +77,7 @@ pub async fn reset_and_rechunk<E: Embedder>(
         corpus.clear_index_stamps()?;
         ChunkStore::drop_chunks_table(lancedb_dir).await?;
         let embedded: Vec<i64> = catalog
-            .intakes_with_status(IntakeStatus::Embedded)?
+            .intakes_with_status(bookrack_core::ItemKind::Book, IntakeStatus::Embedded)?
             .into_iter()
             .map(|i| i.intake_id)
             .collect();
@@ -87,7 +87,8 @@ pub async fn reset_and_rechunk<E: Embedder>(
     }
 
     let mut report = ResetReport::default();
-    let targets = catalog.intakes_with_status(IntakeStatus::Extracted)?;
+    let targets =
+        catalog.intakes_with_status(bookrack_core::ItemKind::Book, IntakeStatus::Extracted)?;
     let chunk_params = ChunkParams::default();
     let run_id = maintenance_run_id("reset");
 

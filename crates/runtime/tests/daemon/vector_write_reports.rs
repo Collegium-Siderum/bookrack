@@ -182,7 +182,7 @@ async fn fill(
 
 fn intakes(root: &Path, side: Side, status: IntakeStatus) -> Result<Vec<i64>> {
     Ok(Catalog::open_for_write_unbacked(&root.join(side.catalog))?
-        .intakes_with_status(status)?
+        .intakes_with_status(side.kind, status)?
         .into_iter()
         .map(|i| i.intake_id)
         .collect())

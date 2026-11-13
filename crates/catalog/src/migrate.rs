@@ -20,7 +20,7 @@
 use rusqlite_migration::{M, Migrations};
 
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
-pub(crate) const TARGET_VERSION: i64 = 17;
+pub(crate) const TARGET_VERSION: i64 = 18;
 
 /// `M[0]` — the frozen baseline schema (the former `schema_version` 3),
 /// captured from the rendered specs. Immutable: never edit this text; add a
@@ -745,6 +745,99 @@ CREATE INDEX idx_retrieval_call_hits_passage
 const RUN_SUMMARY_PROFILE_BUCKETS_M16_DDL: &str =
     "ALTER TABLE pipeline_run_summary ADD COLUMN profile_buckets TEXT;";
 
+// `M[17]` — give every intake row an item kind and move the identity
+// anchor from `source_sha256` to `(kind, source_sha256)`, so a book and a
+// reference built from the same bytes can each hold a row. SQLite cannot
+// drop a column-level UNIQUE in place, so the table is rebuilt via the
+// 12-step pattern, as in `M[4]`. The new anchor is an explicit unique
+// index, which the open-time verification checks; a table-level UNIQUE
+// would not be.
+//
+// The highest `intake_id` ever issued is carried across the rebuild
+// through a temporary table: the copy alone would reset the
+// AUTOINCREMENT counter to the highest *surviving* id, and an id freed
+// by a removal could then be issued again.
+//
+// Existing rows back-fill to `book`; the hook below re-labels them
+// `paper` when the database file is the papers catalog.
+//
+// The rebuild also adds `rule_fingerprint`, NULL on every existing row.
+const INTAKE_KIND_M17_DDL: &str = r#"
+CREATE TABLE intake_new (
+  intake_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_sha256 TEXT NOT NULL,
+  stored_path TEXT,
+  original_path TEXT,
+  format TEXT,
+  byte_size INTEGER,
+  adapter TEXT,
+  extractor_version INTEGER NOT NULL DEFAULT 1,
+  intake_at TEXT NOT NULL,
+  status TEXT NOT NULL,
+  expression_id INTEGER,
+  notes TEXT,
+  page_count INTEGER,
+  source_pdf_path TEXT,
+  derived_from_sha256 TEXT,
+  kind TEXT NOT NULL DEFAULT 'book',
+  rule_fingerprint TEXT
+);
+INSERT INTO intake_new (
+  intake_id, source_sha256, stored_path, original_path, format, byte_size,
+  adapter, extractor_version, intake_at, status, expression_id, notes,
+  page_count, source_pdf_path, derived_from_sha256, kind
+)
+SELECT
+  intake_id, source_sha256, stored_path, original_path, format, byte_size,
+  adapter, extractor_version, intake_at, status, expression_id, notes,
+  page_count, source_pdf_path, derived_from_sha256, 'book'
+FROM intake;
+CREATE TEMP TABLE m17_intake_seq AS
+  SELECT COALESCE(MAX(seq), 0) AS seq FROM sqlite_sequence
+  WHERE name IN ('intake', 'intake_new');
+DROP TABLE intake;
+ALTER TABLE intake_new RENAME TO intake;
+DELETE FROM sqlite_sequence WHERE name = 'intake';
+INSERT INTO sqlite_sequence (name, seq) SELECT 'intake', seq FROM m17_intake_seq;
+DROP TABLE m17_intake_seq;
+CREATE INDEX idx_intake_status ON intake(status);
+CREATE INDEX idx_intake_format ON intake(format);
+CREATE INDEX idx_intake_derived_status ON intake(derived_from_sha256, status);
+CREATE UNIQUE INDEX idx_intake_kind_sha ON intake(kind, source_sha256);
+"#;
+
+/// File name of the papers catalog inside a data root. `M[17]` reads it
+/// to decide which kind the rows it back-fills belong to.
+pub const PAPERS_CATALOG_FILE: &str = "papers_catalog.db";
+
+/// Whether a connection's main database file is the papers catalog. An
+/// in-memory or temporary database (path `""`) is not.
+fn is_papers_catalog(path: Option<&str>) -> bool {
+    path.and_then(|p| std::path::Path::new(p).file_name())
+        .is_some_and(|name| name == PAPERS_CATALOG_FILE)
+}
+
+/// `M[17]` hook. Runs inside the migration's transaction, once,
+/// whichever door opened the file.
+///
+/// It first searches the rebuilt schema for retired labels, as the door
+/// did before the migration began, and fails on any: the transaction
+/// rolls back and the file stays at revision 17. It then back-fills
+/// `kind`: every row a papers catalog already holds is a paper.
+fn intake_kind_m17_hook(tx: &rusqlite::Transaction) -> rusqlite_migration::HookResult {
+    let hits = crate::retired::retired_labels(tx, 17)?;
+    if !hits.is_empty() {
+        return Err(rusqlite_migration::HookError::Hook(format!(
+            "the catalog holds rows carrying retired labels: {}",
+            crate::retired::list(&hits)
+        )));
+    }
+    if is_papers_catalog(tx.path()) {
+        tx.execute("UPDATE intake SET kind = 'paper'", [])?;
+    }
+    Ok(())
+}
+
 /// The migration sequence applied to `catalog.db` on open. Forward-only: a
 /// desktop downgrade restores a backup rather than running a `down` step.
 pub(crate) fn migrations() -> Migrations<'static> {
@@ -766,6 +859,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(AUDIT_PROFILE_FINGERPRINT_M14_DDL),
         M::up(RETRIEVAL_PAIR_M15_DDL),
         M::up(RUN_SUMMARY_PROFILE_BUCKETS_M16_DDL),
+        M::up_with_hook(INTAKE_KIND_M17_DDL, intake_kind_m17_hook),
     ])
 }
 
@@ -1612,5 +1706,38 @@ mod tests {
         assert!(index_exists(&conn, "idx_contrib_node"));
         assert!(index_exists(&conn, "idx_contrib_role_name"));
         assert!(index_exists(&conn, "idx_cat_cat"));
+    }
+    #[test]
+    fn a_retired_row_written_after_the_open_check_rolls_the_migration_back() {
+        // The migration sequence run directly, as it would run on a row
+        // that reached the file after the door had searched it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("catalog.db");
+        crate::fixtures::create_at_version(&path, 17);
+        Connection::open(&path)
+            .expect("open")
+            .execute_batch(
+                "INSERT INTO intake (source_sha256, intake_at, status, format) \
+                 VALUES ('sha-a', '2026-01-01T00:00:00Z', 'embedded', 'ocr-markdown');",
+            )
+            .expect("seed");
+        let before = std::fs::read(&path).expect("read");
+
+        let mut conn = Connection::open(&path).expect("reopen");
+        let err = migrations()
+            .to_latest(&mut conn)
+            .expect_err("the migration must refuse a retired row");
+        assert!(
+            err.to_string().contains("format = ocr-markdown (1)"),
+            "{err}"
+        );
+        drop(conn);
+
+        assert_eq!(crate::fixtures::user_version(&path), 17);
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            before,
+            "a rolled-back migration leaves the file byte for byte"
+        );
     }
 }

@@ -35,17 +35,20 @@ struct Side {
     submit: &'static str,
     catalog: &'static str,
     lancedb: &'static str,
+    kind: bookrack_core::ItemKind,
 }
 
 const BOOKS: Side = Side {
     submit: "ingest.submit",
     catalog: "catalog.db",
+    kind: bookrack_core::ItemKind::Book,
     lancedb: "lancedb",
 };
 
 const PAPERS: Side = Side {
     submit: "glean.submit",
     catalog: "papers_catalog.db",
+    kind: bookrack_core::ItemKind::Paper,
     lancedb: "lancedb_papers",
 };
 
@@ -120,7 +123,7 @@ async fn chunk_rows(root: &Path, side: Side) -> Result<usize> {
 
 fn embedded(root: &Path, side: Side) -> Result<usize> {
     Ok(Catalog::open_read_only(&root.join(side.catalog))?
-        .intakes_with_status(IntakeStatus::Embedded)?
+        .intakes_with_status(side.kind, IntakeStatus::Embedded)?
         .len())
 }
 

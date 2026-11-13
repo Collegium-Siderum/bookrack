@@ -76,7 +76,7 @@ pub async fn plan_reembed(
         let mut t = collect_targets(catalog, only)?;
         if stale_only {
             let stale: std::collections::HashSet<i64> = catalog
-                .stale_partitions(EXTRACTOR_VERSION)?
+                .stale_partitions(bookrack_core::ItemKind::Paper, EXTRACTOR_VERSION)?
                 .into_iter()
                 .collect();
             t.retain(|intake| stale.contains(&intake.intake_id));
@@ -157,7 +157,7 @@ pub async fn reembed_all<E: Embedder>(
         let mut t = collect_targets(catalog, only)?;
         if stale_only {
             let stale: std::collections::HashSet<i64> = catalog
-                .stale_partitions(EXTRACTOR_VERSION)?
+                .stale_partitions(bookrack_core::ItemKind::Paper, EXTRACTOR_VERSION)?
                 .into_iter()
                 .collect();
             t.retain(|intake| stale.contains(&intake.intake_id));
@@ -227,7 +227,9 @@ fn collect_targets(catalog: &Catalog, only: Option<i64>) -> Result<Vec<bookrack_
             }
             vec![intake]
         }
-        None => catalog.intakes_with_status(IntakeStatus::Embedded)?,
+        None => {
+            catalog.intakes_with_status(bookrack_core::ItemKind::Paper, IntakeStatus::Embedded)?
+        }
     })
 }
 

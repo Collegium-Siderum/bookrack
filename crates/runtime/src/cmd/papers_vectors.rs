@@ -63,7 +63,7 @@ fn has_extracted_intakes(cfg: &Config) -> Result<bool> {
         return Ok(false);
     };
     Ok(!catalog
-        .intakes_with_status(IntakeStatus::Extracted)
+        .intakes_with_status(bookrack_core::ItemKind::Paper, IntakeStatus::Extracted)
         .context("count extracted paper intakes")?
         .is_empty())
 }
