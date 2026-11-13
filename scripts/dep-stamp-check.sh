@@ -15,8 +15,8 @@
 # Two frozen forms:
 #   hash  `FROZEN_DEPS_HASH`: SHA-256 of the bytewise-sorted
 #         `name@version` lines joined by "\n", no trailing newline
-#   list  `FROZEN_SPLITTER_DEPS`: those lines themselves, one string
-#         per line of a `&[&str]` constant
+#   list  `FROZEN_SPLITTER_DEPS`, `FROZEN_RULE_DEPS`: those lines
+#         themselves, one string per line of a `&[&str]` constant
 #
 # Usage, from the repository root:
 #   ./scripts/dep-stamp-check.sh [lockfile]
@@ -117,6 +117,8 @@ check_hash normalize '^unicode-normalization$' \
   crates/text/src/normalize.rs FROZEN_DEPS_HASH bookrack_text::NORMALIZE_VERSION
 check_list chunk '^(text-splitter|icu_.*)$' \
   crates/text/src/chunk.rs FROZEN_SPLITTER_DEPS bookrack_text::CHUNK_VERSION
+check_list rule '^(aho-corasick|regex|regex-automata|regex-syntax)$' \
+  crates/extract/src/rule/mod.rs FROZEN_RULE_DEPS bookrack_extract::rule::RULE_ENGINE_VERSION
 
 [ "$fail" -eq 0 ] && echo "dep-stamp-check: clean"
 exit "$fail"

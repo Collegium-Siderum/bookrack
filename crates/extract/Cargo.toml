@@ -21,9 +21,13 @@ scraper.workspace = true
 serde.workspace = true
 # JSON encoding for the envelope module hoisted from ingest.
 serde_json.workspace = true
+# The source hash and the fingerprint of a rule intake.
+sha2.workspace = true
 # Atomic write of the envelope file via a same-dir tempfile + rename.
 tempfile.workspace = true
 thiserror.workspace = true
+# The rule file format.
+toml.workspace = true
 # Adapter fallback events emit a paired `tracing::warn!` so the
 # envelope record and the live log line cannot drift apart.
 tracing.workspace = true
@@ -32,7 +36,4 @@ tracing.workspace = true
 # Also a normal dependency above; the TXT test re-encodes a fixture to
 # GB18030 to exercise the legacy-encoding decode path.
 encoding_rs.workspace = true
-# Hashes Cargo.lock entries for behaviour-sensitive crates in the
-# dep-hash anchor test.
-sha2.workspace = true
 zip.workspace = true

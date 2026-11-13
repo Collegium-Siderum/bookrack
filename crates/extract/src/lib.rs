@@ -24,6 +24,7 @@ pub mod pdf_paper;
 pub mod pdfium_gate;
 pub mod pdfium_pin;
 mod quality;
+pub mod rule;
 mod txt;
 
 pub use contract::*;

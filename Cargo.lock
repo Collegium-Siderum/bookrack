@@ -860,6 +860,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "toml",
  "tracing",
  "zip",
 ]

@@ -11,11 +11,16 @@
 //! The PDFium binary is not in the lockfile. `src/pdfium_pin.rs` pins
 //! its release tag and archive digests to `EXTRACTOR_VERSION` the same
 //! way, so swapping the binary alone also forces a bump.
+//!
+//! The rule engine has a guard of its own: the regex engine and the
+//! crates it matches with are pinned, as a list, to
+//! `RULE_ENGINE_VERSION`.
 
 // Parallel implementation: dep-hash-guards.
 
 use std::path::PathBuf;
 
+use bookrack_extract::rule::{FROZEN_RULE_DEPS, RULE_ENGINE_VERSION};
 use bookrack_extract::{EXTRACTOR_VERSION, FROZEN_DEPS_HASH};
 use sha2::{Digest, Sha256};
 
@@ -34,6 +39,49 @@ const BEHAVIOR_SENSITIVE_CRATES: &[&str] = &[
     "web_atoms",
     "zip",
 ];
+
+/// The crates a rule's patterns are matched by: `regex`, the two
+/// crates it compiles and runs a pattern with, and `aho-corasick`,
+/// which it hands literal prefixes to.
+///
+/// Two crates the rule engine also runs on are left out. `memchr` is a
+/// byte-search primitive, left out of the extractor's list for the same
+/// reason. `toml` needs no guard: a fingerprint covers the parsed rule,
+/// so a parser that reads a rule file differently changes the
+/// fingerprint by itself.
+const RULE_ENGINE_CRATES: &[&str] = &["aho-corasick", "regex", "regex-automata", "regex-syntax"];
+
+#[test]
+fn rule_engine_version_and_frozen_rule_deps_are_pinned_as_a_pair() {
+    assert_eq!(
+        (RULE_ENGINE_VERSION, FROZEN_RULE_DEPS),
+        (
+            1,
+            &[
+                "aho-corasick@1.1.4",
+                "regex-automata@0.4.14",
+                "regex-syntax@0.8.10",
+                "regex@1.12.3",
+            ][..]
+        ),
+        "RULE_ENGINE_VERSION and FROZEN_RULE_DEPS bump together; restate the pair here"
+    );
+}
+
+#[test]
+fn rule_engine_deps_match_frozen_list() {
+    let lock_path = workspace_cargo_lock();
+    let lock = std::fs::read_to_string(&lock_path)
+        .unwrap_or_else(|e| panic!("read {}: {}", lock_path.display(), e));
+    let locked = locked_entries(&lock, RULE_ENGINE_CRATES)
+        .unwrap_or_else(|missing| panic!("Cargo.lock has no entry for {missing:?}"));
+    assert_eq!(
+        locked, FROZEN_RULE_DEPS,
+        "the rule engine's deps changed. Either keep the previous versions in Cargo.lock, \
+         or bump bookrack_extract::rule::RULE_ENGINE_VERSION and restate FROZEN_RULE_DEPS \
+         as {locked:#?} (see docs/UPGRADE.md)"
+    );
+}
 
 #[test]
 fn extractor_version_and_frozen_deps_hash_are_pinned_as_a_pair() {

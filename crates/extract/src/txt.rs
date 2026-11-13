@@ -45,7 +45,7 @@ pub fn extract(
 ) -> Result<Extraction, ExtractError> {
     let bytes = std::fs::read(path)?;
     let mut fallbacks = Vec::new();
-    let text = decode(&bytes, &mut fallbacks);
+    let text = decode(&bytes, ADAPTER, None, &mut fallbacks);
 
     // One non-blank line is one block; `str::lines` also strips the
     // `\r` of CRLF endings, and `trim` drops the leading ideographic
@@ -99,44 +99,47 @@ pub fn extract(
 
 /// Decode raw bytes to text, detecting the encoding. Order: BOM, then a
 /// strict UTF-8 trial, then GB18030 (covers GBK / GB2312) for legacy
-/// Chinese text. Records a [`FallbackEvent`] on the lossy UTF-8 and
-/// GB18030 fallthrough paths so the envelope keeps the trace.
-fn decode(bytes: &[u8], fallbacks: &mut Vec<FallbackEvent>) -> String {
+/// Chinese text. Only a BOM at the very start is removed. Records a
+/// [`FallbackEvent`] on the lossy UTF-8 and GB18030 fallthrough paths so
+/// the envelope keeps the trace.
+///
+/// `adapter` labels the paired log line. `member` names the file when
+/// the caller decodes more than one: it then opens the event's detail,
+/// so the trace says which file took the fallback.
+pub(crate) fn decode(
+    bytes: &[u8],
+    adapter: &str,
+    member: Option<&str>,
+    fallbacks: &mut Vec<FallbackEvent>,
+) -> String {
+    let mut record = |kind: &'static str, cause: Option<String>| {
+        let detail = match (member, cause) {
+            (Some(member), Some(cause)) => Some(format!("{member}: {cause}")),
+            (Some(member), None) => Some(member.to_string()),
+            (None, cause) => cause,
+        };
+        FallbackEvent::record(fallbacks, adapter, kind, detail);
+    };
     if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
         // The BOM only claims UTF-8 — the rest may still contain
         // invalid sub-sequences `from_utf8_lossy` then replaces with
         // U+FFFD. Strict-check before the lossy decode to detect that.
         if std::str::from_utf8(rest).is_err() {
-            FallbackEvent::record(
-                fallbacks,
-                ADAPTER,
-                fallback_kinds::TXT_UTF8_LOSSY_SUBSTITUTION,
-                None,
-            );
+            record(fallback_kinds::TXT_UTF8_LOSSY_SUBSTITUTION, None);
         }
         return String::from_utf8_lossy(rest).into_owned();
     }
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
         let (text, had_errors) = encoding_rs::UTF_16LE.decode_without_bom_handling(rest);
         if had_errors {
-            FallbackEvent::record(
-                fallbacks,
-                ADAPTER,
-                fallback_kinds::TXT_UTF16LE_LOSSY_SUBSTITUTION,
-                None,
-            );
+            record(fallback_kinds::TXT_UTF16LE_LOSSY_SUBSTITUTION, None);
         }
         return text.into_owned();
     }
     if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
         let (text, had_errors) = encoding_rs::UTF_16BE.decode_without_bom_handling(rest);
         if had_errors {
-            FallbackEvent::record(
-                fallbacks,
-                ADAPTER,
-                fallback_kinds::TXT_UTF16BE_LOSSY_SUBSTITUTION,
-                None,
-            );
+            record(fallback_kinds::TXT_UTF16BE_LOSSY_SUBSTITUTION, None);
         }
         return text.into_owned();
     }
@@ -146,12 +149,7 @@ fn decode(bytes: &[u8], fallbacks: &mut Vec<FallbackEvent>) -> String {
     };
     // Not UTF-8 — assume legacy Chinese. GB18030 is a strict superset of
     // GBK and GB2312, so one decoder covers all three.
-    FallbackEvent::record(
-        fallbacks,
-        ADAPTER,
-        fallback_kinds::TXT_GB18030,
-        Some(utf8_error.to_string()),
-    );
+    record(fallback_kinds::TXT_GB18030, Some(utf8_error.to_string()));
     let (text, _, _) = encoding_rs::GB18030.decode(bytes);
     text.into_owned()
 }
@@ -184,7 +182,7 @@ mod fallback_tests {
         bytes.push(0xFF);
         bytes.extend_from_slice(b"text");
         let mut fallbacks = Vec::new();
-        let _ = decode(&bytes, &mut fallbacks);
+        let _ = decode(&bytes, ADAPTER, None, &mut fallbacks);
         assert!(
             fallbacks
                 .iter()
@@ -198,7 +196,7 @@ mod fallback_tests {
         let mut bytes = vec![0xEF, 0xBB, 0xBF];
         bytes.extend_from_slice(b"clean ascii");
         let mut fallbacks = Vec::new();
-        let _ = decode(&bytes, &mut fallbacks);
+        let _ = decode(&bytes, ADAPTER, None, &mut fallbacks);
         assert!(
             fallbacks.is_empty(),
             "clean BOM-prefixed UTF-8 must record nothing, got {fallbacks:?}",
@@ -213,7 +211,7 @@ mod fallback_tests {
         let mut bytes = vec![0xFF, 0xFE];
         bytes.extend_from_slice(&[0x00, 0xD8, 0x41]);
         let mut fallbacks = Vec::new();
-        let _ = decode(&bytes, &mut fallbacks);
+        let _ = decode(&bytes, ADAPTER, None, &mut fallbacks);
         assert!(
             fallbacks
                 .iter()
@@ -227,7 +225,7 @@ mod fallback_tests {
         // UTF-16LE BOM, then "Hi" as two well-formed code units.
         let bytes = [0xFF, 0xFE, b'H', 0x00, b'i', 0x00];
         let mut fallbacks = Vec::new();
-        let _ = decode(&bytes, &mut fallbacks);
+        let _ = decode(&bytes, ADAPTER, None, &mut fallbacks);
         assert!(
             fallbacks.is_empty(),
             "clean BOM-prefixed UTF-16LE must record nothing, got {fallbacks:?}",
@@ -241,7 +239,7 @@ mod fallback_tests {
         let mut bytes = vec![0xFE, 0xFF];
         bytes.extend_from_slice(&[0xD8, 0x00, 0x00, 0x41]);
         let mut fallbacks = Vec::new();
-        let _ = decode(&bytes, &mut fallbacks);
+        let _ = decode(&bytes, ADAPTER, None, &mut fallbacks);
         assert!(
             fallbacks
                 .iter()
@@ -257,7 +255,7 @@ mod fallback_tests {
         // ("ni" in pinyin), commonly used in legacy Chinese text dumps.
         let bytes = [0xC4, 0xE3];
         let mut fallbacks = Vec::new();
-        let _ = decode(&bytes, &mut fallbacks);
+        let _ = decode(&bytes, ADAPTER, None, &mut fallbacks);
         let event = fallbacks
             .iter()
             .find(|e| e.kind == fallback_kinds::TXT_GB18030)
@@ -265,6 +263,46 @@ mod fallback_tests {
         assert!(
             event.detail.is_some(),
             "GB18030 fallback should record the UTF-8 error detail",
+        );
+    }
+
+    #[test]
+    fn without_a_member_the_detail_is_the_cause_alone_or_absent() {
+        let gb18030: Vec<u8> = vec![0xC4, 0xE3];
+        let cause = std::str::from_utf8(&gb18030).unwrap_err().to_string();
+        let mut fallbacks = Vec::new();
+        let _ = decode(&gb18030, ADAPTER, None, &mut fallbacks);
+        let _ = decode(&[0xEF, 0xBB, 0xBF, 0xFF], ADAPTER, None, &mut fallbacks);
+        let details: Vec<Option<&str>> = fallbacks.iter().map(|e| e.detail.as_deref()).collect();
+        assert_eq!(details, [Some(cause.as_str()), None]);
+    }
+
+    #[test]
+    fn a_member_opens_the_detail_of_every_fallback() {
+        let gb18030: Vec<u8> = vec![0xC4, 0xE3];
+        let cause = std::str::from_utf8(&gb18030).unwrap_err().to_string();
+        let mut fallbacks = Vec::new();
+        let _ = decode(&gb18030, "rule-text", Some("vol/01.txt"), &mut fallbacks);
+        let _ = decode(
+            &[0xEF, 0xBB, 0xBF, 0xFF],
+            "rule-text",
+            Some("vol/02.txt"),
+            &mut fallbacks,
+        );
+        let events: Vec<(&str, Option<&str>)> = fallbacks
+            .iter()
+            .map(|e| (e.kind.as_str(), e.detail.as_deref()))
+            .collect();
+        let first = format!("vol/01.txt: {cause}");
+        assert_eq!(
+            events,
+            [
+                (fallback_kinds::TXT_GB18030, Some(first.as_str())),
+                (
+                    fallback_kinds::TXT_UTF8_LOSSY_SUBSTITUTION,
+                    Some("vol/02.txt")
+                ),
+            ]
         );
     }
 }
