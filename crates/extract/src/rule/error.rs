@@ -62,6 +62,67 @@ pub enum RuleError {
         #[source]
         source: std::io::Error,
     },
+
+    /// The canonical text could not be cut into units according to
+    /// `[units]`.
+    #[error("cannot split \"{}\" into units: {detail}", rule.display())]
+    Units {
+        /// The rule file.
+        rule: PathBuf,
+        /// Which member and line failed, or why no unit could be cut.
+        detail: String,
+    },
+
+    /// `completeness.expect = "contiguous"` and `completeness.fail_on_gap = true`
+    /// saw missing, repeated, or out-of-order unit numbers.
+    #[error(
+        "units of \"{}\" are not contiguous: {}",
+        rule.display(),
+        completeness_detail(gaps, duplicates, *ordered)
+    )]
+    Completeness {
+        /// The rule file.
+        rule: PathBuf,
+        /// Missing unit numbers between the lowest and highest numbered
+        /// units.
+        gaps: Vec<u32>,
+        /// Unit numbers that appeared more than once.
+        duplicates: Vec<u32>,
+        /// Whether the observed unit numbers were monotonically
+        /// non-decreasing.
+        ordered: bool,
+    },
+
+    /// Extraction produced zero body blocks.
+    #[error("extraction of \"{}\" produced no body blocks", rule.display())]
+    EmptyExtraction {
+        /// The rule file.
+        rule: PathBuf,
+    },
+}
+
+fn completeness_detail(gaps: &[u32], duplicates: &[u32], ordered: bool) -> String {
+    let mut parts = Vec::new();
+    if !gaps.is_empty() {
+        let list = gaps
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!("missing: {list}"));
+    }
+    if !duplicates.is_empty() {
+        let list = duplicates
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!("duplicate: {list}"));
+    }
+    if !ordered {
+        parts.push(String::from("out of order"));
+    }
+    parts.join("; ")
 }
 
 impl Explain for RuleError {
@@ -111,6 +172,42 @@ impl Explain for RuleError {
                     .hint("Check that the volume holding the rule's files is mounted and readable.")
                     .retryable(true)
             }
+
+            RuleError::Units { rule, detail } => {
+                Problem::new(format!("cannot split \"{}\" into units", rule.display()))
+                    .detail(format!("Unit splitting stopped: {detail}."))
+                    .hint(
+                        "Put every line of prose after a line matching units.marker, or \
+                         adjust units.marker and members.frontmatter.",
+                    )
+            }
+
+            RuleError::Completeness {
+                rule,
+                gaps,
+                duplicates,
+                ordered,
+            } => Problem::new(format!(
+                "units of \"{}\" are not contiguous",
+                rule.display()
+            ))
+            .detail(format!(
+                "Completeness check failed ({}).",
+                completeness_detail(gaps, duplicates, *ordered)
+            ))
+            .hint(
+                "Fix the missing, repeated, or out-of-order units, or set \
+                 completeness.fail_on_gap = false when the gaps are expected.",
+            ),
+
+            RuleError::EmptyExtraction { rule } => Problem::new(format!(
+                "extraction of \"{}\" produced no body blocks",
+                rule.display()
+            ))
+            .hint(
+                "Check that the rule's member files hold prose lines after frontmatter \
+                 and headings.",
+            ),
         }
     }
 }

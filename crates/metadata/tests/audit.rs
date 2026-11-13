@@ -82,6 +82,7 @@ fn provenance(adapter: &str, quality: TextLayerQuality) -> Provenance {
         partial_pages: None,
         source_of_structure: None,
         fallbacks: Vec::new(),
+        rule: None,
     }
 }
 

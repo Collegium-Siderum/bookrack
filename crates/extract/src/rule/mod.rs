@@ -18,13 +18,14 @@
 //!
 //! Nothing here touches PDFium or any other format adapter.
 
+mod book;
 mod error;
 mod glob;
 mod source;
 mod spec;
 
 pub use error::RuleError;
-pub use source::{Member, MemberFile, RuleSource};
+pub use source::{CompletenessReport, Member, MemberFile, RuleSource, SourceUnit};
 pub use spec::{
     BiblioSpec, BlockSplit, BlocksSpec, CompletenessSpec, Expect, Frontmatter, HeadingPattern,
     HeadingSource, MatchOn, MemberOrder, MembersSpec, ProvenanceSpec, RULE_SCHEMA, Rule, RuleFile,

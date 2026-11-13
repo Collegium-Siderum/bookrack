@@ -174,6 +174,7 @@ pub fn extract(
             partial_pages: None,
             source_of_structure: None,
             fallbacks,
+            rule: None,
         },
     }))
 }

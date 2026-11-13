@@ -2112,6 +2112,7 @@ mod tests {
                 partial_pages: None,
                 source_of_structure: None,
                 fallbacks: Vec::new(),
+                rule: None,
             },
         }
     }
@@ -3982,6 +3983,7 @@ mod book_pipeline_tests {
                 partial_pages: None,
                 source_of_structure: None,
                 fallbacks: Vec::new(),
+                rule: None,
             },
         };
         let intake = catalog
@@ -4056,6 +4058,7 @@ mod book_pipeline_tests {
                 partial_pages: None,
                 source_of_structure: None,
                 fallbacks: Vec::new(),
+                rule: None,
             },
         };
         let intake = catalog
@@ -4154,6 +4157,7 @@ mod book_pipeline_tests {
                 partial_pages: None,
                 source_of_structure: None,
                 fallbacks: Vec::new(),
+                rule: None,
             },
         };
         super::run_metadata_substep(
@@ -4481,6 +4485,7 @@ mod book_pipeline_tests {
                 partial_pages: None,
                 source_of_structure: None,
                 fallbacks: Vec::new(),
+                rule: None,
             },
         };
         let intake = catalog
@@ -4551,6 +4556,7 @@ mod book_pipeline_tests {
                 partial_pages: None,
                 source_of_structure: None,
                 fallbacks: Vec::new(),
+                rule: None,
             },
         };
         let intake = catalog
@@ -4620,6 +4626,7 @@ mod book_pipeline_tests {
                 partial_pages: None,
                 source_of_structure: None,
                 fallbacks: Vec::new(),
+                rule: None,
             },
         };
         let intake = catalog
@@ -4688,6 +4695,7 @@ mod book_pipeline_tests {
                 partial_pages: None,
                 source_of_structure: None,
                 fallbacks: Vec::new(),
+                rule: None,
             },
         };
         let intake = catalog
@@ -4754,6 +4762,7 @@ mod book_pipeline_tests {
                 partial_pages: None,
                 source_of_structure: None,
                 fallbacks: Vec::new(),
+                rule: None,
             },
         };
         let intake = catalog
@@ -4937,6 +4946,7 @@ mod book_pipeline_tests {
                 partial_pages: None,
                 source_of_structure: None,
                 fallbacks: Vec::new(),
+                rule: None,
             },
         }
     }

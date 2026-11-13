@@ -1903,6 +1903,7 @@ mod tests {
             partial_pages: None,
             source_of_structure: None,
             fallbacks: Vec::new(),
+            rule: None,
         };
         let blocks = [body("Body sample for the language signal.", 0)];
         run_paper_audit_substep(

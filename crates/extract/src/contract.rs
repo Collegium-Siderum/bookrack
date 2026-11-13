@@ -333,6 +333,40 @@ pub struct Provenance {
     /// deserialize as an empty vector.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallbacks: Vec<FallbackEvent>,
+    /// Rule-engine provenance for an extraction driven by a rule file
+    /// (`adapter == "rule-text"`). Absent on standard format adapters
+    /// and on older envelopes that predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<RuleOrigin>,
+}
+
+/// Rule-engine provenance recorded on [`Provenance::rule`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleOrigin {
+    /// SHA-256 fingerprint of the rule and member layout, computed by
+    /// [`crate::rule::RuleFile::fingerprint`].
+    pub fingerprint: String,
+    /// Value of [`crate::rule::RULE_ENGINE_VERSION`] when the rule ran.
+    pub engine_version: u32,
+    /// One entry per rule-declared source unit, indexed by
+    /// [`Block::source_unit`].
+    pub units: Vec<UnitOrigin>,
+}
+
+/// Origin of one rule-declared source unit in [`RuleOrigin::units`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnitOrigin {
+    /// Relative path of the first member file that contributed to this
+    /// unit.
+    pub member: String,
+    /// Printed page label captured from a marker's `label` group, if
+    /// any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// 1-based sheet or unit number captured from a marker's `sheet`
+    /// group or a member filename's `completeness.number` `n` group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<u32>,
 }
 
 /// One silent-fallback event recorded during extraction.
@@ -430,6 +464,17 @@ pub mod fallback_kinds {
     /// contained `isbn` somewhere in the string but did not carry
     /// the canonical `urn:isbn:` prefix.
     pub const EPUB_ISBN_SUBSTRING_FALLBACK: &str = "epub:isbn_substring_fallback";
+    /// Rule intake completeness check saw missing unit numbers between
+    /// the lowest and highest numbered units (`detail` lists the
+    /// missing numbers).
+    pub const RULE_GAP: &str = "rule:gap";
+    /// Rule intake completeness check saw repeated unit numbers
+    /// (`detail` lists the repeated numbers).
+    pub const RULE_DUPLICATE: &str = "rule:duplicate";
+    /// Rule intake completeness check saw unit numbers that were not
+    /// monotonically non-decreasing (`detail` lists the observed
+    /// sequence).
+    pub const RULE_ORDER: &str = "rule:order";
 }
 
 /// The quality grade of an extracted text layer.
@@ -549,6 +594,7 @@ mod tests {
                 partial_pages: None,
                 source_of_structure: None,
                 fallbacks: Vec::new(),
+                rule: None,
             },
         }
     }

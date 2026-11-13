@@ -184,6 +184,7 @@ pub fn extract_from_text(
             partial_pages: None,
             source_of_structure: None,
             fallbacks,
+            rule: None,
         },
     })
 }
@@ -192,7 +193,7 @@ pub fn extract_from_text(
 /// both LF and CRLF line endings. The content is not interpreted: only
 /// its bracketing is recognised. An unclosed frontmatter leaves the
 /// input untouched so the marker scan can produce a precise diagnostic.
-fn strip_frontmatter(text: &str) -> &str {
+pub(crate) fn strip_frontmatter(text: &str) -> &str {
     let rest = if let Some(r) = text.strip_prefix("---\n") {
         r
     } else if let Some(r) = text.strip_prefix("---\r\n") {

@@ -1,0 +1,17 @@
+schema = 1
+kind = "book"
+
+[members]
+include = ["sample.bookrack-ocr.v1.md"]
+frontmatter = "first"
+
+[units]
+by = "marker"
+marker = '^<!-- page (?P<label>\S*) \(sheet (?P<sheet>\d+)\) -->$'
+
+[structure]
+unit_titles = "none"
+headings = "none"
+
+[provenance]
+text_layer = "doubtful"

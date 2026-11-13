@@ -275,6 +275,7 @@ fn seed_audited_paper(data_root: &std::path::Path) -> Result<i64> {
             partial_pages: None,
             source_of_structure: None,
             fallbacks: Vec::new(),
+            rule: None,
         },
     };
 

@@ -96,12 +96,14 @@ pub enum MemberOrder {
     Explicit,
 }
 
-/// Whether the first member opens with a front-matter block.
+/// Whether members open with a YAML front-matter block (`---\n…\n---\n`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Frontmatter {
     /// The first member opens with one.
     First,
+    /// Every member may open with one.
+    Each,
     /// No member has one.
     #[default]
     None,
@@ -302,6 +304,10 @@ pub struct RuleFile {
     pub(super) rule: Rule,
     pub(super) include: Vec<Regex>,
     pub(super) exclude: Vec<Regex>,
+    pub(super) marker: Option<Regex>,
+    pub(super) unit_levels: Vec<(Regex, u8)>,
+    pub(super) patterns: Vec<(Regex, u8)>,
+    pub(super) number: Regex,
 }
 
 impl RuleFile {
@@ -342,6 +348,10 @@ impl RuleFile {
             rule,
             include: checked.include,
             exclude: checked.exclude,
+            marker: checked.marker,
+            unit_levels: checked.unit_levels,
+            patterns: checked.patterns,
+            number: checked.number,
         })
     }
 
@@ -354,12 +364,25 @@ impl RuleFile {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Parse the `n` capture group of `completeness.number` out of
+    /// `text` as a `u32`.
+    pub(super) fn number_u32(&self, text: &str) -> Option<u32> {
+        self.number
+            .captures(text)
+            .and_then(|c| c.name("n"))
+            .and_then(|m| m.as_str().parse::<u32>().ok())
+    }
 }
 
 /// What [`check`] compiled on the way.
 struct Checked {
     include: Vec<Regex>,
     exclude: Vec<Regex>,
+    marker: Option<Regex>,
+    unit_levels: Vec<(Regex, u8)>,
+    patterns: Vec<(Regex, u8)>,
+    number: Regex,
 }
 
 /// A key a rule sets to a value the engine refuses.
@@ -437,9 +460,10 @@ fn check(rule: &Rule) -> Result<Checked, Fault> {
         }
         _ => {}
     }
-    if let Some(marker) = &units.marker {
-        compile_regex("units.marker", marker)?;
-    }
+    let marker = match &units.marker {
+        Some(pattern) => Some(compile_regex("units.marker", pattern)?),
+        None => None,
+    };
 
     let structure = &rule.structure;
     if structure.unit_titles == UnitTitles::Filename && units.by != UnitsBy::File {
@@ -448,11 +472,15 @@ fn check(rule: &Rule) -> Result<Checked, Fault> {
             "\"filename\" needs units.by = \"file\": only then is a unit one file",
         ));
     }
+    let mut unit_levels = Vec::with_capacity(structure.unit_levels.len());
     for (i, level) in structure.unit_levels.iter().enumerate() {
-        compile_regex(format!("structure.unit_levels[{i}].regex"), &level.regex)?;
+        let re = compile_regex(format!("structure.unit_levels[{i}].regex"), &level.regex)?;
+        unit_levels.push((re, level.depth));
     }
+    let mut patterns = Vec::with_capacity(structure.patterns.len());
     for (i, pattern) in structure.patterns.iter().enumerate() {
-        compile_regex(format!("structure.patterns[{i}].regex"), &pattern.regex)?;
+        let re = compile_regex(format!("structure.patterns[{i}].regex"), &pattern.regex)?;
+        patterns.push((re, pattern.depth));
     }
 
     let number = compile_regex("completeness.number", &rule.completeness.number)?;
@@ -463,7 +491,14 @@ fn check(rule: &Rule) -> Result<Checked, Fault> {
         ));
     }
 
-    Ok(Checked { include, exclude })
+    Ok(Checked {
+        include,
+        exclude,
+        marker,
+        unit_levels,
+        patterns,
+        number,
+    })
 }
 
 fn compile_regex(key: impl Into<String>, pattern: &str) -> Result<Regex, Fault> {

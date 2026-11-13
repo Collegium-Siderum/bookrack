@@ -298,6 +298,7 @@ mod tests {
                 partial_pages: None,
                 source_of_structure: None,
                 fallbacks: Vec::new(),
+                rule: None,
             },
         }
     }

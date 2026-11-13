@@ -81,6 +81,7 @@ fn sample_extraction() -> Extraction {
             partial_pages: None,
             source_of_structure: None,
             fallbacks: Vec::new(),
+            rule: None,
         },
     }
 }

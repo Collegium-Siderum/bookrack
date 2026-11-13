@@ -3,15 +3,15 @@
 //! From a checked rule to its source: the members it names, their
 //! canonical text, and the two values that identify the result.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::spec::{MemberOrder, RuleFile};
+use super::spec::{Expect, Frontmatter, MemberOrder, RuleFile, UnitsBy};
 use super::{ADAPTER, RULE_ENGINE_VERSION, RuleError, glob};
-use crate::contract::FallbackEvent;
+use crate::contract::{FallbackEvent, UnitOrigin, fallback_kinds};
 
 /// Joins two members in the canonical text. A constant of the source
 /// hash: no rule can set it.
@@ -53,6 +53,61 @@ pub struct RuleSource {
     pub members: Vec<Member>,
     /// Decoding fallbacks taken while reading, each naming its member.
     pub fallbacks: Vec<FallbackEvent>,
+}
+
+/// One unit cut from a [`RuleSource`] according to `[units]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceUnit {
+    /// 0-based unit index (`Block::source_unit`).
+    pub index: u32,
+    /// Relative path of the first member file that contributed to this
+    /// unit.
+    pub member: String,
+    /// Printed page label captured from a marker's `label` group, if
+    /// any.
+    pub label: Option<String>,
+    /// 1-based sheet or unit number captured from a marker's `sheet`
+    /// group or a member filename's `completeness.number` `n` group.
+    pub sheet: Option<u32>,
+    /// The unit's canonical lines joined by `\n` and trimmed at both
+    /// ends.
+    pub text: String,
+    /// The unit's canonical lines in order, with leading whitespace and
+    /// internal blank lines intact for book-side heading and paragraph
+    /// scanning.
+    pub(super) lines: Vec<String>,
+}
+
+impl SourceUnit {
+    /// The [`UnitOrigin`] recorded for this unit in
+    /// [`crate::RuleOrigin`].
+    pub fn origin(&self) -> UnitOrigin {
+        UnitOrigin {
+            member: self.member.clone(),
+            label: self.label.clone(),
+            sheet: self.sheet,
+        }
+    }
+}
+
+/// Result of checking unit numbers against `[completeness]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompletenessReport {
+    /// Count of units that carried a number.
+    pub numbered: usize,
+    /// Lowest unit number seen, if any.
+    pub min: Option<u32>,
+    /// Highest unit number seen, if any.
+    pub max: Option<u32>,
+    /// Missing numbers between `min` and `max` under
+    /// `expect = "contiguous"`.
+    pub gaps: Vec<u32>,
+    /// Numbers that appeared more than once under
+    /// `expect = "contiguous"`.
+    pub duplicates: Vec<u32>,
+    /// Whether the observed unit numbers were monotonically
+    /// non-decreasing.
+    pub ordered: bool,
 }
 
 impl RuleSource {
@@ -186,6 +241,244 @@ impl RuleFile {
         }
         input.into_bytes()
     }
+
+    /// Cut `source` into [`SourceUnit`]s after stripping any
+    /// rule-configured YAML frontmatter.
+    pub fn units(&self, source: &RuleSource) -> Result<Vec<SourceUnit>, RuleError> {
+        match self.rule.units.by {
+            UnitsBy::File => {
+                let mut out = Vec::with_capacity(source.members.len());
+                for (idx, member) in source.members.iter().enumerate() {
+                    let lines: Vec<String> = self
+                        .member_lines(source, idx)
+                        .into_iter()
+                        .map(|(line, _)| line)
+                        .collect();
+                    let file_name = Path::new(&member.relative)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(&member.relative);
+                    let sheet = self.number_u32(file_name);
+                    let text = lines.join("\n").trim().to_string();
+                    out.push(SourceUnit {
+                        index: idx as u32,
+                        member: member.relative.clone(),
+                        label: None,
+                        sheet,
+                        text,
+                        lines,
+                    });
+                }
+                Ok(out)
+            }
+            UnitsBy::Whole => {
+                let mut lines = Vec::new();
+                for idx in 0..source.members.len() {
+                    if idx > 0 {
+                        lines.push(String::new());
+                    }
+                    lines.extend(
+                        self.member_lines(source, idx)
+                            .into_iter()
+                            .map(|(line, _)| line),
+                    );
+                }
+                let text = lines.join("\n").trim().to_string();
+                Ok(vec![SourceUnit {
+                    index: 0,
+                    member: source.members[0].relative.clone(),
+                    label: None,
+                    sheet: None,
+                    text,
+                    lines,
+                }])
+            }
+            UnitsBy::Marker => {
+                let marker_re = self.marker.as_ref().expect("marker regex checked at load");
+                let mut out: Vec<SourceUnit> = Vec::new();
+                for idx in 0..source.members.len() {
+                    if idx > 0
+                        && let Some(last) = out.last_mut()
+                    {
+                        last.lines.push(String::new());
+                    }
+                    let member_rel = &source.members[idx].relative;
+                    for (line, line_no) in self.member_lines(source, idx) {
+                        let probe = line.trim();
+                        if let Some(caps) = marker_re.captures(probe) {
+                            let label = caps
+                                .name("label")
+                                .map(|m| m.as_str().trim().to_string())
+                                .filter(|s| !s.is_empty());
+                            let sheet = caps.name("sheet").and_then(|m| {
+                                let s = m.as_str().trim();
+                                self.number_u32(s).or_else(|| s.parse::<u32>().ok())
+                            });
+                            let index = out.len() as u32;
+                            out.push(SourceUnit {
+                                index,
+                                member: member_rel.clone(),
+                                label,
+                                sheet,
+                                text: String::new(),
+                                lines: Vec::new(),
+                            });
+                        } else if let Some(last) = out.last_mut() {
+                            last.lines.push(line);
+                        } else if !probe.is_empty() {
+                            return Err(RuleError::Units {
+                                rule: self.path.clone(),
+                                detail: format!(
+                                    "content before the first marker in {member_rel} at line {line_no}"
+                                ),
+                            });
+                        }
+                    }
+                }
+                if out.is_empty() {
+                    return Err(RuleError::Units {
+                        rule: self.path.clone(),
+                        detail: String::from("no unit marker matched any line"),
+                    });
+                }
+                for unit in &mut out {
+                    unit.text = unit.lines.join("\n").trim().to_string();
+                }
+                Ok(out)
+            }
+            UnitsBy::Adapter => unreachable!("refused at load"),
+        }
+    }
+
+    /// Check `units` against `[completeness]`, recording any
+    /// non-contiguous fallbacks on `fallbacks` and failing with
+    /// [`RuleError::Completeness`] when `fail_on_gap` is set.
+    pub fn check_completeness(
+        &self,
+        units: &[SourceUnit],
+        fallbacks: &mut Vec<FallbackEvent>,
+    ) -> Result<CompletenessReport, RuleError> {
+        if self.rule.units.by == UnitsBy::Whole {
+            return Ok(CompletenessReport {
+                numbered: 0,
+                min: None,
+                max: None,
+                gaps: Vec::new(),
+                duplicates: Vec::new(),
+                ordered: true,
+            });
+        }
+        let numbers: Vec<u32> = units.iter().filter_map(|u| u.sheet).collect();
+        let ordered = numbers.windows(2).all(|w| w[0] <= w[1]);
+        if numbers.is_empty() || self.rule.completeness.expect == Expect::None {
+            return Ok(CompletenessReport {
+                numbered: numbers.len(),
+                min: numbers.iter().copied().min(),
+                max: numbers.iter().copied().max(),
+                gaps: Vec::new(),
+                duplicates: Vec::new(),
+                ordered,
+            });
+        }
+
+        let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
+        for &n in &numbers {
+            *counts.entry(n).or_insert(0) += 1;
+        }
+        let min = *counts.keys().next().expect("numbers is non-empty");
+        let max = *counts.keys().next_back().expect("numbers is non-empty");
+        let duplicates: Vec<u32> = counts
+            .iter()
+            .filter(|(_, c)| **c > 1)
+            .map(|(n, _)| *n)
+            .collect();
+        let gaps: Vec<u32> = (min..=max)
+            .filter(|n| !counts.contains_key(n))
+            .take(1024)
+            .collect();
+
+        if !gaps.is_empty() {
+            FallbackEvent::record(
+                fallbacks,
+                ADAPTER,
+                fallback_kinds::RULE_GAP,
+                Some(join_numbers(&gaps)),
+            );
+        }
+        if !duplicates.is_empty() {
+            FallbackEvent::record(
+                fallbacks,
+                ADAPTER,
+                fallback_kinds::RULE_DUPLICATE,
+                Some(join_numbers(&duplicates)),
+            );
+        }
+        if !ordered {
+            FallbackEvent::record(
+                fallbacks,
+                ADAPTER,
+                fallback_kinds::RULE_ORDER,
+                Some(join_numbers(&numbers)),
+            );
+        }
+
+        if self.rule.completeness.fail_on_gap
+            && (!gaps.is_empty() || !duplicates.is_empty() || !ordered)
+        {
+            return Err(RuleError::Completeness {
+                rule: self.path.clone(),
+                gaps,
+                duplicates,
+                ordered,
+            });
+        }
+
+        Ok(CompletenessReport {
+            numbered: numbers.len(),
+            min: Some(min),
+            max: Some(max),
+            gaps,
+            duplicates,
+            ordered,
+        })
+    }
+
+    /// Lines of `source.members[member_idx]` after stripping any
+    /// rule-configured YAML frontmatter, paired with their 1-based line
+    /// numbers inside that member.
+    fn member_lines(&self, source: &RuleSource, member_idx: usize) -> Vec<(String, usize)> {
+        let member = &source.members[member_idx];
+        let raw = &source.text[member.span.clone()];
+        let strip_fm = match self.rule.members.frontmatter {
+            Frontmatter::None => false,
+            Frontmatter::First => member_idx == 0,
+            Frontmatter::Each => true,
+        };
+        let body = if strip_fm {
+            crate::ocr::strip_frontmatter(raw)
+        } else {
+            raw
+        };
+        if body.is_empty() {
+            return Vec::new();
+        }
+        let prefix_len = raw.len() - body.len();
+        let skipped_lines = raw.as_bytes()[..prefix_len]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count();
+        body.split('\n')
+            .enumerate()
+            .map(|(i, line)| (line.to_string(), skipped_lines + i + 1))
+            .collect()
+    }
+}
+
+fn join_numbers(nums: &[u32]) -> String {
+    nums.iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Append one member's canonical text to `out`: `\r\n` and a lone `\r`

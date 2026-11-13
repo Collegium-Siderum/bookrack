@@ -6,9 +6,15 @@
 
 use std::path::{Path, PathBuf};
 
+use bookrack_audit_profile::HeadingPatterns;
 use bookrack_core::Explain;
-use bookrack_extract::fallback_kinds;
-use bookrack_extract::rule::{MemberOrder, RuleError, RuleFile, RuleKind, RuleSource, UnitsBy};
+use bookrack_extract::rule::{
+    CompletenessReport, MemberOrder, RuleError, RuleFile, RuleKind, RuleSource, UnitsBy,
+};
+use bookrack_extract::{
+    BlockKind, ContributorRole, EXTRACTOR_VERSION, Extraction, TextLayerQuality, fallback_kinds,
+    ocr,
+};
 
 /// A rule that reads every `.txt` beside it as one unit per file.
 const BY_FILE: &str = "schema = 1\n\n[members]\ninclude = [\"*.txt\"]\n\n[units]\nby = \"file\"\n";
@@ -643,4 +649,640 @@ fn every_refusal_explains_itself_in_three_parts() {
     );
     assert!(missing.explain().summary.ends_with("\"9.txt\""));
     assert!(unlisted.explain().summary.ends_with("\"10.txt\""));
+}
+
+fn rule_fixture(relative: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/rule")
+        .join(relative)
+}
+
+fn extract_dir(dir: &Dir, rule: &str) -> (Extraction, CompletenessReport) {
+    let (file, source) = read(dir, rule);
+    file.extract_with_report(&source, &HeadingPatterns::default())
+        .expect("extract_with_report")
+}
+
+// ---- golden comparison against live ocr::extract --------------------------
+
+#[test]
+fn golden_polyocr_v1_matches_live_ocr_adapter() {
+    let rule_path = rule_fixture("polyocr-v1/rule.toml");
+    let ocr_md = rule_fixture("polyocr-v1/sample.bookrack-ocr.v1.md");
+
+    let file = load(&rule_path);
+    let source = file.read().expect("read rule source");
+    let rule_ex = file
+        .extract(&source, &HeadingPatterns::default())
+        .expect("rule extract");
+    let ocr_ex = ocr::extract(&ocr_md, None, None).expect("ocr extract");
+
+    assert!(rule_ex.toc.entries.is_empty());
+    assert!(ocr_ex.toc.entries.is_empty());
+    assert_eq!(rule_ex.blocks.len(), ocr_ex.blocks.len());
+
+    let origin = rule_ex
+        .provenance
+        .rule
+        .as_ref()
+        .expect("Provenance.rule must be populated");
+    assert_eq!(origin.units.len(), 3);
+
+    for (rb, ob) in rule_ex.blocks.iter().zip(ocr_ex.blocks.iter()) {
+        assert_eq!(rb.kind, ob.kind);
+        assert_eq!(rb.text, ob.text);
+        let sheet = origin.units[rb.source_unit as usize]
+            .sheet
+            .expect("sheet number from marker");
+        assert_eq!(sheet - 1, ob.source_unit);
+    }
+}
+
+// ---- units & source_unit --------------------------------------------------
+
+#[test]
+fn unit_cutting_preserves_empty_unit_index_and_omits_its_toc_entry() {
+    // M13a: 3-member by=file set with the middle member empty.
+    let dir = Dir::new();
+    dir.write("01_First.txt", "First body paragraph.\n")
+        .write("02_Middle.txt", "   \n\t\n")
+        .write("03_Third.txt", "Third body paragraph.\n");
+    let rule = format!("{BY_FILE}\n[structure]\nunit_titles = \"filename\"\nheadings = \"none\"\n");
+    let (ex, report) = extract_dir(&dir, &rule);
+    let origin = ex.provenance.rule.as_ref().expect("rule origin");
+    assert_eq!(origin.units.len(), 3);
+    assert_eq!(origin.units[0].sheet, Some(1));
+    assert_eq!(origin.units[1].sheet, Some(2));
+    assert_eq!(origin.units[2].sheet, Some(3));
+    assert_eq!(report.numbered, 3);
+    assert!(report.gaps.is_empty());
+
+    let block_units: Vec<u32> = ex.blocks.iter().map(|b| b.source_unit).collect();
+    assert_eq!(block_units, vec![0, 2]);
+    let toc_labels: Vec<(&str, Option<usize>)> = ex
+        .toc
+        .entries
+        .iter()
+        .map(|e| (e.label.as_str(), e.start_block))
+        .collect();
+    assert_eq!(toc_labels, vec![("First", Some(0)), ("Third", Some(1))]);
+
+    // M21: marker file with an empty middle page.
+    let mdir = Dir::new();
+    mdir.write(
+        "pages.md",
+        "<!-- page 1 (sheet 1) -->\nPage one.\n<!-- page 2 (sheet 2) -->\n\n<!-- page 3 (sheet 3) -->\nPage three.\n",
+    );
+    let mrule = "schema = 1\n[members]\ninclude = [\"pages.md\"]\n[units]\nby = \"marker\"\nmarker = '^<!-- page (?P<label>\\S*) \\(sheet (?P<sheet>\\d+)\\) -->$'\n[structure]\nunit_titles = \"none\"\nheadings = \"none\"\n";
+    let (mfile, msource) = read(&mdir, mrule);
+    let units = mfile.units(&msource).expect("units");
+    assert_eq!(units.len(), 3);
+    assert!(units[1].text.is_empty());
+    let mex = mfile
+        .extract(&msource, &HeadingPatterns::default())
+        .expect("extract");
+    let munits: Vec<u32> = mex.blocks.iter().map(|b| b.source_unit).collect();
+    assert_eq!(munits, vec![0, 2]);
+}
+
+#[test]
+fn unit_origins_record_member_label_and_sheet_across_all_modes() {
+    // Marker starting at sheet 5, with non-numeric label (M20) and empty label (M23).
+    let dir = Dir::new();
+    dir.write(
+        "pages.md",
+        "<!-- page iii (sheet 5) -->\nPreface text.\n<!-- page  (sheet 6) -->\nUnlabeled page text.\n",
+    );
+    let mrule = "schema = 1\n[members]\ninclude = [\"pages.md\"]\n[units]\nby = \"marker\"\nmarker = '^<!-- page (?P<label>\\S*) \\(sheet (?P<sheet>\\d+)\\) -->$'\n[structure]\nunit_titles = \"none\"\nheadings = \"none\"\n";
+    let (ex, _) = extract_dir(&dir, mrule);
+    let origin = ex.provenance.rule.as_ref().expect("rule origin");
+    assert_eq!(origin.units.len(), 2);
+    assert_eq!(origin.units[0].member, "pages.md");
+    assert_eq!(origin.units[0].label.as_deref(), Some("iii"));
+    assert_eq!(origin.units[0].sheet, Some(5));
+    assert_eq!(origin.units[1].label, None);
+    assert_eq!(origin.units[1].sheet, Some(6));
+    assert_eq!(ex.blocks[0].source_unit, 0);
+    assert_eq!(ex.blocks[1].source_unit, 1);
+
+    // by = whole over multiple members records the first member's relative path.
+    let wdir = Dir::new();
+    wdir.write("01.txt", "First file paragraph.\n")
+        .write("02.txt", "Second file paragraph.\n");
+    let wrule = "schema = 1\n[members]\ninclude = [\"*.txt\"]\n[units]\nby = \"whole\"\n[structure]\nunit_titles = \"none\"\nheadings = \"none\"\n";
+    let (wex, _) = extract_dir(&wdir, wrule);
+    let worigin = wex.provenance.rule.as_ref().expect("rule origin");
+    assert_eq!(worigin.units.len(), 1);
+    assert_eq!(worigin.units[0].member, "01.txt");
+    assert_eq!(worigin.units[0].label, None);
+    assert_eq!(worigin.units[0].sheet, None);
+    assert_eq!(wex.blocks.len(), 2);
+    assert_eq!(wex.blocks[0].text, "First file paragraph.");
+    assert_eq!(wex.blocks[1].text, "Second file paragraph.");
+}
+
+#[test]
+fn frontmatter_stripping_obeys_none_first_and_each() {
+    let dir = Dir::new();
+    dir.write("01.txt", "---\ntitle: One\n---\nBody one.\n")
+        .write("02.txt", "---\ntitle: Two\n---\nBody two.\n");
+    let make_rule = |fm: &str| {
+        format!(
+            "schema = 1\n[members]\ninclude = [\"*.txt\"]\nfrontmatter = \"{fm}\"\n[units]\nby = \"file\"\n[structure]\nunit_titles = \"none\"\nheadings = \"none\"\n"
+        )
+    };
+    let (ex_first, _) = extract_dir(&dir, &make_rule("first"));
+    assert_eq!(ex_first.blocks[0].text, "Body one.");
+    assert!(ex_first.blocks[1].text.starts_with("--- title: Two ---"));
+
+    let (ex_each, _) = extract_dir(&dir, &make_rule("each"));
+    assert_eq!(ex_each.blocks[0].text, "Body one.");
+    assert_eq!(ex_each.blocks[1].text, "Body two.");
+
+    let (ex_none, _) = extract_dir(&dir, &make_rule("none"));
+    assert!(ex_none.blocks[0].text.starts_with("--- title: One ---"));
+}
+
+// ---- structure: unit_levels, headings, blocks, TOC ------------------------
+
+#[test]
+fn unit_levels_set_heading_depth_level_and_strip_label_prefix() {
+    let dir = Dir::new();
+    let md_bytes = std::fs::read(rule_fixture("cjk-cases/markdown.md")).expect("read fixture");
+    dir.write("01.md", md_bytes);
+
+    let rule_d0 = "schema = 1\n[members]\ninclude = [\"*.md\"]\n[units]\nby = \"file\"\n[structure]\nunit_titles = \"first-line\"\nunit_levels = [{ regex = '^#\\s+(?P<label>.+)$', depth = 0 }]\nheadings = \"none\"\n";
+    let (ex0, _) = extract_dir(&dir, rule_d0);
+    assert_eq!(ex0.blocks[0].kind, BlockKind::Heading { level: 1 });
+    assert_eq!(ex0.blocks[0].text, "\u{5bfc}\u{8bba}");
+    assert_eq!(ex0.toc.entries.len(), 1);
+    assert_eq!(ex0.toc.entries[0].label, "\u{5bfc}\u{8bba}");
+    assert_eq!(ex0.toc.entries[0].depth, 0);
+
+    let rule_d1 = "schema = 1\n[members]\ninclude = [\"*.md\"]\n[units]\nby = \"file\"\n[structure]\nunit_titles = \"first-line\"\nunit_levels = [{ regex = '^#\\s+(?P<label>.+)$', depth = 1 }]\nheadings = \"none\"\n";
+    let (ex1, _) = extract_dir(&dir, rule_d1);
+    assert_eq!(ex1.blocks[0].kind, BlockKind::Heading { level: 2 });
+    assert_eq!(ex1.toc.entries[0].depth, 1);
+}
+
+#[test]
+fn toc_is_sorted_by_start_block_and_unit_title_wins_on_tie() {
+    let dir = Dir::new();
+    dir.write(
+        "01_Overview.txt",
+        "## Subheading First\n\nParagraph one.\n\n## Second Section\n\nParagraph two.\n",
+    );
+    let rule = "schema = 1\n[members]\ninclude = [\"*.txt\"]\n[units]\nby = \"file\"\n[structure]\nunit_titles = \"filename\"\nheadings = \"patterns\"\npatterns = [{ regex = '^##\\s+(?P<label>.+)$', depth = 1 }]\n";
+    let (ex, _) = extract_dir(&dir, rule);
+
+    // Block 0 is the `## Subheading First` heading block, which is also
+    // `first_block` of unit 0. The unit title ("Overview", depth 0) and
+    // the body heading ("Subheading First", depth 1) both target block 0;
+    // the unit title must win and start_block must be strictly ascending.
+    let entries: Vec<(&str, u8, Option<usize>)> = ex
+        .toc
+        .entries
+        .iter()
+        .map(|e| (e.label.as_str(), e.depth, e.start_block))
+        .collect();
+    assert_eq!(
+        entries,
+        vec![("Overview", 0, Some(0)), ("Second Section", 1, Some(2))],
+    );
+}
+
+#[test]
+fn match_raw_versus_trimmed_and_builtin_heading_family() {
+    let dir = Dir::new();
+    dir.write(
+        "01.txt",
+        std::fs::read(rule_fixture("cjk-cases/indented.txt")).expect("indented fixture"),
+    );
+    let make_rule = |m: &str| {
+        format!(
+            "schema = 1\n[members]\ninclude = [\"*.txt\"]\n[units]\nby = \"file\"\n[structure]\nunit_titles = \"none\"\nheadings = \"builtin\"\nmatch = \"{m}\"\n"
+        )
+    };
+    let (ex_trimmed, _) = extract_dir(&dir, &make_rule("trimmed"));
+    assert_eq!(ex_trimmed.toc.entries.len(), 2);
+
+    let (ex_raw, _) = extract_dir(&dir, &make_rule("raw"));
+    assert_eq!(ex_raw.toc.entries.len(), 1);
+    assert_eq!(
+        ex_raw.toc.entries[0].label,
+        "\u{7b2c}\u{4e00}\u{7ae0} \u{8d77}\u{59cb}"
+    );
+
+    // Builtin sino family false-positive pin on a body sentence starting with an ordinal.
+    let fp_dir = Dir::new();
+    fp_dir.write(
+        "01.txt",
+        std::fs::read(rule_fixture("cjk-cases/false_positive.txt")).expect("fp fixture"),
+    );
+    let fp_builtin = "schema = 1\n[members]\ninclude = [\"*.txt\"]\n[units]\nby = \"file\"\n[structure]\nunit_titles = \"first-line\"\nheadings = \"builtin\"\n";
+    let (ex_fp, _) = extract_dir(&fp_dir, fp_builtin);
+    assert_eq!(ex_fp.toc.entries.len(), 2);
+    assert!(
+        ex_fp.toc.entries[1]
+            .label
+            .starts_with("\u{7b2c}\u{4e09}\u{90e8}")
+    );
+
+    let fp_none = "schema = 1\n[members]\ninclude = [\"*.txt\"]\n[units]\nby = \"file\"\n[structure]\nunit_titles = \"first-line\"\nheadings = \"none\"\n";
+    let (ex_clean, _) = extract_dir(&fp_dir, fp_none);
+    assert_eq!(ex_clean.toc.entries.len(), 1);
+}
+
+#[test]
+fn block_splitting_blank_line_versus_line_and_biblio_provenance() {
+    let dir = Dir::new();
+    dir.write("01.txt", "Title\n\nLine one.\nLine two.\n\nLine three.\n");
+    let rule_blank = "schema = 1\n[members]\ninclude = [\"*.txt\"]\n[units]\nby = \"file\"\n[blocks]\nsplit = \"blank-line\"\n[structure]\nunit_titles = \"first-line\"\nheadings = \"none\"\n[biblio]\ntitle = \"Sample Book\"\nsubtitle = \"A Subtitle\"\nauthors = [\"First Author\", \"Second Author\"]\npublisher = \"Test Press\"\nyear = 2025\nisbn = \"978-0-00-000000-0\"\nseries = \"Test Series\"\nlanguage = \"en\"\n[provenance]\ntext_layer = \"doubtful\"\n";
+    let (ex_blank, _) = extract_dir(&dir, rule_blank);
+    let body_blank: Vec<&str> = ex_blank
+        .blocks
+        .iter()
+        .filter(|b| matches!(b.kind, BlockKind::Body))
+        .map(|b| b.text.as_str())
+        .collect();
+    assert_eq!(body_blank, vec!["Line one. Line two.", "Line three."]);
+    assert_eq!(ex_blank.biblio.title.as_deref(), Some("Sample Book"));
+    assert_eq!(ex_blank.biblio.subtitle.as_deref(), Some("A Subtitle"));
+    assert_eq!(ex_blank.biblio.publisher.as_deref(), Some("Test Press"));
+    assert_eq!(ex_blank.biblio.year, Some(2025));
+    assert_eq!(ex_blank.biblio.year_raw.as_deref(), Some("2025"));
+    assert_eq!(ex_blank.biblio.isbn.as_deref(), Some("978-0-00-000000-0"));
+    assert_eq!(ex_blank.biblio.series.as_deref(), Some("Test Series"));
+    assert_eq!(ex_blank.biblio.language.as_deref(), Some("en"));
+    assert_eq!(ex_blank.biblio.contributors.len(), 2);
+    assert_eq!(ex_blank.biblio.contributors[0].name, "First Author");
+    assert_eq!(
+        ex_blank.biblio.contributors[0].role,
+        ContributorRole::Author
+    );
+    assert_eq!(ex_blank.provenance.adapter, "rule-text");
+    assert_eq!(ex_blank.provenance.extractor_version, EXTRACTOR_VERSION);
+    assert_eq!(
+        ex_blank.provenance.text_layer_quality,
+        TextLayerQuality::Doubtful
+    );
+
+    let rule_line = "schema = 1\n[members]\ninclude = [\"*.txt\"]\n[units]\nby = \"file\"\n[blocks]\nsplit = \"line\"\n[structure]\nunit_titles = \"first-line\"\nheadings = \"none\"\n";
+    let (ex_line, _) = extract_dir(&dir, rule_line);
+    let body_line: Vec<&str> = ex_line
+        .blocks
+        .iter()
+        .filter(|b| matches!(b.kind, BlockKind::Body))
+        .map(|b| b.text.as_str())
+        .collect();
+    assert_eq!(body_line, vec!["Line one.", "Line two.", "Line three."]);
+}
+
+// ---- completeness & M-row cases -------------------------------------------
+
+#[test]
+fn completeness_reports_gaps_duplicates_and_order_or_fails_when_configured() {
+    // M01: gap at 3.
+    let gap_dir = Dir::new();
+    gap_dir
+        .write("01.txt", "Ch 1\n\nBody 1.\n")
+        .write("02.txt", "Ch 2\n\nBody 2.\n")
+        .write("04.txt", "Ch 4\n\nBody 4.\n");
+    let (ex_gap, rep_gap) = extract_dir(&gap_dir, BY_FILE);
+    assert_eq!(rep_gap.gaps, vec![3]);
+    assert!(rep_gap.duplicates.is_empty());
+    assert!(rep_gap.ordered);
+    assert!(
+        ex_gap
+            .provenance
+            .fallbacks
+            .iter()
+            .any(|f| f.kind == fallback_kinds::RULE_GAP && f.detail.as_deref() == Some("3"))
+    );
+
+    let strict = format!("{BY_FILE}\n[completeness]\nfail_on_gap = true\n");
+    let (strict_file, strict_src) = read(&gap_dir, &strict);
+    let err = strict_file
+        .extract(&strict_src, &HeadingPatterns::default())
+        .expect_err("fail_on_gap must reject gap");
+    assert!(
+        matches!(err, RuleError::Completeness { ref gaps, .. } if gaps == &[3]),
+        "{err:?}"
+    );
+
+    // M02: unpadded numbers under `name` order step backwards (1, 10, 2).
+    let ord_dir = Dir::new();
+    for n in [1, 2, 10] {
+        ord_dir.write(&format!("page_{n}.txt"), format!("Page {n}\n\nBody {n}.\n"));
+    }
+    let name_rule = "schema = 1\n[members]\ninclude = [\"*.txt\"]\norder = \"name\"\n[units]\nby = \"file\"\n[completeness]\nnumber = '^page_(?P<n>\\d+)'\n";
+    let (ex_ord, rep_ord) = extract_dir(&ord_dir, name_rule);
+    assert!(!rep_ord.ordered);
+    assert!(
+        ex_ord.provenance.fallbacks.iter().any(
+            |f| f.kind == fallback_kinds::RULE_ORDER && f.detail.as_deref() == Some("1, 10, 2")
+        )
+    );
+
+    // M03 / M04 / M22: duplicate unit numbers.
+    let dup_dir = Dir::new();
+    dup_dir
+        .write("01-1.txt", "Part 1\n\nBody 1a.\n")
+        .write("01-2.txt", "Part 2\n\nBody 1b.\n")
+        .write("02.txt", "Ch 2\n\nBody 2.\n");
+    let (ex_dup, rep_dup) = extract_dir(&dup_dir, BY_FILE);
+    assert_eq!(rep_dup.duplicates, vec![1]);
+    assert!(
+        ex_dup
+            .provenance
+            .fallbacks
+            .iter()
+            .any(|f| f.kind == fallback_kinds::RULE_DUPLICATE && f.detail.as_deref() == Some("1"))
+    );
+
+    // M05: numbering starting at 0 is contiguous.
+    let zero_dir = Dir::new();
+    zero_dir
+        .write("00.txt", "Prologue\n\nBody 0.\n")
+        .write("01.txt", "Ch 1\n\nBody 1.\n");
+    let (ex_zero, rep_zero) = extract_dir(&zero_dir, BY_FILE);
+    assert_eq!(rep_zero.min, Some(0));
+    assert_eq!(rep_zero.max, Some(1));
+    assert!(rep_zero.gaps.is_empty());
+    assert!(ex_zero.provenance.fallbacks.is_empty());
+
+    // M06: unnumbered front/back matter ordered via explicit list.
+    let m06_dir = Dir::new();
+    for name in [
+        "\u{5e8f}.txt",
+        "\u{6954}\u{5b50}.txt",
+        "01_\u{7b2c}\u{4e00}\u{7ae0}.txt",
+        "\u{540e}\u{8bb0}.txt",
+    ] {
+        m06_dir.write(
+            name,
+            std::fs::read(rule_fixture(&format!("m06-unnumbered/{name}"))).expect("m06"),
+        );
+    }
+    let m06_rule = "schema = 1\n[members]\ninclude = [\"*.txt\"]\norder = \"explicit\"\nexplicit = [\"\u{5e8f}.txt\", \"\u{6954}\u{5b50}.txt\", \"01_\u{7b2c}\u{4e00}\u{7ae0}.txt\", \"\u{540e}\u{8bb0}.txt\"]\n[units]\nby = \"file\"\n[completeness]\nexpect = \"none\"\n";
+    let (ex_m06, _) = extract_dir(&m06_dir, m06_rule);
+    let m06_titles: Vec<&str> = ex_m06
+        .toc
+        .entries
+        .iter()
+        .map(|e| e.label.as_str())
+        .collect();
+    assert_eq!(
+        m06_titles,
+        vec![
+            "\u{5e8f}",
+            "\u{6954}\u{5b50}",
+            "\u{7b2c}\u{4e00}\u{7ae0} \u{542f}\u{7a0b}",
+            "\u{540e}\u{8bb0}"
+        ]
+    );
+
+    // M17 & M18: volume subdirectories each starting at 01.
+    let m18_dir = Dir::new();
+    for vol in ["\u{5377}\u{4e00}", "\u{5377}\u{4e8c}", "\u{5377}\u{4e09}"] {
+        let rel = format!("{vol}/01.txt");
+        m18_dir.write(
+            &rel,
+            std::fs::read(rule_fixture(&format!("m18-volumes/{rel}"))).expect("m18"),
+        );
+    }
+    let m18_natural = "schema = 1\n[members]\ninclude = [\"**/*.txt\"]\n[units]\nby = \"file\"\n";
+    let (ex_m18_nat, rep_m18) = extract_dir(&m18_dir, m18_natural);
+    assert_eq!(rep_m18.duplicates, vec![1]);
+    assert!(
+        ex_m18_nat
+            .provenance
+            .fallbacks
+            .iter()
+            .any(|f| f.kind == fallback_kinds::RULE_DUPLICATE)
+    );
+
+    let m18_explicit = "schema = 1\n[members]\ninclude = [\"**/*.txt\"]\norder = \"explicit\"\nexplicit = [\"\u{5377}\u{4e00}/01.txt\", \"\u{5377}\u{4e8c}/01.txt\", \"\u{5377}\u{4e09}/01.txt\"]\n[units]\nby = \"file\"\n[completeness]\nexpect = \"none\"\n";
+    let (ex_m18_exp, _) = extract_dir(&m18_dir, m18_explicit);
+    let m18_titles: Vec<&str> = ex_m18_exp
+        .toc
+        .entries
+        .iter()
+        .map(|e| e.label.as_str())
+        .collect();
+    assert_eq!(
+        m18_titles,
+        vec![
+            "\u{5377}\u{4e00} \u{7b2c}\u{4e00}\u{7ae0}",
+            "\u{5377}\u{4e8c} \u{7b2c}\u{4e00}\u{7ae0}",
+            "\u{5377}\u{4e09} \u{7b2c}\u{4e00}\u{7ae0}",
+        ]
+    );
+
+    // M24: marker-native `{0}----` pagination ingested with `by = "file"`.
+    let m24_dir = Dir::new();
+    m24_dir
+        .write(
+            "page_01.md",
+            "{0}------------------------------------------------\n\nFirst page prose.\n",
+        )
+        .write(
+            "page_02.md",
+            "{1}------------------------------------------------\n\nSecond page prose.\n",
+        );
+    let m24_rule = "schema = 1\n[members]\ninclude = [\"page_*.md\"]\n[units]\nby = \"file\"\n[structure]\nunit_titles = \"none\"\nheadings = \"none\"\n[completeness]\nnumber = '^page_(?P<n>\\d+)'\n";
+    let (ex_m24, rep_m24) = extract_dir(&m24_dir, m24_rule);
+    assert_eq!(rep_m24.numbered, 2);
+    assert!(rep_m24.gaps.is_empty());
+    assert_eq!(ex_m24.blocks.len(), 4);
+}
+
+#[test]
+fn static_bom_and_gb18030_fixtures_and_generated_crlf_variants() {
+    // M07 / M11: static GB18030 member with non-ASCII byte precondition.
+    let gb_bytes = std::fs::read(rule_fixture("m07-gb18030/02_gb18030.txt")).expect("read m07");
+    assert!(
+        std::str::from_utf8(&gb_bytes).is_err(),
+        "GB18030 fixture must not be valid UTF-8"
+    );
+    let m07_dir = Dir::new();
+    m07_dir
+        .write(
+            "01_utf8.txt",
+            std::fs::read(rule_fixture("m07-gb18030/01_utf8.txt")).expect("read m07 01"),
+        )
+        .write("02_gb18030.txt", &gb_bytes);
+    let (ex_m07, _) = extract_dir(&m07_dir, BY_FILE);
+    assert_eq!(ex_m07.toc.entries.len(), 2);
+    assert_eq!(
+        ex_m07.toc.entries[1].label,
+        "\u{7b2c}\u{4e8c}\u{7ae0} \u{591c}\u{96e8}"
+    );
+    assert!(
+        ex_m07
+            .provenance
+            .fallbacks
+            .iter()
+            .any(|f| f.kind == fallback_kinds::TXT_GB18030)
+    );
+
+    // M08a: per-page BOM at start of non-first page file.
+    let m08a_p2 = std::fs::read(rule_fixture("m08a-page-bom/page_002.md")).expect("m08a p2");
+    assert!(m08a_p2.starts_with(b"\xEF\xBB\xBF"));
+    let m08a_dir = Dir::new();
+    for name in ["page_001.md", "page_002.md", "page_003.md"] {
+        m08a_dir.write(
+            name,
+            std::fs::read(rule_fixture(&format!("m08a-page-bom/{name}"))).expect("m08a"),
+        );
+    }
+    let marker_rule = "schema = 1\n[members]\ninclude = [\"page_*.md\"]\n[units]\nby = \"marker\"\nmarker = '^<!-- page (?P<label>\\S*) \\(sheet (?P<sheet>\\d+)\\) -->$'\n[structure]\nunit_titles = \"none\"\nheadings = \"none\"\n";
+    let (ex_m08a, rep_m08a) = extract_dir(&m08a_dir, marker_rule);
+    assert_eq!(ex_m08a.provenance.rule.as_ref().unwrap().units.len(), 3);
+    assert!(rep_m08a.gaps.is_empty());
+
+    // M08b: single file with BOM in the middle right before marker 2.
+    let m08b_bytes = std::fs::read(rule_fixture("m08b-mid-bom/book.md")).expect("m08b");
+    assert!(!m08b_bytes.starts_with(b"\xEF\xBB\xBF"));
+    assert!(
+        m08b_bytes
+            .windows(b"\xEF\xBB\xBF<!-- page 2".len())
+            .any(|w| w == b"\xEF\xBB\xBF<!-- page 2")
+    );
+    let m08b_dir = Dir::new();
+    m08b_dir.write("book.md", &m08b_bytes);
+    let m08b_rule = marker_rule.replace("page_*.md", "book.md");
+    let (ex_m08b, rep_m08b) = extract_dir(&m08b_dir, &m08b_rule);
+    assert_eq!(ex_m08b.provenance.rule.as_ref().unwrap().units.len(), 2);
+    assert_eq!(rep_m08b.gaps, vec![2]);
+
+    // M09 & M10: BOM on non-first member and BOM pair identity.
+    let m09_p2 = std::fs::read(rule_fixture("m09-member-bom/02_two.txt")).expect("m09 p2");
+    assert!(m09_p2.starts_with(b"\xEF\xBB\xBF"));
+    let m09_dir = Dir::new();
+    for name in ["01_one.txt", "02_two.txt"] {
+        m09_dir.write(
+            name,
+            std::fs::read(rule_fixture(&format!("m09-member-bom/{name}"))).expect("m09"),
+        );
+    }
+    let (ex_m09, _) = extract_dir(&m09_dir, BY_FILE);
+    assert_eq!(ex_m09.toc.entries.len(), 2);
+    assert_eq!(ex_m09.toc.entries[1].label, "Chapter 2");
+
+    let clean_dir = Dir::new();
+    let bom_dir = Dir::new();
+    for name in ["01.txt", "02.txt"] {
+        let c = std::fs::read(rule_fixture(&format!("m10-bom-pair/clean/{name}"))).expect("c");
+        let b = std::fs::read(rule_fixture(&format!("m10-bom-pair/bom/{name}"))).expect("b");
+        assert!(!c.starts_with(b"\xEF\xBB\xBF"));
+        assert!(b.starts_with(b"\xEF\xBB\xBF"));
+        clean_dir.write(name, c);
+        bom_dir.write(name, b);
+    }
+    assert_eq!(
+        read(&clean_dir, BY_FILE).1.source_sha256(),
+        read(&bom_dir, BY_FILE).1.source_sha256()
+    );
+
+    // M12 & M19: generated in-test CRLF / LF mix and single-page CRLF.
+    let crlf_page =
+        b"<!-- page 2 (sheet 2) -->\r\n\r\nPara 2a line 1.\r\nPara 2a line 2.\r\n\r\nPara 2b.\r\n";
+    assert!(crlf_page.windows(2).any(|w| w == b"\r\n"));
+    let m19_dir = Dir::new();
+    m19_dir
+        .write("page_01.md", b"<!-- page 1 (sheet 1) -->\n\nPara 1.\n")
+        .write("page_02.md", crlf_page);
+    let (ex_m19, _) = extract_dir(&m19_dir, marker_rule);
+    let m19_texts: Vec<&str> = ex_m19.blocks.iter().map(|b| b.text.as_str()).collect();
+    assert_eq!(
+        m19_texts,
+        vec!["Para 1.", "Para 2a line 1. Para 2a line 2.", "Para 2b."]
+    );
+}
+
+// ---- worker & unit error wording ------------------------------------------
+
+#[test]
+fn worker_and_unit_refusals_explain_themselves_in_three_parts() {
+    // 1. Units: content before the first marker (names member and 1-based line).
+    let pre_dir = Dir::new();
+    pre_dir.write(
+        "pages.md",
+        "---\ntitle: Test\n---\n\nStray line before marker.\n<!-- page 1 (sheet 1) -->\nBody.\n",
+    );
+    let mrule = "schema = 1\n[members]\ninclude = [\"pages.md\"]\nfrontmatter = \"first\"\n[units]\nby = \"marker\"\nmarker = '^<!-- page (?P<label>\\S*) \\(sheet (?P<sheet>\\d+)\\) -->$'\n";
+    let (pre_file, pre_src) = read(&pre_dir, mrule);
+    let pre_err = pre_file
+        .extract(&pre_src, &HeadingPatterns::default())
+        .expect_err("content before first marker");
+    match &pre_err {
+        RuleError::Units { detail, .. } => {
+            assert_names(detail, &["pages.md", "line 5"]);
+        }
+        other => panic!("expected Units error, got {other:?}"),
+    }
+
+    // 2. Units: no marker matched any line.
+    let nom_dir = Dir::new();
+    nom_dir.write("pages.md", "\n\n");
+    let (nom_file, nom_src) = read(&nom_dir, mrule);
+    let nom_err = nom_file
+        .extract(&nom_src, &HeadingPatterns::default())
+        .expect_err("no marker matched");
+    assert!(matches!(nom_err, RuleError::Units { .. }), "{nom_err:?}");
+
+    // 3. Completeness: fail_on_gap = true with gap and duplicate.
+    let comp_dir = Dir::new();
+    comp_dir
+        .write("01-a.txt", "Ch 1a\n\nBody.\n")
+        .write("01-b.txt", "Ch 1b\n\nBody.\n")
+        .write("03.txt", "Ch 3\n\nBody.\n");
+    let comp_rule = format!("{BY_FILE}\n[completeness]\nfail_on_gap = true\n");
+    let (comp_file, comp_src) = read(&comp_dir, &comp_rule);
+    let comp_err = comp_file
+        .extract(&comp_src, &HeadingPatterns::default())
+        .expect_err("completeness failure");
+    assert!(
+        matches!(comp_err, RuleError::Completeness { .. }),
+        "{comp_err:?}"
+    );
+
+    // 4. EmptyExtraction (M13b): all members empty, or heading-only with no body blocks.
+    let empty_dir = Dir::new();
+    empty_dir.write("01.txt", "   \n").write("02.txt", "");
+    let (empty_file, empty_src) = read(&empty_dir, BY_FILE);
+    let empty_err = empty_file
+        .extract(&empty_src, &HeadingPatterns::default())
+        .expect_err("empty extraction");
+    assert!(
+        matches!(empty_err, RuleError::EmptyExtraction { .. }),
+        "{empty_err:?}"
+    );
+
+    let head_only_dir = Dir::new();
+    head_only_dir.write("01.txt", "Only A Heading\n");
+    let (ho_file, ho_src) = read(&head_only_dir, BY_FILE);
+    let ho_err = ho_file
+        .extract(&ho_src, &HeadingPatterns::default())
+        .expect_err("heading-only extraction has no body blocks");
+    assert!(
+        matches!(ho_err, RuleError::EmptyExtraction { .. }),
+        "{ho_err:?}"
+    );
+
+    for (err, opening) in [
+        (&pre_err, "cannot split \""),
+        (&nom_err, "cannot split \""),
+        (&comp_err, "units of \""),
+        (&empty_err, "extraction of \""),
+    ] {
+        let problem = err.explain();
+        assert!(problem.summary.starts_with(opening), "{problem:?}");
+        assert!(!problem.summary.ends_with('.'), "{problem:?}");
+        assert!(!problem.summary.contains('\n'), "{problem:?}");
+        assert!(problem.data.hint.is_some(), "{problem:?}");
+        assert!(!problem.data.retryable, "{problem:?}");
+        assert!(!err.to_string().contains('\n'), "{err}");
+    }
 }
