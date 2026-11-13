@@ -77,6 +77,7 @@ const STORE: StoreSpec = StoreSpec {
     schema: SchemaAxis::Migrated {
         target: TARGET_VERSION,
         migrate: migrate_to_latest,
+        retired: None,
     },
     reader_stamp: ReaderStamp {
         table: "catalog_meta",
@@ -108,6 +109,7 @@ impl From<OpenError> for CatalogError {
             OpenError::Sqlite(e) => CatalogError::Sqlite(e),
             OpenError::Io(e) => CatalogError::Io(e),
             OpenError::Rederive { .. } => unreachable!("catalog.db is migrated, never rederived"),
+            OpenError::Retired { .. } => unreachable!("catalog.db names no retired-value check"),
         }
     }
 }

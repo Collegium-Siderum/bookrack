@@ -77,7 +77,10 @@ impl From<OpenError> for CorpusError {
             }
             OpenError::Verify(e) => CorpusError::Verify(e),
             OpenError::Sqlite(e) => CorpusError::Sqlite(e),
-            OpenError::TooOld { .. } | OpenError::TooNew { .. } | OpenError::Migrate(_) => {
+            OpenError::TooOld { .. }
+            | OpenError::TooNew { .. }
+            | OpenError::Migrate(_)
+            | OpenError::Retired { .. } => {
                 unreachable!("corpus.db is stamped, never migrated")
             }
             OpenError::Io(_) => unreachable!("corpus.db takes no backup"),

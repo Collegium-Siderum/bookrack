@@ -15,6 +15,7 @@
 //! | no file | `Missing` | `Missing` | created, `Ready` |
 //! | current | `Ready`, read-only | `Ready` | `Ready` |
 //! | behind, migratable | `TooOld` | `Declined` | backed up, migrated, `Ready` |
+//! | behind, holding retired values | `Retired` | `Declined` | `Retired` |
 //! | stamped with another revision | `Rederive` | unsupported | `Rederive` |
 //! | newer than this build | `TooNew` | `TooNew` | `TooNew` |
 //! | reader stamp above this build | `ReaderTooOld` | `ReaderTooOld` | `ReaderTooOld` |
@@ -25,6 +26,13 @@
 //! declines every other one, so a write incidental to the caller's real
 //! work never migrates anything. `Write` is the only access that creates
 //! or migrates.
+//!
+//! A store may name a [`RetiredCheck`]: a look for values an earlier
+//! revision wrote and this build no longer reads. It runs on a store
+//! that is behind, under `Read` and `Write` alike, before the version is
+//! reported and before the backup is taken, so a store refused for them
+//! is never snapshotted and never migrated. `Bookkeeping` declines a
+//! store that is behind without running it.
 //!
 //! A refusal under `Bookkeeping` or `Write` means nothing was migrated,
 //! no table was created, and no stamp was written. It does not mean the
@@ -86,6 +94,8 @@ pub enum SchemaAxis {
         target: i64,
         /// Brings a connection at any earlier version to `target`.
         migrate: fn(&mut Connection) -> Result<(), rusqlite_migration::Error>,
+        /// Finds the retired values a store behind `target` holds.
+        retired: Option<RetiredCheck>,
     },
     /// A derived store stamped with one revision. A store stamped with
     /// another is rebuilt from its sources, never migrated.
@@ -95,6 +105,37 @@ pub enum SchemaAxis {
         /// The revision this build reads and writes.
         value: &'static str,
     },
+}
+
+/// Counts the rows of a store that carry values this build no longer
+/// reads.
+///
+/// It is given a connection to a store that is behind and the
+/// `user_version` found on it, so it can keep to the tables and columns
+/// that revision has. It only reads. A marker no row carries is left out
+/// of the result; an empty result admits the store.
+pub type RetiredCheck = fn(&Connection, i64) -> rusqlite::Result<Vec<RetiredHit>>;
+
+/// One retired value and the number of rows that carry it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetiredHit {
+    /// Names the value, as the store's own vocabulary spells it.
+    pub marker: &'static str,
+    /// The number of rows that carry it.
+    pub count: u64,
+}
+
+impl std::fmt::Display for RetiredHit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.marker, self.count)
+    }
+}
+
+fn list_hits(hits: &[RetiredHit]) -> String {
+    hits.iter()
+        .map(RetiredHit::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The outcome of an open that did not fail.
@@ -126,6 +167,15 @@ pub enum OpenError {
         found: i64,
         /// The `user_version` this build reads.
         target: i64,
+    },
+    /// The store is behind this build and holds values it no longer
+    /// reads. Nothing was backed up and nothing was migrated.
+    #[error("schema version {found} holds retired values: {}", list_hits(.hits))]
+    Retired {
+        /// The `user_version` on disk.
+        found: i64,
+        /// Each retired value found, with its row count.
+        hits: Vec<RetiredHit>,
     },
     /// The store requires a newer reader than this build.
     #[error("the store requires reader version {required}; this build is {current}")]
@@ -236,14 +286,20 @@ fn admit(
 ) -> Result<Opened, OpenError> {
     refuse_stamped_bookkeeping(spec, access);
     match spec.schema {
-        SchemaAxis::Migrated { target, migrate } => {
-            admit_migrated(spec, conn, access, backup, target, migrate)
-        }
+        SchemaAxis::Migrated {
+            target,
+            migrate,
+            retired,
+        } => admit_migrated(spec, conn, access, backup, target, migrate, retired),
         SchemaAxis::Stamped { key, value } => admit_stamped(spec, conn, access, key, value),
     }
 }
 
 /// `user_version` first, then the table shapes, then the reader stamp.
+///
+/// A store that is behind is searched for retired values before the
+/// access decides what being behind means, except under `Bookkeeping`,
+/// which declines it unsearched.
 ///
 /// The version comes first so that an empty or behind file reports its
 /// version rather than a table it lacks. The reader stamp comes last
@@ -255,12 +311,21 @@ fn admit_migrated(
     backup: Option<(&Path, &str)>,
     target: i64,
     migrate: fn(&mut Connection) -> Result<(), rusqlite_migration::Error>,
+    retired: Option<RetiredCheck>,
 ) -> Result<Opened, OpenError> {
     let found: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if found > target {
         return Err(OpenError::TooNew { found, target });
     }
     if found < target {
+        if access != Access::Bookkeeping
+            && let Some(check) = retired
+        {
+            let hits = check(&conn, found)?;
+            if !hits.is_empty() {
+                return Err(OpenError::Retired { found, hits });
+            }
+        }
         match access {
             Access::Read => return Err(OpenError::TooOld { found, target }),
             Access::Bookkeeping => return Ok(Opened::Declined),
@@ -453,9 +518,44 @@ mod tests {
         schema: SchemaAxis::Migrated {
             target: TARGET,
             migrate: to_latest,
+            retired: None,
         },
         reader_stamp: STAMP,
     };
+    /// The migrated store with a check for the `old-*` keys of `meta`.
+    const RETIRING: StoreSpec = StoreSpec {
+        label: "store",
+        tables: &[&META, &ITEM],
+        schema: SchemaAxis::Migrated {
+            target: TARGET,
+            migrate: to_latest,
+            retired: Some(old_keys),
+        },
+        reader_stamp: STAMP,
+    };
+
+    /// `meta` arrives with the first migration, so a file at version 0
+    /// has nothing to search.
+    fn old_keys(conn: &Connection, found: i64) -> rusqlite::Result<Vec<RetiredHit>> {
+        if found < 1 {
+            return Ok(Vec::new());
+        }
+        let count = conn
+            .query_row(
+                "SELECT count(*) FROM meta WHERE key LIKE 'old-%'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?
+            .unsigned_abs();
+        Ok(if count == 0 {
+            Vec::new()
+        } else {
+            vec![RetiredHit {
+                marker: "old key",
+                count,
+            }]
+        })
+    }
     const STAMPED: StoreSpec = StoreSpec {
         label: "store",
         tables: &[&META, &ITEM],
@@ -511,6 +611,23 @@ mod tests {
             let mut conn = Connection::open(disk.path()).expect("seed");
             steps().to_version(&mut conn, 1).expect("stop at v1");
             disk
+        }
+
+        /// A store stopped one revision short, holding two retired rows.
+        fn behind_and_retired() -> Disk {
+            let disk = Disk::behind();
+            disk.mark_retired();
+            disk
+        }
+
+        fn mark_retired(&self) {
+            self.raw()
+                .execute_batch("INSERT INTO meta(key, value) VALUES('old-a', 'x'), ('old-b', 'x');")
+                .expect("retired rows");
+        }
+
+        fn bytes(&self) -> Vec<u8> {
+            std::fs::read(self.path()).expect("read the store")
         }
 
         fn raw(&self) -> Connection {
@@ -711,6 +828,119 @@ mod tests {
         ));
         assert_eq!(disk.user_version(), TARGET);
         assert!(disk.backup_names().is_empty());
+    }
+
+    // ── Migrated: behind, holding retired values ────────────────────
+
+    fn two_old_keys(err: &OpenError) -> bool {
+        matches!(err, OpenError::Retired { found: 1, hits }
+            if hits == &[RetiredHit { marker: "old key", count: 2 }])
+    }
+
+    #[test]
+    fn migrated_read_of_a_retired_store_names_the_values_not_the_version() {
+        let disk = Disk::behind_and_retired();
+        let err = refusal(open_store(&RETIRING, &disk.path(), Access::Read, None));
+        assert!(two_old_keys(&err), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            "schema version 1 holds retired values: old key (2)"
+        );
+        assert_eq!(disk.user_version(), 1);
+    }
+
+    #[test]
+    fn migrated_write_of_a_retired_store_is_refused_before_backup_and_migration() {
+        let disk = Disk::behind_and_retired();
+        let before = disk.schema_rows();
+        // Refused twice: a retry must not add a snapshot either.
+        for _ in 0..2 {
+            let err = refusal(open_store(
+                &RETIRING,
+                &disk.path(),
+                Access::Write,
+                Some(&disk.backups()),
+            ));
+            assert!(two_old_keys(&err), "{err:?}");
+        }
+        assert_eq!(disk.user_version(), 1);
+        assert_eq!(disk.schema_rows(), before);
+        assert!(disk.backup_names().is_empty(), "{:?}", disk.backup_names());
+        assert!(!disk.backups().exists());
+    }
+
+    #[test]
+    fn migrated_bookkeeping_of_a_retired_store_declines_as_any_behind_store() {
+        let disk = Disk::behind_and_retired();
+        let opened = open_store(&RETIRING, &disk.path(), Access::Bookkeeping, None).expect("open");
+        assert!(matches!(opened, Opened::Declined), "{opened:?}");
+        assert_eq!(disk.user_version(), 1);
+    }
+
+    #[test]
+    fn open_existing_names_the_retired_values_of_a_behind_store() {
+        let disk = Disk::behind_and_retired();
+        let before = disk.bytes();
+        let err = open_existing(&RETIRING, &disk.path()).expect_err("a retired store");
+        assert!(two_old_keys(&err), "{err:?}");
+        assert_eq!(disk.bytes(), before, "a read leaves the file as it was");
+    }
+
+    #[test]
+    fn a_behind_store_without_retired_values_opens_as_one_without_a_check() {
+        let disk = Disk::behind();
+        let err = refusal(open_store(&RETIRING, &disk.path(), Access::Read, None));
+        assert!(matches!(err, OpenError::TooOld { found: 1, .. }), "{err:?}");
+
+        ready(open_store(
+            &RETIRING,
+            &disk.path(),
+            Access::Write,
+            Some(&disk.backups()),
+        ));
+        assert_eq!(disk.user_version(), TARGET);
+        assert_eq!(disk.backup_names().len(), 1);
+    }
+
+    #[test]
+    fn a_current_store_is_not_searched_for_retired_values() {
+        for access in ACCESSES {
+            let disk = Disk::current(&RETIRING);
+            disk.mark_retired();
+            ready(open_store(&RETIRING, &disk.path(), access, None));
+        }
+    }
+
+    #[test]
+    fn the_check_is_told_the_version_on_disk() {
+        // The check queries `meta`, which a file at version 0 lacks: it
+        // admits such a file only because it is told the version.
+        let disk = Disk::new();
+        std::fs::write(disk.path(), b"").expect("an empty file");
+        ready(open_store(&RETIRING, &disk.path(), Access::Write, None));
+        assert_eq!(disk.user_version(), TARGET);
+        open_in_memory(&RETIRING).expect("in-memory store");
+    }
+
+    #[test]
+    fn a_check_that_fails_refuses_the_store_under_read_and_write() {
+        // A table named `meta` without the column the check reads.
+        for access in [Access::Read, Access::Write] {
+            let disk = Disk::new();
+            let conn = Connection::open(disk.path()).expect("seed");
+            conn.execute_batch("CREATE TABLE meta (k TEXT); PRAGMA user_version = 1;")
+                .expect("seed");
+            drop(conn);
+            let err = refusal(open_store(
+                &RETIRING,
+                &disk.path(),
+                access,
+                Some(&disk.backups()),
+            ));
+            assert!(matches!(err, OpenError::Sqlite(_)), "{access:?}: {err:?}");
+            assert_eq!(disk.user_version(), 1, "{access:?}");
+            assert!(disk.backup_names().is_empty(), "{access:?}");
+        }
     }
 
     // ── Migrated: newer, reader stamp, table shapes ─────────────────

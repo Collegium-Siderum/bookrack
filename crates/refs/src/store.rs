@@ -98,6 +98,7 @@ pub(crate) const STORE: StoreSpec = StoreSpec {
     schema: SchemaAxis::Migrated {
         target: TARGET_VERSION,
         migrate: migrate_to_latest,
+        retired: None,
     },
     reader_stamp: ReaderStamp {
         table: "reference_meta",
@@ -130,6 +131,9 @@ impl From<OpenError> for RefsError {
             OpenError::Io(e) => RefsError::Io(e),
             OpenError::Rederive { .. } => {
                 unreachable!("reference.db is migrated, never rederived")
+            }
+            OpenError::Retired { .. } => {
+                unreachable!("reference.db names no retired-value check")
             }
         }
     }

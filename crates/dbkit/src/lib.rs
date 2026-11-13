@@ -32,8 +32,8 @@ pub use open::{OpenDecision, READER_VERSION, reader_version_decision};
 pub use row::decode;
 pub use spec::{ColumnSpec, ForeignKey, IndexSpec, OnDelete, PkRole, SqlType, TableSpec};
 pub use store::{
-    Access, OpenError, Opened, ReaderStamp, SchemaAxis, StoreSpec, open_existing, open_in_memory,
-    open_store,
+    Access, OpenError, Opened, ReaderStamp, RetiredCheck, RetiredHit, SchemaAxis, StoreSpec,
+    open_existing, open_in_memory, open_store,
 };
 pub use timing::{DEFAULT_SLOW_QUERY_THRESHOLD, TimedConnection};
 pub use verify::{SchemaMismatch, VerifyError, verify_all, verify_table};
