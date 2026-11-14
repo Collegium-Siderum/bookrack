@@ -260,7 +260,11 @@ onto.
   fact; `error.data.detail` carries the reason it was skipped and
   `error.data.hint` the hint bring-up recorded for it, unchanged: that
   reason's next step, closed with `bookrack libraries mount <name>`.
-  A reason recorded without a hint gets the mount command alone.
+  A reason recorded without a hint gets the mount command alone. One
+  reason has no mount to close with: a catalog holding rows of the
+  removed OCR intake path is not repaired in place, so its hint is the
+  removal of the library and stands as it is — on the record, on
+  `library.mount`, and on the queued jobs bring-up fails against it.
 - **A call naming no library that the registry cannot route**
   (`-32010`): `RegistryError::UnnamedAmbiguous`, raised by the same
   handlers when the parameter is absent and the rule under *Unnamed

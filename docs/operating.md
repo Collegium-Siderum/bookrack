@@ -24,7 +24,10 @@ unusable, or its index profile disagreeing with the rest on the
 reranker — does not stop the daemon: it is skipped with the reason, its
 queued jobs are marked failed with that reason, and a command naming it
 is refused with the reason and `bookrack libraries mount <name>`, which
-brings it in once it is repaired. Two failures still stop the daemon:
+brings it in once it is repaired. A library whose catalog holds rows of
+the removed OCR intake path is the exception: nothing repairs it in
+place, and its reason names `bookrack libraries remove <name> --purge`
+instead. Two failures still stop the daemon:
 the library it was started under cannot be resolved (for example, its
 data root is missing), or the reranker cannot start. When no library
 comes up at all, the daemon refuses: with that library's own error when

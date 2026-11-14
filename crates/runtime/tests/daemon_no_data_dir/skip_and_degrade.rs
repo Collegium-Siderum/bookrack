@@ -1263,3 +1263,250 @@ async fn a_held_root_says_mount_once_on_the_record_the_mount_and_a_read() -> Res
     drop(held);
     Ok(())
 }
+
+/// Give `root` a catalog one revision behind the one that retires the
+/// OCR intake labels, holding one row that carries two of them.
+fn retire_catalog(root: &Path) {
+    let db = root.join("catalog.db");
+    bookrack_catalog::fixtures::create_at_version(&db, 17);
+    bookrack_dbkit::open_production(&db)
+        .expect("open catalog")
+        .execute_batch(
+            "INSERT INTO intake (source_sha256, intake_at, status, format, adapter) \
+             VALUES ('sha-a', '2026-01-01T00:00:00Z', 'embedded', 'ocr-markdown', 'ocr-pages');",
+        )
+        .expect("seed a row of the removed intake path");
+}
+
+const NO_RETRY: [&str; 3] = [
+    "libraries mount",
+    "start the daemon again",
+    "bookrack queue retry",
+];
+
+fn assert_names_the_removal_and_no_retry(hint: &str, library: &str) {
+    assert!(
+        hint.contains(&format!("`bookrack libraries remove {library} --purge`")),
+        "the hint names the removal of {library}: {hint}"
+    );
+    for retry in NO_RETRY {
+        assert!(
+            !hint.contains(retry),
+            "a catalog with no in-place repair is followed by no retry: {hint}"
+        );
+    }
+}
+
+/// A library whose catalog holds rows of the removed OCR intake path is
+/// skipped with the labels counted in the detail and the removal of
+/// that library as the hint; no mount follows it, on the record, on a
+/// runtime mount, or on a read naming the library.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_catalog_holding_retired_labels_is_skipped_with_the_removal_and_no_mount() -> Result<()> {
+    let sandbox = world();
+    let alpha = sandbox.data_root("alpha-root");
+    let beta = sandbox.data_root("beta-root");
+    sandbox.write_registry_entries(
+        Some("alpha"),
+        &[("alpha", alpha.as_path()), ("beta", beta.as_path())],
+    );
+    retire_catalog(&beta);
+    let runtime_root = tempfile::tempdir()?;
+
+    let runtime = start("alpha", runtime_root.path(), false).await?;
+    let record = skip_record(&runtime, "beta")?;
+    let reason = record.reason().clone();
+    assert!(
+        reason
+            .summary
+            .ends_with("holds rows from the removed OCR intake path"),
+        "the summary states the fact and no count: {reason:?}"
+    );
+    let detail = reason.data.detail.clone().unwrap_or_default();
+    for counted in ["format = ocr-markdown (1)", "adapter = ocr-pages (1)"] {
+        assert!(detail.contains(counted), "{reason:?}");
+    }
+    assert!(!reason.data.retryable, "{reason:?}");
+    let hint = reason.data.hint.clone().unwrap_or_default();
+    assert_names_the_removal_and_no_retry(&hint, "beta");
+
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        let resp = call(
+            &mut reader,
+            &mut w,
+            1,
+            "library.mount",
+            json!({ "name": "beta" }),
+        )
+        .await?;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(-32018),
+            "a catalog this build cannot open is state-unusable: {resp}"
+        );
+        assert_eq!(
+            resp["error"]["data"]["hint"].as_str(),
+            Some(hint.as_str()),
+            "the mount's hint is the skip's hint, word for word: {resp}"
+        );
+        let resp = call(
+            &mut reader,
+            &mut w,
+            2,
+            "library.info",
+            json!({ "name": "beta" }),
+        )
+        .await?;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(INVALID_LIBRARY),
+            "{resp}"
+        );
+        assert_eq!(
+            resp["error"]["data"]["hint"].as_str(),
+            Some(hint.as_str()),
+            "a call naming the library carries the skip's hint as it is: {resp}"
+        );
+        let _ = call(&mut reader, &mut w, 99, "daemon.shutdown", Value::Null).await?;
+        Ok::<(), eyre::Report>(())
+    });
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
+/// Every library holds retired labels: the refusal names each with the
+/// removal of that library, and none is told to start the daemon again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_bring_up_follows_retired_labels_with_no_restart() -> Result<()> {
+    let sandbox = world();
+    let alpha = sandbox.data_root("alpha-root");
+    let beta = sandbox.data_root("beta-root");
+    sandbox.write_registry_entries(
+        Some("alpha"),
+        &[("alpha", alpha.as_path()), ("beta", beta.as_path())],
+    );
+    retire_catalog(&alpha);
+    retire_catalog(&beta);
+    let runtime_root = tempfile::tempdir()?;
+
+    let err = match start("alpha", runtime_root.path(), false).await {
+        Ok(runtime) => {
+            stop(runtime).await?;
+            panic!("bring-up with no servable library must refuse");
+        }
+        Err(err) => err,
+    };
+    let refusal = err
+        .downcast_ref::<NoServableLibrary>()
+        .unwrap_or_else(|| panic!("two skips must refuse as NoServableLibrary: {err:#}"));
+    for library in &refusal.libraries {
+        let hint = library.reason().data.hint.as_deref().unwrap_or_default();
+        assert_names_the_removal_and_no_retry(hint, library.name());
+    }
+    Ok(())
+}
+
+/// The one registered library holds retired labels: bring-up refuses
+/// with a reason that names it, not with the bare cause chain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lone_library_holding_retired_labels_refuses_naming_it() -> Result<()> {
+    let sandbox = world();
+    let beta = sandbox.data_root("beta-root");
+    sandbox.write_registry_entries(Some("beta"), &[("beta", beta.as_path())]);
+    retire_catalog(&beta);
+    let runtime_root = tempfile::tempdir()?;
+
+    let err = match start("beta", runtime_root.path(), false).await {
+        Ok(runtime) => {
+            stop(runtime).await?;
+            panic!("bring-up with no servable library must refuse");
+        }
+        Err(err) => err,
+    };
+    let refusal = err
+        .downcast_ref::<bookrack_runtime::backend_probe::PreflightRefusal>()
+        .unwrap_or_else(|| panic!("the refusal carries a worded reason: {err:#}"));
+    assert_eq!(refusal.library, "beta");
+    let hint = refusal.problem.data.hint.as_deref().unwrap_or_default();
+    assert_names_the_removal_and_no_retry(hint, "beta");
+    Ok(())
+}
+
+/// A root selected by path has no registry name: the reason points at
+/// the root and at the listing that names it, and never at a library
+/// called `default`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_root_selected_by_path_is_not_told_to_remove_default() -> Result<()> {
+    let sandbox = world();
+    let root = sandbox.data_root("unregistered-root");
+    retire_catalog(&root);
+    let runtime_root = tempfile::tempdir()?;
+
+    let mut opts = RuntimeOpts::headless(Some(root.clone()), None);
+    opts.no_mcp = true;
+    opts.runtime_dir = Some(runtime_root.path().to_path_buf());
+    let err = match DaemonRuntime::start(opts).await {
+        Ok(runtime) => {
+            stop(runtime).await?;
+            panic!("bring-up with no servable library must refuse");
+        }
+        Err(err) => err,
+    };
+    let refusal = err
+        .downcast_ref::<bookrack_runtime::backend_probe::PreflightRefusal>()
+        .unwrap_or_else(|| panic!("the refusal carries a worded reason: {err:#}"));
+    let hint = refusal.problem.data.hint.as_deref().unwrap_or_default();
+    assert!(
+        !hint.contains("remove default"),
+        "a path-selected root has no library name to remove: {hint}"
+    );
+    assert!(
+        hint.contains(&format!("'{}'", root.display())),
+        "the hint points at the root: {hint}"
+    );
+    assert!(
+        hint.contains("`bookrack libraries list`"),
+        "the hint names the listing that carries the library's name: {hint}"
+    );
+    for retry in NO_RETRY {
+        assert!(!hint.contains(retry), "{hint}");
+    }
+    Ok(())
+}
+
+/// Queued work against a library skipped for retired labels is failed
+/// with the removal as its hint: no mount is coming for a retry to
+/// follow.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jobs_against_a_library_holding_retired_labels_are_told_no_retry() -> Result<()> {
+    let sandbox = world();
+    let alpha = sandbox.data_root("alpha-root");
+    let beta = sandbox.data_root("beta-root");
+    sandbox.write_registry_entries(
+        Some("alpha"),
+        &[("alpha", alpha.as_path()), ("beta", beta.as_path())],
+    );
+    retire_catalog(&beta);
+    let beta_pending = "11000000-0000-7000-8000-000000000008";
+    seed_queue(vec![unnamed_row(beta_pending, "beta", "pending")])?;
+    let runtime_root = tempfile::tempdir()?;
+
+    let runtime = start("alpha", runtime_root.path(), true).await?;
+    {
+        let state = runtime
+            .queue_state
+            .lock()
+            .map_err(|_| eyre!("queue lock poisoned"))?;
+        let row = job(&state, beta_pending);
+        assert_eq!(row.state, JobState::Failed);
+        let hint = row
+            .problem
+            .as_ref()
+            .and_then(|problem| problem.data.hint.as_deref())
+            .unwrap_or("");
+        assert_names_the_removal_and_no_retry(hint, "beta");
+    }
+    stop(runtime).await
+}

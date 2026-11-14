@@ -65,6 +65,8 @@
 //! what its own judgement implies, not the leaf inventing facts about
 //! itself: the summary stays the leaf's flattened chain.
 
+use std::path::Path;
+
 use bookrack_catalog::CatalogError;
 use bookrack_config::ConfigError;
 use bookrack_core::{Explain, Problem, ProblemData};
@@ -89,7 +91,7 @@ use super::plan_registry::PlanLookupError;
 use crate::cmd::input_error::CmdInputError;
 use crate::cmd::state_error::CmdStateError;
 use crate::mount::MountRefusal;
-use crate::unmounted::MountOccasion;
+use crate::unmounted::{MountOccasion, Repair};
 
 /// Map a handler's `eyre::Report` onto a JSON-RPC error envelope.
 ///
@@ -128,6 +130,76 @@ pub(crate) fn report_problem(err: &Report) -> Problem {
         Some(rpc) => problem_of(rpc),
         None => Problem::from_error_chain(err.as_ref()),
     }
+}
+
+/// The reason a library that failed to open with `err` is not served,
+/// and the kind of repair its hint names.
+///
+/// `library` is the name the registry carries the library under, or
+/// `None` for a root selected by path. A catalog holding retired labels
+/// is worded with that name in its hint, and the hint replaces the
+/// library; every other error reads as [`report_problem`] reads it and
+/// is repaired in place.
+pub(crate) fn skip_reason(library: Option<&str>, err: &Report) -> (Problem, Repair) {
+    for cause in err.chain() {
+        if let Some(CatalogError::RetiredLabels { path, hits }) =
+            cause.downcast_ref::<CatalogError>()
+        {
+            return (
+                retired_labels_problem(library, path, hits),
+                Repair::Replacement,
+            );
+        }
+    }
+    (report_problem(err), Repair::InPlace)
+}
+
+/// The three-part reading of a catalog at `path` that is behind this
+/// build and holds rows carrying retired labels.
+///
+/// The summary states the fact, the detail counts each label, and the
+/// hint is the removal of the whole library. With `library`, the hint
+/// names it; without, it points at the data root and at the listing
+/// that carries the name of a library registered there.
+fn retired_labels_problem(
+    library: Option<&str>,
+    path: &Path,
+    hits: &[bookrack_dbkit::RetiredHit],
+) -> Problem {
+    let counted = hits
+        .iter()
+        .map(|hit| format!("{hit}"))
+        .collect::<Vec<String>>()
+        .join(", ");
+    let removal = match library {
+        Some(name) => format!(
+            "Remove the library with `bookrack libraries remove {name} --purge` and ingest \
+             its books again, or keep a bookrack 0.14 binary for it."
+        ),
+        None => {
+            let root = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(path);
+            format!(
+                "If `bookrack libraries list` shows a library at the root '{}', remove it with \
+                 `bookrack libraries remove <name> --purge` and ingest its books again; or \
+                 keep a bookrack 0.14 binary for it.",
+                root.display()
+            )
+        }
+    };
+    Problem::new(format!(
+        "catalog \"{}\" holds rows from the removed OCR intake path",
+        path.display()
+    ))
+    .detail(format!(
+        "The catalog was neither backed up nor migrated. Rows carrying a retired label: \
+         {counted}."
+    ))
+    .hint(format!(
+        "This build cannot open the catalog, and no step repairs it in place. {removal}"
+    ))
 }
 
 /// The three-part reading of `err` when a store it depends on is in a
@@ -345,18 +417,25 @@ pub(crate) fn config_err(e: ConfigError) -> RpcError {
 /// mount after a skip reads the skip's hint word for word. A reason
 /// without a hint — an unclassified fault, a name the registry does not
 /// carry — names no repair for the mount to follow and stays as it is.
+///
+/// A reason whose hint replaces the library — a catalog holding retired
+/// labels — names `name` in that hint and is followed by no mount.
 pub(crate) fn mount_err(name: &str, e: MountRefusal) -> RpcError {
-    refusal_rpc(e, |problem| MountOccasion::Serving.close(name, problem))
+    refusal_rpc(e, Some(name), |problem, repair| {
+        MountOccasion::Serving.close(name, problem, repair)
+    })
 }
 
 /// Map a refused unmount onto the corresponding wire code, each reason
 /// as it is: none of them is repaired by a mount.
 pub(crate) fn unmount_err(e: MountRefusal) -> RpcError {
-    refusal_rpc(e, |problem| problem)
+    refusal_rpc(e, None, |problem, _| problem)
 }
 
 /// The envelope a change to the mounted set is refused with, `close`
-/// applied to every reason the mounter worded.
+/// applied to every reason the mounter worded. `library` is the
+/// registry name the change is for, when the caller holds one for a
+/// reason to name.
 ///
 /// The `match` is exhaustive: each variant already knows whether it is
 /// caller input, a refusal the caller can repair, or a fault, so the
@@ -367,7 +446,11 @@ pub(crate) fn unmount_err(e: MountRefusal) -> RpcError {
 /// failure when it skips the library. The registry's own refusals —
 /// already mounted, not mounted — are worded by the registry and left
 /// as they are.
-fn refusal_rpc(e: MountRefusal, close: impl Fn(Problem) -> Problem) -> RpcError {
+fn refusal_rpc(
+    e: MountRefusal,
+    library: Option<&str>,
+    close: impl Fn(Problem, Repair) -> Problem,
+) -> RpcError {
     match e {
         MountRefusal::Unresolvable { library, source } => {
             let code = match source.as_ref() {
@@ -379,17 +462,23 @@ fn refusal_rpc(e: MountRefusal, close: impl Fn(Problem) -> Problem) -> RpcError 
             };
             rpc_from_problem(
                 code,
-                close(crate::unmounted::resolve_problem(&library, &source)),
+                close(
+                    crate::unmounted::resolve_problem(&library, &source),
+                    Repair::InPlace,
+                ),
             )
         }
         MountRefusal::Registry(e) => from_registry(&e),
-        MountRefusal::Refused { problem, .. } => rpc_from_problem(INVALID_PARAMS, close(problem)),
+        MountRefusal::Refused { problem, .. } => {
+            rpc_from_problem(INVALID_PARAMS, close(problem, Repair::InPlace))
+        }
         MountRefusal::RootLocked { problem, .. } => {
-            rpc_from_problem(BACKEND_UNAVAILABLE, close(problem))
+            rpc_from_problem(BACKEND_UNAVAILABLE, close(problem, Repair::InPlace))
         }
         MountRefusal::BringUp(err) => {
             let code = classify(&err).map_or(INTERNAL_ERROR, |rpc| rpc.code);
-            rpc_from_problem(code, close(report_problem(&err)))
+            let (problem, repair) = skip_reason(library, &err);
+            rpc_from_problem(code, close(problem, repair))
         }
     }
 }
@@ -705,12 +794,17 @@ fn too_few_vectors_hint(rows: u64, required: u64, limit: &TrainingLimit) -> Stri
     }
 }
 
-/// Map a leaf `CatalogError` onto its wire code. Same contract as
-/// [`from_vectors`]: no `Explain` on the type, a hint only beside a
-/// caller-input code.
+/// Map a leaf `CatalogError` onto its wire code. The type has no
+/// `Explain`: the summary is its own text, and a hint is added for a
+/// state this build cannot serve and for caller input. A catalog
+/// holding retired labels is the exception, worded in three parts by
+/// [`retired_labels_problem`] with no library to name.
 fn from_catalog(e: &CatalogError) -> RpcError {
     let problem = Problem::from_error_chain(e);
     match e {
+        CatalogError::RetiredLabels { path, hits } => {
+            rpc_from_problem(STATE_UNUSABLE, retired_labels_problem(None, path, hits))
+        }
         CatalogError::SchemaTooNew { expected, .. } => rpc_from_problem(
             STATE_UNUSABLE,
             problem.hint(format!(
@@ -1698,6 +1792,91 @@ mod tests {
                 "{label}: the hint names the step that migrates it"
             );
         }
+    }
+
+    fn retired_catalog() -> bookrack_catalog::CatalogError {
+        bookrack_catalog::CatalogError::RetiredLabels {
+            path: std::path::PathBuf::from("/disk/library/beta/catalog.db"),
+            hits: vec![
+                bookrack_dbkit::RetiredHit {
+                    marker: "format = ocr-markdown",
+                    count: 3,
+                },
+                bookrack_dbkit::RetiredHit {
+                    marker: "derived_from_sha256",
+                    count: 2,
+                },
+            ],
+        }
+    }
+
+    /// A catalog holding retired labels, met with no library to name,
+    /// is a state the operator resolves: the state code, a summary
+    /// without the counts, a detail that carries each of them, and a
+    /// hint that points at the root and names no library.
+    #[test]
+    fn a_catalog_holding_retired_labels_takes_the_state_code_in_three_parts() {
+        for (label, err) in [
+            ("bare", Report::from(retired_catalog())),
+            ("ops", OpsError::Catalog(retired_catalog()).into()),
+            (
+                "wrapped",
+                Report::from(retired_catalog()).wrap_err("preflight catalog schema check failed"),
+            ),
+        ] {
+            let rpc = handler_err("library.list_books", err);
+            assert_eq!(rpc.code, STATE_UNUSABLE, "{label}: {}", rpc.message);
+            assert_eq!(
+                rpc.message,
+                "catalog \"/disk/library/beta/catalog.db\" holds rows from the removed OCR \
+                 intake path",
+                "{label}"
+            );
+            let data: bookrack_core::ProblemData =
+                serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
+            let detail = data.detail.unwrap_or_default();
+            assert!(
+                detail.ends_with("format = ocr-markdown (3), derived_from_sha256 (2)."),
+                "{label}: {detail}"
+            );
+            let hint = data.hint.unwrap_or_default();
+            assert!(hint.contains("'/disk/library/beta'"), "{label}: {hint}");
+            assert!(
+                hint.contains("`bookrack libraries list`")
+                    && hint.contains("`bookrack libraries remove <name> --purge`"),
+                "{label}: {hint}"
+            );
+            assert!(!data.retryable, "{label}");
+        }
+    }
+
+    /// The reason a library is skipped for names the library only when
+    /// the caller holds its registry name, and says whether the hint
+    /// leaves a library to retry against.
+    #[test]
+    fn a_skip_reason_names_a_registered_library_and_marks_a_replacement() {
+        let err = Report::from(retired_catalog()).wrap_err("bring up library 'default'");
+        let (named, repair) = skip_reason(Some("beta"), &err);
+        assert_eq!(repair, Repair::Replacement);
+        let hint = named.data.hint.unwrap_or_default();
+        assert!(
+            hint.contains("`bookrack libraries remove beta --purge`"),
+            "{hint}"
+        );
+
+        let (unnamed, repair) = skip_reason(None, &err);
+        assert_eq!(repair, Repair::Replacement);
+        let hint = unnamed.data.hint.unwrap_or_default();
+        assert!(!hint.contains("default"), "{hint}");
+        assert!(hint.contains("'/disk/library/beta'"), "{hint}");
+
+        let behind = Report::from(bookrack_catalog::CatalogError::SchemaTooNew {
+            found: 19,
+            expected: 18,
+        });
+        let (reason, repair) = skip_reason(Some("beta"), &behind);
+        assert_eq!(repair, Repair::InPlace);
+        assert_eq!(reason, report_problem(&behind));
     }
 
     /// A reference store this build cannot serve is a state the

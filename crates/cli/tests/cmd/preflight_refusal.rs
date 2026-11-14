@@ -243,3 +243,106 @@ async fn no_servable_library_exits_two_naming_each() {
         "beta's reason carries its hint: {stderr}"
     );
 }
+
+/// Give `root` a catalog one revision behind the one that retires the
+/// OCR intake labels, holding one row that carries two of them.
+fn retire_catalog(root: &std::path::Path) {
+    let db = root.join("catalog.db");
+    bookrack_catalog::fixtures::create_at_version(&db, 17);
+    bookrack_dbkit::open_production(&db)
+        .expect("open catalog")
+        .execute_batch(
+            "INSERT INTO intake (source_sha256, intake_at, status, format, adapter) \
+             VALUES ('sha-a', '2026-01-01T00:00:00Z', 'embedded', 'ocr-markdown', 'ocr-pages');",
+        )
+        .expect("seed a row of the removed intake path");
+}
+
+fn assert_a_three_part_refusal_with_no_report(code: Option<i32>, stderr: &str) {
+    assert_eq!(
+        code,
+        Some(2),
+        "a catalog this build cannot open is the operator's to act on: {stderr}"
+    );
+    assert!(
+        stderr.contains("holds rows from the removed OCR intake path"),
+        "the summary states the fact: {stderr}"
+    );
+    assert!(
+        stderr.contains("format = ocr-markdown (1)"),
+        "the detail counts each label: {stderr}"
+    );
+    for trace in ["Location:", "Backtrace", "bring up library"] {
+        assert!(
+            !stderr.contains(trace),
+            "no cause chain reaches the operator: {stderr}"
+        );
+    }
+    for retry in ["libraries mount", "start the daemon again"] {
+        assert!(
+            !stderr.contains(retry),
+            "no retry follows a catalog with no in-place repair: {stderr}"
+        );
+    }
+}
+
+/// The only registered library holds rows of the removed OCR intake
+/// path: the daemon refuses at exit 2, in three parts, and the hint
+/// names the removal of that library.
+#[tokio::test]
+async fn a_lone_library_holding_retired_labels_exits_two_naming_its_removal() {
+    let sandbox = Sandbox::new();
+    let beta = sandbox.data_root("beta-root");
+    sandbox.write_registry_entries(Some("beta"), &[("beta", beta.as_path())]);
+    retire_catalog(&beta);
+
+    let output = Command::from(
+        bookrack_cmd!(&sandbox)
+            .without_data_dir()
+            .ollama_url(EmbedStub::shared().url())
+            .build(),
+    )
+    .args(["--library", "beta", "run"])
+    .output()
+    .await
+    .expect("run bookrack run");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert_a_three_part_refusal_with_no_report(output.status.code(), &stderr);
+    assert!(
+        stderr.contains("`bookrack libraries remove beta --purge`"),
+        "the hint names the removal of the library: {stderr}"
+    );
+}
+
+/// The same catalog under a root selected by path: the refusal points
+/// at the root, and never at a library called `default`.
+#[tokio::test]
+async fn a_path_selected_root_holding_retired_labels_is_not_told_to_remove_default() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.data_root("unregistered-root");
+    retire_catalog(&root);
+    let root_arg = root.display().to_string();
+
+    let output = Command::from(
+        bookrack_cmd!(&sandbox)
+            .without_data_dir()
+            .ollama_url(EmbedStub::shared().url())
+            .build(),
+    )
+    .args(["--data-dir", &root_arg, "run"])
+    .output()
+    .await
+    .expect("run bookrack run");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert_a_three_part_refusal_with_no_report(output.status.code(), &stderr);
+    assert!(
+        !stderr.contains("remove default"),
+        "a path-selected root has no library name to remove: {stderr}"
+    );
+    assert!(
+        stderr.contains("`bookrack libraries list`"),
+        "the hint names the listing that carries the library's name: {stderr}"
+    );
+}

@@ -69,7 +69,7 @@ use crate::control::socket::{
 };
 use crate::queue;
 use crate::rerank_supervisor::SupervisorState;
-use crate::unmounted::{self, MountOccasion, Skips};
+use crate::unmounted::{self, MountOccasion, Repair, Skips};
 
 /// Caller-facing bring-up options. Public fields keep construction
 /// declarative; helper constructors capture the two stable entry-point
@@ -403,6 +403,7 @@ impl DaemonRuntime {
                             name,
                             data_dir,
                             unmounted::resolve_problem(name, &err),
+                            Repair::InPlace,
                             eyre::Report::new(err)
                                 .wrap_err(format!("resolve configuration for library '{name}'")),
                         );
@@ -424,9 +425,10 @@ impl DaemonRuntime {
                         name,
                         lib_cfg.data_dir(),
                         reason.clone(),
+                        Repair::InPlace,
                         crate::backend_probe::PreflightRefusal {
                             library: name.clone(),
-                            problem: MountOccasion::Refusing.close(name, reason),
+                            problem: MountOccasion::Refusing.close(name, reason, Repair::InPlace),
                         }
                         .into(),
                     );
@@ -462,6 +464,7 @@ impl DaemonRuntime {
                     &candidate.name,
                     root,
                     crate::mount::duplicate_root_problem(&previous, root),
+                    Repair::InPlace,
                     eyre::eyre!(
                         "registry entries '{previous}' and '{}' point at the same data root {}; \
                          fix the registry before starting the daemon",
@@ -499,6 +502,7 @@ impl DaemonRuntime {
                         &candidate.name,
                         candidate.cfg.data_dir(),
                         problem,
+                        Repair::InPlace,
                         err.wrap_err(format!(
                             "lock the data root of library '{}'",
                             candidate.name
@@ -603,6 +607,7 @@ impl DaemonRuntime {
                         &candidate.name,
                         candidate.cfg.data_dir(),
                         crate::control::error_map::report_problem(&err),
+                        Repair::InPlace,
                         err,
                     );
                 }
@@ -624,6 +629,7 @@ impl DaemonRuntime {
                     &candidate.name,
                     candidate.cfg.data_dir(),
                     problem.clone(),
+                    Repair::InPlace,
                     crate::backend_probe::PreflightRefusal {
                         library: candidate.name.clone(),
                         problem: problem.clone(),
@@ -693,6 +699,7 @@ impl DaemonRuntime {
                         &candidate.name,
                         candidate.cfg.data_dir(),
                         problem.clone(),
+                        Repair::InPlace,
                         crate::backend_probe::PreflightRefusal {
                             library: candidate.name.clone(),
                             problem,
@@ -709,6 +716,7 @@ impl DaemonRuntime {
                         &candidate.name,
                         candidate.cfg.data_dir(),
                         crate::control::error_map::report_problem(&err),
+                        Repair::InPlace,
                         err,
                     );
                 }
@@ -753,12 +761,24 @@ impl DaemonRuntime {
                 Ok(handle) => handles.push(handle),
                 Err(err) => {
                     let err = err.wrap_err(format!("bring up library '{name}'"));
-                    skips.push(
-                        &name,
-                        lib_cfg.data_dir(),
-                        crate::control::error_map::report_problem(&err),
-                        err,
-                    );
+                    // The reason names the library only by the name
+                    // the registry carries it under: a root selected by
+                    // path is served under a placeholder name that may
+                    // be another library's.
+                    let (reason, repair) =
+                        crate::control::error_map::skip_reason(lib_cfg.library(), &err);
+                    // A reason whose hint replaces the library is the
+                    // whole of what a bring-up with this library alone
+                    // reports; any other keeps its cause chain.
+                    let cause = match repair {
+                        Repair::InPlace => err,
+                        Repair::Replacement => crate::backend_probe::PreflightRefusal {
+                            library: name.clone(),
+                            problem: MountOccasion::Refusing.close(&name, reason.clone(), repair),
+                        }
+                        .into(),
+                    };
+                    skips.push(&name, lib_cfg.data_dir(), reason, repair, cause);
                 }
             }
         }
@@ -832,10 +852,10 @@ impl DaemonRuntime {
             .map(|entry| entry.name.clone())
             .unwrap_or_else(|| primary_name.clone());
         let mut adjusted = queue::pin_unnamed_jobs(&mut initial_queue_state, &pin_target);
-        for library in skips.libraries() {
+        for (library, problem) in skips.queue_failures() {
             let failure = queue::JobFailure {
                 message: unmounted::queue_failure_message(library),
-                problem: Some(unmounted::queue_failure_problem(library)),
+                problem: Some(problem),
             };
             adjusted +=
                 queue::fail_jobs_against(&mut initial_queue_state, library.name(), &failure);

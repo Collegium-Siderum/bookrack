@@ -78,6 +78,18 @@ impl Explain for NoServableLibrary {
     }
 }
 
+/// Whether what a reason's hint names leaves the library in place for
+/// a retry to follow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Repair {
+    /// The hint repairs the library where it is: mounting it, or
+    /// starting the daemon again, is the step after.
+    InPlace,
+    /// The hint replaces the library: once it is followed there is
+    /// nothing of this library left to mount or to retry against.
+    Replacement,
+}
+
 /// Whether the daemon a reason is worded for is serving, so a hint can
 /// close with the retry that fits: a running daemon mounts the repaired
 /// library through `libraries mount`, and a bring-up that refused is
@@ -99,8 +111,12 @@ pub(crate) enum MountOccasion {
 impl MountOccasion {
     /// `reason` with the retry this occasion calls for as the last
     /// sentence of its hint. A reason without a hint is returned as it
-    /// was: it names no repair for a retry to follow.
-    pub(crate) fn close(self, name: &str, mut reason: Problem) -> Problem {
+    /// was: it names no repair for a retry to follow. So is one whose
+    /// hint is a [`Repair::Replacement`].
+    pub(crate) fn close(self, name: &str, mut reason: Problem, repair: Repair) -> Problem {
+        if repair == Repair::Replacement {
+            return reason;
+        }
         if let Some(hint) = reason.data.hint.take() {
             let retry = match self {
                 MountOccasion::Serving => format!("Then run `bookrack libraries mount {name}`."),
@@ -113,13 +129,14 @@ impl MountOccasion {
 }
 
 /// One library bring-up skipped: the record the registry keeps, the
-/// reason a refused bring-up gives for it, and the error that caused
-/// it, kept whole so a bring-up with nothing else to report can return
-/// it as it was.
+/// reason a refused bring-up gives for it, what kind of repair its
+/// hint names, and the error that caused it, kept whole so a bring-up
+/// with nothing else to report can return it as it was.
 pub(crate) struct Skip {
     pub(crate) library: UnmountedLibrary,
     /// The reason [`NoServableLibrary`] names the library with.
     pub(crate) refusal: Problem,
+    pub(crate) repair: Repair,
     pub(crate) cause: eyre::Report,
 }
 
@@ -129,24 +146,26 @@ pub(crate) struct Skips(Vec<Skip>);
 
 impl Skips {
     /// Record that bring-up skipped `name`, registered at `data_dir`,
-    /// for `reason`, whose hint names the repair and no retry. The
-    /// record a serving daemon keeps closes the hint with the mount;
-    /// the reason a refused bring-up gives closes it with starting the
-    /// daemon again.
+    /// for `reason`, whose hint names a repair of kind `repair` and no
+    /// retry. The record a serving daemon keeps closes the hint with
+    /// the mount; the reason a refused bring-up gives closes it with
+    /// starting the daemon again.
     pub(crate) fn push(
         &mut self,
         name: &str,
         data_dir: impl Into<PathBuf>,
         reason: Problem,
+        repair: Repair,
         cause: eyre::Report,
     ) {
         self.0.push(Skip {
             library: UnmountedLibrary::new(
                 name,
                 data_dir,
-                MountOccasion::Serving.close(name, reason.clone()),
+                MountOccasion::Serving.close(name, reason.clone(), repair),
             ),
-            refusal: MountOccasion::Refusing.close(name, reason),
+            refusal: MountOccasion::Refusing.close(name, reason, repair),
+            repair,
             cause,
         });
     }
@@ -155,9 +174,15 @@ impl Skips {
         self.0.iter()
     }
 
-    /// The records, in skip order, for the registry to keep.
-    pub(crate) fn libraries(&self) -> impl Iterator<Item = &UnmountedLibrary> {
-        self.0.iter().map(|skip| &skip.library)
+    /// Each record with the problem to write onto a queued job against
+    /// its library, in skip order.
+    pub(crate) fn queue_failures(&self) -> impl Iterator<Item = (&UnmountedLibrary, Problem)> {
+        self.0.iter().map(|skip| {
+            (
+                &skip.library,
+                queue_failure_problem(&skip.library, skip.repair),
+            )
+        })
     }
 
     /// The error bring-up fails with when it has nothing to serve. A
@@ -217,9 +242,13 @@ pub(crate) fn queue_failure_message(library: &UnmountedLibrary) -> String {
 
 /// The problem written onto such a job: the skip's record, its hint
 /// followed by the retry to run once the library is mounted. A record
-/// without a hint gets the mount and the retry as the whole hint.
-pub(crate) fn queue_failure_problem(library: &UnmountedLibrary) -> Problem {
+/// without a hint gets the mount and the retry as the whole hint; one
+/// whose hint is a [`Repair::Replacement`] is written as it is.
+fn queue_failure_problem(library: &UnmountedLibrary, repair: Repair) -> Problem {
     let mut problem = library.reason().clone();
+    if repair == Repair::Replacement {
+        return problem;
+    }
     problem.data.hint = Some(match problem.data.hint.take() {
         Some(hint) => format!("{hint} Once it is mounted, run `bookrack queue retry`."),
         None => format!(
@@ -291,6 +320,7 @@ mod tests {
             "alpha",
             "/disk/library/alpha",
             Problem::new("root locked"),
+            Repair::InPlace,
             eyre::eyre!("lock the data root of library 'alpha'"),
         );
         let err = one.into_refusal();
@@ -302,12 +332,14 @@ mod tests {
             "alpha",
             "/disk/library/alpha",
             Problem::new("root locked"),
+            Repair::InPlace,
             eyre::eyre!("first cause"),
         );
         two.push(
             "beta",
             "/disk/library/beta",
             Problem::new("schema too new"),
+            Repair::InPlace,
             eyre::eyre!("second cause"),
         );
         let err = two.into_refusal();
@@ -329,16 +361,19 @@ mod tests {
             "alpha",
             "/disk/library/alpha",
             Problem::new("no manifest").hint("Reconnect it."),
+            Repair::InPlace,
             eyre::eyre!("first cause"),
         );
         skips.push(
             "beta",
             "/disk/library/beta",
             Problem::new("beta failed: disk on fire"),
+            Repair::InPlace,
             eyre::eyre!("second cause"),
         );
         let records: Vec<Option<String>> = skips
-            .libraries()
+            .iter()
+            .map(|skip| &skip.library)
             .map(|library| library.reason().data.hint.clone())
             .collect();
         assert_eq!(
@@ -378,7 +413,7 @@ mod tests {
             .detail("Held by pid 7.")
             .hint("Stop the other daemon.")
             .retryable(true);
-        let serving = MountOccasion::Serving.close("beta", reason.clone());
+        let serving = MountOccasion::Serving.close("beta", reason.clone(), Repair::InPlace);
         assert_eq!(serving.summary, reason.summary);
         assert_eq!(serving.data.detail, reason.data.detail);
         assert!(serving.data.retryable);
@@ -386,7 +421,7 @@ mod tests {
             serving.data.hint.as_deref(),
             Some("Stop the other daemon. Then run `bookrack libraries mount beta`.")
         );
-        let refusing = MountOccasion::Refusing.close("beta", reason);
+        let refusing = MountOccasion::Refusing.close("beta", reason.clone(), Repair::InPlace);
         assert_eq!(
             refusing.data.hint.as_deref(),
             Some("Stop the other daemon. Then start the daemon again.")
@@ -394,8 +429,60 @@ mod tests {
 
         let bare = Problem::new("beta failed: disk on fire");
         for occasion in [MountOccasion::Serving, MountOccasion::Refusing] {
-            assert_eq!(occasion.close("beta", bare.clone()), bare);
+            assert_eq!(occasion.close("beta", bare.clone(), Repair::InPlace), bare);
+            assert_eq!(
+                occasion.close("beta", reason.clone(), Repair::Replacement),
+                reason,
+                "a hint that replaces the library is followed by no retry"
+            );
         }
+    }
+
+    /// A skip whose hint replaces the library keeps that hint as it is
+    /// on the record, in the refusal, and on a queued job.
+    #[test]
+    fn a_replacement_is_followed_by_no_retry_anywhere() {
+        let hint = "Remove the library.";
+        let mut skips = Skips::default();
+        skips.push(
+            "alpha",
+            "/disk/library/alpha",
+            Problem::new("holds retired rows").hint(hint),
+            Repair::Replacement,
+            eyre::eyre!("first cause"),
+        );
+        skips.push(
+            "beta",
+            "/disk/library/beta",
+            Problem::new("root locked").hint("Stop the other daemon."),
+            Repair::InPlace,
+            eyre::eyre!("second cause"),
+        );
+        let on_jobs: Vec<Option<String>> = skips
+            .queue_failures()
+            .map(|(_, problem)| problem.data.hint)
+            .collect();
+        assert_eq!(on_jobs[0].as_deref(), Some(hint));
+        assert!(
+            on_jobs[1]
+                .as_deref()
+                .is_some_and(|hint| hint.ends_with("run `bookrack queue retry`.")),
+            "{on_jobs:?}"
+        );
+        let record = skips
+            .iter()
+            .map(|skip| &skip.library)
+            .next()
+            .expect("alpha's record");
+        assert_eq!(record.reason().data.hint.as_deref(), Some(hint));
+        let err = skips.into_refusal();
+        let refusal = err
+            .downcast_ref::<NoServableLibrary>()
+            .expect("several skips refuse as one");
+        assert_eq!(
+            refusal.libraries[0].reason().data.hint.as_deref(),
+            Some(hint)
+        );
     }
 
     /// A missing root names the volume and the two registry commands,
@@ -436,7 +523,7 @@ mod tests {
             message,
             "library \"beta\" was not mounted at bring-up: schema too new"
         );
-        let problem = queue_failure_problem(&record);
+        let problem = queue_failure_problem(&record, Repair::InPlace);
         assert_eq!(problem.summary, "schema too new");
         assert_eq!(
             problem.data.hint.as_deref(),
@@ -448,7 +535,10 @@ mod tests {
 
         let bare = skipped("beta", "beta failed: disk on fire", None, false);
         assert_eq!(
-            queue_failure_problem(&bare).data.hint.as_deref(),
+            queue_failure_problem(&bare, Repair::InPlace)
+                .data
+                .hint
+                .as_deref(),
             Some("Run `bookrack libraries mount beta`, then `bookrack queue retry`.")
         );
     }
