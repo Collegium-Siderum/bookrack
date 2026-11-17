@@ -521,8 +521,13 @@ the exit-code bucket does not distinguish the two.
   merged_into }`.
   `op` says what the job does and holds everything only that operation
   reads — `{ type: "ingest", path, force, hold_for_metadata,
-  audit_profile, input: { type: "file" } }` for an ingest of the source
-  at `path` — so a client reads the source path at `op.path`. A row a
+  audit_profile, input }` for an ingest — so a client reads the source
+  path at `op.path`. `input` says what that path is: `{ type: "file" }`
+  for a source the pipeline extracts directly, or `{ type: "rule",
+  source_pdf, allow_partial }` for a rule file describing how plain-text
+  members make up one book, where `source_pdf` is the scan the text
+  derives from or `null`. A rule builds a book: a job of another `kind`
+  naming one fails without running. A row a
   document before schema 8 wrote is converted to this shape as the
   document loads. A `failed` row carries `error`, the flattened cause
   chain, and `problem` — `{ summary, detail?, hint?, retryable }`, the

@@ -360,6 +360,10 @@ site = "crates/ops/src/registry.rs::ingest_ocr"
 access = "write"
 
 [[write_door]]
+site = "crates/ops/src/registry.rs::ingest_rule"
+access = "write"
+
+[[write_door]]
 site = "crates/ops/src/writes/metadata.rs::acknowledge_metadata_gap"
 access = "write"
 
@@ -806,6 +810,7 @@ id = "ops-handle-pipeline"
 summary = "library-handle entry into each pipeline"
 sites = [
   "crates/ops/src/registry.rs::ingest_book",
+  "crates/ops/src/registry.rs::ingest_rule",
   "crates/ops/src/registry.rs::glean_paper",
 ]
 reason = "transitional"

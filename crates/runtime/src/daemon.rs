@@ -909,7 +909,7 @@ impl DaemonRuntime {
                                 force,
                                 hold_for_metadata,
                                 audit_profile,
-                                input: queue::JobInput::File,
+                                input,
                             }) = job.op.clone();
                             let intake_ocr = job.intake_ocr.clone();
                             runtime.block_on(async move {
@@ -956,6 +956,48 @@ impl DaemonRuntime {
                                             no_op: report.no_op,
                                             needs_ocr: false,
                                             intake_id: Some(report.ocr_intake_id),
+                                        },
+                                    );
+                                }
+                                if let queue::JobInput::Rule {
+                                    source_pdf,
+                                    allow_partial,
+                                } = input
+                                {
+                                    // A rule builds a book. A job on any
+                                    // other side that names one is failed
+                                    // here, before a pipeline that reads
+                                    // sources directly takes the rule file
+                                    // for one.
+                                    if job_kind != bookrack_core::ItemKind::Book {
+                                        return Err(queue::JobError::Book(
+                                            queue::JobFailure::text(format!(
+                                                "{} job {} names a rule file as its input,                                                  and a rule builds a book",
+                                                job_kind.as_scope_str(),
+                                                path.display()
+                                            )),
+                                        ));
+                                    }
+                                    let params = prepare_book_params(
+                                        &handle.templates().ingest,
+                                        handle.cfg(),
+                                        force,
+                                        false,
+                                        audit_profile.as_deref(),
+                                    );
+                                    let rule_params = bookrack_ingest::RuleIngestParams {
+                                        source_pdf,
+                                        allow_partial,
+                                    };
+                                    let report = handle
+                                        .ingest_rule(&path, &rule_params, &params, &on_embed_batch)
+                                        .await
+                                        .map_err(|e| queue::classify_ingest_error(&e))?;
+                                    return Ok::<queue::JobSuccess, queue::JobError>(
+                                        queue::JobSuccess {
+                                            no_op: report.no_op,
+                                            needs_ocr: false,
+                                            intake_id: Some(report.intake_id),
                                         },
                                     );
                                 }

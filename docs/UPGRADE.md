@@ -143,7 +143,8 @@ they carry no runbook step:
   `kind`, `priority`, the lifecycle fields — and an `op` object holding
   what one operation reads: for `"type": "ingest"`, the `path`, `force`,
   `hold_for_metadata`, and `audit_profile` that sat on the row itself
-  through version 7, plus an `input` naming what the path is. A version
+  through version 7, plus an `input` naming what the path is: a source
+  file, or a rule file with the scan it derives from. A version
   7 document loads with every job converted and nothing lost, with one
   exception: a job queued by `bookrack intake ocr` that had not finished
   — pending, running, failed, or parked for OCR — loads as `failed`,

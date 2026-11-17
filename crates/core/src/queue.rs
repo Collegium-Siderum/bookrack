@@ -194,6 +194,17 @@ impl IngestJob {
 pub enum JobInput {
     /// The source itself, in a format the pipeline extracts directly.
     File,
+    /// A rule file describing how a set of plain-text members makes up
+    /// one book.
+    Rule {
+        /// The scan PDF the rule's text was produced from. When set, the
+        /// rule's numbered units are checked against the PDF's pages
+        /// and the book is recorded as derived from it.
+        source_pdf: Option<PathBuf>,
+        /// Accept text that leaves pages of `source_pdf` without a
+        /// unit.
+        allow_partial: bool,
+    },
 }
 
 /// One row in the persistent queue.
@@ -923,6 +934,32 @@ mod tests {
         assert_eq!(read_row(QUEUE_SCHEMA_VERSION, json), job);
     }
 
+    /// A rule input survives a write and a read, with and without the
+    /// scan it derives from.
+    #[test]
+    fn a_rule_input_round_trips() {
+        for (source_pdf, allow_partial) in [(None, false), (Some("/tmp/scan.pdf"), true)] {
+            let job = QueueJob {
+                op: JobOp::Ingest(IngestJob {
+                    input: JobInput::Rule {
+                        source_pdf: source_pdf.map(PathBuf::from),
+                        allow_partial,
+                    },
+                    ..IngestJob::file("/tmp/material/rule.toml")
+                }),
+                ..job_with("0", JobState::Pending)
+            };
+            let json = serde_json::to_value(&job).expect("serialize");
+            assert_eq!(json["op"]["input"]["type"], "rule");
+            assert_eq!(json["op"]["input"]["allow_partial"], allow_partial);
+            assert_eq!(
+                json["op"]["input"]["source_pdf"],
+                serde_json::json!(source_pdf)
+            );
+            assert_eq!(read_row(QUEUE_SCHEMA_VERSION, json), job);
+        }
+    }
+
     #[test]
     fn a_document_at_or_below_this_version_loads_and_a_later_one_is_refused() {
         assert_eq!(
@@ -1013,6 +1050,13 @@ mod tests {
         );
         assert_eq!(state["jobs"][0]["op"]["input"]["type"], "file");
         assert_eq!(keys_of(&state["jobs"][0]["op"]["input"]), ["type"]);
+        let rule = serde_json::to_value(JobInput::Rule {
+            source_pdf: Some("/tmp/scan.pdf".into()),
+            allow_partial: true,
+        })
+        .expect("serialize");
+        assert_eq!(rule["type"], "rule");
+        assert_eq!(keys_of(&rule), ["allow_partial", "source_pdf", "type"]);
         assert_eq!(
             keys_of(&state["jobs"][0]["intake_ocr"]),
             ["allow_partial", "expected_pages", "from_pdf"]

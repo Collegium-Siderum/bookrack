@@ -323,7 +323,7 @@ pub fn show_stats<E: Embedder>(ops: &Ops<E>) -> Result<LibraryStats> {
             intake_counts_by_status.insert(status.as_str().to_string(), n);
         }
         let mut intake_count_by_format = BTreeMap::new();
-        for format in ["epub", "pdf", "mobi", "azw3", "txt"] {
+        for format in ["epub", "pdf", "mobi", "azw3", "txt", "rule-text"] {
             let n = catalog.count_intakes_by_format(bookrack_core::ItemKind::Book, format)?;
             if n > 0 {
                 intake_count_by_format.insert(format.to_string(), n);

@@ -25,7 +25,7 @@ use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_glean::{GleanParams, GleanReport};
 use bookrack_ingest::ocr::{OcrIngestParams, OcrIngestReport, ingest_ocr_intake_with_progress};
-use bookrack_ingest::{IngestParams, IngestReport, OnEmbedBatch};
+use bookrack_ingest::{IngestParams, IngestReport, OnEmbedBatch, RuleIngestParams};
 use eyre::WrapErr;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -385,6 +385,60 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
                 .refresh_store()
                 .await
                 .context("refresh library store after ingest")?;
+        }
+        Ok(report)
+    }
+
+    /// Ingest the book a rule file describes through the
+    /// registry-mediated write path.
+    ///
+    /// Mirrors [`Self::ingest_book`]: holds the per-library ingest
+    /// mutex, opens fresh [`Catalog`] and [`Corpus`] handles from the
+    /// library's stored paths, then forwards to
+    /// [`bookrack_ingest::ingest_rule_with_progress`] with the library's
+    /// warm embedder, reporting each EMBED batch to `on_embed_batch`.
+    /// Rebinds the book-side [`Library`] store afterwards, so the first
+    /// rule ingest into a previously empty data dir lights up the read
+    /// path on the same lock.
+    ///
+    /// Returns an error when this handle was built catalog-only, since
+    /// ingest requires the embedder that lives on the
+    /// [`bookrack_query::Library`] half.
+    // Parallel implementation: ops-handle-pipeline.
+    pub async fn ingest_rule(
+        &self,
+        rule: &Path,
+        rule_params: &RuleIngestParams,
+        params: &IngestParams,
+        on_embed_batch: &OnEmbedBatch<'_>,
+    ) -> eyre::Result<IngestReport> {
+        let embedder = self
+            .ops
+            .embedder()
+            .ok_or_else(|| eyre::eyre!("ingest requires a library handle with an embedder"))?;
+        let _guard = self.ingest_lock.lock().await;
+        let mut corpus = Corpus::open_for_write(self.ops.corpus_db())
+            .context("open corpus for rule ingest write")?;
+        let mut catalog = Catalog::open_for_write(self.ops.catalog_db(), self.ops.backup_dir())
+            .context("open catalog for rule ingest write")?;
+        let report = bookrack_ingest::ingest_rule_with_progress(
+            rule,
+            &mut corpus,
+            &mut catalog,
+            self.ops.lancedb_dir(),
+            self.ops.books_dir(),
+            embedder,
+            params,
+            rule_params,
+            on_embed_batch,
+        )
+        .await
+        .context("registry-mediated rule ingest")?;
+        if let Some(library) = self.ops.library() {
+            library
+                .refresh_store()
+                .await
+                .context("refresh library store after rule ingest")?;
         }
         Ok(report)
     }
