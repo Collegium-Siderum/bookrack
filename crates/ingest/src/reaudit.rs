@@ -155,9 +155,12 @@ fn report_for_intake(
     let origins = crate::field_origins(catalog, intake_id)?;
     let toc_stats = structure::toc_stats(&envelope.extraction, &audit_profile.toc_shape);
     let sample = body_sample(&envelope.extraction);
+    // A rule row's `original_path` is the rule file, whose name does
+    // not describe the book: ingest offers the audit no stem for it.
     let source_stem = intake
         .original_path
         .as_deref()
+        .filter(|_| intake.adapter.as_deref() != Some(bookrack_extract::rule::ADAPTER))
         .and_then(|p| Path::new(p).file_stem())
         .map(|s| s.to_string_lossy().into_owned());
     let input = bookrack_metadata::AuditInput {

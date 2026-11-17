@@ -63,11 +63,11 @@ pub(crate) enum ShapeSeverity {
 
 /// Run the audit over the prepared input under one profile.
 pub(crate) fn run(input: &AuditInput, profile: &AuditProfile) -> MetadataReport {
-    let prior = source_prior(&input.provenance.adapter);
     let doubtful = matches!(
         input.provenance.text_layer_quality,
         TextLayerQuality::Doubtful
     );
+    let prior = source_prior(&input.provenance.adapter, doubtful);
     // The source prior and the text-layer doubt judge the extractor,
     // not the value: a field whose effective value is a curator's
     // override is graded without them.
@@ -279,9 +279,14 @@ enum SourcePrior {
     None,
 }
 
-fn source_prior(adapter: &str) -> SourcePrior {
+/// A rule states its biblio outright, so a rule over typed text is a
+/// strong source; one over recognised text is graded as text with no
+/// biblio surface, whatever the rule states.
+fn source_prior(adapter: &str, doubtful: bool) -> SourcePrior {
     match adapter {
         "epub" | "mobi" | "azw3" => SourcePrior::Strong,
+        "rule-text" if doubtful => SourcePrior::None,
+        "rule-text" => SourcePrior::Strong,
         "pdf" | "html" | "htm" | "xhtml" => SourcePrior::Weak,
         "txt" | "text" | "ocr" => SourcePrior::None,
         _ => SourcePrior::Weak,

@@ -652,6 +652,69 @@ fn doubtful_text_layer_downgrades_present_fields() {
     );
 }
 
+/// Audit a book carrying a title and a language, read by `adapter`
+/// from a text layer of `quality`.
+fn titled_report(adapter: &str, quality: TextLayerQuality) -> MetadataReport {
+    let catalog = Catalog::open_in_memory().expect("open");
+    seed_base(
+        &catalog,
+        Some("A Book"),
+        None,
+        None,
+        None,
+        Some("en"),
+        None,
+        None,
+    );
+    let effective = effective_of(&catalog);
+    let prov = provenance(adapter, quality);
+    let biblio = biblio();
+    let stats = toc_stats();
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "Some English body.",
+        total_blocks: 10,
+        source_stem: None,
+        data: test_data(),
+        origins: FieldOrigins::empty(),
+    };
+    audit(&input, &AuditProfile::default())
+}
+
+#[test]
+fn a_born_digital_rule_text_is_graded_as_a_strong_source() {
+    let rule = titled_report("rule-text", TextLayerQuality::BornDigital);
+    let epub = titled_report("epub", TextLayerQuality::BornDigital);
+    assert_eq!(rule.verdict, Verdict::Clean);
+    for name in ["title", "language"] {
+        let (rule, epub) = (field(&rule, name), field(&epub, name));
+        assert!(
+            !rule.flags.contains(&Flag::SourcePriorWeak),
+            "{name}: a rule states its biblio outright: {:?}",
+            rule.flags
+        );
+        assert_eq!(rule.grade, epub.grade, "{name}");
+        assert_eq!(rule.flags, epub.flags, "{name}");
+    }
+}
+
+#[test]
+fn a_doubtful_rule_text_is_graded_as_a_source_with_no_biblio() {
+    let rule = titled_report("rule-text", TextLayerQuality::Doubtful);
+    let txt = titled_report("txt", TextLayerQuality::Doubtful);
+    assert_eq!(rule.verdict, Verdict::NeedsWork);
+    for name in ["title", "language"] {
+        let (rule, txt) = (field(&rule, name), field(&txt, name));
+        assert!(rule.flags.contains(&Flag::DoubtfulTextLayer), "{name}");
+        assert!(rule.flags.contains(&Flag::SourcePriorWeak), "{name}");
+        assert_eq!(rule.grade, FieldGrade::Weak, "{name}");
+        assert_eq!(rule.grade, txt.grade, "{name}");
+    }
+}
+
 #[test]
 fn language_disagreeing_with_body_is_flagged() {
     let catalog = Catalog::open_in_memory().expect("open");

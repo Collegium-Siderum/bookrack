@@ -635,7 +635,12 @@ fn from_ingest(e: &IngestError) -> RpcError {
         | IntakeNotEmbedded(_)
         | OcrSourceStatusMismatch { .. }
         | OcrPagesMissing { .. }
-        | OcrPagesExcess { .. } => INVALID_PARAMS,
+        | OcrPagesExcess { .. }
+        | Rule(_)
+        | RuleKindNotBook { .. }
+        | RuleSourceNotPending { .. }
+        | RuleSourceUnnumbered { .. }
+        | RuleCoverage { .. } => INVALID_PARAMS,
         _ => INTERNAL_ERROR,
     };
     rpc_from_problem(code, e.explain())
@@ -1439,6 +1444,63 @@ mod tests {
         for (label, err) in cases {
             let rpc = handler_err("vectors.rebuild", err);
             assert_eq!(rpc.code, INVALID_PARAMS, "{label}: {}", rpc.message);
+        }
+    }
+
+    /// A rule the pipeline refuses is caller input: every such failure
+    /// answers invalid params, with the rule's own wording and a next
+    /// step on the wire rather than the wrapper's name.
+    #[test]
+    fn a_refused_rule_answers_invalid_params_with_its_own_wording() {
+        use bookrack_extract::rule::RuleError;
+        let rule = std::path::PathBuf::from("rule.toml");
+        let scan = std::path::PathBuf::from("scan.pdf");
+        let cases: Vec<(&str, IngestError)> = vec![
+            (
+                "rule",
+                IngestError::Rule(RuleError::NoMembers { rule: rule.clone() }),
+            ),
+            ("kind", IngestError::RuleKindNotBook { rule: rule.clone() }),
+            (
+                "not pending",
+                IngestError::RuleSourceNotPending {
+                    source_pdf: scan.clone(),
+                    status: None,
+                },
+            ),
+            (
+                "unnumbered",
+                IngestError::RuleSourceUnnumbered { rule: rule.clone() },
+            ),
+            (
+                "coverage",
+                IngestError::RuleCoverage {
+                    rule,
+                    source_pdf: scan,
+                    covered: 2,
+                    expected: 3,
+                    missing: vec![3],
+                    excess: Vec::new(),
+                },
+            ),
+        ];
+        for (label, err) in cases {
+            let rpc = handler_err("ingest.submit", Report::from(err).wrap_err("ingest"));
+            assert_eq!(rpc.code, INVALID_PARAMS, "{label}: {}", rpc.message);
+            assert!(
+                !rpc.message.contains("rule error") && !rpc.message.ends_with('.'),
+                "{label}: {}",
+                rpc.message
+            );
+            let hint = rpc
+                .data
+                .as_ref()
+                .and_then(|data| data.get("hint"))
+                .and_then(|hint| hint.as_str());
+            assert!(
+                hint.is_some_and(|hint| !hint.is_empty()),
+                "{label}: {rpc:?}"
+            );
         }
     }
 

@@ -322,44 +322,7 @@ pub fn dryrun_path(path: &Path, params: &DryrunParams) -> Vec<DryrunBookReport> 
 /// errors are recorded into the returned report rather than propagated.
 pub fn dryrun_book(path: &Path, params: &DryrunParams) -> DryrunBookReport {
     let started = Instant::now();
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string();
-    let format = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_default();
-    let bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
-
-    let mut record = DryrunBookReport {
-        stem: stem.clone(),
-        format,
-        bytes,
-        extract_outcome: "error".to_string(),
-        adapter: None,
-        blocks: None,
-        toc_stats: None,
-        structure: None,
-        chunks: None,
-        source_tag: None,
-        filename_template: None,
-        biblio: None,
-        filename_biblio: None,
-        base_attrs: None,
-        base_attrs_actions: vec![],
-        effective: None,
-        inherited_from_parent: None,
-        audit_profile: params.audit_profile.name.clone(),
-        audit_fields: None,
-        audit_shape_flags: None,
-        verdict: None,
-        confidence: None,
-        elapsed_ms: 0,
-        error: None,
-    };
+    let mut record = blank_report(path, params);
 
     let extraction = match extract(path, &params.audit_profile, &params.heading_patterns) {
         Ok(ExtractOutcome::Extracted(e)) => e,
@@ -384,26 +347,106 @@ pub fn dryrun_book(path: &Path, params: &DryrunParams) -> DryrunBookReport {
         }
     };
 
+    let stem = record.stem.clone();
+    finish_report(&extraction, Some(&stem), path, params, &mut record);
+    record.elapsed_ms = started.elapsed().as_millis() as u64;
+    record
+}
+
+/// Dryrun an extraction already in hand, for a source `extract` does not
+/// read by path. `path` names the source in the report.
+///
+/// `filename_stem` is the stem offered to the filename parser and the
+/// audit; `None` for a source whose file name does not describe the
+/// book, which then gets no filename layer. Like [`dryrun_book`], never
+/// panics and never returns an error: a failure after extraction is
+/// recorded in the report.
+pub fn dryrun_extraction(
+    extraction: &Extraction,
+    filename_stem: Option<&str>,
+    path: &Path,
+    params: &DryrunParams,
+) -> DryrunBookReport {
+    let started = Instant::now();
+    let mut record = blank_report(path, params);
+    finish_report(extraction, filename_stem, path, params, &mut record);
+    record.elapsed_ms = started.elapsed().as_millis() as u64;
+    record
+}
+
+/// Run the pre-vector pipeline over `extraction` and set the report's
+/// outcome from it.
+fn finish_report(
+    extraction: &Extraction,
+    filename_stem: Option<&str>,
+    path: &Path,
+    params: &DryrunParams,
+    record: &mut DryrunBookReport,
+) {
     // Past this point the extract succeeded. Any failure now is a bug,
     // not user data — surface it as an error rather than panicking.
-    match run_pipeline(&extraction, &stem, path, params, &mut record) {
+    match run_pipeline(extraction, filename_stem, path, params, record) {
         Ok(()) => record.extract_outcome = "extracted".to_string(),
         Err(e) => {
             record.extract_outcome = "error".to_string();
             record.error = Some(format!("{e}"));
         }
     }
-    record.elapsed_ms = started.elapsed().as_millis() as u64;
-    record
+}
+
+/// A report for the source at `path` with nothing run yet: its stem,
+/// extension, and size, and an `error` outcome.
+fn blank_report(path: &Path, params: &DryrunParams) -> DryrunBookReport {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let format = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    let bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
+
+    DryrunBookReport {
+        stem,
+        format,
+        bytes,
+        extract_outcome: "error".to_string(),
+        adapter: None,
+        blocks: None,
+        toc_stats: None,
+        structure: None,
+        chunks: None,
+        source_tag: None,
+        filename_template: None,
+        biblio: None,
+        filename_biblio: None,
+        base_attrs: None,
+        base_attrs_actions: vec![],
+        effective: None,
+        inherited_from_parent: None,
+        audit_profile: params.audit_profile.name.clone(),
+        audit_fields: None,
+        audit_shape_flags: None,
+        verdict: None,
+        confidence: None,
+        elapsed_ms: 0,
+        error: None,
+    }
 }
 
 /// Drive the pre-vector pipeline against fresh in-memory databases and
 /// fill `record` with what each step produced. Separated from
 /// [`dryrun_book`] so the success path can use `?` without sacrificing the
 /// caller's "never returns an Err" guarantee.
+///
+/// `stem` is the file stem the filename parser and the audit read; with
+/// `None` the report carries no filename layer.
 fn run_pipeline(
     extraction: &Extraction,
-    stem: &str,
+    stem: Option<&str>,
     path: &Path,
     params: &DryrunParams,
     record: &mut DryrunBookReport,
@@ -415,7 +458,7 @@ fn run_pipeline(
     let mut corpus = Corpus::open_in_memory()?;
     let registration = catalog.register_intake(
         ItemKind::Book,
-        &NewIntake::new(synthetic_sha(stem))
+        &NewIntake::new(synthetic_sha(stem.unwrap_or(&path.to_string_lossy())))
             .format(extraction.provenance.adapter.clone())
             .byte_size(extraction.blocks.iter().map(|b| b.text.len() as i64).sum())
             .original_path(path.to_string_lossy().into_owned()),
@@ -449,16 +492,17 @@ fn run_pipeline(
     });
 
     // METADATA — seed base attrs, then audit over the effective view.
-    let filename_biblio = parse_filename(stem, &params.audit_profile.filename_parser);
-    record.filename_template = filename_template_label(&filename_biblio);
-    record.filename_biblio = record
-        .filename_template
-        .is_some()
-        .then(|| FilenameBiblioOut::from(&filename_biblio));
+    let filename_biblio =
+        stem.map(|stem| parse_filename(stem, &params.audit_profile.filename_parser));
+    record.filename_template = filename_biblio.as_ref().and_then(filename_template_label);
+    record.filename_biblio = filename_biblio
+        .as_ref()
+        .filter(|_| record.filename_template.is_some())
+        .map(FilenameBiblioOut::from);
     let outcome = build_base_attrs(
         intake_id,
         extraction,
-        Some(&filename_biblio),
+        filename_biblio.as_ref(),
         &params.audit_data,
         &params.audit_profile,
     );
@@ -484,7 +528,7 @@ fn run_pipeline(
             toc_stats: &structure_report.toc_stats,
             body_sample: &body,
             total_blocks: extraction.blocks.len(),
-            source_stem: Some(stem),
+            source_stem: stem,
             data: &params.audit_data,
             // The dryrun catalog is freshly created in memory; no
             // override can exist on it.
@@ -751,6 +795,47 @@ mod tests {
         assert_eq!(fb.publisher.as_deref(), Some("A Publisher"));
         assert_eq!(fb.isbn, None);
         assert_eq!(fb.series, None);
+    }
+
+    #[test]
+    fn a_dryrun_of_an_extraction_reads_no_filename_unless_given_a_stem() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("01.txt"), "A paragraph of prose.\n").expect("member");
+        // A rule file whose name the filename parser would read a whole
+        // biblio out of.
+        let path = dir
+            .path()
+            .join("An Author - A Title (2020, A Publisher).toml");
+        std::fs::write(
+            &path,
+            "schema = 1\n[members]\ninclude = [\"*.txt\"]\n[units]\nby = \"file\"\n\
+             [structure]\nunit_titles = \"none\"\nheadings = \"none\"\n",
+        )
+        .expect("rule");
+        let rule = bookrack_extract::rule::RuleFile::load(&path).expect("load");
+        let source = rule.read().expect("read");
+        let params = DryrunParams::default();
+        let extraction = rule
+            .extract(&source, &params.heading_patterns)
+            .expect("extract");
+
+        let rec = dryrun_extraction(&extraction, None, &path, &params);
+        assert_eq!(rec.extract_outcome, "extracted", "{:?}", rec.error);
+        assert_eq!(rec.adapter.as_deref(), Some("rule-text"));
+        assert_eq!(rec.source_tag.as_deref(), Some("rule"));
+        assert_eq!(rec.filename_template, None);
+        assert!(rec.filename_biblio.is_none());
+        assert_eq!(rec.base_attrs.expect("base attrs").title, None);
+        assert!(rec.chunks.is_some());
+
+        // The same extraction with the stem offered: the parser reads it.
+        let stem = path.file_stem().and_then(|s| s.to_str());
+        let rec = dryrun_extraction(&extraction, stem, &path, &params);
+        assert_eq!(rec.filename_template.as_deref(), Some("calibre"));
+        assert_eq!(
+            rec.base_attrs.expect("base attrs").title.as_deref(),
+            Some("A Title")
+        );
     }
 
     #[test]

@@ -21,19 +21,24 @@ pub mod reaudit;
 pub mod rebuild;
 pub mod reembed;
 pub mod reset;
+mod rule;
 mod structure;
 
 pub use bookrack_corpus::IndexStamps;
 pub use bookrack_text::{ChunkParams, ChunkPlan};
 pub use dryrun::{
     BiblioOut, ChunkStatsOut, DryrunBookReport, DryrunParams, DryrunSummary, FieldOut,
-    StructureOut, TocStatsOut, collect_files, dryrun_book, dryrun_path, summarize,
+    StructureOut, TocStatsOut, collect_files, dryrun_book, dryrun_extraction, dryrun_path,
+    summarize,
 };
 pub use embed_run::{
     EmbedRunReport, OnEmbedBatch, embed_book_chunks, embed_book_chunks_with_progress, now_rfc3339,
 };
+pub use rule::{
+    RuleIngestParams, RuleSourceAnchor, check_rule_source, ingest_rule, ingest_rule_with_progress,
+};
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use bookrack_catalog::{
     ActorKind, Catalog, IntakeStatus, NewContributor, NewIntake, NewItemPipelineAudit,
@@ -217,6 +222,61 @@ pub enum IngestError {
         /// not declare.
         excess: Vec<u32>,
     },
+
+    /// A rule file, or the members it names, could not be read into an
+    /// extraction.
+    #[error("rule error")]
+    Rule(#[from] bookrack_extract::rule::RuleError),
+
+    /// The rule declares a kind other than a book.
+    #[error("rule \"{}\" does not describe a book", rule.display())]
+    RuleKindNotBook {
+        /// The rule file.
+        rule: PathBuf,
+    },
+
+    /// The PDF a rule's text is said to derive from is not a source
+    /// waiting for OCR: no book intake holds its content, or the intake
+    /// that does is in another state.
+    #[error("\"{}\" is not waiting for OCR", source_pdf.display())]
+    RuleSourceNotPending {
+        /// The PDF named as the source.
+        source_pdf: PathBuf,
+        /// The state of the intake holding the PDF's content, as the
+        /// database string form; `None` when no intake holds it.
+        status: Option<&'static str>,
+    },
+
+    /// A source PDF was named, and the rule gives a unit that holds
+    /// text no number to match against the PDF's pages.
+    #[error("rule \"{}\" gives its units no page numbers", rule.display())]
+    RuleSourceUnnumbered {
+        /// The rule file.
+        rule: PathBuf,
+    },
+
+    /// The rule's numbered units do not match the pages of the source
+    /// PDF: pages are missing and a partial product was not asked for,
+    /// or a unit is numbered outside the PDF's pages.
+    #[error(
+        "\"{}\" covers {covered} of {expected} pages of \"{}\"",
+        rule.display(),
+        source_pdf.display()
+    )]
+    RuleCoverage {
+        /// The rule file.
+        rule: PathBuf,
+        /// The PDF named as the source.
+        source_pdf: PathBuf,
+        /// How many of the PDF's pages a unit is numbered as.
+        covered: usize,
+        /// The PDF's page count.
+        expected: u32,
+        /// The 1-based pages no unit is numbered as, ascending.
+        missing: Vec<u32>,
+        /// The unit numbers that are no page of the PDF, ascending.
+        excess: Vec<u32>,
+    },
 }
 
 impl bookrack_core::Explain for IngestError {
@@ -225,6 +285,84 @@ impl bookrack_core::Explain for IngestError {
             // The embed leaf writes its own wording; the wrapper's own
             // `Display` ("embed error") names a module, not a failure.
             IngestError::Embed(e) => e.explain(),
+            IngestError::Rule(e) => e.explain(),
+            IngestError::RuleKindNotBook { rule } => bookrack_core::Problem::new(format!(
+                "rule \"{}\" does not describe a book",
+                rule.display()
+            ))
+            .detail("The rule sets `kind` to a value other than \"book\".")
+            .hint("Set kind = \"book\" to ingest the rule's members as one book."),
+            IngestError::RuleSourceNotPending { source_pdf, status } => {
+                let problem = bookrack_core::Problem::new(format!(
+                    "\"{}\" is not waiting for OCR",
+                    source_pdf.display()
+                ));
+                match status {
+                    None => problem
+                        .detail("No book in the library was registered from this file.")
+                        .hint(
+                            "Ingest the PDF first with `bookrack ingest`. A scan without a \
+                             usable text layer is then registered as waiting for OCR.",
+                        ),
+                    Some(status) => problem
+                        .detail(format!("The book registered from this file is {status}."))
+                        .hint(
+                            "The PDF was not registered as a scan waiting for OCR, so no \
+                             text is derived from it. Submit the rule without `--source`.",
+                        ),
+                }
+            }
+            IngestError::RuleSourceUnnumbered { rule } => bookrack_core::Problem::new(format!(
+                "rule \"{}\" gives its units no page numbers",
+                rule.display()
+            ))
+            .detail(
+                "A source PDF was named, and each unit that holds text needs a number \
+                 to be matched against the PDF's pages.",
+            )
+            .hint(
+                "Capture a `sheet` group in units.marker, or split by file and let \
+                 completeness.number match every member's file name.",
+            ),
+            IngestError::RuleCoverage {
+                rule,
+                source_pdf,
+                covered,
+                expected,
+                missing,
+                excess,
+            } => {
+                let list = |pages: &[u32]| {
+                    pages
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let mut detail = Vec::new();
+                if !missing.is_empty() {
+                    detail.push(format!("No unit is numbered {}.", list(missing)));
+                }
+                if !excess.is_empty() {
+                    detail.push(format!(
+                        "The PDF has no page numbered {}, which a unit is numbered as.",
+                        list(excess)
+                    ));
+                }
+                let hint = if excess.is_empty() {
+                    "Pass `--allow-partial` to accept the text with those pages missing."
+                } else {
+                    "A unit numbered outside the PDF's pages is never accepted. Check \
+                     that the rule and the PDF belong together."
+                };
+                bookrack_core::Problem::new(format!(
+                    "\"{}\" covers {covered} of {expected} pages of \"{}\"",
+                    rule.display(),
+                    source_pdf.display()
+                ))
+                .detail(detail.join(" "))
+                .hint(hint)
+            }
             other => bookrack_core::Problem::from_error_chain(other),
         }
     }
@@ -482,7 +620,7 @@ pub async fn ingest_book_with_progress<E: Embedder>(
     let behind = if params.force {
         None
     } else {
-        match on_file(catalog, corpus, &source_sha, &params.embed.model)? {
+        match on_file(catalog, corpus, &source_sha, &params.embed.model, None)? {
             OnFile::Current(report) => {
                 tracing::Span::current().record("intake_id", report.intake_id);
                 tracing::info!(
@@ -491,7 +629,7 @@ pub async fn ingest_book_with_progress<E: Embedder>(
                 );
                 return Ok(report);
             }
-            OnFile::ExtractorBehind(intake) => {
+            OnFile::ExtractorBehind(intake) | OnFile::RuleChanged(intake) => {
                 tracing::Span::current().record("intake_id", intake.intake_id);
                 Some(*intake)
             }
@@ -569,6 +707,86 @@ pub async fn ingest_book_with_progress<E: Embedder>(
             return Err(e.into());
         }
     };
+    finish_extraction_ingest(
+        Staged {
+            extraction,
+            source_sha,
+            byte_size: bytes.len() as i64,
+            original_path: file,
+            source_stem: file.file_stem().and_then(|s| s.to_str()),
+            run_id,
+            started,
+            behind,
+            hold_for_metadata: params.hold_for_metadata,
+        },
+        corpus,
+        catalog,
+        lancedb_dir,
+        books_dir,
+        embedder,
+        params,
+        on_embed_batch,
+    )
+    .await
+}
+
+/// A source read into an [`Extraction`], with what the stages after
+/// EXTRACT need to know about where it came from.
+struct Staged<'a> {
+    /// The extraction to ingest.
+    extraction: Extraction,
+    /// The hash the intake is keyed by.
+    source_sha: String,
+    /// Size in bytes of what `source_sha` is the hash of.
+    byte_size: i64,
+    /// The path recorded as the intake's `original_path`.
+    original_path: &'a Path,
+    /// The file stem offered to the filename parser and the audit, for a
+    /// source whose file name describes the book.
+    source_stem: Option<&'a str>,
+    /// The run id every audit row of this run carries.
+    run_id: String,
+    /// When EXTRACT started.
+    started: std::time::Instant,
+    /// The intake on file whose envelope the extraction is compared with
+    /// before the later stages run.
+    behind: Option<bookrack_catalog::Intake>,
+    /// Whether a `needs_work` audit verdict parks the book at the
+    /// metadata stage.
+    hold_for_metadata: bool,
+}
+
+/// Run every stage after EXTRACT for `staged`: compare with the envelope
+/// on file when the intake is behind, register the intake, build the
+/// corpus tree, stamp and cache the extraction, seed and audit the
+/// metadata, then chunk and embed.
+///
+/// An extraction a rule produced also records its fingerprint and unit
+/// count on the intake. A derivation edge the extraction names is written
+/// to the intake once the book is embedded, so a run that fails earlier
+/// leaves the source it derives from without a product.
+#[allow(clippy::too_many_arguments)]
+async fn finish_extraction_ingest<E: Embedder>(
+    staged: Staged<'_>,
+    corpus: &mut Corpus,
+    catalog: &mut Catalog,
+    lancedb_dir: &Path,
+    books_dir: &Path,
+    embedder: &E,
+    params: &IngestParams,
+    on_embed_batch: &OnEmbedBatch<'_>,
+) -> Result<IngestReport> {
+    let Staged {
+        extraction,
+        source_sha,
+        byte_size,
+        original_path,
+        source_stem,
+        run_id,
+        started,
+        behind,
+        hold_for_metadata,
+    } = staged;
     let adapter = extraction.provenance.adapter.clone();
     audit(
         catalog,
@@ -605,8 +823,8 @@ pub async fn ingest_book_with_progress<E: Embedder>(
         ItemKind::Book,
         &NewIntake::new(source_sha.clone())
             .format(adapter.clone())
-            .byte_size(bytes.len() as i64)
-            .original_path(file.to_string_lossy().into_owned()),
+            .byte_size(byte_size)
+            .original_path(original_path.to_string_lossy().into_owned()),
     )?;
     let already_registered = !registration.is_new();
     let intake_id = registration.intake().intake_id;
@@ -687,6 +905,10 @@ pub async fn ingest_book_with_progress<E: Embedder>(
         &extraction.provenance.adapter,
         extraction.provenance.extractor_version,
     )?;
+    if let Some(rule) = &extraction.provenance.rule {
+        catalog.set_rule_fingerprint(intake_id, &rule.fingerprint)?;
+        catalog.set_page_count(ItemKind::Book, intake_id, rule.units.len() as i64)?;
+    }
     store_envelope(catalog, intake_id, &extraction, books_dir, &source_sha);
 
     // METADATA (non-blocking): seed the publication-attrs base from the
@@ -697,7 +919,6 @@ pub async fn ingest_book_with_progress<E: Embedder>(
     // metadata looks. A human or LLM must `metadata approve`,
     // `metadata ack`, or `metadata reject` to advance status, and a
     // re-ingest leaves an advanced status in place.
-    let source_stem = file.file_stem().and_then(|s| s.to_str());
     let filename_biblio = source_stem
         .map(|stem| bookrack_metadata::parse_filename(stem, &params.audit_profile.filename_parser));
     let outcome = run_metadata_substep(
@@ -722,7 +943,7 @@ pub async fn ingest_book_with_progress<E: Embedder>(
     // Optional hold gate: when the caller asked for it AND the audit
     // flagged the record, park the book in the metadata stage and
     // hand control back. CHUNK/EMBED run on a later `advance` call.
-    if params.hold_for_metadata && needs_work {
+    if hold_for_metadata && needs_work {
         set_state(
             catalog,
             NewItemState::new(book_root_id, intake_id, "metadata").parsed_at(&parsed_at),
@@ -761,6 +982,10 @@ pub async fn ingest_book_with_progress<E: Embedder>(
     )
     .await?;
 
+    if let Some(derived_from) = &extraction.provenance.derived_from_sha256 {
+        catalog.set_derived_from(ItemKind::Book, intake_id, derived_from)?;
+    }
+
     Ok(IngestReport {
         intake_id,
         book_root_id: structure.book_root_id,
@@ -787,6 +1012,9 @@ enum OnFile {
     /// Only `extractor_version` is behind: extract, then compare the
     /// result with the envelope on file.
     ExtractorBehind(Box<bookrack_catalog::Intake>),
+    /// Every stamp matches and the rule's fingerprint does not: extract,
+    /// then compare the result with the envelope on file.
+    RuleChanged(Box<bookrack_catalog::Intake>),
 }
 
 /// Inspect the catalog and book state to decide how much of a re-ingest
@@ -798,12 +1026,18 @@ enum OnFile {
 /// stamp then decides: equal to this binary's is [`OnFile::Current`];
 /// behind it is [`OnFile::ExtractorBehind`], except on an OCR-intake row,
 /// whose staleness is a separate version dimension.
+///
+/// `rule_fingerprint` is the fingerprint of the rule this run extracts
+/// under, `None` for a source no rule reads. With the extractor stamp
+/// current, a row recording another fingerprint, or none, is
+/// [`OnFile::RuleChanged`].
 // Parallel implementation: pipeline-noop.
 fn on_file(
     catalog: &Catalog,
     corpus: &Corpus,
     source_sha: &str,
     embed_model: &str,
+    rule_fingerprint: Option<&str>,
 ) -> Result<OnFile> {
     let Some(intake) = catalog.intake_by_sha(bookrack_core::ItemKind::Book, source_sha)? else {
         return Ok(OnFile::Rerun);
@@ -839,6 +1073,11 @@ fn on_file(
             return Ok(OnFile::Rerun);
         }
         return Ok(OnFile::ExtractorBehind(Box::new(intake)));
+    }
+    if let Some(fingerprint) = rule_fingerprint
+        && intake.rule_fingerprint.as_deref() != Some(fingerprint)
+    {
+        return Ok(OnFile::RuleChanged(Box::new(intake)));
     }
     let (audit_verdict, audit_confidence) = stored_audit_outcome(catalog, intake.intake_id)?;
     Ok(OnFile::Current(IngestReport {
@@ -916,8 +1155,9 @@ impl EnvelopeCheck {
 }
 
 /// Compare a fresh extraction of a source whose only stale stamp is
-/// `extractor_version` with the envelope on file. When the two match
-/// apart from that stamp, rewrite the envelope and advance the stamp,
+/// `extractor_version`, or whose rule fingerprint moved, with the
+/// envelope on file. When the two match apart from those stamps, rewrite
+/// the envelope and advance the extractor stamp and the rule fingerprint,
 /// leaving the corpus tree, chunks, vectors, and status as they are.
 ///
 /// Returns the report of that run, or `None` when the full pipeline has
@@ -949,6 +1189,9 @@ fn restamp_if_unchanged(
             &extraction.provenance.adapter,
             to,
         )?;
+        if let Some(rule) = &extraction.provenance.rule {
+            catalog.set_rule_fingerprint(intake_id, &rule.fingerprint)?;
+        }
     }
     let error = match &check {
         EnvelopeCheck::Unreadable(err) => Some(error_chain(err)),
@@ -1001,7 +1244,8 @@ fn restamp_if_unchanged(
 }
 
 /// Judge the envelope on file against `extraction`, and store the fresh
-/// one in its place when the two match apart from the extractor version.
+/// one in its place when the two match apart from the extractor version
+/// and, on a rule's extraction, the rule fingerprint and engine version.
 ///
 /// The envelope is read at its canonical path in `books_dir`, where every
 /// ingest writes it, falling back to the legacy name; `stored_path` is
@@ -1039,6 +1283,14 @@ fn check_envelope(
         return EnvelopeCheck::Outdated;
     }
     stored.provenance.extractor_version = current;
+    // A rule's fingerprint and engine version are stamps of the same
+    // kind: they say what read the text, not what was read out of it.
+    // The units stay in the comparison, as part of the product.
+    if let (Some(stored), Some(fresh)) = (&mut stored.provenance.rule, &extraction.provenance.rule)
+    {
+        stored.fingerprint.clone_from(&fresh.fingerprint);
+        stored.engine_version = fresh.engine_version;
+    }
     if stored != *extraction {
         return EnvelopeCheck::Changed;
     }
@@ -1626,6 +1878,7 @@ fn write_contributors(
 /// biblio, with an optional filename-derived biblio as a strict
 /// fallback per field. `source_format` carries the adapter name so
 /// the audit's per-format prior can recompute. `source` is stamped
+/// `"rule"` on a rule's extraction; otherwise
 /// `"extracted"` whenever any field came from the adapter, otherwise
 /// `"filename"` whenever any field came from the filename parser,
 /// otherwise `"extracted"` to match the legacy all-empty case.
@@ -1727,6 +1980,10 @@ fn build_base_attrs(
     attrs.source = Some(
         if extraction.provenance.adapter == bookrack_extract::ocr::ADAPTER {
             "ocr_marker".to_string()
+        } else if extraction.provenance.adapter == bookrack_extract::rule::ADAPTER {
+            // A rule states its biblio outright; nothing was read out
+            // of the text or a file name.
+            "rule".to_string()
         } else if extracted_any || !filename_filled_any {
             "extracted".to_string()
         } else {
@@ -2545,7 +2802,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod book_pipeline_tests {
+pub(crate) mod book_pipeline_tests {
     use super::*;
     use bookrack_core::PartitionIdx;
     use bookrack_embed::{EmbedError, Embedder, Result as EmbedResult};
@@ -2554,8 +2811,8 @@ mod book_pipeline_tests {
     use std::io::Write;
 
     /// A fake embedder returning constant `dim`-length vectors.
-    struct Fake {
-        dim: usize,
+    pub(crate) struct Fake {
+        pub(crate) dim: usize,
     }
 
     impl Embedder for Fake {
@@ -2569,7 +2826,7 @@ mod book_pipeline_tests {
     }
 
     /// A fake embedder that always fails, forcing the EMBED stage to fail.
-    struct Offline;
+    pub(crate) struct Offline;
 
     impl Embedder for Offline {
         fn embed_batch(
@@ -2893,7 +3150,10 @@ mod book_pipeline_tests {
 
     /// Read the envelope at `path`, change it with `edit`, and write it
     /// back as it stands, `captured_at` included.
-    fn rewrite_envelope(path: &Path, edit: impl FnOnce(&mut bookrack_extract::ExtractionEnvelope)) {
+    pub(crate) fn rewrite_envelope(
+        path: &Path,
+        edit: impl FnOnce(&mut bookrack_extract::ExtractionEnvelope),
+    ) {
         let mut envelope = read_envelope(path).expect("read envelope");
         edit(&mut envelope);
         let bytes = serde_json::to_vec(&envelope).expect("serialize envelope");
@@ -3871,7 +4131,7 @@ mod book_pipeline_tests {
             .source_sha256;
         assert!(
             matches!(
-                on_file(&catalog, &corpus, &sha, &params.embed.model).expect("on_file"),
+                on_file(&catalog, &corpus, &sha, &params.embed.model, None).expect("on_file"),
                 OnFile::ExtractorBehind(_)
             ),
             "the born-digital row must be offered, or the OCR case proves nothing"
@@ -3885,7 +4145,7 @@ mod book_pipeline_tests {
                 stale,
             )
             .expect("ocr adapter");
-        let decided = on_file(&catalog, &corpus, &sha, &params.embed.model).expect("on_file");
+        let decided = on_file(&catalog, &corpus, &sha, &params.embed.model, None).expect("on_file");
         assert!(matches!(decided, OnFile::Rerun), "{decided:?}");
     }
 
