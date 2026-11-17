@@ -94,7 +94,12 @@ pub(super) async fn wait_on<S: WaitSource>(
         return Ok(WaitResult::Nothing);
     }
     let label = match selected.as_slice() {
-        [only] => basename_or_dash(listing.jobs[*only].path.to_str()).to_string(),
+        [only] => basename_or_dash(
+            listing.jobs[*only]
+                .source_path()
+                .and_then(|path| path.to_str()),
+        )
+        .to_string(),
         _ => "jobs".to_string(),
     };
     let attached = job_wait::attach(&listing, &selected)?;

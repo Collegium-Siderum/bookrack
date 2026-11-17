@@ -398,7 +398,7 @@ fn shared_logs_fold_every_mounted_root_and_the_state_dir() {
 
     let manifest: serde_json::Value =
         serde_json::from_slice(&read_archive_file(&report.out_path, "manifest.json")).unwrap();
-    assert_eq!(manifest["schema_version"], 5, "{manifest}");
+    assert_eq!(manifest["schema_version"], 6, "{manifest}");
     assert_eq!(manifest["library"], "beta", "{manifest}");
     let env = String::from_utf8(read_archive_file(&report.out_path, "env.txt")).unwrap();
     assert!(
@@ -833,18 +833,15 @@ fn collect_records_an_unreadable_reference_store_as_an_open_error() {
 /// One pending job whose source sits under the data root, so the
 /// snapshot has a path for the scrubber to fold.
 fn queue_document_with_one_job(data_dir: &Path) -> String {
-    use bookrack_core::queue::{JobState, Priority, QueueJob, QueueState};
+    use bookrack_core::queue::{IngestJob, JobOp, JobState, Priority, QueueJob, QueueState};
     let state = QueueState {
         jobs: vec![QueueJob {
             id: "0190f9b0-0000-7000-8000-000000000001".to_string(),
             library: "fixture-library".to_string(),
-            path: data_dir.join("inbox").join("sample.epub"),
-            priority: Priority::Normal,
-            force: false,
-            hold_for_metadata: false,
             kind: ItemKind::Book,
+            priority: Priority::Normal,
+            op: JobOp::Ingest(IngestJob::file(data_dir.join("inbox").join("sample.epub"))),
             intake_ocr: None,
-            audit_profile: None,
             state: JobState::Pending,
             queued_at: chrono::DateTime::from_timestamp_millis(FROZEN_UNIX_MS as i64).unwrap(),
             started_at: None,
@@ -881,7 +878,9 @@ fn collect_snapshots_the_queue_document_and_reports_a_refused_one() {
     let jobs = snapshot["jobs"].as_array().expect("a jobs array");
     assert_eq!(jobs.len(), 1, "{snapshot}");
     assert_eq!(jobs[0]["library"], "fixture-library", "{snapshot}");
-    let path = jobs[0]["path"].as_str().expect("the job path is a string");
+    let path = jobs[0]["op"]["path"]
+        .as_str()
+        .expect("the job path is a string");
     assert!(
         path.starts_with(bookrack_diagnose::DATA_DIR_PLACEHOLDER),
         "the job's source path must be scrubbed like every other path: {path}"
@@ -889,6 +888,74 @@ fn collect_snapshots_the_queue_document_and_reports_a_refused_one() {
     assert!(
         !path.contains("sample"),
         "the source basename is a title and must be folded: {path}"
+    );
+
+    // A document an earlier binary wrote is read in that binary's flat
+    // shape and snapshotted in this build's: the version on disk stays,
+    // a plain job keeps its source under `op`, and a job queued for the
+    // OCR intake path reads as the failure the daemon would record.
+    let inbox = fx.cfg.data_dir().join("inbox");
+    let earlier = serde_json::json!({
+        "schema_version": 7,
+        "paused": false,
+        "jobs": [
+            {
+                "id": "0190f9b0-0000-7000-8000-000000000002",
+                "library": "fixture-library",
+                "path": inbox.join("sample.epub"),
+                "kind": "book",
+                "priority": "normal",
+                "force": false,
+                "state": "pending",
+                "queued_at": "2026-01-02T03:04:05Z",
+                "started_at": null,
+                "finished_at": null,
+                "error": null
+            },
+            {
+                "id": "0190f9b0-0000-7000-8000-000000000003",
+                "library": "fixture-library",
+                "path": inbox.join("scanned.md"),
+                "kind": "book",
+                "priority": "normal",
+                "force": false,
+                "intake_ocr": { "from_pdf": inbox.join("scanned.pdf") },
+                "state": "pending",
+                "queued_at": "2026-01-02T03:04:05Z",
+                "started_at": null,
+                "finished_at": null,
+                "error": null
+            }
+        ]
+    });
+    std::fs::write(&queue_path, earlier.to_string()).unwrap();
+    let report = collect(&fx.cfg, &opts, &Scope::default()).expect("collect");
+    let bytes = read_archive_file(&report.out_path, "queue/queue.json");
+    let snapshot: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(snapshot["schema_version"], 7, "{snapshot}");
+    let jobs = snapshot["jobs"].as_array().expect("a jobs array");
+    assert_eq!(jobs.len(), 2, "{snapshot}");
+    assert_eq!(jobs[0]["state"], "pending", "{snapshot}");
+    assert_eq!(jobs[0]["op"]["type"], "ingest", "{snapshot}");
+    assert!(jobs[0].get("path").is_none(), "{snapshot}");
+    let path = jobs[0]["op"]["path"].as_str().expect("a path under op");
+    assert!(
+        path.starts_with(bookrack_diagnose::DATA_DIR_PLACEHOLDER) && !path.contains("sample"),
+        "{path}"
+    );
+    assert_eq!(jobs[1]["state"], "failed", "{snapshot}");
+    assert!(jobs[1]["intake_ocr"].is_null(), "{snapshot}");
+    assert_eq!(
+        jobs[1]["finished_at"], "2026-01-02T03:04:05Z",
+        "the failure is dated from the row, not from the collection: {snapshot}"
+    );
+    let hint = jobs[1]["problem"]["hint"].as_str().unwrap_or_default();
+    assert!(hint.contains("`bookrack ingest --rule`"), "{snapshot}");
+    let detail = jobs[1]["problem"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains(bookrack_diagnose::DATA_DIR_PLACEHOLDER)
+            && !detail.contains(&fx.cfg.data_dir().display().to_string()),
+        "the data root in the recorded failure is folded as well: {detail}"
     );
 
     // A document a newer binary wrote is left alone by the daemon and

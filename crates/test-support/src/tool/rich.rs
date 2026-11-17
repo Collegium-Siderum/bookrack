@@ -650,7 +650,7 @@ pub fn check_shape(readings: &Readings) -> Vec<ShapeFinding> {
                 .map(|jobs| {
                     jobs.iter()
                         .filter(|j| j["state"] == state)
-                        .filter_map(|j| j["path"].as_str().map(str::to_string))
+                        .filter_map(|j| j["op"]["path"].as_str().map(str::to_string))
                         .collect()
                 })
                 .unwrap_or_default()
@@ -2006,7 +2006,7 @@ mod tests {
             json!({ "name": name, "data_dir": format!("/h/roots/{name}"), "kind": "test",
                     "is_default": name == "alpha", "served": served })
         };
-        let job = |path: &str, state: &str| json!({ "path": path, "state": state, "kind": "book" });
+        let job = |path: &str, state: &str| json!({ "op": { "type": "ingest", "path": path }, "state": state, "kind": "book" });
         let list = |books: u64, papers: u64| {
             json!({ "items": [], "pages": {
                 "book": { "total": books, "truncated": false },
@@ -2118,10 +2118,11 @@ mod tests {
                 r.get_mut("queue").unwrap()["summary"]["done"] = json!(6)
             }),
             ("queue.failed_path", |r| {
-                r.get_mut("queue").unwrap()["jobs"][7]["path"] = json!("/h/inputs/renamed.epub");
+                r.get_mut("queue").unwrap()["jobs"][7]["op"]["path"] =
+                    json!("/h/inputs/renamed.epub");
             }),
             ("queue.pending_path", |r| {
-                r.get_mut("queue").unwrap()["jobs"][8]["path"] = json!("/h/inputs/b7.txt");
+                r.get_mut("queue").unwrap()["jobs"][8]["op"]["path"] = json!("/h/inputs/b7.txt");
             }),
             ("list.alpha.books", |r| {
                 r.get_mut("list.alpha").unwrap()["pages"]["book"]["total"] = json!(3);

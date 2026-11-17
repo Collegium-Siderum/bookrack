@@ -205,8 +205,8 @@ async fn the_rich_preset_builds_and_its_check_finds_each_kind_of_damage() {
         .iter_mut()
         .find(|j| j["state"] == "failed")
         .expect("a failed job");
-    failed["path"] = Value::from(
-        failed["path"]
+    failed["op"]["path"] = Value::from(
+        failed["op"]["path"]
             .as_str()
             .expect("a path")
             .replace("broken.epub", "renamed.epub"),

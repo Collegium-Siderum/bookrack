@@ -311,7 +311,7 @@ fn row_cells(job: &Value, long: bool, with_state: bool) -> Vec<String> {
         .map(relative_from_iso)
         .unwrap_or_else(|| "-".to_string());
     let path = job
-        .get("path")
+        .pointer("/op/path")
         .and_then(Value::as_str)
         .map(|p| basename_or_dash(Some(p)).to_string())
         .unwrap_or_else(|| "-".to_string());
@@ -433,7 +433,7 @@ mod tests {
             "state": state,
             "queued_at": "2026-01-01T00:00:00Z",
             "priority": "normal",
-            "path": format!("/synthetic/{id}.epub"),
+            "op": { "type": "ingest", "path": format!("/synthetic/{id}.epub") },
             "error": error,
         })
     }

@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use bookrack_core::queue::{
-    QUEUE_SCHEMA_VERSION, QueueOpenDecision, QueueState, queue_open_decision,
+    QUEUE_SCHEMA_VERSION, QueueReadError, QueueState, document_version, read_document,
 };
 
 use crate::Result;
@@ -14,7 +14,9 @@ use crate::scrub::Scrubber;
 
 /// Write `<bundle>/queue/queue.json`: the queue document from the
 /// daemon state directory, parsed and re-serialised so every path in
-/// it passes through the scrubber. The document is daemon state rather
+/// it passes through the scrubber. The rows are written in the shape
+/// this build holds them in, whatever version wrote the document, and
+/// `schema_version` stays the one on disk. The document is daemon state rather
 /// than library state — one per daemon process, however many
 /// libraries it serves — so it is read from the state directory the
 /// daemon resolves, not from the data root.
@@ -66,18 +68,20 @@ pub fn collect(bundle_dir: &Path, scrubber: &Scrubber) -> Result<()> {
 /// reported as such rather than as malformed for carrying a field or
 /// variant this build has no match for.
 fn parse(bytes: &[u8]) -> std::result::Result<QueueState, String> {
-    let probe: serde_json::Value =
-        serde_json::from_slice(bytes).map_err(|e| format!("cannot parse the document: {e}"))?;
-    let found = probe
-        .get("schema_version")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|v| u32::try_from(v).ok())
-        .ok_or_else(|| "the document carries no schema_version".to_string())?;
-    if queue_open_decision(found) == QueueOpenDecision::Refuse {
-        return Err(format!(
-            "written by schema version {found}; this build reads version \
-             {QUEUE_SCHEMA_VERSION} and the daemon will not load it"
-        ));
-    }
-    serde_json::from_slice(bytes).map_err(|e| format!("cannot parse the document: {e}"))
+    let malformed = |e: serde_json::Error| format!("cannot parse the document: {e}");
+    let found =
+        document_version(&mut serde_json::Deserializer::from_slice(bytes)).map_err(malformed)?;
+    let mut document = serde_json::Deserializer::from_slice(bytes);
+    let state = match read_document(found, &mut document) {
+        Ok(state) => state,
+        Err(QueueReadError::TooNew) => {
+            return Err(format!(
+                "written by schema version {found}; this build reads version \
+                 {QUEUE_SCHEMA_VERSION} and the daemon will not load it"
+            ));
+        }
+        Err(QueueReadError::Malformed(e)) => return Err(malformed(e)),
+    };
+    document.end().map_err(malformed)?;
+    Ok(state)
 }

@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 use bookrack_catalog::{Catalog, IntakeStatus, NewIntake};
 use bookrack_config::{Config, LibrarySelection};
 use bookrack_core::ItemKind;
-use bookrack_core::queue::{JobState, Priority, QueueJob, QueueState};
+use bookrack_core::queue::{IngestJob, JobOp, JobState, Priority, QueueJob, QueueState};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::LogStreamHandle;
 use bookrack_ops::reads::info::LibraryInfoContext;
@@ -268,13 +268,10 @@ fn finished_job_with(
     QueueJob {
         id: format!("job-{n:02}"),
         library: "fixture".to_string(),
-        path: PathBuf::from(format!("/srv/books/{n:02}.epub")),
         priority: Priority::Normal,
-        force: false,
-        hold_for_metadata: false,
         kind: ItemKind::Book,
+        op: JobOp::Ingest(IngestJob::file(format!("/srv/books/{n:02}.epub"))),
         intake_ocr: None,
-        audit_profile: None,
         state,
         queued_at: at,
         started_at: Some(at),

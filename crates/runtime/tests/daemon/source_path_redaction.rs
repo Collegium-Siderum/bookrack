@@ -128,10 +128,11 @@ async fn a_dependency_logging_a_location_reaches_logs_tail_and_the_log_event_red
     .await
 }
 
-/// A queue document holding one failure recorded before redaction.
+/// A queue document holding one failure recorded before redaction, in
+/// the flat shape the binary that recorded it wrote.
 fn seeded_queue() -> Value {
     json!({
-        "schema_version": bookrack_core::queue::QUEUE_SCHEMA_VERSION,
+        "schema_version": 7,
         "paused": false,
         "jobs": [{
             "id": "01900000-0000-7000-8000-000000000001",

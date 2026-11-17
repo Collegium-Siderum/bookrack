@@ -44,7 +44,11 @@ fn job_id_for(listing: &Value, file: &str) -> String {
         .as_array()
         .unwrap_or_else(|| panic!("queue list carries jobs: {listing}"))
         .iter()
-        .filter(|job| job["path"].as_str().is_some_and(|p| p.ends_with(file)))
+        .filter(|job| {
+            job["op"]["path"]
+                .as_str()
+                .is_some_and(|p| p.ends_with(file))
+        })
         .collect();
     assert_eq!(rows.len(), 1, "one row for {file}: {listing}");
     rows[0]["id"].as_str().expect("job id").to_string()

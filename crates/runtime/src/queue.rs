@@ -22,16 +22,17 @@ use std::time::Duration;
 
 use chrono::Utc;
 use eyre::{Context, Result, eyre};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tempfile::NamedTempFile;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use bookrack_core::queue::{
-    FragmentMiss, QueueOpenDecision, match_id_fragment, queue_open_decision,
+    FragmentMiss, QueueReadError, document_version, match_id_fragment, read_document,
 };
 pub use bookrack_core::queue::{
-    IntakeOcrInfo, JobState, Priority, QUEUE_SCHEMA_VERSION, QueueJob, QueueState,
+    IngestJob, IntakeOcrInfo, JobInput, JobOp, JobState, Priority, QUEUE_SCHEMA_VERSION, QueueJob,
+    QueueState,
 };
 use bookrack_core::{Explain, ItemKind, Problem};
 
@@ -124,14 +125,6 @@ impl Explain for QueueLoadError {
     }
 }
 
-/// The one field the version gate reads, deserialized on its own so a
-/// document whose *shape* this binary cannot parse is still judged by
-/// its version first.
-#[derive(Deserialize)]
-struct VersionProbe {
-    schema_version: u32,
-}
-
 /// Read the queue state at `path`. A missing file deserialises to the
 /// default state so a freshly initialised daemon state directory just
 /// works.
@@ -158,22 +151,26 @@ pub fn load(path: &Path) -> std::result::Result<QueueState, QueueLoadError> {
             });
         }
     };
-    let probe: VersionProbe =
-        serde_json::from_slice(&bytes).map_err(|source| QueueLoadError::Parse {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    if queue_open_decision(probe.schema_version) == QueueOpenDecision::Refuse {
-        return Err(QueueLoadError::SchemaTooNew {
-            path: path.to_path_buf(),
-            found: probe.schema_version,
-            expected: QUEUE_SCHEMA_VERSION,
-        });
-    }
-    serde_json::from_slice(&bytes).map_err(|source| QueueLoadError::Parse {
+    let malformed = |source| QueueLoadError::Parse {
         path: path.to_path_buf(),
         source,
-    })
+    };
+    let found =
+        document_version(&mut serde_json::Deserializer::from_slice(&bytes)).map_err(malformed)?;
+    let mut document = serde_json::Deserializer::from_slice(&bytes);
+    let state = match read_document(found, &mut document) {
+        Ok(state) => state,
+        Err(QueueReadError::TooNew) => {
+            return Err(QueueLoadError::SchemaTooNew {
+                path: path.to_path_buf(),
+                found,
+                expected: QUEUE_SCHEMA_VERSION,
+            });
+        }
+        Err(QueueReadError::Malformed(source)) => return Err(malformed(source)),
+    };
+    document.end().map_err(malformed)?;
+    Ok(state)
 }
 
 /// Write `state` to `path` atomically: a sibling temp file is written
@@ -616,13 +613,16 @@ pub fn enqueue_files(
         state.jobs.push(QueueJob {
             id: id.clone(),
             library: library.to_string(),
-            path: path.clone(),
             kind,
             priority,
-            force,
-            hold_for_metadata,
+            op: JobOp::Ingest(IngestJob {
+                path: path.clone(),
+                force,
+                hold_for_metadata,
+                audit_profile: book_audit_profile.clone(),
+                input: JobInput::File,
+            }),
             intake_ocr: None,
-            audit_profile: book_audit_profile.clone(),
             state: JobState::Pending,
             queued_at: Utc::now(),
             started_at: None,
@@ -663,13 +663,16 @@ pub fn enqueue_ocr_intake(
     state.jobs.push(QueueJob {
         id: id.clone(),
         library: library.to_string(),
-        path,
         kind: ItemKind::Book,
         priority,
-        force,
-        hold_for_metadata,
+        op: JobOp::Ingest(IngestJob {
+            path,
+            force,
+            hold_for_metadata,
+            audit_profile: book_audit_profile,
+            input: JobInput::File,
+        }),
         intake_ocr: Some(info),
-        audit_profile: book_audit_profile,
         state: JobState::Pending,
         queued_at: Utc::now(),
         started_at: None,
@@ -1056,11 +1059,13 @@ fn summarize_outcome(job: &QueueJob) -> JobOutcomeSummary {
 /// inferring them from `queue.tick` summaries.
 fn announce_outcome(job: &QueueJob, outcome: &JobOutcome) {
     let short: String = job.id.chars().take(8).collect();
-    let name = job
-        .path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| job.path.display().to_string());
+    let name = match job.source_path() {
+        Some(path) => path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string()),
+        None => String::new(),
+    };
     match outcome {
         JobOutcome::Done => tracing::info!(job = %job.id, "queue: {short} {name} done"),
         JobOutcome::SkippedDuplicate { intake_id } => {
@@ -1092,13 +1097,10 @@ mod tests {
         QueueJob {
             id: "01900000-0000-7000-8000-000000000001".to_string(),
             library: "default".to_string(),
-            path: PathBuf::from("/tmp/example.epub"),
             kind: ItemKind::Book,
             priority: Priority::Normal,
-            force: false,
-            hold_for_metadata: false,
+            op: JobOp::Ingest(IngestJob::file("/tmp/example.epub")),
             intake_ocr: None,
-            audit_profile: None,
             state: JobState::Pending,
             queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
                 .unwrap()
@@ -1350,6 +1352,89 @@ mod tests {
         assert!(state.jobs[0].merged_into.is_none());
     }
 
+    /// A document an earlier binary wrote holds flat rows. A job it
+    /// queued for the OCR intake path loads as a failure pointing at the
+    /// rule path, a plain job loads unchanged, and the first write
+    /// persists both in the current shape — which a reload reads back
+    /// as the same state.
+    #[test]
+    fn an_earlier_document_loads_its_flat_rows_and_is_written_in_the_current_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.json");
+        let row = |id: &str, file: &str, ocr: serde_json::Value| {
+            serde_json::json!({
+                "id": id, "library": "default", "path": file, "kind": "book",
+                "priority": "normal", "force": false, "hold_for_metadata": false,
+                "intake_ocr": ocr, "audit_profile": null, "state": "pending",
+                "queued_at": "2026-01-02T03:04:05Z", "started_at": null,
+                "finished_at": null, "error": null, "problem": null, "merged_into": null
+            })
+        };
+        let document = serde_json::json!({
+            "schema_version": 7, "paused": true,
+            "jobs": [
+                row("plain", "/tmp/example.epub", serde_json::Value::Null),
+                row("ocr", "/tmp/example.md", serde_json::json!({ "from_pdf": "/tmp/scan.pdf" })),
+            ]
+        });
+        std::fs::write(&path, document.to_string()).unwrap();
+
+        let mut state = load(&path).expect("an earlier document loads");
+        assert_eq!(state.schema_version, 7, "loading does not relabel");
+        assert_eq!(state.jobs[0].state, JobState::Pending);
+        assert_eq!(
+            state.jobs[0].op,
+            JobOp::Ingest(IngestJob::file("/tmp/example.epub"))
+        );
+        assert_eq!(state.jobs[1].state, JobState::Failed);
+        assert!(state.jobs[1].intake_ocr.is_none());
+        let hint = state.jobs[1]
+            .problem
+            .as_ref()
+            .and_then(|problem| problem.data.hint.as_deref())
+            .expect("the failure carries a hint");
+        assert!(hint.contains("`bookrack ingest --rule`"), "{hint}");
+        let pending: Vec<&str> = state
+            .jobs
+            .iter()
+            .filter(|job| job.state == JobState::Pending)
+            .map(|job| job.id.as_str())
+            .collect();
+        assert_eq!(pending, ["plain"], "only the plain job is left to run");
+
+        save_atomic(&mut state, &path).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            raw["schema_version"],
+            serde_json::json!(QUEUE_SCHEMA_VERSION)
+        );
+        assert_eq!(raw["jobs"][1]["state"], "failed", "{raw}");
+        assert_eq!(raw["jobs"][1]["op"]["path"], "/tmp/example.md", "{raw}");
+        assert_eq!(load(&path).expect("the written document loads"), state);
+    }
+
+    /// Bytes after the document are malformed at every version, as they
+    /// are to a whole-document parse.
+    #[test]
+    fn trailing_bytes_after_the_document_are_malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.json");
+        for version in [7, QUEUE_SCHEMA_VERSION] {
+            std::fs::write(
+                &path,
+                format!(
+                    "{{\"schema_version\": {version}, \"paused\": false, \"jobs\": []}} trailing"
+                ),
+            )
+            .unwrap();
+            assert!(
+                matches!(load(&path), Err(QueueLoadError::Parse { .. })),
+                "version {version}"
+            );
+        }
+    }
+
     /// A document as a version-5 binary wrote it: one finished job,
     /// none of the fields added since.
     const V5_DOCUMENT: &str = r#"{"schema_version": 5, "paused": false, "jobs": [{
@@ -1419,13 +1504,10 @@ mod tests {
         QueueJob {
             id: id.to_string(),
             library: "default".to_string(),
-            path: PathBuf::from(format!("/tmp/{id}.epub")),
             kind: ItemKind::Book,
             priority,
-            force: false,
-            hold_for_metadata: false,
+            op: JobOp::Ingest(IngestJob::file(format!("/tmp/{id}.epub"))),
             intake_ocr: None,
-            audit_profile: None,
             state,
             queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
                 .unwrap()
@@ -1984,9 +2066,14 @@ mod tests {
             assert_eq!(job.id, ids[i]);
             assert_eq!(job.library, "books");
             assert_eq!(job.priority, Priority::High);
-            assert!(job.force);
             assert_eq!(job.state, JobState::Pending);
-            assert_eq!(job.path, paths[i]);
+            assert_eq!(
+                job.op,
+                JobOp::Ingest(IngestJob {
+                    force: true,
+                    ..IngestJob::file(&paths[i])
+                })
+            );
         }
     }
 
@@ -2062,7 +2149,7 @@ mod tests {
     /// failure, is relabelled at this binary's version and keeps the
     /// diagnostic through a reload.
     #[test]
-    fn a_v6_document_written_at_v7_keeps_its_problem() {
+    fn an_earlier_document_written_at_this_version_keeps_its_problem() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("queue.json");
         let v6 = r#"{"schema_version": 6, "paused": false, "jobs": [{
@@ -2099,8 +2186,13 @@ mod tests {
 
         let raw: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(raw["schema_version"], serde_json::json!(7));
+        assert_eq!(
+            raw["schema_version"],
+            serde_json::json!(QUEUE_SCHEMA_VERSION)
+        );
         assert!(raw["jobs"][0]["problem"].is_object(), "{raw}");
+        assert_eq!(raw["jobs"][0]["op"]["path"], "/tmp/example.epub", "{raw}");
+        assert!(raw["jobs"][0].get("path").is_none(), "{raw}");
         let reloaded = load(&path).unwrap();
         assert_eq!(reloaded.jobs[0].problem, Some(problem));
     }

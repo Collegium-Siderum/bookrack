@@ -118,7 +118,7 @@ async fn the_listed_id_locates_its_job() {
             .as_array()
             .and_then(|jobs| {
                 jobs.iter()
-                    .find(|j| j["path"].as_str().is_some_and(|p| p.ends_with(file)))
+                    .find(|j| j["op"]["path"].as_str().is_some_and(|p| p.ends_with(file)))
             })
             .and_then(|j| j["id"].as_str())
             .unwrap_or_else(|| panic!("no row for {file}: {listing}"))

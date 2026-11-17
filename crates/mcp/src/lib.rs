@@ -642,8 +642,9 @@ pub struct QueueJobSummary {
     pub state: String,
     /// Library name the job runs against.
     pub library: String,
-    /// Source file path the job ingests.
-    pub path: String,
+    /// The file the job reads; absent for a job that reads none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// When the job reached its terminal state; absent while it has not
     /// reached one, as for a pending or running job.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1863,7 +1864,7 @@ impl BookrackServer {
                 // `needsocr`.
                 state: j.state.as_wire_str().to_string(),
                 library: j.library.clone(),
-                path: j.path.display().to_string(),
+                path: j.source_path().map(|path| path.display().to_string()),
                 finished_at: j.finished_at,
                 error: j
                     .error

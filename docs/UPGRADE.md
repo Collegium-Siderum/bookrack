@@ -135,13 +135,23 @@ it.
 Some version dimensions move without invalidating anything on disk, so
 they carry no runbook step:
 
-- **Queue document schema** (`QUEUE_SCHEMA_VERSION`, now `7`) — the
+- **Queue document schema** (`QUEUE_SCHEMA_VERSION`, now `8`) — the
   persistent ingest queue is versioned on its own track. An older
   document loads in a newer binary, and the first write (with a queue
   worker, the worker's start-up save) rewrites it at the newer version.
-  Version 7 adds `problem` to every job row, the classified diagnostic
-  of a failed job; a version 6 document loads with the field absent and
-  nothing else changes.
+  Version 8 splits a job row into what every job has — `id`, `library`,
+  `kind`, `priority`, the lifecycle fields — and an `op` object holding
+  what one operation reads: for `"type": "ingest"`, the `path`, `force`,
+  `hold_for_metadata`, and `audit_profile` that sat on the row itself
+  through version 7, plus an `input` naming what the path is. A version
+  7 document loads with every job converted and nothing lost, with one
+  exception: a job queued by `bookrack intake ocr` that had not finished
+  — pending, running, failed, or parked for OCR — loads as `failed`,
+  with a hint naming `bookrack ingest --rule`, because the OCR intake
+  path it was queued for is being removed. A finished or cancelled one
+  keeps its record.
+  Version 7 added `problem` to every job row, the classified diagnostic
+  of a failed job; a version 6 document loads with the field absent.
   The bump is one-way: a binary reading a document above its own
   version refuses it and starts nothing, naming both versions. A refused
   document is left exactly as it was found, so the version that wrote
@@ -559,6 +569,20 @@ The knobs themselves are unchanged. Declare the listen address with
 [`.env.example`](../.env.example) documents both with their defaults.
 Nothing about the resolved values changes — only where they may be
 written.
+
+## Diagnose bundle schema 6
+
+`manifest.json` moved from 5 to 6 because the shape of one file
+changed: `queue/queue.json` now holds each job in the version 8 shape of
+the queue document (see *Stamps that advance without a refresh command*
+above), with the source path at `op.path` rather than `path`. The rows
+are written in that shape whatever version wrote the document on disk;
+`schema_version` inside the file stays the one found on disk, so a
+bundle from a daemon that has not yet rewritten an older document reads
+`7` beside version 8 rows. The scrubbing contract is unchanged.
+
+Nothing on disk goes stale and there is no refresh command. A reader
+holding bundles of both versions looks for the job path in two places.
 
 ## Diagnose bundle schema 5
 

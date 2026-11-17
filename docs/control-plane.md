@@ -516,7 +516,15 @@ the exit-code bucket does not distinguish the two.
 - `queue.list` — `{ schema_version, binary_schema_version, paused,
   summary, jobs }`. `summary` counts the whole queue by state.
   `params.limit` optionally caps the jobs slice. Each `jobs` entry is
-  the persisted row. A `failed` row carries `error`, the flattened cause
+  the persisted row: `{ id, library, kind, priority, op, intake_ocr,
+  state, queued_at, started_at, finished_at, error, problem,
+  merged_into }`.
+  `op` says what the job does and holds everything only that operation
+  reads — `{ type: "ingest", path, force, hold_for_metadata,
+  audit_profile, input: { type: "file" } }` for an ingest of the source
+  at `path` — so a client reads the source path at `op.path`. A row a
+  document before schema 8 wrote is converted to this shape as the
+  document loads. A `failed` row carries `error`, the flattened cause
   chain, and `problem` — `{ summary, detail?, hint?, retryable }`, the
   diagnostic the error envelope's `message` and `data` make for the same
   error on a write RPC — when the daemon recognised the failure's type;
@@ -749,7 +757,7 @@ the exit-code bucket does not distinguish the two.
   the worker's book-side audit profile for this job, with the same
   three-way resolution as `ingest.submit` — including the `-32602` on
   a name outside the built-in set. The persistent queue schema is
-  `v7`.
+  `v8`.
 - `glean.submit` — `{ paths, library?, priority?, force? }` →
   `{ job_ids: [<uuid v7>] }`. The paper-pipeline peer of
   `ingest.submit`: appends one glean job per path to the same

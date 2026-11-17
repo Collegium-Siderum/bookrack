@@ -10,7 +10,7 @@
 //! both ends ship the same `Priority` / `JobState` / `QueueJob` over
 //! the wire without duplicating their definitions.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -20,14 +20,14 @@ use crate::{ItemKind, Problem};
 /// Schema version embedded in the persisted document. Bumped whenever
 /// any field shape, enum variant, or invariant changes.
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
-pub const QUEUE_SCHEMA_VERSION: u32 = 7;
+pub const QUEUE_SCHEMA_VERSION: u32 = 8;
 
 /// What a reader does with a persisted document, given the
 /// `schema_version` it carries.
 ///
 /// The two directions are not symmetric. A document an earlier binary
-/// wrote is loaded: every field added since carries `#[serde(default)]`,
-/// so it reads as the shape that binary behaved as. A document a later
+/// wrote is loaded through [`read_document`], which reads it in the
+/// shape that binary wrote and converts it. A document a later
 /// binary wrote is refused, because loading it would drop the fields
 /// this binary has no field for and the next write would persist the
 /// truncated document over the original.
@@ -116,11 +116,12 @@ impl JobState {
 }
 
 /// Side data carried by an OCR-intake job. When set on a [`QueueJob`],
-/// the worker treats the job as a derived-source intake: the job's
-/// `path` is the OCR markdown product, and the fields below name the
-/// scan PDF the product was produced from along with the runtime knobs
-/// the OCR ingest path needs. Defaults are the same as the standalone
-/// runner's: no expected-page override, partial coverage rejected.
+/// the worker treats the job as a derived-source intake: the ingest
+/// operation's `path` is the OCR markdown product, and the fields below
+/// name the scan PDF the product was produced from along with the
+/// runtime knobs the OCR ingest path needs. Defaults are the same as
+/// the standalone runner's: no expected-page override, partial coverage
+/// rejected.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct IntakeOcrInfo {
     /// Path to the scan PDF the OCR product was produced from.
@@ -136,6 +137,65 @@ pub struct IntakeOcrInfo {
     pub allow_partial: bool,
 }
 
+/// What a queued job does. The row around it — id, library, kind,
+/// priority, lifecycle — is the same for every operation; everything
+/// only one operation reads sits inside its variant.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum JobOp {
+    /// Take one source into the library through the pipeline the row's
+    /// `kind` names.
+    Ingest(IngestJob),
+}
+
+/// The payload of [`JobOp::Ingest`].
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct IngestJob {
+    /// The file the job reads; [`Self::input`] says what it is. Resolved
+    /// when the job was enqueued; the worker does not re-resolve
+    /// relative paths.
+    pub path: PathBuf,
+    /// Force a fresh ingest even when the source's noop-if-up-to-date
+    /// check would otherwise short-circuit.
+    pub force: bool,
+    /// Park the book at STRUCTURE when the audit verdict is
+    /// `needs_work`, skipping CHUNK and EMBED until a curator resumes
+    /// it.
+    pub hold_for_metadata: bool,
+    /// Book-side audit profile override for this job. When `None`, the
+    /// worker uses the daemon's default profile baked into the queue
+    /// params template at startup. When `Some(name)`, the worker
+    /// reloads the named profile per job and substitutes it into the
+    /// ingest params before dispatch. Paper-side jobs do not consume
+    /// this field; the glean pipeline carries its own paper audit
+    /// profile in `glean_params_template`.
+    pub audit_profile: Option<String>,
+    /// What [`Self::path`] is.
+    pub input: JobInput,
+}
+
+impl IngestJob {
+    /// An ingest of the source file at `path`: not forced, not held,
+    /// under the daemon's default audit profile.
+    pub fn file(path: impl Into<PathBuf>) -> Self {
+        IngestJob {
+            path: path.into(),
+            force: false,
+            hold_for_metadata: false,
+            audit_profile: None,
+            input: JobInput::File,
+        }
+    }
+}
+
+/// What the path of an [`IngestJob`] names.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum JobInput {
+    /// The source itself, in a format the pipeline extracts directly.
+    File,
+}
+
 /// One row in the persistent queue.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct QueueJob {
@@ -146,44 +206,19 @@ pub struct QueueJob {
     /// Library name the job runs against, as registered in the
     /// `LibraryRegistry`.
     pub library: String,
-    /// Source file to ingest. Resolved when the job was enqueued; the
-    /// worker does not re-resolve relative paths.
-    pub path: PathBuf,
+    /// Which side of the library the job works on: `Book` is dispatched
+    /// to the ingest pipeline, `Paper` to the glean pipeline.
+    pub kind: ItemKind,
     /// Scheduling hint for the worker pull order.
     pub priority: Priority,
-    /// Force a fresh ingest even when the source's noop-if-up-to-date
-    /// check would otherwise short-circuit.
-    pub force: bool,
-    /// Park the book at STRUCTURE when the audit verdict is
-    /// `needs_work`, skipping CHUNK and EMBED until a curator
-    /// resumes it. Off by default; a v2 queue document (no
-    /// `hold_for_metadata` field) loads with the flag unset, matching
-    /// the previous worker behaviour.
-    #[serde(default)]
-    pub hold_for_metadata: bool,
-    /// Which pipeline owns this job: `Book` is dispatched to the ingest
-    /// pipeline, `Paper` to the glean pipeline. Defaults to `Book`, so
-    /// a v1 queue document (no `kind` field) loads as a book queue.
-    #[serde(default)]
-    pub kind: ItemKind,
+    /// What the job does, with everything only that operation reads.
+    pub op: JobOp,
     /// When set, the job is an OCR-intake ingest. The worker routes it
-    /// to the OCR ingest path with `path` as the OCR markdown product
-    /// and the nested `from_pdf` as the source PDF anchor. A v3 queue
-    /// document (no `intake_ocr` field) loads with this `None`, so an
-    /// upgrade reads the previous shape as a plain book ingest.
+    /// to the OCR ingest path with the ingest operation's `path` as the
+    /// OCR markdown product and the nested `from_pdf` as the source PDF
+    /// anchor.
     #[serde(default)]
     pub intake_ocr: Option<IntakeOcrInfo>,
-    /// Book-side audit profile override for this job. When `None`, the
-    /// worker uses the daemon's default profile baked into the queue
-    /// params template at startup. When `Some(name)`, the worker
-    /// reloads the named profile per job and substitutes it into the
-    /// ingest params before dispatch. Paper-side jobs do not consume
-    /// this field; the glean pipeline carries its own paper audit
-    /// profile in `glean_params_template`. A v4 queue document (no
-    /// `audit_profile` field) loads with this `None`, preserving the
-    /// previous default-profile behaviour.
-    #[serde(default)]
-    pub audit_profile: Option<String>,
     /// Current lifecycle state.
     pub state: JobState,
     /// When the job entered the queue.
@@ -203,21 +238,189 @@ pub struct QueueJob {
     /// summary / detail / hint / retryable the error envelope carries
     /// when the same error fails a write RPC. Recorded beside `error`
     /// when `state == Failed` and the daemon recognised the error's
-    /// type; `None` for a failure it did not, for every non-failure
-    /// state, and for a row a v6 document wrote. Redacted as it loads,
-    /// string by string, as `error` is.
+    /// type; `None` for a failure it did not and for every non-failure
+    /// state. Redacted as it loads, string by string, as `error` is.
     #[serde(default, deserialize_with = "deserialize_redacted_problem")]
     pub problem: Option<Problem>,
     /// Intake id this job resolved to: the existing catalog row when the
     /// worker skipped the source as a duplicate (`SkippedDuplicate`), or
     /// the `needs_ocr` anchor the worker registered for a scan source
     /// (`NeedsOcr`). Set together with either terminal so `queue list`
-    /// can point the operator at the intake without a sha256 lookup. A
-    /// v4 queue document (no `merged_into` field) loads with this `None`,
-    /// matching the previous single-`done` terminal.
+    /// can point the operator at the intake without a sha256 lookup.
     #[serde(default)]
     pub merged_into: Option<i64>,
 }
+
+impl QueueJob {
+    /// The file the job reads, for an operation that reads one.
+    pub fn source_path(&self) -> Option<&Path> {
+        match &self.op {
+            JobOp::Ingest(ingest) => Some(&ingest.path),
+        }
+    }
+}
+
+/// The summary and flattened text recorded on a job an earlier binary
+/// queued for the OCR intake path.
+const OCR_PATH_REMOVED: &str = "cannot run a job queued for the removed OCR intake path";
+
+/// A queue row as a document below schema version 8 holds it: every
+/// field on the row itself, and each field added after version 1
+/// defaulting to what the binary before it behaved as.
+#[derive(Deserialize)]
+struct FlatQueueJob {
+    id: String,
+    library: String,
+    path: PathBuf,
+    priority: Priority,
+    force: bool,
+    #[serde(default)]
+    hold_for_metadata: bool,
+    #[serde(default)]
+    kind: ItemKind,
+    #[serde(default)]
+    intake_ocr: Option<IntakeOcrInfo>,
+    #[serde(default)]
+    audit_profile: Option<String>,
+    state: JobState,
+    queued_at: DateTime<Utc>,
+    started_at: Option<DateTime<Utc>>,
+    finished_at: Option<DateTime<Utc>>,
+    #[serde(default, deserialize_with = "deserialize_redacted")]
+    error: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_redacted_problem")]
+    problem: Option<Problem>,
+    #[serde(default)]
+    merged_into: Option<i64>,
+}
+
+impl FlatQueueJob {
+    /// The same job as a current row. A plain ingest keeps every value.
+    /// An OCR-intake job loses its sidecar: one that finished or was
+    /// cancelled keeps the rest of its record, and one that could still
+    /// run — pending, running, failed, or parked for OCR — becomes a
+    /// failure naming the removed path, finished at the latest time the
+    /// row records.
+    fn into_current(self) -> QueueJob {
+        let mut job = QueueJob {
+            id: self.id,
+            library: self.library,
+            kind: self.kind,
+            priority: self.priority,
+            op: JobOp::Ingest(IngestJob {
+                path: self.path,
+                force: self.force,
+                hold_for_metadata: self.hold_for_metadata,
+                audit_profile: self.audit_profile,
+                input: JobInput::File,
+            }),
+            intake_ocr: None,
+            state: self.state,
+            queued_at: self.queued_at,
+            started_at: self.started_at,
+            finished_at: self.finished_at,
+            error: self.error,
+            problem: self.problem,
+            merged_into: self.merged_into,
+        };
+        let Some(ocr) = self.intake_ocr else {
+            return job;
+        };
+        if matches!(
+            job.state,
+            JobState::Done | JobState::SkippedDuplicate | JobState::Cancelled
+        ) {
+            return job;
+        }
+        let JobOp::Ingest(ingest) = &job.op;
+        let problem = Problem::new(OCR_PATH_REMOVED)
+            .detail(format!(
+                "The job paired the OCR output {} with the scan {}.",
+                ingest.path.display(),
+                ocr.from_pdf.display()
+            ))
+            .hint(
+                "Describe the OCR output in a rule file and submit it with \
+                 `bookrack ingest --rule`. docs/UPGRADE.md covers the move.",
+            );
+        job.state = JobState::Failed;
+        job.finished_at = job.finished_at.or(job.started_at).or(Some(job.queued_at));
+        job.error = Some(OCR_PATH_REMOVED.to_string());
+        job.problem = Some(problem);
+        job.merged_into = None;
+        job
+    }
+}
+
+/// A whole document below schema version 8.
+#[derive(Deserialize)]
+struct FlatQueueState {
+    schema_version: u32,
+    paused: bool,
+    jobs: Vec<FlatQueueJob>,
+}
+
+/// The one field the version gate reads.
+#[derive(Deserialize)]
+struct VersionProbe {
+    schema_version: u32,
+}
+
+/// The `schema_version` a persisted document records, read on its own
+/// so a document whose shape this binary cannot parse is still judged
+/// by its version first.
+pub fn document_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(VersionProbe::deserialize(deserializer)?.schema_version)
+}
+
+/// Why [`read_document`] did not produce a state.
+#[derive(Debug)]
+pub enum QueueReadError<E> {
+    /// The document records a version above [`QUEUE_SCHEMA_VERSION`].
+    TooNew,
+    /// The document is not the shape its version describes.
+    Malformed(E),
+}
+
+/// Read a persisted document that records schema version `found`,
+/// in the shape that version wrote.
+///
+/// A document above [`QUEUE_SCHEMA_VERSION`] is refused. One below
+/// version 8 holds flat rows, each converted to a current row. The
+/// returned state keeps `found` as its `schema_version`: reading does
+/// not relabel a document, the next write does.
+pub fn read_document<'de, D>(
+    found: u32,
+    deserializer: D,
+) -> Result<QueueState, QueueReadError<D::Error>>
+where
+    D: serde::Deserializer<'de>,
+{
+    if queue_open_decision(found) == QueueOpenDecision::Refuse {
+        return Err(QueueReadError::TooNew);
+    }
+    if found >= FIRST_OP_SCHEMA_VERSION {
+        return QueueState::deserialize(deserializer).map_err(QueueReadError::Malformed);
+    }
+    let flat = FlatQueueState::deserialize(deserializer).map_err(QueueReadError::Malformed)?;
+    Ok(QueueState {
+        schema_version: flat.schema_version,
+        paused: flat.paused,
+        jobs: flat
+            .jobs
+            .into_iter()
+            .map(FlatQueueJob::into_current)
+            .collect(),
+    })
+}
+
+/// The first schema version whose rows carry an `op`; every document
+/// below it holds flat rows.
+// setting: internal -- a fixed point in the document format's history, not a tunable
+const FIRST_OP_SCHEMA_VERSION: u32 = 8;
 
 /// An optional string, redacted of build-machine source prefixes.
 fn deserialize_redacted<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -306,40 +509,140 @@ pub fn match_id_fragment(
 mod tests {
     use super::*;
 
-    /// A failure recorded before errors were redacted at their source
-    /// is redacted as it loads: the failure text reaches `queue.list`,
-    /// the queue snapshot, and the next save only through this field.
-    #[test]
-    fn a_recorded_failure_loads_without_build_prefixes() {
-        let failed = r#"{
+    const LOCATED: &str = "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/train.rs:10:4";
+    const KEPT: &str = "dep-1.0.0/src/train.rs:10:4";
+
+    fn at(time: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(time)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    /// Read `document` through the two public entry points, the way
+    /// both of its on-disk readers do.
+    fn read(document: &serde_json::Value) -> Result<QueueState, QueueReadError<serde_json::Error>> {
+        let text = document.to_string();
+        let found = document_version(&mut serde_json::Deserializer::from_str(&text))
+            .expect("the document records a version");
+        read_document(found, &mut serde_json::Deserializer::from_str(&text))
+    }
+
+    /// The one row of a document at `version` holding `row`.
+    fn read_row(version: u32, row: serde_json::Value) -> QueueJob {
+        let document = serde_json::json!({
+            "schema_version": version,
+            "paused": false,
+            "jobs": [row],
+        });
+        let mut state = read(&document).expect("the document loads");
+        assert_eq!(state.jobs.len(), 1);
+        state.jobs.remove(0)
+    }
+
+    /// A flat row as a version-1 binary wrote it: the fields every
+    /// version below 8 carries, and none added after the first.
+    fn flat_row() -> serde_json::Value {
+        serde_json::json!({
             "id": "0",
             "library": "default",
             "path": "/srv/books/example.epub",
-            "kind": "book",
             "priority": "normal",
             "force": false,
-            "state": "failed",
+            "state": "pending",
             "queued_at": "2026-01-02T03:04:05Z",
-            "started_at": "2026-01-02T03:04:06Z",
-            "finished_at": "2026-01-02T03:04:07Z",
-            "error": "ingest: train failed, /disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/train.rs:10:4: train failed"
-        }"#;
-        let job: QueueJob = serde_json::from_str(failed).expect("deserialize");
-        assert_eq!(
-            job.error.as_deref(),
-            Some("ingest: train failed, dep-1.0.0/src/train.rs:10:4: train failed")
+            "started_at": null,
+            "finished_at": null,
+            "error": null
+        })
+    }
+
+    /// `flat_row` with `extra`'s keys set over it.
+    fn flat_row_with(extra: serde_json::Value) -> serde_json::Value {
+        let mut row = flat_row();
+        for (key, value) in extra.as_object().expect("an object of overrides") {
+            row[key] = value.clone();
+        }
+        row
+    }
+
+    fn job_with(id: &str, state: JobState) -> QueueJob {
+        QueueJob {
+            id: id.to_string(),
+            library: "default".to_string(),
+            kind: ItemKind::Book,
+            priority: Priority::Normal,
+            op: JobOp::Ingest(IngestJob::file("/tmp/example.epub")),
+            intake_ocr: None,
+            state,
+            queued_at: at("2026-01-02T03:04:05Z"),
+            started_at: None,
+            finished_at: None,
+            error: None,
+            problem: None,
+            merged_into: None,
+        }
+    }
+
+    /// A failure recorded before errors were redacted at their source
+    /// is redacted as it loads, from a flat row and from a current one
+    /// alike: the failure text reaches `queue.list`, the queue snapshot,
+    /// and the next save only through this field.
+    #[test]
+    fn a_recorded_failure_loads_without_build_prefixes() {
+        let error = format!("ingest: train failed, {LOCATED}: train failed");
+        let kept = format!("ingest: train failed, {KEPT}: train failed");
+
+        let flat = read_row(
+            7,
+            flat_row_with(serde_json::json!({ "state": "failed", "error": error })),
         );
+        assert_eq!(flat.error.as_deref(), Some(kept.as_str()));
         assert_eq!(
-            job.path,
-            std::path::PathBuf::from("/srv/books/example.epub")
+            flat.source_path(),
+            Some(Path::new("/srv/books/example.epub"))
         );
 
-        let missing = failed.replace(
-            r#""error": "ingest: train failed, /disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/train.rs:10:4: train failed""#,
-            r#""error": null"#,
-        );
-        let job: QueueJob = serde_json::from_str(&missing).expect("deserialize null");
-        assert_eq!(job.error, None);
+        let mut current = serde_json::to_value(job_with("0", JobState::Failed)).unwrap();
+        current["error"] = serde_json::json!(error);
+        let current = read_row(QUEUE_SCHEMA_VERSION, current);
+        assert_eq!(current.error.as_deref(), Some(kept.as_str()));
+
+        let missing = read_row(7, flat_row_with(serde_json::json!({ "state": "failed" })));
+        assert_eq!(missing.error, None);
+    }
+
+    /// A recorded diagnostic is redacted as it loads, every string of
+    /// it, from a flat row and from a current one alike.
+    #[test]
+    fn a_recorded_problem_loads_redacted() {
+        let problem = serde_json::json!({
+            "summary": format!("failed at {LOCATED}"),
+            "detail": format!("Detail at {LOCATED}."),
+            "hint": format!("Hint at {LOCATED}."),
+            "retryable": true
+        });
+        let mut current = serde_json::to_value(job_with("0", JobState::Failed)).unwrap();
+        current["problem"] = problem.clone();
+        let rows = [
+            read_row(
+                7,
+                flat_row_with(serde_json::json!({ "state": "failed", "problem": problem })),
+            ),
+            read_row(QUEUE_SCHEMA_VERSION, current),
+        ];
+        for job in rows {
+            let problem = job.problem.expect("the diagnostic loads");
+            assert_eq!(problem.summary, format!("failed at {KEPT}"));
+            assert_eq!(
+                problem.data.detail.as_deref(),
+                Some(format!("Detail at {KEPT}.").as_str())
+            );
+            assert_eq!(
+                problem.data.hint.as_deref(),
+                Some(format!("Hint at {KEPT}.").as_str())
+            );
+            assert!(problem.data.retryable);
+        }
     }
 
     #[test]
@@ -351,189 +654,218 @@ mod tests {
         }
     }
 
+    /// A flat row carrying only the fields version 1 wrote loads as a
+    /// plain book ingest: every field added since reads as what the
+    /// binary before it behaved as.
     #[test]
-    fn queue_job_without_kind_loads_as_book() {
-        // A v1-shaped document persisted before [`QUEUE_SCHEMA_VERSION`]
-        // grew the `kind` field must still deserialize cleanly, with
-        // every job defaulting to the book pipeline.
-        let v1 = r#"{
-            "id": "0",
-            "library": "default",
-            "path": "/tmp/example.epub",
-            "priority": "normal",
-            "force": false,
-            "state": "pending",
-            "queued_at": "2026-01-02T03:04:05Z",
-            "started_at": null,
-            "finished_at": null,
-            "error": null
-        }"#;
-        let job: QueueJob = serde_json::from_str(v1).expect("deserialize v1");
+    fn a_flat_row_without_the_later_fields_loads_with_their_defaults() {
+        let job = read_row(1, flat_row());
         assert_eq!(job.kind, ItemKind::Book);
-    }
-
-    #[test]
-    fn queue_job_without_hold_for_metadata_loads_as_false() {
-        // A v2-shaped document persisted before the field was added
-        // must still deserialize cleanly, with the flag defaulting to
-        // off so the worker preserves the previous behaviour.
-        let v2 = r#"{
-            "id": "0",
-            "library": "default",
-            "path": "/tmp/example.epub",
-            "kind": "book",
-            "priority": "normal",
-            "force": false,
-            "state": "pending",
-            "queued_at": "2026-01-02T03:04:05Z",
-            "started_at": null,
-            "finished_at": null,
-            "error": null
-        }"#;
-        let job: QueueJob = serde_json::from_str(v2).expect("deserialize v2");
-        assert!(!job.hold_for_metadata);
-    }
-
-    #[test]
-    fn queue_job_without_intake_ocr_loads_as_none() {
-        // A v3-shaped document persisted before the field was added
-        // must still deserialize cleanly, with the side data defaulting
-        // to `None` so the worker treats the job as a plain book ingest.
-        let v3 = r#"{
-            "id": "0",
-            "library": "default",
-            "path": "/tmp/example.epub",
-            "kind": "book",
-            "priority": "normal",
-            "force": false,
-            "hold_for_metadata": false,
-            "state": "pending",
-            "queued_at": "2026-01-02T03:04:05Z",
-            "started_at": null,
-            "finished_at": null,
-            "error": null
-        }"#;
-        let job: QueueJob = serde_json::from_str(v3).expect("deserialize v3");
+        assert_eq!(
+            job.op,
+            JobOp::Ingest(IngestJob::file("/srv/books/example.epub"))
+        );
         assert!(job.intake_ocr.is_none());
-    }
-
-    #[test]
-    fn queue_job_without_audit_profile_loads_as_none() {
-        // A v4-shaped document persisted before the field was added
-        // must still deserialize cleanly, with the per-job override
-        // defaulting to `None` so the worker falls back to the daemon
-        // params template's profile.
-        let v4 = r#"{
-            "id": "0",
-            "library": "default",
-            "path": "/tmp/example.epub",
-            "kind": "book",
-            "priority": "normal",
-            "force": false,
-            "hold_for_metadata": false,
-            "intake_ocr": null,
-            "state": "pending",
-            "queued_at": "2026-01-02T03:04:05Z",
-            "started_at": null,
-            "finished_at": null,
-            "error": null
-        }"#;
-        let job: QueueJob = serde_json::from_str(v4).expect("deserialize v4");
-        assert!(job.audit_profile.is_none());
-    }
-
-    #[test]
-    fn queue_job_without_merged_into_loads_as_none() {
-        // A v4-shaped document persisted before the field was added
-        // must still deserialize cleanly, with the dedup back-pointer
-        // defaulting to `None` so a job without it renders identically
-        // to the previous single-`done` terminal.
-        let v4 = r#"{
-            "id": "0",
-            "library": "default",
-            "path": "/tmp/example.epub",
-            "kind": "book",
-            "priority": "normal",
-            "force": false,
-            "hold_for_metadata": false,
-            "intake_ocr": null,
-            "audit_profile": null,
-            "state": "done",
-            "queued_at": "2026-01-02T03:04:05Z",
-            "started_at": null,
-            "finished_at": null,
-            "error": null
-        }"#;
-        let job: QueueJob = serde_json::from_str(v4).expect("deserialize v4");
+        assert!(job.problem.is_none());
         assert!(job.merged_into.is_none());
     }
 
+    /// Every value a flat row holds reaches the current row, the
+    /// operation's fields inside `op` and the rest where they were.
     #[test]
-    fn queue_job_without_problem_loads_as_none() {
-        // A v6-shaped row persisted before the classified diagnostic was
-        // recorded must still deserialize cleanly, with the diagnostic
-        // absent so the row renders from its flattened text alone.
-        let v6 = r#"{
-            "id": "0",
-            "library": "default",
-            "path": "/tmp/example.epub",
-            "kind": "book",
-            "priority": "normal",
-            "force": false,
-            "hold_for_metadata": false,
-            "intake_ocr": null,
-            "audit_profile": null,
-            "state": "failed",
-            "queued_at": "2026-01-02T03:04:05Z",
-            "started_at": null,
-            "finished_at": "2026-01-02T03:04:07Z",
-            "error": "ingest: boom",
-            "merged_into": null
-        }"#;
-        let job: QueueJob = serde_json::from_str(v6).expect("deserialize v6");
-        assert!(job.problem.is_none());
-        assert_eq!(job.error.as_deref(), Some("ingest: boom"));
+    fn a_flat_row_keeps_every_value_it_holds() {
+        for kind in [ItemKind::Book, ItemKind::Paper] {
+            let job = read_row(
+                7,
+                flat_row_with(serde_json::json!({
+                    "id": "abc",
+                    "library": "beta",
+                    "kind": kind,
+                    "priority": "high",
+                    "force": true,
+                    "hold_for_metadata": true,
+                    "intake_ocr": null,
+                    "audit_profile": "strict",
+                    "state": "skipped_duplicate",
+                    "started_at": "2026-01-02T03:04:06Z",
+                    "finished_at": "2026-01-02T03:04:07Z",
+                    "merged_into": 42
+                })),
+            );
+            assert_eq!(
+                job,
+                QueueJob {
+                    id: "abc".to_string(),
+                    library: "beta".to_string(),
+                    kind,
+                    priority: Priority::High,
+                    op: JobOp::Ingest(IngestJob {
+                        path: "/srv/books/example.epub".into(),
+                        force: true,
+                        hold_for_metadata: true,
+                        audit_profile: Some("strict".to_string()),
+                        input: JobInput::File,
+                    }),
+                    intake_ocr: None,
+                    state: JobState::SkippedDuplicate,
+                    queued_at: at("2026-01-02T03:04:05Z"),
+                    started_at: Some(at("2026-01-02T03:04:06Z")),
+                    finished_at: Some(at("2026-01-02T03:04:07Z")),
+                    error: None,
+                    problem: None,
+                    merged_into: Some(42),
+                }
+            );
+        }
     }
 
-    /// A recorded diagnostic is redacted as it loads, every string of
-    /// it, so a row written before errors were redacted at their source
-    /// leaves the process as clean as a new one.
+    fn flat_ocr_row(extra: serde_json::Value) -> serde_json::Value {
+        let mut row = flat_row_with(serde_json::json!({
+            "path": "/srv/ocr/example.md",
+            "intake_ocr": {
+                "from_pdf": "/srv/scans/example.pdf",
+                "expected_pages": 42,
+                "allow_partial": true
+            }
+        }));
+        for (key, value) in extra.as_object().expect("an object of overrides") {
+            row[key] = value.clone();
+        }
+        row
+    }
+
+    /// An OCR-intake job that could still run loads as a failure that
+    /// names the removed path and what replaces it, finished at the
+    /// latest time the row records, with nothing left that would send
+    /// it down the plain ingest path as a pending job.
     #[test]
-    fn a_recorded_problem_loads_redacted() {
-        const LOCATED: &str = "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/train.rs:10:4";
-        const KEPT: &str = "dep-1.0.0/src/train.rs:10:4";
-        let row = serde_json::json!({
-            "id": "0",
-            "library": "default",
-            "path": "/tmp/example.epub",
-            "kind": "book",
-            "priority": "normal",
-            "force": false,
-            "state": "failed",
-            "queued_at": "2026-01-02T03:04:05Z",
-            "started_at": null,
-            "finished_at": "2026-01-02T03:04:07Z",
-            "error": "ingest: boom",
-            "problem": {
-                "summary": format!("failed at {LOCATED}"),
-                "detail": format!("Detail at {LOCATED}."),
-                "hint": format!("Hint at {LOCATED}."),
-                "retryable": true
-            },
-            "merged_into": null
+    fn a_flat_ocr_job_that_could_still_run_loads_as_a_failure() {
+        let cases = [
+            (
+                serde_json::json!({ "state": "pending" }),
+                "2026-01-02T03:04:05Z",
+            ),
+            (
+                serde_json::json!({ "state": "running", "started_at": "2026-01-02T03:04:06Z" }),
+                "2026-01-02T03:04:06Z",
+            ),
+            (
+                serde_json::json!({
+                    "state": "failed",
+                    "started_at": "2026-01-02T03:04:06Z",
+                    "finished_at": "2026-01-02T03:04:07Z",
+                    "error": "ingest: embed backend unreachable",
+                    "problem": { "summary": "could not reach the embed backend",
+                                 "hint": "Run `bookrack queue retry`.", "retryable": true }
+                }),
+                "2026-01-02T03:04:07Z",
+            ),
+            (
+                serde_json::json!({ "state": "needs_ocr", "merged_into": 9,
+                                    "finished_at": "2026-01-02T03:04:07Z" }),
+                "2026-01-02T03:04:07Z",
+            ),
+        ];
+        for (extra, finished) in cases {
+            let job = read_row(7, flat_ocr_row(extra.clone()));
+            assert_eq!(job.state, JobState::Failed, "{extra}");
+            assert!(job.intake_ocr.is_none(), "{extra}");
+            assert_eq!(job.finished_at, Some(at(finished)), "{extra}");
+            assert_eq!(job.merged_into, None, "{extra}");
+            assert_eq!(
+                job.error.as_deref(),
+                Some("cannot run a job queued for the removed OCR intake path"),
+                "{extra}"
+            );
+            let problem = job.problem.expect("the failure is classified");
+            assert_eq!(
+                problem.summary,
+                "cannot run a job queued for the removed OCR intake path"
+            );
+            let detail = problem.data.detail.expect("the detail names the pair");
+            assert!(detail.contains("/srv/ocr/example.md"), "{detail}");
+            assert!(detail.contains("/srv/scans/example.pdf"), "{detail}");
+            let hint = problem.data.hint.expect("the hint names the next step");
+            assert!(hint.contains("`bookrack ingest --rule`"), "{hint}");
+            assert!(hint.contains("docs/UPGRADE.md"), "{hint}");
+            assert!(!hint.contains("retry"), "{hint}");
+            assert!(!problem.data.retryable);
+        }
+    }
+
+    /// An OCR-intake job that finished or was cancelled keeps its
+    /// record and loses only the sidecar.
+    #[test]
+    fn a_flat_ocr_job_that_ended_keeps_its_record() {
+        for state in ["done", "skipped_duplicate", "cancelled"] {
+            let job = read_row(
+                7,
+                flat_ocr_row(serde_json::json!({
+                    "state": state,
+                    "finished_at": "2026-01-02T03:04:07Z",
+                    "merged_into": 9
+                })),
+            );
+            assert_eq!(job.state.as_wire_str(), state);
+            assert!(job.intake_ocr.is_none());
+            assert_eq!(job.error, None);
+            assert_eq!(job.problem, None);
+            assert_eq!(job.merged_into, Some(9));
+            assert_eq!(job.finished_at, Some(at("2026-01-02T03:04:07Z")));
+            assert_eq!(job.source_path(), Some(Path::new("/srv/ocr/example.md")));
+        }
+    }
+
+    /// Reading keeps the version the document records, at every
+    /// version this binary reads; a document above it is refused before
+    /// its shape is looked at.
+    #[test]
+    fn reading_keeps_the_recorded_version_and_refuses_a_later_one() {
+        for version in [1, 7] {
+            let document = serde_json::json!({
+                "schema_version": version, "paused": true, "jobs": [flat_row()]
+            });
+            let state = read(&document).expect("an earlier document loads");
+            assert_eq!(state.schema_version, version);
+            assert!(state.paused);
+        }
+        let current = serde_json::to_value(QueueState {
+            schema_version: QUEUE_SCHEMA_VERSION,
+            paused: false,
+            jobs: vec![job_with("0", JobState::Pending)],
+        })
+        .unwrap();
+        assert_eq!(
+            read(&current).expect("a current document loads").jobs,
+            vec![job_with("0", JobState::Pending)]
+        );
+
+        let later = serde_json::json!({
+            "schema_version": QUEUE_SCHEMA_VERSION + 1, "paused": false, "jobs": [{ "shape": "unknown" }]
         });
-        let job: QueueJob = serde_json::from_value(row).expect("deserialize");
-        let problem = job.problem.expect("the diagnostic loads");
-        assert_eq!(problem.summary, format!("failed at {KEPT}"));
-        assert_eq!(
-            problem.data.detail.as_deref(),
-            Some(format!("Detail at {KEPT}.").as_str())
-        );
-        assert_eq!(
-            problem.data.hint.as_deref(),
-            Some(format!("Hint at {KEPT}.").as_str())
-        );
-        assert!(problem.data.retryable);
+        assert!(matches!(read(&later), Err(QueueReadError::TooNew)));
+    }
+
+    /// Each version is read in its own shape only: a flat row under the
+    /// current version is malformed, and so is a current row under an
+    /// earlier one.
+    #[test]
+    fn a_row_in_another_versions_shape_is_malformed() {
+        let flat_as_current = serde_json::json!({
+            "schema_version": QUEUE_SCHEMA_VERSION, "paused": false, "jobs": [flat_row()]
+        });
+        assert!(matches!(
+            read(&flat_as_current),
+            Err(QueueReadError::Malformed(_))
+        ));
+        let current_as_flat = serde_json::json!({
+            "schema_version": 7, "paused": false,
+            "jobs": [serde_json::to_value(job_with("0", JobState::Pending)).unwrap()]
+        });
+        assert!(matches!(
+            read(&current_as_flat),
+            Err(QueueReadError::Malformed(_))
+        ));
     }
 
     #[test]
@@ -555,96 +887,40 @@ mod tests {
         assert_eq!(back, JobState::NeedsOcr);
     }
 
+    /// A current row survives a write and a read with every field it
+    /// can carry set.
     #[test]
-    fn queue_job_round_trips_merged_into() {
+    fn a_current_row_round_trips() {
         let job = QueueJob {
-            id: "0".to_string(),
-            library: "default".to_string(),
-            path: "/tmp/example.epub".into(),
-            kind: ItemKind::Book,
-            priority: Priority::Normal,
-            force: false,
-            hold_for_metadata: false,
-            intake_ocr: None,
-            audit_profile: None,
-            state: JobState::SkippedDuplicate,
-            queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
-                .unwrap()
-                .with_timezone(&Utc),
-            started_at: None,
-            finished_at: None,
-            error: None,
-            problem: None,
-            merged_into: Some(42),
-        };
-        let json = serde_json::to_value(&job).expect("serialize");
-        assert_eq!(json["state"], "skipped_duplicate");
-        assert_eq!(json["merged_into"], 42);
-        let back: QueueJob = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(back, job);
-    }
-
-    #[test]
-    fn queue_job_round_trips_intake_ocr() {
-        let job = QueueJob {
-            id: "0".to_string(),
-            library: "default".to_string(),
-            path: "/tmp/example.md".into(),
-            kind: ItemKind::Book,
-            priority: Priority::Normal,
-            force: false,
-            hold_for_metadata: false,
+            kind: ItemKind::Paper,
+            priority: Priority::High,
+            op: JobOp::Ingest(IngestJob {
+                path: "/tmp/example.md".into(),
+                force: true,
+                hold_for_metadata: true,
+                audit_profile: Some("strict".to_string()),
+                input: JobInput::File,
+            }),
             intake_ocr: Some(IntakeOcrInfo {
                 from_pdf: "/tmp/scan.pdf".into(),
                 expected_pages: Some(42),
                 allow_partial: true,
             }),
-            audit_profile: None,
-            state: JobState::Pending,
-            queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
-                .unwrap()
-                .with_timezone(&Utc),
-            started_at: None,
-            finished_at: None,
-            error: None,
-            problem: None,
-            merged_into: None,
-        };
-        let json = serde_json::to_value(&job).expect("serialize");
-        assert_eq!(json["intake_ocr"]["from_pdf"], "/tmp/scan.pdf");
-        assert_eq!(json["intake_ocr"]["expected_pages"], 42);
-        assert_eq!(json["intake_ocr"]["allow_partial"], true);
-        let back: QueueJob = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(back, job);
-    }
-
-    #[test]
-    fn queue_job_round_trips_kind() {
-        let job = QueueJob {
-            id: "0".to_string(),
-            library: "default".to_string(),
-            path: "/tmp/example.pdf".into(),
-            kind: ItemKind::Paper,
-            priority: Priority::Normal,
-            force: false,
-            hold_for_metadata: false,
-            intake_ocr: None,
-            audit_profile: None,
-            state: JobState::Pending,
-            queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
-                .unwrap()
-                .with_timezone(&Utc),
-            started_at: None,
-            finished_at: None,
-            error: None,
-            problem: None,
-            merged_into: None,
+            merged_into: Some(42),
+            ..job_with("0", JobState::SkippedDuplicate)
         };
         let json = serde_json::to_value(&job).expect("serialize");
         assert_eq!(json["kind"], "paper");
-        let back: QueueJob = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(back.kind, ItemKind::Paper);
-        assert_eq!(back, job);
+        assert_eq!(json["state"], "skipped_duplicate");
+        assert_eq!(json["merged_into"], 42);
+        assert_eq!(json["op"]["type"], "ingest");
+        assert_eq!(json["op"]["path"], "/tmp/example.md");
+        assert_eq!(json["op"]["force"], true);
+        assert_eq!(json["op"]["hold_for_metadata"], true);
+        assert_eq!(json["op"]["audit_profile"], "strict");
+        assert_eq!(json["op"]["input"]["type"], "file");
+        assert_eq!(json["intake_ocr"]["from_pdf"], "/tmp/scan.pdf");
+        assert_eq!(read_row(QUEUE_SCHEMA_VERSION, json), job);
     }
 
     #[test]
@@ -667,7 +943,7 @@ mod tests {
 
     /// Every persisted key, pinned against the version stamp that
     /// describes the document holding it. A field added to any of the
-    /// three types changes what an older binary sees on disk, which is
+    /// types changes what an older binary sees on disk, which is
     /// exactly what [`QUEUE_SCHEMA_VERSION`] exists to announce — so the
     /// expected sets below and the constant move in the same change,
     /// and a field that arrives without one fails here.
@@ -685,33 +961,17 @@ mod tests {
         }
 
         assert_eq!(
-            QUEUE_SCHEMA_VERSION, 7,
-            "the key sets below describe version 7 of the document"
+            QUEUE_SCHEMA_VERSION, 8,
+            "the key sets below describe version 8 of the document"
         );
 
         let job = QueueJob {
-            id: "0".to_string(),
-            library: "default".to_string(),
-            path: "/tmp/example.md".into(),
-            kind: ItemKind::Book,
-            priority: Priority::Normal,
-            force: false,
-            hold_for_metadata: false,
             intake_ocr: Some(IntakeOcrInfo {
                 from_pdf: "/tmp/scan.pdf".into(),
                 expected_pages: Some(42),
                 allow_partial: true,
             }),
-            audit_profile: Some("strict".to_string()),
-            state: JobState::Pending,
-            queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
-                .unwrap()
-                .with_timezone(&Utc),
-            started_at: None,
-            finished_at: None,
-            error: None,
-            problem: None,
-            merged_into: None,
+            ..job_with("0", JobState::Pending)
         };
         let state = serde_json::to_value(QueueState {
             schema_version: QUEUE_SCHEMA_VERSION,
@@ -724,17 +984,14 @@ mod tests {
         assert_eq!(
             keys_of(&state["jobs"][0]),
             [
-                "audit_profile",
                 "error",
                 "finished_at",
-                "force",
-                "hold_for_metadata",
                 "id",
                 "intake_ocr",
                 "kind",
                 "library",
                 "merged_into",
-                "path",
+                "op",
                 "priority",
                 "problem",
                 "queued_at",
@@ -742,62 +999,24 @@ mod tests {
                 "state",
             ]
         );
+        assert_eq!(state["jobs"][0]["op"]["type"], "ingest");
+        assert_eq!(
+            keys_of(&state["jobs"][0]["op"]),
+            [
+                "audit_profile",
+                "force",
+                "hold_for_metadata",
+                "input",
+                "path",
+                "type",
+            ]
+        );
+        assert_eq!(state["jobs"][0]["op"]["input"]["type"], "file");
+        assert_eq!(keys_of(&state["jobs"][0]["op"]["input"]), ["type"]);
         assert_eq!(
             keys_of(&state["jobs"][0]["intake_ocr"]),
             ["allow_partial", "expected_pages", "from_pdf"]
         );
-    }
-
-    #[test]
-    fn queue_job_round_trips_audit_profile() {
-        let job = QueueJob {
-            id: "0".to_string(),
-            library: "default".to_string(),
-            path: "/tmp/example.epub".into(),
-            kind: ItemKind::Book,
-            priority: Priority::Normal,
-            force: false,
-            hold_for_metadata: false,
-            intake_ocr: None,
-            audit_profile: Some("strict".to_string()),
-            state: JobState::Pending,
-            queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
-                .unwrap()
-                .with_timezone(&Utc),
-            started_at: None,
-            finished_at: None,
-            error: None,
-            problem: None,
-            merged_into: None,
-        };
-        let json = serde_json::to_value(&job).expect("serialize");
-        assert_eq!(json["audit_profile"], "strict");
-        let back: QueueJob = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(back.audit_profile.as_deref(), Some("strict"));
-        assert_eq!(back, job);
-    }
-
-    fn job_with(id: &str, state: JobState) -> QueueJob {
-        QueueJob {
-            id: id.to_string(),
-            library: "default".to_string(),
-            path: "/tmp/example.epub".into(),
-            kind: ItemKind::Book,
-            priority: Priority::Normal,
-            force: false,
-            hold_for_metadata: false,
-            intake_ocr: None,
-            audit_profile: None,
-            state,
-            queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
-                .unwrap()
-                .with_timezone(&Utc),
-            started_at: None,
-            finished_at: None,
-            error: None,
-            problem: None,
-            merged_into: None,
-        }
     }
 
     #[test]

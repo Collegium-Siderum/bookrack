@@ -28,7 +28,9 @@
 use std::time::Duration;
 
 use bookrack_core::ItemKind;
-use bookrack_core::queue::{JobState, Priority, QUEUE_SCHEMA_VERSION, QueueJob, QueueState};
+use bookrack_core::queue::{
+    IngestJob, JobOp, JobState, Priority, QUEUE_SCHEMA_VERSION, QueueJob, QueueState,
+};
 use eyre::{Context, Result, bail};
 use serde_json::Value;
 
@@ -227,13 +229,10 @@ async fn crash_recovery_resets_a_running_job_to_pending_on_restart() -> Result<(
         jobs: vec![QueueJob {
             id: "01890000-0000-7000-8000-000000000001".into(),
             library: String::new(),
-            path: "/tmp/crash-recovery-fixture.txt".into(),
             priority: Priority::Normal,
-            force: false,
-            hold_for_metadata: false,
             kind: ItemKind::Book,
+            op: JobOp::Ingest(IngestJob::file("/tmp/crash-recovery-fixture.txt")),
             intake_ocr: None,
-            audit_profile: None,
             state: JobState::Running,
             queued_at,
             started_at: Some(queued_at),

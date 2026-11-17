@@ -903,12 +903,15 @@ impl DaemonRuntime {
                             // row that predates the field, so a row
                             // reaching here unnamed cannot be routed.
                             let library = job.library.clone();
-                            let force = job.force;
-                            let hold_for_metadata = job.hold_for_metadata;
                             let job_kind = job.kind;
-                            let path = job.path.clone();
+                            let queue::JobOp::Ingest(queue::IngestJob {
+                                path,
+                                force,
+                                hold_for_metadata,
+                                audit_profile,
+                                input: queue::JobInput::File,
+                            }) = job.op.clone();
                             let intake_ocr = job.intake_ocr.clone();
-                            let audit_profile = job.audit_profile.clone();
                             runtime.block_on(async move {
                                 if library.is_empty() {
                                     return Err(queue::JobError::Book(queue::JobFailure::text(
