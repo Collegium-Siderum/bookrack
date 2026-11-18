@@ -849,6 +849,38 @@ async fn find_books_filters_on_the_requested_lifecycle_statuses() {
 }
 
 #[tokio::test]
+async fn find_books_lists_the_scans_awaiting_text() {
+    let fx = Fixture::start().await;
+    let open = fx.seed_book("sha-scan-open", IntakeStatus::NeedsOcr);
+    let _done = fx.seed_book("sha-scan-done", IntakeStatus::NeedsOcr);
+    let text = fx.seed_book("sha-text", IntakeStatus::Embedded);
+    Catalog::open_for_write_unbacked(&fx.catalog_db)
+        .expect("open catalog")
+        .set_derived_from(ItemKind::Book, text, "sha-scan-done")
+        .expect("edge");
+    let client = fx.connect().await;
+
+    let result = client
+        .call_tool(call(
+            "library.find_books",
+            serde_json::json!({ "awaiting_text": true }),
+        ))
+        .await
+        .expect("find_books with awaiting_text");
+    let body = body_json(&result);
+    let books = body["books"].as_array().expect("books array");
+    let ids: Vec<i64> = books
+        .iter()
+        .map(|b| b["intake_id"].as_i64().expect("intake_id"))
+        .collect();
+    assert_eq!(ids, vec![open], "only the scan without text: {body}");
+    assert_eq!(books[0]["awaiting_text"]["sha256"], "sha-scan-open");
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+#[tokio::test]
 async fn find_books_refuses_a_status_no_book_can_be_in() {
     // Dropping an unrecognised status would answer with the whole
     // shelf, which reads as a successful filter that matched

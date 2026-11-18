@@ -113,6 +113,8 @@ pub struct FindBooksParams {
     #[serde(default)]
     pub language: Option<Vec<String>>,
     #[serde(default)]
+    pub awaiting_text: bool,
+    #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
     pub offset: Option<u32>,
@@ -366,6 +368,7 @@ pub fn find_books(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
         statuses,
         categories: p.categories.unwrap_or_default(),
         language: p.language.unwrap_or_default(),
+        awaiting_text: p.awaiting_text,
     };
     let page = reads::books::find_books(
         handle.ops(),

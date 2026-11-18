@@ -94,6 +94,15 @@ fn listings_are_empty_pages() {
     assert_eq!(page.total, 0);
     assert!(!page.truncated);
 
+    let awaiting_text = BookFilter {
+        awaiting_text: true,
+        ..BookFilter::default()
+    };
+    let page = find_books(&fx.ops, awaiting_text, 10, 0)
+        .expect("find_books for scans on a root without a catalog");
+    assert!(page.books.is_empty(), "{:?}", page.books);
+    assert_eq!(page.total, 0);
+
     let page =
         list_ocr_pending(&fx.ops, 10, 0).expect("list_ocr_pending on a root without a catalog");
     assert!(page.items.is_empty(), "{:?}", page.items);

@@ -21,7 +21,7 @@ use std::path::PathBuf;
 
 use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::render::ctx;
-use bookrack_cli::render::human::truncate_to;
+use bookrack_cli::render::human::{basename_or_dash, truncate_to};
 use bookrack_cli::render::table::RowTable;
 use bookrack_cli_grammar::{FindArgs, ListArgs, Scope, SearchArgs};
 use bookrack_control_client::ControlClient;
@@ -266,6 +266,7 @@ fn filters_bound_to_one_side(args: &FindArgs) -> Vec<(&'static str, ItemKind)> {
         ("--year", ItemKind::Paper, args.year.is_some()),
         ("--venue", ItemKind::Paper, args.venue.is_some()),
         ("--doi", ItemKind::Paper, args.doi.is_some()),
+        ("--awaiting-text", ItemKind::Book, args.awaiting_text),
     ]
     .into_iter()
     .filter_map(|(flag, kind, passed)| passed.then_some((flag, kind)))
@@ -338,6 +339,10 @@ fn find_params(kind: ItemKind, args: &FindArgs) -> Value {
                 Value::Array(values.iter().map(|v| Value::from(v.as_str())).collect()),
             );
         }
+    }
+    // Sent only when asked for: a `false` is the absence of the filter.
+    if args.awaiting_text && kind == ItemKind::Book {
+        params.insert("awaiting_text".to_string(), Value::Bool(true));
     }
     if let Some(n) = args.limit {
         params.insert("limit".to_string(), Value::from(n));
@@ -523,14 +528,59 @@ fn format_book_list(response: &Value) -> String {
         Some(arr) if !arr.is_empty() => arr,
         _ => return "no books match".to_string(),
     };
+    // A page filtered to the scans awaiting text carries a block on
+    // every row, and is printed as the worklist it is.
+    let table = if rows[0].get("awaiting_text").is_some_and(Value::is_object) {
+        awaiting_text_table(rows)
+    } else {
+        book_table(rows)
+    };
+    let mut out = table.render();
+    if let Some(footer) = page_footer(response, rows.len()) {
+        out.push('\n');
+        out.push_str(&footer);
+    }
+    out
+}
+
+/// The id cell of one book row.
+fn book_id_cell(row: &Value) -> String {
+    row.get("intake_id")
+        .and_then(Value::as_i64)
+        .and_then(|i| row_id(ItemKind::Book, i))
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+/// One row per scan source awaiting text: its id, page count, the
+/// basename of the file to read it from, and why its text layer was
+/// rejected. The full paths are in the `--json` rows.
+fn awaiting_text_table(rows: &[Value]) -> RowTable {
+    let mut table = RowTable::new(["id", "pages", "source", "reason"]);
+    for row in rows {
+        let block = row.get("awaiting_text");
+        let field = |key: &str| block.and_then(|b| b.get(key));
+        let pages = field("pages")
+            .and_then(Value::as_i64)
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let source = field("source_path")
+            .and_then(Value::as_str)
+            .map(|p| basename_or_dash(Some(p)).to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let reason = field("reason")
+            .and_then(Value::as_str)
+            .map(|r| truncate_to(r, 60))
+            .unwrap_or_else(|| "-".to_string());
+        table.push_row([book_id_cell(row), pages, source, reason]);
+    }
+    table
+}
+
+fn book_table(rows: &[Value]) -> RowTable {
     let mut table = RowTable::new(["id", "title", "author", "format", "status"]);
     for row in rows {
-        let id = row
-            .get("intake_id")
-            .and_then(Value::as_i64)
-            .and_then(|i| row_id(ItemKind::Book, i))
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "-".to_string());
+        let id = book_id_cell(row);
         let title = row
             .get("title")
             .and_then(Value::as_str)
@@ -554,12 +604,7 @@ fn format_book_list(response: &Value) -> String {
             .to_string();
         table.push_row([id, title, author, format, status]);
     }
-    let mut out = table.render();
-    if let Some(footer) = page_footer(response, rows.len()) {
-        out.push('\n');
-        out.push_str(&footer);
-    }
-    out
+    table
 }
 
 #[cfg(test)]
@@ -680,6 +725,94 @@ mod tests {
                 "the id cell {cell:?} is not an id any command accepts, in:\n{table}"
             );
         }
+    }
+
+    fn awaiting_text_page() -> Value {
+        json!({
+            "books": [
+                {
+                    "intake_id": 7,
+                    "title": null,
+                    "format": "pdf",
+                    "status": "needs_ocr",
+                    "awaiting_text": {
+                        "source_path": "/store/books/7.pdf",
+                        "pages": 12,
+                        "reason": "no usable text layer",
+                    },
+                },
+                {
+                    "intake_id": 8,
+                    "status": "needs_ocr",
+                    "awaiting_text": { "source_path": null, "pages": null, "reason": null },
+                },
+            ],
+            "total": 2,
+            "truncated": false,
+        })
+    }
+
+    /// A page of scans awaiting text prints what producing the text
+    /// needs, under the same typed id the book listing prints.
+    #[test]
+    fn a_page_of_scans_awaiting_text_prints_pages_source_and_reason() {
+        let table = format_book_list(&awaiting_text_page());
+        let header = table
+            .lines()
+            .find(|line| line.starts_with('\u{2502}'))
+            .expect("a header row");
+        let columns: Vec<&str> = header.trim_matches('\u{2502}').split_whitespace().collect();
+        assert_eq!(columns, ["id", "pages", "source", "reason"], "{table}");
+        assert!(table.contains("7.pdf"), "{table}");
+        assert!(
+            !table.contains("/store/books"),
+            "the basename only: {table}"
+        );
+        assert!(table.contains("no usable text layer"), "{table}");
+
+        let cells = id_cells(&table);
+        for (cell, intake_id) in cells.iter().zip([7, 8]) {
+            assert_eq!(
+                TypedItemId::from_str(cell).map_err(|e| e.to_string()),
+                Ok(TypedItemId::Book(intake_id)),
+                "the id cell {cell:?} is not an id any command accepts, in:\n{table}"
+            );
+        }
+        assert_eq!(cells.len(), 2, "{table}");
+        assert_eq!(
+            page_footer(&awaiting_text_page(), 2),
+            None,
+            "a full page states no count"
+        );
+    }
+
+    /// `--awaiting-text` is a book-side filter: it is sent to the book
+    /// side alone, and refused under a scope that reaches the papers.
+    #[test]
+    fn awaiting_text_is_sent_to_the_book_side_and_refused_off_it() {
+        let mut args = every_filter();
+        let book = find_params(ItemKind::Book, &args);
+        assert_eq!(book.get("awaiting_text"), Some(&json!(true)), "{book}");
+        let paper = find_params(ItemKind::Paper, &args);
+        assert_eq!(paper.get("awaiting_text"), None, "{paper}");
+
+        args.format = None;
+        args.year = None;
+        args.venue = None;
+        args.doi = None;
+        for scope in [Scope::All, Scope::Paper] {
+            let refused = refuse_filters_off_their_side(scope, &args)
+                .expect_err("--awaiting-text does not apply to the paper side");
+            let BookrackCliError::FilterOffItsSide { problem } = refused else {
+                panic!("a filter off its side should be its own refusal");
+            };
+            assert_eq!(
+                problem.summary,
+                "--awaiting-text filters the book side only"
+            );
+        }
+        refuse_filters_off_their_side(Scope::Book, &args)
+            .expect("--awaiting-text applies to the book side");
     }
 
     /// A typed id is composed by the human renderer and reaches no
@@ -967,6 +1100,7 @@ mod tests {
             year: Some("2020".into()),
             venue: Some("v".into()),
             doi: Some("10.0/x".into()),
+            awaiting_text: true,
             limit: None,
             offset: None,
         }
@@ -1031,6 +1165,7 @@ mod tests {
             year: None,
             venue: None,
             doi: None,
+            awaiting_text: false,
             limit: Some(5),
             offset: None,
         };
@@ -1044,6 +1179,7 @@ mod tests {
     #[test]
     fn a_side_specific_filter_is_refused_off_its_side() {
         let mut args = every_filter();
+        args.awaiting_text = false;
         args.format = None;
         args.venue = None;
         args.doi = None;
@@ -1096,6 +1232,7 @@ mod tests {
     #[test]
     fn a_shared_filter_is_accepted_under_every_scope() {
         let mut args = every_filter();
+        args.awaiting_text = false;
         args.format = None;
         args.year = None;
         args.venue = None;

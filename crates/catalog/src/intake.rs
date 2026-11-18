@@ -47,6 +47,8 @@
 //! `tests/fixtures/intake/v1/catalog.db`: a future binary that
 //! breaks any rule above flips that test red.
 
+use std::collections::BTreeMap;
+
 use bookrack_core::ItemKind;
 use bookrack_dbkit::{ColumnSpec, IndexSpec, TableSpec, decode};
 use rusqlite::{OptionalExtension, Row, ToSql, named_params, params_from_iter};
@@ -325,6 +327,12 @@ pub struct IntakeFilter<'a> {
     /// Match the root publication-attrs `language` column against this
     /// set, comparing as text. An empty slice means "no filter".
     pub language: &'a [&'a str],
+    /// Match only scan sources the library holds no text for: a
+    /// `NeedsOcr` row with no book derived from it that reached
+    /// `embedded`, `extracted`, or `dedup_hold`. A derived book that
+    /// was aborted, and a derived row of another kind, leave the source
+    /// matching. `false` means "no filter".
+    pub awaiting_text: bool,
 }
 
 /// The list of `intake` columns qualified with the `i.` alias used by
@@ -379,6 +387,25 @@ fn attr_expr(filter: &IntakeFilter<'_>, column: &str) -> String {
             format!("CASE WHEN {alias}.intake_id IS NULL THEN npa.{column} ELSE {alias}.value END")
         }
     }
+}
+
+/// The predicate selecting scan sources the library holds no text for,
+/// over the `intake` row aliased `alias`: a `NeedsOcr` anchor with no
+/// derived row that reached a successfully-processed state. An
+/// `aborted` derived row is deliberately not counted as processed, so a
+/// source whose text failed to ingest keeps matching. Only a book row
+/// counts: a row of another kind derived from the same source leaves
+/// the anchor matching.
+fn awaiting_text_predicate(alias: &str) -> String {
+    format!(
+        "{alias}.status = 'needs_ocr' \
+         AND NOT EXISTS ( \
+           SELECT 1 FROM intake child \
+           WHERE child.derived_from_sha256 = {alias}.source_sha256 \
+             AND child.kind = 'book' \
+             AND child.status IN ('embedded', 'extracted', 'dedup_hold') \
+         )"
+    )
 }
 
 fn build_filter_fragments(filter: &IntakeFilter<'_>) -> (String, String, Vec<Box<dyn ToSql>>) {
@@ -533,6 +560,10 @@ fn build_filter_fragments(filter: &IntakeFilter<'_>) -> (String, String, Vec<Box
         for value in filter.categories {
             params.push(Box::new((*value).to_string()));
         }
+    }
+
+    if filter.awaiting_text {
+        where_parts.push(awaiting_text_predicate("i"));
     }
 
     let where_clause = if where_parts.is_empty() {
@@ -815,22 +846,6 @@ impl Catalog {
         Ok(out)
     }
 
-    /// The `WHERE` clause selecting scan sources still awaiting OCR: a
-    /// `NeedsOcr` anchor with no OCR product that reached a
-    /// successfully-processed state derived from it. `aborted` OCR
-    /// products are deliberately not counted as processed, so a source
-    /// whose OCR attempt failed keeps surfacing here for a re-run. Only
-    /// a book row counts as a product: a row of another kind derived
-    /// from the same source leaves the anchor pending.
-    const OCR_PENDING_WHERE: &'static str = "\
-        WHERE intake.status = 'needs_ocr' \
-          AND NOT EXISTS ( \
-            SELECT 1 FROM intake child \
-            WHERE child.derived_from_sha256 = intake.source_sha256 \
-              AND child.kind = 'book' \
-              AND child.status IN ('embedded', 'extracted', 'dedup_hold') \
-          )";
-
     /// Scan sources still awaiting OCR, ordered by ascending
     /// `intake_id`, paged by `limit` and `offset`. Each row pairs the
     /// `NeedsOcr` anchor with the reason its text layer was rejected,
@@ -844,40 +859,39 @@ impl Catalog {
             return Ok(Vec::new());
         }
         let sql = format!(
-            "SELECT {cols}, ( \
-                 SELECT a.error_message FROM item_pipeline_audit a \
-                 WHERE a.source_sha256 = intake.source_sha256 \
-                   AND a.stage = 'extract' AND a.outcome = 'skipped' \
-                 ORDER BY a.ts DESC, a.audit_id DESC LIMIT 1 \
-             ) AS ocr_reason \
-             FROM intake {where_clause} \
+            "SELECT {cols} FROM intake WHERE {predicate} \
              ORDER BY intake.intake_id LIMIT :limit OFFSET :offset",
             cols = SPEC.select_list(),
-            where_clause = Self::OCR_PENDING_WHERE,
+            predicate = awaiting_text_predicate("intake"),
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
             named_params! { ":limit": limit, ":offset": offset },
-            |row| {
-                Ok(OcrPending {
-                    intake: Intake::from_row(row)?,
-                    reason: crate::diagnostic_text::redacted(row.get("ocr_reason")?),
-                })
-            },
+            Intake::from_row,
         )?;
-        let mut out = Vec::new();
+        let mut intakes = Vec::new();
         for r in rows {
-            out.push(r?);
+            intakes.push(r?);
         }
-        Ok(out)
+        let shas: Vec<&str> = intakes.iter().map(|i| i.source_sha256.as_str()).collect();
+        let mut reasons = self.extract_skip_reasons(&shas)?;
+        Ok(intakes
+            .into_iter()
+            .map(|intake| OcrPending {
+                reason: reasons.remove(&intake.source_sha256),
+                intake,
+            })
+            .collect())
     }
 
     /// Total number of scan sources still awaiting OCR, ignoring
-    /// pagination. Shares [`Self::OCR_PENDING_WHERE`] with
-    /// [`Self::list_ocr_pending`] so the count and the listing reach the
-    /// same rows.
+    /// pagination. Shares its predicate with [`Self::list_ocr_pending`]
+    /// so the count and the listing reach the same rows.
     pub fn count_ocr_pending(&self) -> Result<u64> {
-        let sql = format!("SELECT COUNT(*) FROM intake {}", Self::OCR_PENDING_WHERE);
+        let sql = format!(
+            "SELECT COUNT(*) FROM intake WHERE {}",
+            awaiting_text_predicate("intake")
+        );
         let n: i64 = self.conn.query_row(&sql, [], |row| row.get(0))?;
         count_as_u64(n)
     }
@@ -898,6 +912,42 @@ impl Catalog {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// Why each source's text layer was rejected: the message of its
+    /// latest `extract` / `skipped` audit row, keyed by source hash and
+    /// read back redacted. A hash with no such row, or whose latest one
+    /// carries no message, is absent from the map. An empty `shas`
+    /// slice returns an empty map.
+    pub fn extract_skip_reasons(&self, shas: &[&str]) -> Result<BTreeMap<String, String>> {
+        if shas.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let placeholders = vec!["?"; shas.len()].join(", ");
+        // Oldest first, so each later row replaces the one before it and
+        // the map ends holding the latest row of every source.
+        let sql = format!(
+            "SELECT source_sha256, error_message FROM item_pipeline_audit \
+             WHERE stage = 'extract' AND outcome = 'skipped' \
+               AND source_sha256 IN ({placeholders}) \
+             ORDER BY ts, audit_id"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(shas.iter().copied()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                crate::diagnostic_text::redacted(row.get(1)?),
+            ))
+        })?;
+        let mut latest: BTreeMap<String, Option<String>> = BTreeMap::new();
+        for r in rows {
+            let (sha, reason) = r?;
+            latest.insert(sha, reason);
+        }
+        Ok(latest
+            .into_iter()
+            .filter_map(|(sha, reason)| reason.map(|r| (sha, r)))
+            .collect())
     }
 
     /// Find intake rows matching `filter`, ordered by ascending
@@ -3034,10 +3084,154 @@ mod tests {
         assert_eq!(pending[0].reason.as_deref(), Some(READ));
     }
 
+    fn awaiting_text() -> IntakeFilter<'static> {
+        IntakeFilter {
+            awaiting_text: true,
+            ..IntakeFilter::default()
+        }
+    }
+
+    fn found(cat: &Catalog, filter: &IntakeFilter<'_>) -> (Vec<i64>, u64) {
+        let (page, total) = cat.find_intakes_page(filter, 50, 0).expect("page");
+        let listed: Vec<i64> = cat
+            .find_intakes(filter, 50, 0)
+            .expect("find")
+            .into_iter()
+            .map(|i| i.intake_id)
+            .collect();
+        let paged: Vec<i64> = page.into_iter().map(|i| i.intake_id).collect();
+        assert_eq!(listed, paged, "find and page disagree");
+        assert_eq!(cat.count_find_intakes(filter).expect("count"), total);
+        (paged, total)
+    }
+
+    #[test]
+    fn the_awaiting_text_filter_keeps_a_scan_until_a_book_derived_from_it_is_processed() {
+        let mut cat = catalog();
+        let open = register_book(&mut cat, "pdf-open", "pdf", IntakeStatus::NeedsOcr);
+        register_book(&mut cat, "pdf-done", "pdf", IntakeStatus::NeedsOcr);
+        let failed = register_book(&mut cat, "pdf-failed", "pdf", IntakeStatus::NeedsOcr);
+        let other_kind = register_book(&mut cat, "pdf-ref", "pdf", IntakeStatus::NeedsOcr);
+        // A book that is not a scan source at all.
+        register_book(&mut cat, "plain", "epub", IntakeStatus::Embedded);
+
+        let done = register_book(&mut cat, "text-done", "rule-text", IntakeStatus::Embedded);
+        cat.set_derived_from(ItemKind::Book, done, "pdf-done")
+            .expect("edge");
+        let aborted = register_book(&mut cat, "text-failed", "rule-text", IntakeStatus::Aborted);
+        cat.set_derived_from(ItemKind::Book, aborted, "pdf-failed")
+            .expect("edge");
+        let reference = cat
+            .register_intake(ItemKind::Reference, &NewIntake::new("ref-sha"))
+            .expect("register")
+            .into_intake()
+            .intake_id;
+        cat.set_intake_status(ItemKind::Reference, reference, IntakeStatus::Embedded)
+            .expect("status");
+        cat.set_derived_from(ItemKind::Reference, reference, "pdf-ref")
+            .expect("edge");
+
+        let (ids, total) = found(&cat, &awaiting_text());
+        assert_eq!(ids, vec![open, failed, other_kind]);
+        assert_eq!(total, 3);
+
+        // The status filter alone keeps listing the scan that has its text.
+        let needs_ocr = [IntakeStatus::NeedsOcr];
+        let by_status = IntakeFilter {
+            statuses: &needs_ocr,
+            ..IntakeFilter::default()
+        };
+        assert_eq!(found(&cat, &by_status).1, 4);
+
+        // The worklist and the filter select the same rows.
+        let worklist: Vec<i64> = cat
+            .list_ocr_pending(50, 0)
+            .expect("list")
+            .into_iter()
+            .map(|p| p.intake.intake_id)
+            .collect();
+        assert_eq!(worklist, ids);
+    }
+
+    #[test]
+    fn the_awaiting_text_filter_ands_with_the_other_predicates() {
+        let mut cat = catalog();
+        register_book(&mut cat, "pdf-open", "pdf", IntakeStatus::NeedsOcr);
+        let embedded = [IntakeStatus::Embedded];
+        let filter = IntakeFilter {
+            statuses: &embedded,
+            ..awaiting_text()
+        };
+        assert_eq!(found(&cat, &filter), (Vec::new(), 0));
+        let paper = IntakeFilter {
+            kind: ItemKind::Paper,
+            ..awaiting_text()
+        };
+        assert_eq!(found(&cat, &paper), (Vec::new(), 0));
+    }
+
+    fn skip_row(
+        sha: &str,
+        stage: &str,
+        outcome: &str,
+        message: &str,
+    ) -> crate::NewItemPipelineAudit {
+        let mut row = crate::NewItemPipelineAudit::new(
+            stage,
+            "quality_gate",
+            outcome,
+            "run-skip",
+            crate::ActorKind::Pipeline,
+        );
+        row.source_sha256 = Some(sha.to_string());
+        row.error_message = Some(message.to_string());
+        row
+    }
+
+    #[test]
+    fn extract_skip_reasons_reads_the_latest_rejection_of_each_source() {
+        use crate::diagnostic_text::fixture::{READ, STORED};
+        let cat = catalog();
+        // Both land in the same second; the audit id breaks the tie.
+        for reason in ["watermark text layer", "garbled text layer"] {
+            cat.record_pipeline_audit(&skip_row("pdf-a", "extract", "skipped", reason))
+                .expect("skip row");
+        }
+        // Newer rows that are not a rejection of the text layer.
+        cat.record_pipeline_audit(&skip_row("pdf-a", "extract", "ok", "not a rejection"))
+            .expect("ok row");
+        cat.record_pipeline_audit(&skip_row("pdf-a", "embed", "skipped", "wrong stage"))
+            .expect("other stage");
+        cat.record_pipeline_audit(&skip_row("pdf-b", "extract", "skipped", STORED))
+            .expect("located row");
+        // A source nobody asks about.
+        cat.record_pipeline_audit(&skip_row("pdf-c", "extract", "skipped", "unasked"))
+            .expect("unasked row");
+
+        let reasons = cat
+            .extract_skip_reasons(&["pdf-a", "pdf-b", "pdf-none"])
+            .expect("reasons");
+        let expected: BTreeMap<String, String> = [
+            ("pdf-a".to_string(), "garbled text layer".to_string()),
+            ("pdf-b".to_string(), READ.to_string()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(reasons, expected);
+    }
+
+    #[test]
+    fn extract_skip_reasons_of_no_source_is_empty() {
+        let cat = catalog();
+        cat.record_pipeline_audit(&skip_row("pdf-a", "extract", "skipped", "garbled"))
+            .expect("skip row");
+        assert!(cat.extract_skip_reasons(&[]).expect("reasons").is_empty());
+    }
+
     #[test]
     fn intake_status_database_strings_are_pinned() {
         // These literals are the on-disk format and are matched verbatim
-        // inside OCR_PENDING_WHERE; renaming one would strand existing
+        // inside the awaiting-text predicate; renaming one would strand existing
         // rows. Pinned here so a change is a deliberate act, not a typo.
         let expected = [
             (IntakeStatus::Pending, "pending"),

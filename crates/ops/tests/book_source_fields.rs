@@ -13,7 +13,7 @@
 
 use std::path::PathBuf;
 
-use bookrack_catalog::{Catalog, NewIntake};
+use bookrack_catalog::{ActorKind, Catalog, IntakeStatus, NewIntake, NewItemPipelineAudit};
 use bookrack_core::ItemKind;
 use bookrack_corpus::Corpus;
 use bookrack_embed::OllamaEmbedClient;
@@ -170,5 +170,145 @@ fn the_detail_read_reports_absent_source_columns_as_null() {
     assert!(
         value["byte_size"].is_null(),
         "an unrecorded size is absent, not a size of zero"
+    );
+}
+
+/// Seed a scan source awaiting text: a `needs_ocr` row with both
+/// recorded paths, a page count, and a rejection reason in the audit.
+fn seed_scan(fx: &Fixture, sha: &str, original_path: &str, stored_path: Option<&str>) -> i64 {
+    let mut catalog = Catalog::open_for_write_unbacked(&fx.catalog_db).expect("open catalog");
+    let intake_id = catalog
+        .register_intake(
+            ItemKind::Book,
+            &NewIntake::new(sha)
+                .original_path(original_path)
+                .format("pdf"),
+        )
+        .expect("register intake")
+        .into_intake()
+        .intake_id;
+    catalog
+        .set_intake_status(ItemKind::Book, intake_id, IntakeStatus::NeedsOcr)
+        .expect("status");
+    catalog
+        .set_page_count(ItemKind::Book, intake_id, 7)
+        .expect("pages");
+    if let Some(stored) = stored_path {
+        catalog
+            .set_stored_path(ItemKind::Book, intake_id, stored)
+            .expect("stored path");
+    }
+    let mut skip = NewItemPipelineAudit::new(
+        "extract",
+        "quality_gate",
+        "skipped",
+        "run-scan",
+        ActorKind::Pipeline,
+    );
+    skip.source_sha256 = Some(sha.to_string());
+    skip.error_message = Some("no usable text layer".to_string());
+    catalog.record_pipeline_audit(&skip).expect("skip row");
+    intake_id
+}
+
+fn awaiting_text_rows(fx: &Fixture) -> Vec<serde_json::Value> {
+    let filter = BookFilter {
+        awaiting_text: true,
+        ..BookFilter::default()
+    };
+    let page = find_books(&fx.ops, filter, 10, 0).expect("find");
+    assert_eq!(page.total, page.books.len() as u64);
+    page.books
+        .iter()
+        .map(|b| serde_json::to_value(b).expect("serialize"))
+        .collect()
+}
+
+#[test]
+fn a_page_of_scans_awaiting_text_carries_what_producing_the_text_needs() {
+    let fx = Fixture::build();
+    fx.seed_book("sha-plain", "shelf/a-book.epub", 4096, 12);
+    let stored = seed_scan(&fx, "sha-stored", "inbox/stored.pdf", Some("store/1.pdf"));
+    let unstored = seed_scan(&fx, "sha-unstored", "inbox/unstored.pdf", None);
+
+    let rows = awaiting_text_rows(&fx);
+    let ids: Vec<i64> = rows
+        .iter()
+        .map(|r| r["intake_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![stored, unstored], "only the scans are listed");
+
+    assert_eq!(
+        rows[0]["awaiting_text"],
+        serde_json::json!({
+            "source_path": "store/1.pdf",
+            "stored_path": "store/1.pdf",
+            "original_path": "inbox/stored.pdf",
+            "sha256": "sha-stored",
+            "pages": 7,
+            "reason": "no usable text layer",
+        })
+    );
+    assert_eq!(
+        rows[1]["awaiting_text"]["source_path"],
+        "inbox/unstored.pdf"
+    );
+    assert!(rows[1]["awaiting_text"]["stored_path"].is_null());
+}
+
+#[test]
+fn a_scan_leaves_the_page_once_a_book_derived_from_it_is_embedded() {
+    let fx = Fixture::build();
+    seed_scan(&fx, "sha-scan", "inbox/scan.pdf", None);
+    assert_eq!(awaiting_text_rows(&fx).len(), 1);
+
+    let mut catalog = Catalog::open_for_write_unbacked(&fx.catalog_db).expect("open catalog");
+    let text = catalog
+        .register_intake(
+            ItemKind::Book,
+            &NewIntake::new("sha-text").format("rule-text"),
+        )
+        .expect("register intake")
+        .into_intake()
+        .intake_id;
+    catalog
+        .set_intake_status(ItemKind::Book, text, IntakeStatus::Embedded)
+        .expect("status");
+    catalog
+        .set_derived_from(ItemKind::Book, text, "sha-scan")
+        .expect("edge");
+    drop(catalog);
+
+    assert!(awaiting_text_rows(&fx).is_empty());
+}
+
+#[test]
+fn an_unfiltered_row_has_no_awaiting_text_key_even_for_a_scan() {
+    let fx = Fixture::build();
+    let scan = seed_scan(&fx, "sha-scan", "inbox/scan.pdf", None);
+
+    let page = find_books(&fx.ops, BookFilter::default(), 10, 0).expect("find");
+    let row = page
+        .books
+        .iter()
+        .find(|b| b.intake_id == scan)
+        .expect("row");
+    let value = serde_json::to_value(row).expect("serialize");
+    let keys: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "format",
+            "intake_id",
+            "source_filename",
+            "status",
+            "title",
+            "top_contributor"
+        ]
     );
 }

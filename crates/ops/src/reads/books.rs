@@ -22,8 +22,8 @@ use crate::OpsError;
 use crate::Result;
 use crate::dto::categories::{CategoryBooks, CategoryCounts};
 use crate::dto::{
-    BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, OcrPendingItem,
-    OcrPendingResult, ShowTocArgs, Toc, TocNodes, TocStats, clamp_limit,
+    AwaitingText, BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult,
+    OcrPendingItem, OcrPendingResult, ShowTocArgs, Toc, TocNodes, TocStats, clamp_limit,
 };
 use crate::reads::open_book_catalog;
 use crate::recorder::record_call_sync;
@@ -88,6 +88,7 @@ pub fn find_books<E: Embedder>(
             .collect::<Vec<_>>(),
         "categories": filter.categories,
         "language": filter.language,
+        "awaiting_text": filter.awaiting_text,
         "limit": limit,
         "offset": offset,
     });
@@ -111,6 +112,7 @@ pub fn find_books<E: Embedder>(
             format: filter.format.as_deref(),
             categories: categories_refs.as_slice(),
             language: language_refs.as_slice(),
+            awaiting_text: filter.awaiting_text,
             ..IntakeFilter::default()
         };
         let (intakes, total) =
@@ -119,6 +121,12 @@ pub fn find_books<E: Embedder>(
         let effective =
             catalog.effective_publication_attrs_for_intakes(&intake_ids, ItemKind::Book)?;
         let contributors = catalog.contributors_for_addresses(&intake_ids, ItemKind::Book)?;
+        let mut skip_reasons = if filter.awaiting_text {
+            let shas: Vec<&str> = intakes.iter().map(|i| i.source_sha256.as_str()).collect();
+            catalog.extract_skip_reasons(&shas)?
+        } else {
+            BTreeMap::new()
+        };
         let books: Vec<BookSummary> = intakes
             .iter()
             .map(|intake| {
@@ -129,7 +137,14 @@ pub fn find_books<E: Embedder>(
                     .get(&intake.intake_id)
                     .and_then(|cs| cs.first())
                     .map(|c| c.name.clone());
-                BookSummary::from_intake(intake, title, top_contributor)
+                let mut summary = BookSummary::from_intake(intake, title, top_contributor);
+                if filter.awaiting_text {
+                    summary.awaiting_text = Some(AwaitingText::from_intake(
+                        intake,
+                        skip_reasons.remove(&intake.source_sha256),
+                    ));
+                }
+                summary
             })
             .collect();
         let returned = books.len() as u64;

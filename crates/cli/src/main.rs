@@ -426,12 +426,13 @@ enum Command {
     /// Filter both catalogs from one verb.
     ///
     /// The same page `list` prints, narrowed by the columns both
-    /// catalogs carry. `--format` filters the book side and `--year` /
-    /// `--venue` / `--doi` the paper side, so each of those requires
-    /// `--scope` naming the side that has it.
+    /// catalogs carry. `--format` and `--awaiting-text` filter the book
+    /// side and `--year` / `--venue` / `--doi` the paper side, so each
+    /// of those requires `--scope` naming the side that has it.
     #[command(after_long_help = bookrack_cli_grammar::examples![
         "find --title \"Sample Title\"",
         "find --year 2020 --scope paper",
+        "find --scope book --awaiting-text",
     ])]
     Find(FindArgs),
     /// Browse both catalogs from one verb.

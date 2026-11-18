@@ -197,7 +197,8 @@ pub struct FindBooksArgs {
     /// `contributor_name`.
     #[serde(default)]
     pub contributor_role: Option<String>,
-    /// Exact-equality match against the file format (`epub`, `pdf`).
+    /// Exact-equality match against the file format (`epub`, `pdf`,
+    /// `rule-text`, ...).
     #[serde(default)]
     pub format: Option<String>,
     /// Match books whose lifecycle status is one of these, named as
@@ -220,6 +221,14 @@ pub struct FindBooksArgs {
     /// `show_book` reports.
     #[serde(default)]
     pub language: Option<Vec<String>>,
+    /// When true, match only scan sources the library holds no text
+    /// for: a `needs_ocr` book with no book derived from it that was
+    /// ingested. Each row then carries an `awaiting_text` object with
+    /// the path of the scan, its SHA-256, its page count, and why its
+    /// text layer was rejected. `statuses: ["needs_ocr"]` alone also
+    /// lists the scans whose text is already in the library.
+    #[serde(default)]
+    pub awaiting_text: Option<bool>,
     /// Maximum number of books in this page.
     #[serde(default)]
     pub limit: Option<u32>,
@@ -1091,7 +1100,8 @@ impl BookrackServer {
         description = "Search the book registry by title substring (fuzzy), contributor \
                        name (exact), file format, or category tags. The `categories` \
                        filter matches books carrying at least one of the listed tags; \
-                       library.categories lists the tags this library carries."
+                       library.categories lists the tags this library carries. \
+                       `awaiting_text` lists the scan sources still without text."
     )]
     async fn library_find_books(
         &self,
@@ -1108,6 +1118,7 @@ impl BookrackServer {
             statuses,
             categories: args.categories.unwrap_or_default(),
             language: args.language.unwrap_or_default(),
+            awaiting_text: args.awaiting_text.unwrap_or(false),
         };
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
@@ -2513,6 +2524,7 @@ mod tests {
             status: "extracted".to_string(),
             top_contributor: Some("An Author".to_string()),
             source_filename: Some("book.epub".to_string()),
+            awaiting_text: None,
         };
         let value = serde_json::to_value(&summary).expect("serialize");
         assert_eq!(value["intake_id"], 1);

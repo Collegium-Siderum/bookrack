@@ -2178,9 +2178,15 @@ async fn a_paper_filter_is_refused_before_the_call_goes_out() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_side_specific_filter_requires_a_scope() -> Result<()> {
     let sandbox = Sandbox::new();
-    for flag in ["--year", "--format"] {
+    for args in [
+        &["--year", "x"][..],
+        &["--format", "x"],
+        &["--awaiting-text"],
+    ] {
+        let flag = args[0];
         let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
-            .args(["find", flag, "x"])
+            .arg("find")
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

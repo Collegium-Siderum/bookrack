@@ -1049,6 +1049,89 @@ async fn find_books_applies_the_status_filter_and_refuses_an_unknown_one() -> Re
     join_with_deadline(runtime, repl_handle, driver).await
 }
 
+/// `library.find_books` with `awaiting_text` answers with the scan
+/// sources still without text, each carrying its block, and leaves an
+/// unfiltered row as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn find_books_lists_the_scans_awaiting_text() -> Result<()> {
+    use bookrack_catalog::IntakeStatus;
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let catalog_db = data_root.path().join("catalog.db");
+    let open = seed_intake(&catalog_db, ItemKind::Book, "sha-scan-open")?;
+    let done = seed_intake(&catalog_db, ItemKind::Book, "sha-scan-done")?;
+    let text = seed_intake(&catalog_db, ItemKind::Book, "sha-text")?;
+    {
+        let catalog = Catalog::open_for_write_unbacked(&catalog_db)?;
+        catalog.set_intake_status(ItemKind::Book, open, IntakeStatus::NeedsOcr)?;
+        catalog.set_intake_status(ItemKind::Book, done, IntakeStatus::NeedsOcr)?;
+        catalog.set_intake_status(ItemKind::Book, text, IntakeStatus::Embedded)?;
+        catalog.set_derived_from(ItemKind::Book, text, "sha-scan-done")?;
+    }
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        let resp = call(
+            &mut w,
+            &mut reader,
+            1,
+            "library.find_books",
+            json!({ "awaiting_text": true }),
+        )
+        .await?;
+        let books = resp["result"]["books"]
+            .as_array()
+            .ok_or_else(|| eyre!("expected a books array, got {resp}"))?;
+        let ids: Vec<i64> = books
+            .iter()
+            .filter_map(|book| book["intake_id"].as_i64())
+            .collect();
+        assert_eq!(ids, vec![open], "only the scan without text: {resp}");
+        assert_eq!(resp["result"]["total"], 1, "{resp}");
+        assert_eq!(
+            books[0]["awaiting_text"]["sha256"], "sha-scan-open",
+            "{resp}"
+        );
+
+        let resp = call(
+            &mut w,
+            &mut reader,
+            2,
+            "library.find_books",
+            json!({ "statuses": ["needs_ocr"] }),
+        )
+        .await?;
+        let books = resp["result"]["books"]
+            .as_array()
+            .ok_or_else(|| eyre!("expected a books array, got {resp}"))?;
+        assert_eq!(books.len(), 2, "the status alone lists both scans: {resp}");
+        assert!(
+            books.iter().all(|b| b.get("awaiting_text").is_none()),
+            "an unfiltered row carries no block: {resp}"
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
 /// `library.fork` refuses a fork it cannot perform. Its validation ran
 /// before any of this — what changes is that the refusal now reaches
 /// the caller as caller input rather than as a fault.

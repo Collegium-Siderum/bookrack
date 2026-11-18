@@ -1097,7 +1097,17 @@ defined profile, or an embedding model the backend does not hold is
   `library.list_metadata`. A `language` list matches the reported
   language, hitting on any one of the values named; the tag is
   compared as text and is not normalised, so match what the row
-  reports. The CLI's `bookrack list` and `bookrack find` reach these
+  reports. `awaiting_text: true` matches only the scan sources the
+  library holds no text for: a `needs_ocr` row with no book derived
+  from it in `embedded`, `extracted`, or `dedup_hold`. `statuses:
+  ["needs_ocr"]` alone also returns the scans whose text is already in
+  the library. On such a page, and on no other, each row carries an
+  `awaiting_text` object: `{ source_path, stored_path, original_path,
+  sha256, pages, reason }`, where `source_path` is the stored copy when
+  there is one and the original path otherwise, and `reason` is the
+  message of the latest audit row that rejected the text layer. The
+  CLI peer is `bookrack find --scope book --awaiting-text`. The CLI's
+  `bookrack list` and `bookrack find` reach these
   and their paper-side peers, but their `--json` is a shape the CLI
   assembles from one or both sides — it is not this method's response
   verbatim.

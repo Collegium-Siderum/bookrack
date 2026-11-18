@@ -125,6 +125,55 @@ pub struct BookSummary {
     /// export-tool placeholder. The full path and the source hash are
     /// in [`BookDetail`]: a list page carries the basename only.
     pub source_filename: Option<String>,
+    /// What an operator needs to produce this scan source's text.
+    /// Present only on a page filtered with
+    /// [`BookFilter::awaiting_text`], the one listing where a row
+    /// carries full paths; absent from the serialized row otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awaiting_text: Option<AwaitingText>,
+}
+
+/// A scan source the library holds no text for, as a
+/// [`BookSummary`] row carries it. `source_path` is the path to hand
+/// to an OCR tool; the raw `stored_path` / `original_path` are carried
+/// alongside so the row is self-describing.
+#[derive(Debug, Clone, Serialize)]
+pub struct AwaitingText {
+    /// The path to read the scan from: the durable opaque-store copy
+    /// (`stored_path`) when present, else the original source path.
+    /// `None` only when neither is recorded.
+    pub source_path: Option<String>,
+    /// The opaque-store copy of the source bytes, if stored.
+    pub stored_path: Option<String>,
+    /// Where the source file came from, kept for forensics. May no
+    /// longer exist on disk.
+    pub original_path: Option<String>,
+    /// The source's whole-file SHA-256.
+    pub sha256: String,
+    /// Physical sheet count, best-effort at registration. `None` when
+    /// PDFium was unavailable.
+    pub pages: Option<i64>,
+    /// Why the text layer was rejected, from the `extract` / `skipped`
+    /// audit row. `None` when no such audit row survives.
+    pub reason: Option<String>,
+}
+
+impl AwaitingText {
+    /// Project a scan source's catalog row, deriving `source_path` as
+    /// `stored_path` with an `original_path` fallback.
+    pub fn from_intake(intake: &Intake, reason: Option<String>) -> AwaitingText {
+        AwaitingText {
+            source_path: intake
+                .stored_path
+                .clone()
+                .or_else(|| intake.original_path.clone()),
+            stored_path: intake.stored_path.clone(),
+            original_path: intake.original_path.clone(),
+            sha256: intake.source_sha256.clone(),
+            pages: intake.page_count,
+            reason,
+        }
+    }
 }
 
 /// One `library.show_book` response: the full bibliographic record
@@ -501,17 +550,21 @@ impl OcrPendingItem {
     /// `source_path` as `stored_path` with an `original_path` fallback.
     pub fn from_pending(pending: OcrPending) -> OcrPendingItem {
         let OcrPending { intake, reason } = pending;
-        let source_path = intake
-            .stored_path
-            .clone()
-            .or_else(|| intake.original_path.clone());
+        let AwaitingText {
+            source_path,
+            stored_path,
+            original_path,
+            sha256,
+            pages,
+            reason,
+        } = AwaitingText::from_intake(&intake, reason);
         OcrPendingItem {
             intake_id: intake.intake_id,
             source_path,
-            stored_path: intake.stored_path,
-            original_path: intake.original_path,
-            sha256: intake.source_sha256,
-            pages: intake.page_count,
+            stored_path,
+            original_path,
+            sha256,
+            pages,
             reason,
         }
     }
@@ -538,6 +591,9 @@ pub struct BookFilter {
     /// Match the reported language against this set. Empty means no
     /// filter.
     pub language: Vec<String>,
+    /// Match only scan sources the library holds no text for, and have
+    /// each row carry its [`AwaitingText`] block.
+    pub awaiting_text: bool,
 }
 
 /// A filter value outside the vocabulary its parameter accepts,
@@ -677,6 +733,7 @@ impl BookSummary {
             status: intake.status.as_str().to_string(),
             top_contributor,
             source_filename: source_filename(intake.original_path.as_deref()),
+            awaiting_text: None,
         }
     }
 }

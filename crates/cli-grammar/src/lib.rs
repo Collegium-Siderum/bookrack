@@ -1642,6 +1642,13 @@ pub struct FindArgs {
     /// Exact-equality match against the DOI. Paper side only.
     #[arg(long, requires = "scope")]
     pub doi: Option<String>,
+    /// List only the scan sources the library holds no text for, each
+    /// with its page count, source file and the reason its text layer
+    /// was rejected; `--json` adds the full paths and the source hash.
+    /// A scan leaves the list once a book ingested with `--source`
+    /// naming it is in the library. Book side only.
+    #[arg(long, requires = "scope")]
+    pub awaiting_text: bool,
     /// Maximum number of rows per side, so `--scope all` can return up
     /// to twice this many. The server-side cap applies to each side.
     #[arg(long)]
