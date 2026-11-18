@@ -841,7 +841,6 @@ fn queue_document_with_one_job(data_dir: &Path) -> String {
             kind: ItemKind::Book,
             priority: Priority::Normal,
             op: JobOp::Ingest(IngestJob::file(data_dir.join("inbox").join("sample.epub"))),
-            intake_ocr: None,
             state: JobState::Pending,
             queued_at: chrono::DateTime::from_timestamp_millis(FROZEN_UNIX_MS as i64).unwrap(),
             started_at: None,
@@ -944,7 +943,7 @@ fn collect_snapshots_the_queue_document_and_reports_a_refused_one() {
         "{path}"
     );
     assert_eq!(jobs[1]["state"], "failed", "{snapshot}");
-    assert!(jobs[1]["intake_ocr"].is_null(), "{snapshot}");
+    assert!(jobs[1].get("intake_ocr").is_none(), "{snapshot}");
     assert_eq!(
         jobs[1]["finished_at"], "2026-01-02T03:04:05Z",
         "the failure is dated from the row, not from the collection: {snapshot}"

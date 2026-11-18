@@ -688,7 +688,7 @@ pub struct SessionQueueStatusResult {
     /// stamps, so no new intake row was written.
     pub skipped_duplicate: usize,
     /// Jobs in `NeedsOcr` state: the source had no usable text layer and
-    /// was registered as a `needs_ocr` anchor for a later OCR pass.
+    /// was registered as a `needs_ocr` anchor until its text is ingested.
     pub needs_ocr: usize,
     /// Jobs in `Failed` state.
     pub failed: usize,

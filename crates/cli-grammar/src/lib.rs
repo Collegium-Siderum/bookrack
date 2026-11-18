@@ -340,90 +340,9 @@ pub struct DryrunArgs {
     pub no_chunk: bool,
 }
 
-/// Intake-side commands: the OCR product re-entry point and the
-/// worklist of scan sources still awaiting OCR.
-#[derive(clap::Subcommand, Debug)]
-pub enum IntakeAction {
-    /// List scan sources still awaiting OCR.
-    ///
-    /// Each row is a source the extract stage rejected as image-only:
-    /// registered as a `needs_ocr` anchor with no OCR product yet. The
-    /// output names the path to hand to an external OCR tool, the
-    /// source hash, a best-effort page count, and why the text layer
-    /// was rejected. Run OCR with any tool, then re-enter the product
-    /// through `intake ocr`. `--json` emits the full manifest.
-    #[command(after_long_help = crate::examples![
-        "intake list-ocr-pending",
-        "intake list-ocr-pending --limit 20",
-    ])]
-    ListOcrPending {
-        /// Maximum number of sources to list. Omitted or zero uses the
-        /// default page size; the value is clamped to the read cap.
-        #[arg(long, value_name = "N")]
-        limit: Option<u32>,
-        /// Number of sources to skip before the page starts.
-        #[arg(long, value_name = "N")]
-        offset: Option<u32>,
-    },
-    /// Bring an OCR product into the library as a derived source.
-    ///
-    /// The scan PDF named by `--from-pdf` is registered as the durable
-    /// source anchor (status `needs_ocr`); the OCR markdown is
-    /// registered as its own intake whose `Provenance` forensically
-    /// references the PDF's hash and flows through STRUCTURE / CHUNK /
-    /// EMBED. The expected page count comes from the source PDF's
-    /// `/Pages`; pass `--expected-pages` to override it when PDFium
-    /// cannot read the source, and `--allow-partial` to accept an OCR
-    /// product whose sheets do not cover every page.
-    #[command(after_long_help = crate::examples![
-        "intake ocr /path/to/scan.md --from-pdf /path/to/scan.pdf",
-        "intake ocr /path/to/scan.md --from-pdf /path/to/scan.pdf --allow-partial",
-    ])]
-    Ocr {
-        /// Path to the polyocr single-file Markdown product, with
-        /// page markers `<!-- page <label> (sheet <n>) -->`.
-        ocr_md: PathBuf,
-        /// Path to the scan PDF the OCR product was produced from.
-        #[arg(long, value_name = "PDF")]
-        from_pdf: PathBuf,
-        /// Override the expected page count rather than reading it
-        /// from the source PDF's `/Pages`.
-        #[arg(long, value_name = "N")]
-        expected_pages: Option<u32>,
-        /// Accept a partial OCR product. The present sheets are
-        /// recorded into `Provenance.partial_pages`; missing pages
-        /// surface in the OCR intake's `partial_pages` field rather
-        /// than being silently treated as blank.
-        #[arg(long)]
-        allow_partial: bool,
-        /// Re-ingest even when either the OCR markdown or the scan PDF
-        /// already has an entry under its SHA-256. Without this flag,
-        /// duplicate sources are skipped.
-        #[arg(long)]
-        force: bool,
-        /// Park the resulting book at STRUCTURE if the audit verdict
-        /// is `needs_work`, skipping CHUNK and EMBED until a curator
-        /// drives it past the metadata gate. Mirrors the `ingest`
-        /// flag of the same name.
-        #[arg(long)]
-        hold_for_metadata: bool,
-        /// Queue priority for the enqueued job: `low`, `normal`, or
-        /// `high`. Defaults to `normal`.
-        #[arg(long, value_name = "LEVEL")]
-        priority: Option<String>,
-        /// Skip waiting for the enqueued job to finish. Without this
-        /// flag, the command stays attached until the OCR intake
-        /// reaches a terminal state and prints a one-line human
-        /// summary; the historical behaviour returned as soon as
-        /// the daemon had the job in its queue.
-        #[arg(long = "no-wait")]
-        no_wait: bool,
-    },
-}
-
 /// Distill-side commands. The CLI runs these in-process against
 /// `<data>/reference.db`; no daemon RPC is involved. The positional
-/// `<PATH>` arguments mirror the ingest / glean / intake surface: a
+/// `<PATH>` arguments mirror the ingest / glean surface: a
 /// path can be a `book.toml` file, a directory holding one, or a
 /// source file with a co-located `book.toml`.
 #[derive(clap::Subcommand, Debug, Clone)]
@@ -1781,10 +1700,6 @@ mod tests {
             action: PapersAction,
         },
         Ingest(IngestArgs),
-        Intake {
-            #[command(subcommand)]
-            action: IntakeAction,
-        },
         Queue {
             #[command(subcommand)]
             action: QueueAction,
@@ -1831,13 +1746,6 @@ mod tests {
         match TestCli::try_parse_from(tokens).expect("parse").command {
             TestCommand::Ingest(args) => args,
             other => panic!("expected ingest, got {other:?}"),
-        }
-    }
-
-    fn parse_intake(tokens: &[&str]) -> IntakeAction {
-        match TestCli::try_parse_from(tokens).expect("parse").command {
-            TestCommand::Intake { action } => action,
-            other => panic!("expected intake, got {other:?}"),
         }
     }
 
@@ -2296,67 +2204,6 @@ mod tests {
     fn ingest_priority_is_optional() {
         let args = parse_ingest(&["ingest", "/tmp/b.epub"]);
         assert!(args.priority.is_none());
-    }
-
-    #[test]
-    fn intake_ocr_carries_priority_force_hold_flags() {
-        let action = parse_intake(&[
-            "intake",
-            "ocr",
-            "/tmp/out.md",
-            "--from-pdf",
-            "/tmp/scan.pdf",
-            "--force",
-            "--hold-for-metadata",
-            "--priority",
-            "low",
-        ]);
-        match action {
-            IntakeAction::Ocr {
-                ocr_md,
-                from_pdf,
-                force,
-                hold_for_metadata,
-                priority,
-                allow_partial,
-                expected_pages,
-                no_wait,
-            } => {
-                assert_eq!(ocr_md.to_string_lossy(), "/tmp/out.md");
-                assert_eq!(from_pdf.to_string_lossy(), "/tmp/scan.pdf");
-                assert!(force);
-                assert!(hold_for_metadata);
-                assert_eq!(priority.as_deref(), Some("low"));
-                assert!(!allow_partial);
-                assert!(expected_pages.is_none());
-                assert!(!no_wait);
-            }
-            other => panic!("expected ocr action, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn intake_ocr_defaults_when_priority_force_hold_omitted() {
-        let action = parse_intake(&[
-            "intake",
-            "ocr",
-            "/tmp/out.md",
-            "--from-pdf",
-            "/tmp/scan.pdf",
-        ]);
-        match action {
-            IntakeAction::Ocr {
-                force,
-                hold_for_metadata,
-                priority,
-                ..
-            } => {
-                assert!(!force);
-                assert!(!hold_for_metadata);
-                assert!(priority.is_none());
-            }
-            other => panic!("expected ocr action, got {other:?}"),
-        }
     }
 
     #[test]

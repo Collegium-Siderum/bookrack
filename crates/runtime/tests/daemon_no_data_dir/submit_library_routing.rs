@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The three queue-submitting methods — `ingest.submit`,
-//! `glean.submit`, `intake.ocr` — resolve their target library
+//! The queue-submitting methods — `ingest.submit`, in its file and
+//! its rule form, and `glean.submit` — resolve their target library
 //! through the registry at enqueue time.
 //!
 //! An unnamed submit lands on the registry's current default pointer,
@@ -50,29 +50,28 @@ fn world() -> &'static Sandbox {
 }
 
 /// Regular files for the submit parameters that check their inputs
-/// exist before enqueueing: a text book, an OCR markdown product and
-/// the scan it claims to come from.
+/// exist before enqueueing: a text book, and a rule file beside the
+/// one member it describes.
 struct Fixtures {
     book: std::path::PathBuf,
-    ocr_md: std::path::PathBuf,
-    from_pdf: std::path::PathBuf,
+    rule: std::path::PathBuf,
 }
 
 fn fixtures(dir: &Path) -> Result<Fixtures> {
     let book = dir.join("synthetic-ledger.txt");
     std::fs::write(&book, "Chapter One\n\nA synthetic ledger.\n")?;
-    let ocr_md = dir.join("scan.md");
-    std::fs::write(&ocr_md, "<!-- page 1 (sheet 1) -->\n\nA synthetic page.\n")?;
-    let from_pdf = dir.join("scan.pdf");
-    std::fs::write(&from_pdf, b"%PDF-1.4\n%%EOF\n")?;
-    Ok(Fixtures {
-        book,
-        ocr_md,
-        from_pdf,
-    })
+    let material = dir.join("material");
+    std::fs::create_dir_all(&material)?;
+    std::fs::write(material.join("01.txt"), "A synthetic page.\n")?;
+    let rule = material.join("rule.toml");
+    std::fs::write(
+        &rule,
+        "schema = 1\n[members]\ninclude = [\"*.txt\"]\n[units]\nby = \"file\"\n",
+    )?;
+    Ok(Fixtures { book, rule })
 }
 
-/// The three submit requests, each with `library` set to `library`
+/// The submit requests, each with `library` set to `library`
 /// when given and omitted otherwise.
 fn submits(f: &Fixtures, library: Option<&str>) -> Vec<(&'static str, Value)> {
     let with_library = |mut params: Value| {
@@ -88,13 +87,8 @@ fn submits(f: &Fixtures, library: Option<&str>) -> Vec<(&'static str, Value)> {
             with_library(json!({ "paths": [f.book], "force": true })),
         ),
         (
-            "intake.ocr",
-            with_library(json!({
-                "ocr_md": f.ocr_md,
-                "from_pdf": f.from_pdf,
-                "expected_pages": 1,
-                "force": true,
-            })),
+            "ingest.submit",
+            with_library(json!({ "rule": f.rule, "force": true })),
         ),
     ]
 }
@@ -114,20 +108,12 @@ async fn call(
 /// The job id(s) a successful submit answered with.
 fn job_ids(method: &str, resp: &Value) -> Result<Vec<String>> {
     let result = &resp["result"];
-    let ids: Vec<String> = match method {
-        "intake.ocr" => vec![
-            result["job_id"]
-                .as_str()
-                .with_context(|| format!("{method}: no job_id in {resp}"))?
-                .to_string(),
-        ],
-        _ => result["job_ids"]
-            .as_array()
-            .with_context(|| format!("{method}: no job_ids in {resp}"))?
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect(),
-    };
+    let ids: Vec<String> = result["job_ids"]
+        .as_array()
+        .with_context(|| format!("{method}: no job_ids in {resp}"))?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
     if ids.is_empty() {
         return Err(eyre!("{method}: submit answered with no job ids: {resp}"));
     }
@@ -151,7 +137,7 @@ fn library_of<'a>(rows: &'a [Value], job_id: &str) -> Result<&'a str> {
         .with_context(|| format!("job {job_id} carries no library"))
 }
 
-/// Submit all three methods without a library and assert every queued
+/// Submit every form without a library and assert every queued
 /// row names `expected`.
 async fn unnamed_submits_land_on(
     reader: &mut Reader,

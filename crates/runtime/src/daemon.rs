@@ -911,7 +911,6 @@ impl DaemonRuntime {
                                 audit_profile,
                                 input,
                             }) = job.op.clone();
-                            let intake_ocr = job.intake_ocr.clone();
                             runtime.block_on(async move {
                                 if library.is_empty() {
                                     return Err(queue::JobError::Book(queue::JobFailure::text(
@@ -929,36 +928,6 @@ impl DaemonRuntime {
                                 // throttled reporter on the job's sink.
                                 let on_embed_batch =
                                     embed_batch_reporter(&sink, EMBED_PROGRESS_INTERVAL);
-                                if let Some(ocr) = intake_ocr {
-                                    let params = prepare_book_params(
-                                        &handle.templates().ingest,
-                                        handle.cfg(),
-                                        force,
-                                        hold_for_metadata,
-                                        audit_profile.as_deref(),
-                                    );
-                                    let ocr_params = bookrack_ingest::ocr::OcrIngestParams {
-                                        expected_pages: ocr.expected_pages,
-                                        allow_partial: ocr.allow_partial,
-                                    };
-                                    let report = handle
-                                        .ingest_ocr(
-                                            &path,
-                                            &ocr.from_pdf,
-                                            &ocr_params,
-                                            &params,
-                                            &on_embed_batch,
-                                        )
-                                        .await
-                                        .map_err(|e| queue::classify_ingest_error(&e))?;
-                                    return Ok::<queue::JobSuccess, queue::JobError>(
-                                        queue::JobSuccess {
-                                            no_op: report.no_op,
-                                            needs_ocr: false,
-                                            intake_id: Some(report.ocr_intake_id),
-                                        },
-                                    );
-                                }
                                 if let queue::JobInput::Rule {
                                     source_pdf,
                                     allow_partial,

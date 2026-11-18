@@ -22,8 +22,8 @@ use crate::OpsError;
 use crate::Result;
 use crate::dto::categories::{CategoryBooks, CategoryCounts};
 use crate::dto::{
-    AwaitingText, BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult,
-    OcrPendingItem, OcrPendingResult, ShowTocArgs, Toc, TocNodes, TocStats, clamp_limit,
+    AwaitingText, BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, ShowTocArgs,
+    Toc, TocNodes, TocStats, clamp_limit,
 };
 use crate::reads::open_book_catalog;
 use crate::recorder::record_call_sync;
@@ -186,47 +186,6 @@ pub fn category_counts<E: Embedder>(ops: &Ops<E>) -> Result<CategoryCounts> {
             total,
         })
     })
-}
-
-/// List scan sources still awaiting OCR, paginated. Each item carries
-/// the path to hand to an external OCR tool, the source hash, a
-/// best-effort page count, and the reason its text layer was rejected.
-/// The limit is clamped to
-/// [`dto::MAX_LIST_LIMIT`](crate::dto::MAX_LIST_LIMIT); `truncated` is
-/// set when the page does not cover the full result set.
-pub fn list_ocr_pending<E: Embedder>(
-    ops: &Ops<E>,
-    limit: u32,
-    offset: u32,
-) -> Result<OcrPendingResult> {
-    record_call_sync!(
-        ops,
-        "library.list_ocr_pending",
-        serde_json::json!({ "limit": limit, "offset": offset }),
-        {
-            let Some(catalog) = open_book_catalog(ops)? else {
-                return Ok(OcrPendingResult {
-                    items: Vec::new(),
-                    total: 0,
-                    truncated: false,
-                });
-            };
-            let (effective_limit, _) = clamp_limit(limit);
-            let pending = catalog.list_ocr_pending(effective_limit, offset)?;
-            let total = catalog.count_ocr_pending()?;
-            let items: Vec<OcrPendingItem> = pending
-                .into_iter()
-                .map(OcrPendingItem::from_pending)
-                .collect();
-            let returned = items.len() as u64;
-            let truncated = u64::from(offset) + returned < total;
-            Ok(OcrPendingResult {
-                items,
-                total,
-                truncated,
-            })
-        }
-    )
 }
 
 /// Fetch the full bibliographic record of one book by intake id,

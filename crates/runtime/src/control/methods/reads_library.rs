@@ -345,15 +345,6 @@ pub fn list_books(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
     to_value(&page)
 }
 
-pub fn list_ocr_pending(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let p: PageParams = parse(params, "library.list_ocr_pending")?;
-    let handle = resolve(ctx, p.library.as_deref())?;
-    let page =
-        reads::books::list_ocr_pending(handle.ops(), p.limit.unwrap_or(0), p.offset.unwrap_or(0))
-            .map_err(ops_err)?;
-    to_value(&page)
-}
-
 // Parallel implementation: control-reads-library.
 pub fn find_books(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: FindBooksParams = parse(params, "library.find_books")?;

@@ -300,10 +300,10 @@ onto.
     resolves onto the source library, a name the registry already
     holds, a non-empty target directory.
 
-  The `audit_profile` check also guards `ingest.submit` and
-  `intake.ocr`. Those two queue their work rather than running it
-  inline, so they render the refusal straight onto the envelope
-  instead of routing it through this layer — same code, same wording.
+  The `audit_profile` check also guards `ingest.submit`, in both its
+  forms. It queues its work rather than running it inline, so it
+  renders the refusal straight onto the envelope instead of routing it
+  through this layer — same code, same wording.
 - **A `remove` / `papers.remove` execute leg whose target moved since
   the dry run** (`-32016`): `CmdInputError::TargetDrifted` — the
   intake is gone, or its state no longer matches the fingerprint the
@@ -406,10 +406,10 @@ the kind of failure without parsing stderr.
 | --- | --- | --- |
 | `0` | success | — |
 | `1` | internal / unexpected error | color-eyre fallback for unclassified errors; `-32700 parse error`, `-32600 invalid request`, `-32603 internal error`, and unknown JSON-RPC codes; `SessionLockUnreadable` (`bookrack run` on a lock it cannot interpret; an offline `doctor` repair on a lock it cannot read, or a held one naming no control socket, since neither shows the library unserved); `doctor` reported a FAIL row; `verify` judged a finding as damage (see `verify.run` below for the table); `libraries detect` returned a not-a-library or unreadable-manifest verdict |
-| `2` | user / preflight error | daemon not running or unreachable; `show` or `papers show` given an id the library does not hold (a `null` body for a book or paper, no hits for a reference entry); `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32016` plan-id mismatches and plan-target drift, `-32018 state unusable` (a store from another build or with drifted stamps; the hint names the rebuild or the build to run); an offline `doctor` repair (`--backfill-ocr-derivation`, `--close-abandoned-runs`) asked for while a daemon answers on the session lock's control socket; a locally-resolved command rejected operator input (a global `--audit-profile` on a subcommand that does not consume it, judged before any dispatch so the four subcommands that run ahead of the shared resolver — `doctor`, `init`, `run`, `rpc` — refuse it too; `libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate, `config effective` given a data root that does not resolve — the report is still printed, with the failure at its head, because a configuration report that fails when the configuration is broken is useless exactly when it is needed); a command that writes to a library from the CLI process — `distill build` (dry run included), `index-profile apply` (dry run included), `libraries config` with an edit, a `doctor` repair, `libraries remove --purge` — found the library's registered data root carrying no identity manifest, or one recording another uuid, judged before anything there is read or written; a wait on queue jobs was refused — `bookrack queue wait`, or `bookrack ingest`, `bookrack glean` and `bookrack intake ocr` once they have submitted and wait — because a `--job` fragment matches no job or more than one, a selected job is pending on a paused queue, the daemon has no queue worker, or the daemon disconnected before every selected job ended (its event stream closed, or a queue read found the connection gone); the queue is read and judged when the wait attaches and again whenever the event stream goes quiet, drops events, or carries `daemon.state = degraded`, and the report of what the wait had seen still goes to stdout (the jobs that had ended as records, the rest by id under `unfinished`); a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0`; `bookrack run` refused to start because an external backend it needs is unusable (the embed model is not pulled, or the Ollama endpoint does not answer), or because the selected data root carries the identity of a library the registry records at another path — either check runs before any library is opened, so nothing was half-started; or because none of several registered libraries could be mounted — the refusal names each one with its reason, while a bring-up with a single library to try reports that library's failure as itself, with that error's own exit code. A registered library that fails while others come up does not stop the daemon: it is skipped with its reason and reached again through `libraries mount` once repaired, except that the library the daemon is started under must still resolve (its data root must exist) and the reranker must still start. The same judgement on a live write RPC splits: an unpulled model stays `-32602` and exit `2`, while an unreachable or overloaded backend is `-32017` and exit `4`, because a call that failed mid-session may succeed on the next attempt; `bookrack rpc call` was handed params that are not valid JSON (`RpcParamsInvalid`) or a method name carrying no namespace (`RpcMethodNotNamespaced`), both judged locally before the call is sent; `bookrack init` refused on its input or the host (`--non-interactive` without `--data-dir`, a data root inside the application bundle, a path that is not a directory, a root that already holds a library without `--force`, Ollama unreachable or the embed model not pulled) — each decided before anything is written |
+| `2` | user / preflight error | daemon not running or unreachable; `show` or `papers show` given an id the library does not hold (a `null` body for a book or paper, no hits for a reference entry); `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32016` plan-id mismatches and plan-target drift, `-32018 state unusable` (a store from another build or with drifted stamps; the hint names the rebuild or the build to run); an offline `doctor` repair (`--close-abandoned-runs`) asked for while a daemon answers on the session lock's control socket; a locally-resolved command rejected operator input (a global `--audit-profile` on a subcommand that does not consume it, judged before any dispatch so the four subcommands that run ahead of the shared resolver — `doctor`, `init`, `run`, `rpc` — refuse it too; `libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate, `config effective` given a data root that does not resolve — the report is still printed, with the failure at its head, because a configuration report that fails when the configuration is broken is useless exactly when it is needed); a command that writes to a library from the CLI process — `distill build` (dry run included), `index-profile apply` (dry run included), `libraries config` with an edit, a `doctor` repair, `libraries remove --purge` — found the library's registered data root carrying no identity manifest, or one recording another uuid, judged before anything there is read or written; a wait on queue jobs was refused — `bookrack queue wait`, or `bookrack ingest` and `bookrack glean` once they have submitted and wait — because a `--job` fragment matches no job or more than one, a selected job is pending on a paused queue, the daemon has no queue worker, or the daemon disconnected before every selected job ended (its event stream closed, or a queue read found the connection gone); the queue is read and judged when the wait attaches and again whenever the event stream goes quiet, drops events, or carries `daemon.state = degraded`, and the report of what the wait had seen still goes to stdout (the jobs that had ended as records, the rest by id under `unfinished`); a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0`; `bookrack run` refused to start because an external backend it needs is unusable (the embed model is not pulled, or the Ollama endpoint does not answer), or because the selected data root carries the identity of a library the registry records at another path — either check runs before any library is opened, so nothing was half-started; or because none of several registered libraries could be mounted — the refusal names each one with its reason, while a bring-up with a single library to try reports that library's failure as itself, with that error's own exit code. A registered library that fails while others come up does not stop the daemon: it is skipped with its reason and reached again through `libraries mount` once repaired, except that the library the daemon is started under must still resolve (its data root must exist) and the reranker must still start. The same judgement on a live write RPC splits: an unpulled model stays `-32602` and exit `2`, while an unreachable or overloaded backend is `-32017` and exit `4`, because a call that failed mid-session may succeed on the next attempt; `bookrack rpc call` was handed params that are not valid JSON (`RpcParamsInvalid`) or a method name carrying no namespace (`RpcMethodNotNamespaced`), both judged locally before the call is sent; `bookrack init` refused on its input or the host (`--non-interactive` without `--data-dir`, a data root inside the application bundle, a path that is not a directory, a root that already holds a library without `--force`, Ollama unreachable or the embed model not pulled) — each decided before anything is written |
 | `3` | needs operator cleanup | a held session lock whose recorded daemon does not answer (`bookrack run`, `bookrack status`, and the offline `doctor` repairs all judge it the same way); the operator finds and stops the process holding it, which releases it; the file is never removed by hand |
 | `4` | busy / not ready (retryable) | `-32001 busy`, `-32002 not ready` and `queue worker disabled`; `-32017 backend unavailable` (the Ollama daemon did not answer, or reported itself overloaded); a scripted caller can sleep and retry |
-| `5` | async job batch had failures | `bookrack ingest`, `bookrack glean`, `bookrack intake ocr`, and `bookrack queue wait` return this when the wait saw every job end and at least one ended in `Failed` or `Cancelled` — for `queue wait`, a job named with `--job` that had already ended counts too. A wait refused before every job ended exits `2` instead, with the failures it had seen in the report on stdout. `Done`, `SkippedDuplicate`, and `NeedsOcr` are terminal successes and do not trigger it — a batch of scan sources that all end in `needs_ocr` returns `0` and points at `bookrack intake list-ocr-pending`. The per-job summary on stdout names the offenders; `--no-wait` returns `0` because the batch is not awaited |
+| `5` | async job batch had failures | `bookrack ingest`, `bookrack glean`, and `bookrack queue wait` return this when the wait saw every job end and at least one ended in `Failed` or `Cancelled` — for `queue wait`, a job named with `--job` that had already ended counts too. A wait refused before every job ended exits `2` instead, with the failures it had seen in the report on stdout. `Done`, `SkippedDuplicate`, and `NeedsOcr` are terminal successes and do not trigger it — a batch of scan sources that all end in `needs_ocr` returns `0`; `bookrack find --scope book --awaiting-text` lists them. The per-job summary on stdout names the offenders; `--no-wait` returns `0` because the batch is not awaited |
 
 `-32601 method not found` is grouped with the user-input bucket so
 the common case — `bookrack rpc call <typo>` — exits with the same code
@@ -516,9 +516,9 @@ the exit-code bucket does not distinguish the two.
 - `queue.list` — `{ schema_version, binary_schema_version, paused,
   summary, jobs }`. `summary` counts the whole queue by state.
   `params.limit` optionally caps the jobs slice. Each `jobs` entry is
-  the persisted row: `{ id, library, kind, priority, op, intake_ocr,
+  the persisted row: `{ id, library, kind, priority, op,
   state, queued_at, started_at, finished_at, error, problem,
-  merged_into }`.
+  merged_into }`. The persistent queue schema is `v8`.
   `op` says what the job does and holds everything only that operation
   reads — `{ type: "ingest", path, force, hold_for_metadata,
   audit_profile, input }` for an ingest — so a client reads the source
@@ -768,20 +768,6 @@ the exit-code bucket does not distinguish the two.
   or more than one, is `-32011`. The reply's `job_id` is the full id
   the fragment resolved to. The queue spans libraries, so the reply carries no `library`;
   `queue.list` reports it per row.
-- `intake.ocr` — `{ ocr_md, from_pdf, expected_pages?, allow_partial?,
-  library?, priority?, force?, hold_for_metadata?, audit_profile? }`
-  → `{ job_id: <uuid v7> }`. Append a single OCR-intake job. The worker
-  treats it as a book ingest whose source is the OCR markdown product
-  paired with the scan PDF named by `from_pdf`; the queue document
-  keeps `kind = "book"` and carries the OCR fields in an `intake_ocr`
-  sidecar so the row reads as a book job in `queue.list`.
-  `expected_pages` overrides the page-count gate the OCR ingest
-  derives from the source PDF; `allow_partial = true` accepts an OCR
-  product that does not cover every page. `audit_profile` overrides
-  the worker's book-side audit profile for this job, with the same
-  three-way resolution as `ingest.submit` — including the `-32602` on
-  a name outside the built-in set. The persistent queue schema is
-  `v8`.
 - `glean.submit` — `{ paths, library?, priority?, force? }` →
   `{ job_ids: [<uuid v7>] }`. The paper-pipeline peer of
   `ingest.submit`: appends one glean job per path to the same
@@ -993,8 +979,8 @@ whenever the daemon came up under a non-default library.
 listening, so the running daemon follows a pointer moved from the CLI
 rather than keeping the value it read at bring-up; with nothing
 listening it writes the registry directly and the next start picks the
-change up. The queue-submitting methods — `ingest.submit`,
-`glean.submit`, `intake.ocr` — resolve the name the same way before the
+change up. The queue-submitting methods — `ingest.submit` and
+`glean.submit` — resolve the name the same way before the
 job is written, so the row carries the library it will run under and a
 later move of the pointer does not move a queued job, and an unnamed
 submit the rule refuses writes no row. The resolved library is
@@ -1090,6 +1076,8 @@ defined profile, or an embedding model the backend does not hold is
   lifecycle states in the form a row reports them (`pending`,
   `extracted`, `dedup_hold`, `embedded`, `aborted`, `needs_ocr`) — a
   name outside that set is refused with `-32602` rather than dropped.
+  `aborted` is accepted and matches the rows an earlier version left
+  in it; nothing writes it now.
   Its `title_substring` matches the title the row reports — the
   extracted value with the curator's corrections applied — so a book
   answers the title it is shown under. To filter on what the pipeline
@@ -1138,8 +1126,8 @@ defined profile, or an embedding model the backend does not hold is
   which narrows `contributor_name` and is ignored on its own, and a
   `statuses` list. The accepted lifecycle states are `pending`,
   `extracted` and `embedded` — three fewer than the book side, because
-  `needs_ocr` and `aborted` are written only by the OCR quality gate
-  and `dedup_hold` has no writer at all. Naming one of those, or any
+  `needs_ocr` is written only for a book-side scan, and `aborted` and
+  `dedup_hold` have no writer at all. Naming one of those, or any
   unrecognised state, is refused with `-32602` rather than answered
   with the empty page it could only ever match. It takes the same
   `language` list as `library.find_books`, on the same rule.
@@ -1195,9 +1183,6 @@ defined profile, or an embedding model the backend does not hold is
   the hits this method returns as a bare array, so that payload is not
   this method's response verbatim either.
 - `library.vectors_status` — vector-store snapshot for the library.
-- `library.list_ocr_pending` — scan sources still awaiting OCR: every
-  `needs_ocr` intake anchor with no successfully-processed OCR product
-  derived from it. Peer of the CLI `bookrack intake list-ocr-pending`.
 - `reference.lookup` — `{ library?, book, entry_key, fields?,
   min_severity?, exclude_books? }` → one keyed read over the library's
   reference store, the same call as the MCP tool of the same name.
@@ -1328,7 +1313,7 @@ the tool description says which one it ran.
   where `kind` is the job's pipeline (`book` / `paper` / `reference`,
   as on `queue.list`). `stage` names only a position the worker can
   observe: `processing`, published once when the worker pulls the
-  job, and — for a book job, an `intake.ocr` job included — `embed`,
+  job, and — for a book job, a rule job included — `embed`,
   whose `stage_progress` is the fraction of the book's chunks written
   to the vector store, published always for the first and the last
   batch and throttled in between. Paper jobs report `processing` only.

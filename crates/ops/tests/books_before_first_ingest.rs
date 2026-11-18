@@ -15,7 +15,7 @@ use bookrack_catalog::IntakeStatus;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::{BookFilter, MetadataFilter, ShowTocArgs};
 use bookrack_ops::reads::books::{
-    category_counts, find_books, list_books, list_ocr_pending, show_book, show_stats, show_toc,
+    category_counts, find_books, list_books, show_book, show_stats, show_toc,
 };
 use bookrack_ops::reads::metadata::{
     list_metadata, list_pending_reviews, show_audit_trail, show_metadata_audit,
@@ -102,12 +102,6 @@ fn listings_are_empty_pages() {
         .expect("find_books for scans on a root without a catalog");
     assert!(page.books.is_empty(), "{:?}", page.books);
     assert_eq!(page.total, 0);
-
-    let page =
-        list_ocr_pending(&fx.ops, 10, 0).expect("list_ocr_pending on a root without a catalog");
-    assert!(page.items.is_empty(), "{:?}", page.items);
-    assert_eq!(page.total, 0);
-    assert!(!page.truncated);
 
     fx.assert_nothing_created("listing");
 }

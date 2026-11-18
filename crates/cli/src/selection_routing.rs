@@ -86,7 +86,6 @@ pub(crate) fn resolves_root_locally(command: &Command) -> bool {
         | Command::Rpc { .. }
         | Command::Doctor { .. }
         | Command::Glean(_)
-        | Command::Intake { .. }
         | Command::Queue { .. }
         | Command::Metadata { .. }
         | Command::Vectors { .. }

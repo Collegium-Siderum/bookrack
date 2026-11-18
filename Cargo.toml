@@ -197,7 +197,7 @@ tokio-stream = { version = "0.1", default-features = false, features = ["sync"] 
 # tables without learning the crate's API. License: MIT.
 comfy-table = "7"
 # Spinner and progress-bar primitive for the CLI's async-job
-# renderers (ingest, vectors, intake ocr, ...). The render layer's
+# renderers (ingest, vectors, ...). The render layer's
 # `SpinnerWithStage` wraps it so the carriage-return rewrites do
 # not bleed into individual subcommand code. License: MIT.
 indicatif = "0.18"

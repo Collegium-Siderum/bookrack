@@ -18,7 +18,6 @@
 
 #![cfg(unix)]
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use eyre::{ContextCompat, Result, eyre};
@@ -234,33 +233,19 @@ fn assert_book_pipeline_progress(
     Ok(())
 }
 
-/// Path to a fixture under the extract crate's OCR v1 fixture
-/// directory, resolved relative to this crate's manifest dir.
-fn ocr_fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../extract/tests/fixtures/ocr/v1")
-        .join(name)
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_ocr_intake_reports_embed_progress_like_a_book() -> Result<()> {
+async fn a_rule_job_reports_embed_progress_like_a_book() -> Result<()> {
     process_env(ProcessEnv::daemon());
-    // The OCR ingest reads the scan PDF's outline through PDFium. The
-    // gate skips when no library is loadable and fails when the
-    // environment declares one mandatory.
-    if !bookrack_extract::pdfium_gate::available() {
-        return Ok(());
-    }
+    let material = tempfile::tempdir()?;
+    std::fs::write(material.path().join("01.txt"), BOOK_TEXT)?;
+    let rule = material.path().join("rule.toml");
+    std::fs::write(
+        &rule,
+        "schema = 1\n[members]\ninclude = [\"*.txt\"]\n[units]\nby = \"file\"\n",
+    )?;
 
-    let (progress, last_finished) = drive_one_job(
-        "intake.ocr",
-        json!({
-            "ocr_md": ocr_fixture("sample.bookrack-ocr.v1.md"),
-            "from_pdf": ocr_fixture("sample.pdf"),
-        }),
-    )
-    .await?;
-    assert_book_pipeline_progress("ocr", &progress, &last_finished)
+    let (progress, last_finished) = drive_one_job("ingest.submit", json!({ "rule": rule })).await?;
+    assert_book_pipeline_progress("rule", &progress, &last_finished)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -29,7 +29,7 @@ use serde::Serialize;
 
 use bookrack_catalog::{
     CONFIDENCE_LEVELS, EffectiveAttrs, Intake, IntakeStatus, NodeContributor, NodeOverride,
-    OcrPending, REVIEW_STATUSES,
+    REVIEW_STATUSES,
 };
 use bookrack_core::ItemKind;
 use bookrack_corpus::{Node, TocQuery};
@@ -504,70 +504,6 @@ pub struct ListBooksResult {
     pub total: u64,
     /// True when the page does not cover the full result set.
     pub truncated: bool,
-}
-
-/// One scan source still awaiting OCR, projected for
-/// `library.list_ocr_pending`. `source_path` is the path the operator
-/// should hand to their own OCR tool; the raw `stored_path` /
-/// `original_path` are carried alongside so the JSON manifest is
-/// self-describing.
-#[derive(Debug, Clone, Serialize)]
-pub struct OcrPendingItem {
-    /// The `NeedsOcr` anchor's intake id.
-    pub intake_id: i64,
-    /// The path to feed the OCR tool: the durable opaque-store copy
-    /// (`stored_path`) when present, else the original source path.
-    /// `None` only when neither is recorded.
-    pub source_path: Option<String>,
-    /// The opaque-store copy of the source bytes, if stored.
-    pub stored_path: Option<String>,
-    /// Where the source file came from, kept for forensics. May no
-    /// longer exist on disk.
-    pub original_path: Option<String>,
-    /// The source's whole-file SHA-256.
-    pub sha256: String,
-    /// Physical sheet count, best-effort at registration. `None` when
-    /// PDFium was unavailable.
-    pub pages: Option<i64>,
-    /// Why the text layer was rejected, from the `extract` / `skipped`
-    /// audit row. `None` when no such audit row survives.
-    pub reason: Option<String>,
-}
-
-/// Result page for `library.list_ocr_pending`.
-#[derive(Debug, Clone, Serialize)]
-pub struct OcrPendingResult {
-    /// Scan sources awaiting OCR in this page.
-    pub items: Vec<OcrPendingItem>,
-    /// Total number of pending sources (regardless of pagination).
-    pub total: u64,
-    /// True when the page does not cover the full result set.
-    pub truncated: bool,
-}
-
-impl OcrPendingItem {
-    /// Project a catalog [`OcrPending`] row into a wire item, deriving
-    /// `source_path` as `stored_path` with an `original_path` fallback.
-    pub fn from_pending(pending: OcrPending) -> OcrPendingItem {
-        let OcrPending { intake, reason } = pending;
-        let AwaitingText {
-            source_path,
-            stored_path,
-            original_path,
-            sha256,
-            pages,
-            reason,
-        } = AwaitingText::from_intake(&intake, reason);
-        OcrPendingItem {
-            intake_id: intake.intake_id,
-            source_path,
-            stored_path,
-            original_path,
-            sha256,
-            pages,
-            reason,
-        }
-    }
 }
 
 /// Facade-level filter for `find_books`. Mirrors

@@ -614,7 +614,6 @@ mod tests {
     use bookrack_cli::render::OutputMode;
     use bookrack_runtime::control::methods::REGISTRY;
 
-    use super::super::intake::format_ocr_pending;
     use super::super::papers::paper_list_output;
     use super::*;
 
@@ -693,32 +692,6 @@ mod tests {
         let cells = id_cells(&table);
         assert_eq!(cells.len(), 2, "one id cell per row in:\n{table}");
         for (cell, intake_id) in cells.iter().zip([12, 13]) {
-            assert_eq!(
-                TypedItemId::from_str(cell).map_err(|e| e.to_string()),
-                Ok(TypedItemId::Book(intake_id)),
-                "the id cell {cell:?} is not an id any command accepts, in:\n{table}"
-            );
-        }
-    }
-
-    /// The OCR worklist prints book-side intake ids, so it prints them
-    /// the way the book listings do. Its rows are book rows throughout:
-    /// `distill` registers no intake, so no reference row can reach
-    /// this table.
-    #[test]
-    fn every_id_the_ocr_worklist_prints_reads_back_as_the_book_it_names() {
-        let response = json!({
-            "items": [
-                { "intake_id": 7, "pages": 12, "source_path": "/inbox/one.pdf" },
-                { "intake_id": 8, "pages": 30, "source_path": "/inbox/two.pdf" },
-            ],
-            "total": 2,
-            "truncated": false,
-        });
-        let table = format_ocr_pending(&response);
-        let cells = id_cells(&table);
-        assert_eq!(cells.len(), 2, "one id cell per row in:\n{table}");
-        for (cell, intake_id) in cells.iter().zip([7, 8]) {
             assert_eq!(
                 TypedItemId::from_str(cell).map_err(|e| e.to_string()),
                 Ok(TypedItemId::Book(intake_id)),

@@ -68,7 +68,7 @@ pub enum Priority {
 /// source was already on file with up-to-date stamps, so the worker
 /// short-circuited without changing catalog state. `NeedsOcr` marks a
 /// job whose source has no usable text layer: the worker registered it
-/// as a `needs_ocr` intake anchor for a later OCR pass but wrote no
+/// as a `needs_ocr` intake anchor until its text is ingested but wrote no
 /// book content. All three are non-failure terminal states, distinct so
 /// operators can reconcile queue counts against `library.stats` without
 /// cross-referencing sha256; `NeedsOcr` in particular keeps scan sources
@@ -113,28 +113,6 @@ impl JobState {
             JobState::Cancelled => "cancelled",
         }
     }
-}
-
-/// Side data carried by an OCR-intake job. When set on a [`QueueJob`],
-/// the worker treats the job as a derived-source intake: the ingest
-/// operation's `path` is the OCR markdown product, and the fields below
-/// name the scan PDF the product was produced from along with the
-/// runtime knobs the OCR ingest path needs. Defaults are the same as
-/// the standalone runner's: no expected-page override, partial coverage
-/// rejected.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct IntakeOcrInfo {
-    /// Path to the scan PDF the OCR product was produced from.
-    pub from_pdf: PathBuf,
-    /// Override the expected page count rather than reading it from
-    /// the source PDF's `/Pages`.
-    #[serde(default)]
-    pub expected_pages: Option<u32>,
-    /// Accept a partial OCR product. Missing sheets surface in the OCR
-    /// intake's `partial_pages` field rather than being silently
-    /// treated as blank.
-    #[serde(default)]
-    pub allow_partial: bool,
 }
 
 /// What a queued job does. The row around it — id, library, kind,
@@ -224,12 +202,6 @@ pub struct QueueJob {
     pub priority: Priority,
     /// What the job does, with everything only that operation reads.
     pub op: JobOp,
-    /// When set, the job is an OCR-intake ingest. The worker routes it
-    /// to the OCR ingest path with the ingest operation's `path` as the
-    /// OCR markdown product and the nested `from_pdf` as the source PDF
-    /// anchor.
-    #[serde(default)]
-    pub intake_ocr: Option<IntakeOcrInfo>,
     /// Current lifecycle state.
     pub state: JobState,
     /// When the job entered the queue.
@@ -275,6 +247,13 @@ impl QueueJob {
 /// queued for the OCR intake path.
 const OCR_PATH_REMOVED: &str = "cannot run a job queued for the removed OCR intake path";
 
+/// The sidecar a document below schema version 8 holds on a job queued
+/// for the OCR intake path, read for the one field the failure names.
+#[derive(Deserialize)]
+struct FlatIntakeOcr {
+    from_pdf: PathBuf,
+}
+
 /// A queue row as a document below schema version 8 holds it: every
 /// field on the row itself, and each field added after version 1
 /// defaulting to what the binary before it behaved as.
@@ -290,7 +269,7 @@ struct FlatQueueJob {
     #[serde(default)]
     kind: ItemKind,
     #[serde(default)]
-    intake_ocr: Option<IntakeOcrInfo>,
+    intake_ocr: Option<FlatIntakeOcr>,
     #[serde(default)]
     audit_profile: Option<String>,
     state: JobState,
@@ -325,7 +304,6 @@ impl FlatQueueJob {
                 audit_profile: self.audit_profile,
                 input: JobInput::File,
             }),
-            intake_ocr: None,
             state: self.state,
             queued_at: self.queued_at,
             started_at: self.started_at,
@@ -583,7 +561,6 @@ mod tests {
             kind: ItemKind::Book,
             priority: Priority::Normal,
             op: JobOp::Ingest(IngestJob::file("/tmp/example.epub")),
-            intake_ocr: None,
             state,
             queued_at: at("2026-01-02T03:04:05Z"),
             started_at: None,
@@ -676,7 +653,6 @@ mod tests {
             job.op,
             JobOp::Ingest(IngestJob::file("/srv/books/example.epub"))
         );
-        assert!(job.intake_ocr.is_none());
         assert!(job.problem.is_none());
         assert!(job.merged_into.is_none());
     }
@@ -717,7 +693,6 @@ mod tests {
                         audit_profile: Some("strict".to_string()),
                         input: JobInput::File,
                     }),
-                    intake_ocr: None,
                     state: JobState::SkippedDuplicate,
                     queued_at: at("2026-01-02T03:04:05Z"),
                     started_at: Some(at("2026-01-02T03:04:06Z")),
@@ -780,7 +755,6 @@ mod tests {
         for (extra, finished) in cases {
             let job = read_row(7, flat_ocr_row(extra.clone()));
             assert_eq!(job.state, JobState::Failed, "{extra}");
-            assert!(job.intake_ocr.is_none(), "{extra}");
             assert_eq!(job.finished_at, Some(at(finished)), "{extra}");
             assert_eq!(job.merged_into, None, "{extra}");
             assert_eq!(
@@ -818,7 +792,6 @@ mod tests {
                 })),
             );
             assert_eq!(job.state.as_wire_str(), state);
-            assert!(job.intake_ocr.is_none());
             assert_eq!(job.error, None);
             assert_eq!(job.problem, None);
             assert_eq!(job.merged_into, Some(9));
@@ -912,11 +885,6 @@ mod tests {
                 audit_profile: Some("strict".to_string()),
                 input: JobInput::File,
             }),
-            intake_ocr: Some(IntakeOcrInfo {
-                from_pdf: "/tmp/scan.pdf".into(),
-                expected_pages: Some(42),
-                allow_partial: true,
-            }),
             merged_into: Some(42),
             ..job_with("0", JobState::SkippedDuplicate)
         };
@@ -930,7 +898,6 @@ mod tests {
         assert_eq!(json["op"]["hold_for_metadata"], true);
         assert_eq!(json["op"]["audit_profile"], "strict");
         assert_eq!(json["op"]["input"]["type"], "file");
-        assert_eq!(json["intake_ocr"]["from_pdf"], "/tmp/scan.pdf");
         assert_eq!(read_row(QUEUE_SCHEMA_VERSION, json), job);
     }
 
@@ -1002,14 +969,7 @@ mod tests {
             "the key sets below describe version 8 of the document"
         );
 
-        let job = QueueJob {
-            intake_ocr: Some(IntakeOcrInfo {
-                from_pdf: "/tmp/scan.pdf".into(),
-                expected_pages: Some(42),
-                allow_partial: true,
-            }),
-            ..job_with("0", JobState::Pending)
-        };
+        let job = job_with("0", JobState::Pending);
         let state = serde_json::to_value(QueueState {
             schema_version: QUEUE_SCHEMA_VERSION,
             paused: false,
@@ -1024,7 +984,6 @@ mod tests {
                 "error",
                 "finished_at",
                 "id",
-                "intake_ocr",
                 "kind",
                 "library",
                 "merged_into",
@@ -1057,10 +1016,16 @@ mod tests {
         .expect("serialize");
         assert_eq!(rule["type"], "rule");
         assert_eq!(keys_of(&rule), ["allow_partial", "source_pdf", "type"]);
-        assert_eq!(
-            keys_of(&state["jobs"][0]["intake_ocr"]),
-            ["allow_partial", "expected_pages", "from_pdf"]
-        );
+    }
+
+    /// A version 8 row written while the row still carried an
+    /// `intake_ocr` key loads as the same job without it.
+    #[test]
+    fn a_current_row_with_a_leftover_intake_ocr_key_still_loads() {
+        let job = job_with("0", JobState::Pending);
+        let mut json = serde_json::to_value(&job).expect("serialize");
+        json["intake_ocr"] = serde_json::Value::Null;
+        assert_eq!(read_row(QUEUE_SCHEMA_VERSION, json), job);
     }
 
     #[test]

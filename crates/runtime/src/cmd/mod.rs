@@ -13,7 +13,6 @@ pub mod dryrun;
 pub mod index_profile;
 pub mod ingest;
 pub mod input_error;
-pub mod intake_ocr;
 pub mod libraries;
 pub mod metadata;
 pub mod papers_corpus;

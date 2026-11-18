@@ -186,10 +186,15 @@ async fn an_unknown_audit_profile_is_refused_at_every_entry_point() -> Result<()
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let scan_dir = tempfile::tempdir()?;
-    let ocr_md = scan_dir.path().join("x.md");
-    let from_pdf = scan_dir.path().join("x.pdf");
-    std::fs::write(&ocr_md, "# x\n")?;
-    std::fs::write(&from_pdf, "%PDF-1.4\n")?;
+    std::fs::write(scan_dir.path().join("x.md"), "# x\n")?;
+    std::fs::write(scan_dir.path().join("x.pdf"), "%PDF-1.4\n")?;
+    let rule_dir = tempfile::tempdir()?;
+    std::fs::write(rule_dir.path().join("01.txt"), "A synthetic page.\n")?;
+    let rule = rule_dir.path().join("rule.toml");
+    std::fs::write(
+        &rule,
+        "schema = 1\n[members]\ninclude = [\"*.txt\"]\n[units]\nby = \"file\"\n",
+    )?;
     // The positive control runs a real dryrun, so it is pointed at an
     // empty directory: the handler refuses it for having nothing to
     // scan, which is the proof the profile name was accepted.
@@ -211,7 +216,8 @@ async fn an_unknown_audit_profile_is_refused_at_every_entry_point() -> Result<()
     let driver = tokio::spawn(async move {
         let (mut reader, mut w) = connect(&sock).await?;
 
-        // The six entry points that accept `audit_profile`. Each is
+        // The entry points that accept `audit_profile`, `ingest.submit`
+        // in both its forms. Each is
         // given otherwise-valid params, so a refusal can only come
         // from the profile name.
         let cases: Vec<(&str, Value)> = vec![
@@ -224,12 +230,8 @@ async fn an_unknown_audit_profile_is_refused_at_every_entry_point() -> Result<()
                 serde_json::json!({"paths": [scan_path], "audit_profile": "strictt"}),
             ),
             (
-                "intake.ocr",
-                serde_json::json!({
-                    "ocr_md": ocr_md,
-                    "from_pdf": from_pdf,
-                    "audit_profile": "strictt",
-                }),
+                "ingest.submit",
+                serde_json::json!({"rule": rule, "audit_profile": "strictt"}),
             ),
             (
                 "metadata.reaudit",

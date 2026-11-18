@@ -79,7 +79,6 @@ pub mod diagnose;
 pub mod dryrun;
 pub mod glean;
 pub mod ingest;
-pub mod intake;
 pub mod libraries;
 pub mod logs;
 pub mod meta;
@@ -203,7 +202,6 @@ use corpus::CorpusRebuildParams;
 use dryrun::DryrunParams;
 use glean::GleanSubmitParams;
 use ingest::IngestSubmitParams;
-use intake::IntakeOcrParams;
 use libraries::LibraryForkParams;
 use metadata::{
     MetadataAckParams, MetadataAdvanceParams, MetadataApproveParams, MetadataClearParams,
@@ -370,8 +368,6 @@ methods! {
         "library.categories" => reads_library::categories,
     read  no_queue sync    routed(PageParams)
         "library.list_books" => reads_library::list_books,
-    read  no_queue sync    routed(PageParams)
-        "library.list_ocr_pending" => reads_library::list_ocr_pending,
     read  no_queue sync    routed(FindBooksParams)
         "library.find_books" => reads_library::find_books,
     read  no_queue sync    routed(BookIdParams)
@@ -431,11 +427,10 @@ methods! {
     stream no_queue sidebar process                    "events.subscribe",
     read  no_queue sync    unrouted                   "events.snapshot" => reads::events_snapshot,
 
-    // ingest / glean / intake
+    // ingest / glean
     write queue    async   routed(IngestSubmitParams) "ingest.submit" => ingest::submit,
     write queue    async   process                    "ingest.cancel" => ingest::cancel,
     write queue    async   routed(GleanSubmitParams)  "glean.submit" => glean::submit,
-    write queue    async   routed(IntakeOcrParams)    "intake.ocr" => intake::submit,
 
     // book metadata curation
     write no_queue async   routed(MetadataSetParams)  "metadata.set" => metadata::set,
@@ -1099,7 +1094,6 @@ mod tests {
             "ingest.cancel",
             "queue.retry",
             "glean.submit",
-            "intake.ocr",
             "vectors.rebuild",
             "vectors.reembed",
             "vectors.reset",
@@ -1112,6 +1106,18 @@ mod tests {
             "dryrun",
         ] {
             assert!(is_queue_bound_method(name), "{name} should be queue-bound");
+        }
+    }
+
+    /// Neither the OCR intake submission nor its worklist is a method.
+    #[test]
+    fn the_ocr_intake_methods_are_not_in_the_dispatch_table() {
+        for name in ["intake.ocr", "library.list_ocr_pending"] {
+            assert!(
+                REGISTRY.iter().all(|method| method.name != name),
+                "{name} is still dispatched"
+            );
+            assert!(!is_queue_bound_method(name), "{name} is still queue-bound");
         }
     }
 

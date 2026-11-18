@@ -232,7 +232,6 @@ async fn crash_recovery_resets_a_running_job_to_pending_on_restart() -> Result<(
             priority: Priority::Normal,
             kind: ItemKind::Book,
             op: JobOp::Ingest(IngestJob::file("/tmp/crash-recovery-fixture.txt")),
-            intake_ocr: None,
             state: JobState::Running,
             queued_at,
             started_at: Some(queued_at),

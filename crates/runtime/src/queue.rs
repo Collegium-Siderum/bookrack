@@ -31,8 +31,7 @@ use bookrack_core::queue::{
     FragmentMiss, QueueReadError, document_version, match_id_fragment, read_document,
 };
 pub use bookrack_core::queue::{
-    IngestJob, IntakeOcrInfo, JobInput, JobOp, JobState, Priority, QUEUE_SCHEMA_VERSION, QueueJob,
-    QueueState,
+    IngestJob, JobInput, JobOp, JobState, Priority, QUEUE_SCHEMA_VERSION, QueueJob, QueueState,
 };
 use bookrack_core::{Explain, ItemKind, Problem};
 
@@ -430,7 +429,7 @@ pub enum JobOutcome {
     /// the existing catalog row.
     SkippedDuplicate { intake_id: i64 },
     /// The ingest rejected the source as image-only and registered a
-    /// `needs_ocr` intake anchor for a later OCR pass. The wrapped
+    /// `needs_ocr` intake anchor until its text is ingested. The wrapped
     /// intake id points at that anchor. A non-failure terminal: no book
     /// content was written, but the job did what it could.
     NeedsOcr { intake_id: i64 },
@@ -622,7 +621,6 @@ pub fn enqueue_files(
                 audit_profile: book_audit_profile.clone(),
                 input: JobInput::File,
             }),
-            intake_ocr: None,
             state: JobState::Pending,
             queued_at: Utc::now(),
             started_at: None,
@@ -634,54 +632,6 @@ pub fn enqueue_files(
         ids.push(id);
     }
     ids
-}
-
-/// Append one OCR-intake job to the queue. `path` is the OCR markdown
-/// product; `info` carries the source PDF anchor and the runtime knobs
-/// (`expected_pages`, `allow_partial`) the OCR ingest path consumes.
-/// Returns the appended job's id.
-///
-/// OCR intakes are dispatched to the book pipeline — the worker routes
-/// on `intake_ocr.is_some()`, then calls the OCR ingest path with the
-/// stored markdown + PDF pair. The job's `kind` therefore stays
-/// `ItemKind::Book`; a queue listing reads it as a book job.
-// Same trade-off as `enqueue_files`: the scalars correspond one-to-one
-// to `QueueJob` fields and an options struct would just be a thin
-// destructure target at every caller.
-#[allow(clippy::too_many_arguments)]
-pub fn enqueue_ocr_intake(
-    state: &mut QueueState,
-    path: PathBuf,
-    info: IntakeOcrInfo,
-    library: &str,
-    priority: Priority,
-    force: bool,
-    hold_for_metadata: bool,
-    book_audit_profile: Option<String>,
-) -> String {
-    let id = Uuid::now_v7().to_string();
-    state.jobs.push(QueueJob {
-        id: id.clone(),
-        library: library.to_string(),
-        kind: ItemKind::Book,
-        priority,
-        op: JobOp::Ingest(IngestJob {
-            path,
-            force,
-            hold_for_metadata,
-            audit_profile: book_audit_profile,
-            input: JobInput::File,
-        }),
-        intake_ocr: Some(info),
-        state: JobState::Pending,
-        queued_at: Utc::now(),
-        started_at: None,
-        finished_at: None,
-        error: None,
-        problem: None,
-        merged_into: None,
-    });
-    id
 }
 
 /// Append one book-pipeline job whose input is the rule file at
@@ -716,7 +666,6 @@ pub fn enqueue_rule(
                 allow_partial,
             },
         }),
-        intake_ocr: None,
         state: JobState::Pending,
         queued_at: Utc::now(),
         started_at: None,
@@ -1144,7 +1093,6 @@ mod tests {
             kind: ItemKind::Book,
             priority: Priority::Normal,
             op: JobOp::Ingest(IngestJob::file("/tmp/example.epub")),
-            intake_ocr: None,
             state: JobState::Pending,
             queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
                 .unwrap()
@@ -1431,7 +1379,6 @@ mod tests {
             JobOp::Ingest(IngestJob::file("/tmp/example.epub"))
         );
         assert_eq!(state.jobs[1].state, JobState::Failed);
-        assert!(state.jobs[1].intake_ocr.is_none());
         let hint = state.jobs[1]
             .problem
             .as_ref()
@@ -1551,7 +1498,6 @@ mod tests {
             kind: ItemKind::Book,
             priority,
             op: JobOp::Ingest(IngestJob::file(format!("/tmp/{id}.epub"))),
-            intake_ocr: None,
             state,
             queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
                 .unwrap()

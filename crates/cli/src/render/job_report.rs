@@ -20,7 +20,7 @@ use super::human::short_id;
 /// `SkippedDuplicate` covers a job whose source was already in the
 /// catalog with up-to-date stamps, so the worker short-circuited
 /// without writing. `NeedsOcr` covers a scan source with no usable text
-/// layer, registered as a `needs_ocr` anchor for a later OCR pass. Both
+/// layer, registered as a `needs_ocr` anchor until its text is ingested. Both
 /// are success terminals — distinct from `Done` so batch summaries can
 /// reconcile against `library.stats` and steer the operator to the OCR
 /// worklist.

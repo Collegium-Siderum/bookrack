@@ -637,7 +637,7 @@ mod tests {
         let mut other_hint = job("failed-4", "failed", Some(NO_BODY));
         other_hint["problem"] = json!({
             "summary": "cannot ingest: the extraction produced no body",
-            "hint": "Run `bookrack intake ocr` on it.",
+            "hint": "Split the source into smaller files.",
             "retryable": false,
         });
         let mut same_hint = job("failed-5", "failed", Some(NO_BODY));
@@ -658,7 +658,7 @@ mod tests {
             &lines[header + 1..header + 3],
             [
                 "  hint: Check that the source is not image-only.",
-                "  hint: Run `bookrack intake ocr` on it.",
+                "  hint: Split the source into smaller files.",
             ],
             "{out}"
         );

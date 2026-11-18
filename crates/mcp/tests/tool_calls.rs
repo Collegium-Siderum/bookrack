@@ -271,7 +271,6 @@ fn finished_job_with(
         priority: Priority::Normal,
         kind: ItemKind::Book,
         op: JobOp::Ingest(IngestJob::file(format!("/srv/books/{n:02}.epub"))),
-        intake_ocr: None,
         state,
         queued_at: at,
         started_at: Some(at),

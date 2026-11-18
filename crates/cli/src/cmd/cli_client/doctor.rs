@@ -92,17 +92,13 @@ pub async fn run(
     install_pdfium: bool,
     install_reranker: bool,
     rename_envelopes: bool,
-    backfill_ocr_derivation: bool,
     close_abandoned_runs: bool,
     dry_run: bool,
     runtime_dir: Option<PathBuf>,
 ) -> Result<bool> {
-    // The two catalog-writing repairs are judged first, before any
-    // install runs: a refusal that arrives after a download has
-    // already landed would report the one and hide the other.
-    if backfill_ocr_derivation {
-        refuse_repair_under_a_daemon(runtime_dir.as_deref(), "--backfill-ocr-derivation").await?;
-    }
+    // The catalog-writing repair is judged first, before any install
+    // runs: a refusal that arrives after a download has already landed
+    // would report the one and hide the other.
     if close_abandoned_runs {
         refuse_repair_under_a_daemon(runtime_dir.as_deref(), "--close-abandoned-runs").await?;
     }
@@ -110,7 +106,7 @@ pub async fn run(
     // judged here too, before any install. A root that does not resolve
     // is left to the repair's own resolution, which reports it with the
     // repair's context.
-    if (rename_envelopes || backfill_ocr_derivation || close_abandoned_runs)
+    if (rename_envelopes || close_abandoned_runs)
         // root identity: gated; the gate for every repair below
         && let Ok(cfg) = bookrack_config::Config::resolve(selection)
     {
@@ -151,22 +147,11 @@ pub async fn run(
         bookrack_runtime::doctor::render_rename_report(&report, json);
         return Ok(!report.has_failures());
     }
-    // The derivation backfill opens the catalog for writing, which would
-    // race the daemon's exclusive write handle. It is an offline repair,
-    // guarded above; the dry run is guarded too — it still opens the
-    // catalog, and a plan against a library the operator is about to
-    // take offline is misleading.
-    if backfill_ocr_derivation {
-        let report = bookrack_runtime::doctor::backfill_ocr_derivation(selection, dry_run).await?;
-        bookrack_runtime::doctor::render_backfill_report(&report, json);
-        return Ok(!report.has_failures());
-    }
-    // Closing abandoned runs writes the registry, so it carries the
-    // same offline rule as the backfill: a daemon serving the library
-    // holds the write handle, and one of its own runs may be in flight.
-    // The dry run is guarded for the same reason the backfill's is — a
-    // plan computed against a live library describes a moment that has
-    // already passed.
+    // Closing abandoned runs writes the registry, which would race the
+    // daemon's exclusive write handle, and one of the daemon's own runs
+    // may be in flight. It is an offline repair, guarded above; the dry
+    // run is guarded too, because a plan computed against a live
+    // library describes a moment that has already passed.
     if close_abandoned_runs {
         // root identity: gated; judged at the top of run, before any install
         let cfg = bookrack_config::Config::resolve(selection)?;

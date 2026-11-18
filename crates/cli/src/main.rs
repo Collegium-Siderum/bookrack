@@ -20,8 +20,8 @@ mod util;
 use std::path::{Path, PathBuf};
 
 use bookrack_cli_grammar::{
-    CorpusAction, DistillAction, DryrunArgs, FindArgs, IngestArgs, IntakeAction, ListArgs,
-    LogsArgs, PapersAction, QueueAction, RemoveArgs, RpcAction, SearchArgs, StampsAction,
+    CorpusAction, DistillAction, DryrunArgs, FindArgs, IngestArgs, ListArgs, LogsArgs,
+    PapersAction, QueueAction, RemoveArgs, RpcAction, SearchArgs, StampsAction,
     WriteMetadataAction, WriteVectorsAction,
 };
 use bookrack_config::{Config, ConfigError, LibrarySelection};
@@ -113,8 +113,8 @@ struct Cli {
     /// `<data_root>/audit-rules/audit_profile.local.toml` overlay is
     /// merged onto the shipped default; with it the overlay is
     /// bypassed and the named preset wins. Applies to `ingest`,
-    /// `intake ocr`, `dryrun`, `metadata reaudit`, `metadata advance`,
-    /// and `papers metadata reaudit`; passing the flag on any other
+    /// `dryrun`, `metadata reaudit`, `metadata advance`, and
+    /// `papers metadata reaudit`; passing the flag on any other
     /// subcommand aborts before any RPC is sent.
     #[arg(
         long,
@@ -290,7 +290,6 @@ enum Command {
         ],
         group(clap::ArgGroup::new("repair").multiple(false).args([
             "rename_envelopes",
-            "backfill_ocr_derivation",
             "close_abandoned_runs",
         ])),
     )]
@@ -315,17 +314,6 @@ enum Command {
         /// skipped.
         #[arg(long)]
         rename_envelopes: bool,
-        /// Recover the `derived_from_sha256` edge on OCR product intakes
-        /// that predate the column, reading each parent scan PDF's hash
-        /// from the intake's envelope provenance. Idempotent; rows whose
-        /// edge is already set are skipped. Run this once after
-        /// upgrading a library that holds OCR intakes, so
-        /// `intake list-ocr-pending` does not list their already-
-        /// processed sources. An offline repair: it writes the catalog
-        /// directly, so it is refused while a daemon is serving the
-        /// library — stop it with `bookrack quit` first.
-        #[arg(long)]
-        backfill_ocr_derivation: bool,
         /// Close `pipeline_runs` rows still marked running whose owning
         /// process is gone, stamping each `abandoned`. Only rows proven
         /// ownerless are touched: a run still in flight, and one that
@@ -335,9 +323,9 @@ enum Command {
         /// `bookrack quit` first.
         #[arg(long)]
         close_abandoned_runs: bool,
-        /// With `--rename-envelopes`, `--backfill-ocr-derivation`, or
-        /// `--close-abandoned-runs`, compute the plan without touching
-        /// the disk or database. Refused without one of them.
+        /// With `--rename-envelopes` or `--close-abandoned-runs`, compute
+        /// the plan without touching the disk or database. Refused
+        /// without one of them.
         #[arg(long, requires = "repair")]
         dry_run: bool,
     },
@@ -364,15 +352,6 @@ enum Command {
         "glean /path/to/papers-dir/ --recursive",
     ])]
     Glean(bookrack_cli_grammar::PapersIngestArgs),
-    /// Drive an intake from a derived source manifestation (OCR-only).
-    ///
-    /// The job is enqueued onto the persistent ingest queue and
-    /// dispatched by the worker as a book ingest job whose source is
-    /// the OCR markdown product paired with the original scan PDF.
-    Intake {
-        #[command(subcommand)]
-        action: IntakeAction,
-    },
     /// Inspect or mutate the persistent ingest queue.
     ///
     /// Covers `list`, `pause`, `resume`, `clear`, and
@@ -1164,7 +1143,7 @@ async fn run() -> Result<()> {
     let audit_profile = cli.audit_profile.clone();
     if audit_profile.is_some() && !accepts_audit_profile(&cli.command) {
         return Err(bookrack_cli::error::BookrackCliError::LocalUserError {
-            message: "--audit-profile is only consumed by `ingest`, `intake ocr`, \
+            message: "--audit-profile is only consumed by `ingest`, \
                       `dryrun`, `metadata reaudit`, `metadata advance`, and \
                       `papers metadata reaudit`; remove it for this subcommand"
                 .to_string(),
@@ -1182,7 +1161,6 @@ async fn run() -> Result<()> {
         install_pdfium,
         install_reranker,
         rename_envelopes,
-        backfill_ocr_derivation,
         close_abandoned_runs,
         dry_run,
     } = &cli.command
@@ -1193,7 +1171,6 @@ async fn run() -> Result<()> {
             *install_pdfium,
             *install_reranker,
             *rename_envelopes,
-            *backfill_ocr_derivation,
             *close_abandoned_runs,
             *dry_run,
             None,
@@ -1507,9 +1484,6 @@ async fn run() -> Result<()> {
             cmd::cli_client::ingest::dry_run(&selection, &args, audit_profile)
         }
         Command::Ingest(args) => cmd::cli_client::ingest::run(args, None, audit_profile).await,
-        Command::Intake { action } => {
-            cmd::cli_client::intake::run(action, None, audit_profile, json_global).await
-        }
         Command::Queue { action } => cmd::cli_client::queue::run(action, None).await,
         Command::Metadata { action } => {
             cmd::cli_client::metadata::run(action, None, audit_profile).await
@@ -1549,13 +1523,10 @@ async fn run() -> Result<()> {
 /// audit-profile-aware set, the new variant fails to compile here
 /// until its arm is added.
 fn accepts_audit_profile(command: &Command) -> bool {
-    use bookrack_cli_grammar::{
-        IntakeAction, PapersAction, PapersMetadataAction, WriteMetadataAction,
-    };
+    use bookrack_cli_grammar::{PapersAction, PapersMetadataAction, WriteMetadataAction};
     match command {
         Command::Ingest(_) => true,
         Command::Glean(_) => true,
-        Command::Intake { action } => matches!(action, IntakeAction::Ocr { .. }),
         Command::Dryrun(_) => true,
         Command::Metadata { action } => matches!(
             action,
@@ -2093,9 +2064,8 @@ mod tests {
     #[test]
     fn doctor_repair_flags_are_mutually_exclusive() {
         for pair in [
-            ["--rename-envelopes", "--backfill-ocr-derivation"],
             ["--rename-envelopes", "--close-abandoned-runs"],
-            ["--backfill-ocr-derivation", "--close-abandoned-runs"],
+            ["--close-abandoned-runs", "--rename-envelopes"],
         ] {
             let parsed = Cli::try_parse_from(["bookrack", "doctor", pair[0], pair[1]]);
             assert!(
@@ -2113,11 +2083,7 @@ mod tests {
             Cli::try_parse_from(["bookrack", "doctor", "--dry-run"]).is_err(),
             "--dry-run with no repair flag must be refused",
         );
-        for repair in [
-            "--rename-envelopes",
-            "--backfill-ocr-derivation",
-            "--close-abandoned-runs",
-        ] {
+        for repair in ["--rename-envelopes", "--close-abandoned-runs"] {
             Cli::try_parse_from(["bookrack", "doctor", repair, "--dry-run"])
                 .unwrap_or_else(|e| panic!("{repair} --dry-run must parse: {e}"));
         }
@@ -2127,14 +2093,6 @@ mod tests {
     fn accepts_audit_profile_white_list_matches_consumers() {
         let consumers = [
             vec!["bookrack", "ingest", "/tmp/x.epub"],
-            vec![
-                "bookrack",
-                "intake",
-                "ocr",
-                "/tmp/x.md",
-                "--from-pdf",
-                "/tmp/x.pdf",
-            ],
             vec!["bookrack", "dryrun", "/tmp/x.epub"],
             vec!["bookrack", "metadata", "reaudit", "1"],
             vec!["bookrack", "metadata", "advance", "1"],
@@ -2251,21 +2209,27 @@ mod tests {
             .expect("the flag parses");
     }
 
+    /// The OCR intake entry points are not part of the grammar: the
+    /// `intake` group, and the `doctor` repair for its derivation edge.
     #[test]
-    fn intake_ocr_accepts_priority_force_hold_flags() {
-        Cli::try_parse_from([
-            "bookrack",
-            "intake",
-            "ocr",
-            "/x/out.md",
-            "--from-pdf",
-            "/x/scan.pdf",
-            "--force",
-            "--hold-for-metadata",
-            "--priority",
-            "normal",
-        ])
-        .expect("the flags parse");
+    fn the_ocr_intake_entry_points_do_not_parse() {
+        for argv in [
+            &[
+                "bookrack",
+                "intake",
+                "ocr",
+                "/x/out.md",
+                "--from-pdf",
+                "/x/scan.pdf",
+            ][..],
+            &["bookrack", "intake", "list-ocr-pending"],
+            &["bookrack", "doctor", "--backfill-ocr-derivation"],
+        ] {
+            assert!(
+                Cli::try_parse_from(argv.iter().copied()).is_err(),
+                "{argv:?} must be refused by the grammar",
+            );
+        }
     }
 
     #[test]
@@ -2591,7 +2555,6 @@ mod tests {
         "glean",
         "ingest",
         "init",
-        "intake",
         "libraries",
         "list",
         "logs",
@@ -2622,13 +2585,12 @@ mod tests {
     /// is a new help page, and a help page is a surface commitment, so the
     /// tree's shape is pinned here rather than left to grow silently.
     const SUBCOMMAND_COUNTS: &[(&str, usize)] = &[
-        ("bookrack", 31),
+        ("bookrack", 30),
         ("bookrack audit-profile", 3),
         ("bookrack config", 3),
         ("bookrack corpus", 1),
         ("bookrack distill", 4),
         ("bookrack index-profile", 6),
-        ("bookrack intake", 2),
         ("bookrack libraries", 12),
         ("bookrack metadata", 10),
         ("bookrack papers", 12),
@@ -2841,7 +2803,6 @@ mod tests {
             Reach::Local,
         ),
         (&["init"], Reach::Local),
-        (&["intake", "list-ocr-pending"], Reach::Routed),
         (&["libraries", "detect", "/tmp/library"], Reach::Local),
         (&["libraries", "list"], Reach::Routed),
         (&["libraries", "mount", "demo"], Reach::Routed),

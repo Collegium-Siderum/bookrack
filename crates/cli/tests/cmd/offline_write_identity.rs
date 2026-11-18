@@ -415,11 +415,11 @@ fn distill_build_still_writes_a_root_that_carries_its_identity() {
 }
 
 #[test]
-fn backfill_refuses_an_empty_mount_point() {
+fn close_abandoned_runs_refuses_an_empty_mount_point() {
     let world = World::new();
     world.empty_alpha();
     let before = world.snapshot();
-    let out = world.repair("--backfill-ocr-derivation");
+    let out = world.repair("--close-abandoned-runs");
     world.assert_refused(&before, &out, "alpha", Fault::NoManifest);
 }
 
@@ -458,24 +458,21 @@ fn rename_envelopes_refuses_another_librarys_root() {
 /// A root that does not resolve at all is not the gate's to report:
 /// the repair's own resolution says so, with its own context.
 #[test]
-fn backfill_on_a_missing_root_still_reports_the_resolution() {
+fn close_abandoned_runs_on_a_missing_root_still_reports_the_resolution() {
     let world = World::new();
     world.missing_alpha();
-    let out = world.repair("--backfill-ocr-derivation");
+    let out = world.repair("--close-abandoned-runs");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
-    assert!(
-        stderr.contains("resolve config for OCR derivation backfill"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("is not an existing directory"), "{stderr}");
     assert!(!world.alpha.exists(), "nothing creates the root");
 }
 
 #[test]
-fn backfill_still_runs_on_a_root_that_carries_its_identity() {
+fn close_abandoned_runs_still_runs_on_a_root_that_carries_its_identity() {
     let world = World::new();
-    let out = world.repair("--backfill-ocr-derivation");
-    assert_success(&out, "backfill alpha");
+    let out = world.repair("--close-abandoned-runs");
+    assert_success(&out, "close abandoned runs in alpha");
 }
 
 impl World {

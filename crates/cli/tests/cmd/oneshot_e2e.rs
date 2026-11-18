@@ -60,7 +60,10 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
         (&["queue", "list"], CaseExpect::NotRunning),
         (&["logs"], CaseExpect::NotRunning),
         (&["papers", "list"], CaseExpect::NotRunning),
-        (&["intake", "list-ocr-pending"], CaseExpect::NotRunning),
+        (
+            &["find", "--scope", "book", "--awaiting-text"],
+            CaseExpect::NotRunning,
+        ),
         (&["rpc", "list"], CaseExpect::NotRunning),
         (
             &["rpc", "call", "library.info", "{}"],
@@ -189,6 +192,10 @@ async fn audit_profile_is_refused_before_the_early_dispatches() -> Result<()> {
         assert!(
             stderr.contains("--audit-profile is only consumed by"),
             "{argv:?} should name the flag it refused: {stderr}",
+        );
+        assert!(
+            !stderr.contains("intake ocr"),
+            "{argv:?} names a consumer that is not a command: {stderr}",
         );
         assert!(
             !stderr.contains(NOT_RUNNING),

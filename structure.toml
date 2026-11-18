@@ -226,7 +226,6 @@ paths = [
   "crates/runtime/src/cmd/dryrun.rs",
   "crates/runtime/src/cmd/index_profile.rs",
   "crates/runtime/src/cmd/ingest.rs",
-  "crates/runtime/src/cmd/intake_ocr.rs",
   "crates/runtime/src/cmd/libraries.rs",
   "crates/runtime/src/cmd/metadata.rs",
   "crates/runtime/src/cmd/papers_corpus.rs",
@@ -356,10 +355,6 @@ site = "crates/ops/src/registry.rs::ingest_book"
 access = "write"
 
 [[write_door]]
-site = "crates/ops/src/registry.rs::ingest_ocr"
-access = "write"
-
-[[write_door]]
 site = "crates/ops/src/registry.rs::ingest_rule"
 access = "write"
 
@@ -460,10 +455,6 @@ site = "crates/runtime/src/cmd/ingest.rs::run"
 access = "write"
 
 [[write_door]]
-site = "crates/runtime/src/cmd/intake_ocr.rs::run"
-access = "write"
-
-[[write_door]]
 site = "crates/runtime/src/cmd/metadata.rs::advance"
 access = "write"
 
@@ -537,10 +528,6 @@ access = "write"
 
 [[write_door]]
 site = "crates/runtime/src/daemon.rs::build_library_handle"
-access = "write"
-
-[[write_door]]
-site = "crates/runtime/src/doctor.rs::backfill_ocr_derivation"
 access = "write"
 
 [[write_door]]
