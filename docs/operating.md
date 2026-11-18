@@ -1,7 +1,8 @@
 # Operating bookrack
 
 This is the operator's guide to a running library: the daemon
-lifecycle, submitting and watching ingest work, the OCR worklist,
+lifecycle, submitting and watching ingest work, scans waiting for text
+and rule files,
 health checks, and the observability surfaces. For configuration
 (where the data root comes from, the registry, per-library settings)
 see [configuration.md](configuration.md); for rebuilding derived data
@@ -87,7 +88,9 @@ snapshots its log ring (see [Observability](#observability)).
 with `--recursive`) to the daemon and streams the queue worker's
 progress until the batch reaches a terminal state. `bookrack glean
 <path>` is the parallel entry point for academic papers, which live in
-a second cluster under the same data root.
+a second cluster under the same data root. `bookrack ingest --rule
+<rule.toml>` submits a book whose text sits in plain-text files; see
+[Ingesting text through a rule file](#ingesting-text-through-a-rule-file).
 
 ```
 bookrack ingest /path/to/book.epub
@@ -176,7 +179,7 @@ library, then retry again.
 
 `queue wait` reads the queue once, when it attaches, and refuses up
 front when a selected job is pending on a paused queue or the daemon has
-no queue worker; `ingest`, `glean` and `intake ocr` make the same
+no queue worker; `ingest` and `glean` make the same
 read, and the same refusal, once they have submitted. A refused wait
 still prints what the read showed: the jobs that had ended, and the rest
 by id. After that the wait follows the event stream, and whatever the
@@ -194,30 +197,142 @@ running `queue wait --job <id>` again reads its outcome straight from the
 queue; a job still pending on a paused queue is refused again until
 `queue resume`.
 
-### The OCR worklist
+### Scans waiting for text
 
 A scan whose PDF carries no usable text layer is not a failure: the
 extract stage records it as a `needs_ocr` intake anchor — its bytes,
 a best-effort page count, and the rejection reason — rather than
-dropping the job. `bookrack intake list-ocr-pending` lists every scan
-source still awaiting OCR (`--json` emits a tool-agnostic manifest of
-`intake_id` / `source_path` / `sha256` / `pages` / `reason`).
+dropping the job. `bookrack find --scope book --awaiting-text` lists
+every scan the library still holds no text for, with its page count
+and the reason its text layer was rejected; under `--json` each row
+carries an `awaiting_text` object (`source_path` / `stored_path` /
+`original_path` / `sha256` / `pages` / `reason`).
 
-bookrack stays engine-agnostic: run any OCR tool over the manifest,
-then bring the Markdown product back in through `bookrack intake ocr`.
+bookrack stays engine-agnostic: run any OCR tool over a listed source,
+describe its output in a rule file (next section), and bring the text
+in with `--source` naming the scan.
 
 ```
-bookrack intake list-ocr-pending
+bookrack find --scope book --awaiting-text
 # ...run an OCR engine over each listed source...
-bookrack intake ocr <ocr_md> --from-pdf <scan.pdf>
+bookrack ingest --rule <rule.toml> --dry-run
+bookrack ingest --rule <rule.toml> --source <scan.pdf>
 ```
 
-The OCR product is registered as an intake whose provenance references
-the scan PDF's hash and flows through the normal STRUCTURE / CHUNK /
-EMBED path. The expected page count comes from the source PDF's
-`/Pages`; pass `--expected-pages` when PDFium cannot read the source,
-and `--allow-partial` to accept a product that does not cover every
-page.
+`--source` takes the scan PDF itself, at any path that holds the same
+bytes the library registered. A PDF the library does not hold, or holds
+as anything but a scan waiting for text, is refused before a job is
+queued: ingest the PDF first, or leave `--source` off for text that
+derives from no scan.
+
+The text is ingested as a book of its own, recorded as derived from the
+scan. The scan's row stays `needs_ocr` and leaves the
+`--awaiting-text` list; `bookrack find --scope book --status needs_ocr`
+lists every scan, with and without text.
+
+With `--source`, each unit of the rule stands for one page of the PDF,
+so the rule has to number its units: `units.by = "file"` numbers a
+unit from its file name and `units.by = "marker"` from the marker's
+`sheet` group, while `units.by = "whole"` cannot. The job fails when a
+page of the PDF has no unit; `--allow-partial` accepts the text with
+pages missing and records the pages it covers. A unit numbered past the
+last page of the PDF fails the job either way.
+
+### Ingesting text through a rule file
+
+`bookrack ingest --rule <rule.toml>` ingests one book whose text sits in
+plain-text files: the pages an OCR engine wrote, one file per chapter,
+or a single file with page markers. The rule file is TOML. It names the
+member files, says how they are cut into units — the pages or chapters
+a citation counts — and where headings come from. Member patterns
+resolve against the directory holding the rule file, so a rule is kept
+beside the text it describes.
+
+```toml
+schema = 1
+
+[members]
+include = ["pages/*.md"]
+
+[units]
+by = "file"
+
+[structure]
+unit_titles = "none"
+
+[biblio]
+title = "An Example Title"
+authors = ["A. N. Author"]
+language = "en"
+
+[provenance]
+text_layer = "doubtful"
+```
+
+| Key | Values | Default |
+|---|---|---|
+| `schema` | `1` | required |
+| `kind` | `"book"`; `"reference"` is refused at submission | `"book"` |
+| `members.include` | patterns a member's path matches one of | required |
+| `members.exclude` | patterns that keep a matching file out | none |
+| `members.order` | `"natural"` (digit runs compare by value), `"name"` (bytewise), `"explicit"` | `"natural"` |
+| `members.explicit` | the members in order, for `order = "explicit"`; a file the patterns match and the list omits is an error | none |
+| `members.frontmatter` | `"first"`, `"each"`, `"none"`: which members open with a `---` front-matter block to drop | `"none"` |
+| `units.by` | `"file"` (each member is a unit), `"marker"` (a line matching `units.marker` opens a unit), `"whole"` (all members are one unit) | required |
+| `units.marker` | a regular expression; its named groups `label` and `sheet` give the unit's page label and number | required with `by = "marker"` |
+| `blocks.split` | `"blank-line"` (lines between blank lines join into one paragraph), `"line"` (every line is a paragraph) | `"blank-line"` |
+| `structure.unit_titles` | `"first-line"`, `"filename"` (only with `by = "file"`), `"none"` | `"first-line"` |
+| `structure.unit_levels` | `[{ regex, depth }]` matched against a unit's title: the first match sets its depth, and a `label` group replaces its text | every title at depth 0 |
+| `structure.headings` | `"builtin"` (the built-in chapter and volume markers), `"patterns"`, `"none"`: headings inside a unit | `"builtin"` |
+| `structure.patterns` | `[{ regex, depth }]` for `headings = "patterns"`; a `label` group is the heading text | none |
+| `structure.match` | `"trimmed"`, `"raw"` (leading whitespace kept): the form of a line the heading patterns see | `"trimmed"` |
+| `biblio.*` | `title`, `subtitle`, `authors` (a list), `publisher`, `year` (an integer), `isbn`, `series`, `language` | unset |
+| `provenance.text_layer` | `"born-digital"`, `"doubtful"` for recognised text that may carry recognition errors | `"born-digital"` |
+| `completeness.number` | a regular expression whose `n` group reads a unit's number | `^(?P<n>\d+)` |
+| `completeness.expect` | `"contiguous"`, `"none"`: whether the numbers are checked for gaps, repeats, and steps backwards | `"contiguous"` |
+| `completeness.fail_on_gap` | `true` fails the job on a finding; `false` records it | `false` |
+
+A key outside this table is an error, as is a pattern that does not
+compile; the refusal names the key and its line. In a member pattern
+`*` matches within one directory level, `?` one character, `[...]` a
+character class, and `**/` any number of directories. Members are
+decoded as a plain-text source file is.
+
+Under `by = "marker"` every line of text sits below a marker line: text
+ahead of the first marker fails the job. A single-file OCR product that
+opens each page with a comment line reads as:
+
+```toml
+[units]
+by = "marker"
+marker = '^<!-- page (?P<label>\S*) \(sheet (?P<sheet>\d+)\) -->$'
+```
+
+`--dry-run` previews a rule in the calling process: it needs no daemon
+and no library, queues and writes nothing, and reports the units and
+their numbering, the title, the counts of blocks, table-of-contents
+entries and chunks, and the audit verdict the book would receive. It takes none of `--source`, `--allow-partial`,
+`--force`, `--priority`, or `--no-wait`. Without `--dry-run` the rule
+file is checked when it is submitted — it parses, and it matches at
+least one member — and a rule that fails is refused with exit `2` and
+nothing queued. What only reading the members can tell fails the job
+instead, with the reason and a hint on the job's row in `bookrack queue
+list --state failed`.
+
+A book ingested through a rule is listed with `format` `rule-text`
+(`bookrack find --scope book --format rule-text`). Its source is the
+rule file — `bookrack show <id> --json` carries the full path as
+`source_path` — and its page count is the number of units.
+
+Submitting the same rule again is judged by what it would produce. The
+book's identity is its text: the same members reached through a rule
+whose only changes are comments and whitespace are skipped as already
+in the catalog. A rule changed in a way that alters the result — a
+heading pattern, the unit boundaries — runs the pipeline again on the
+same book id, and one changed in a way that does not only has its
+recorded fingerprint advanced. Members whose text changed are a
+different source and register as a new book; the earlier one stays
+until it is removed.
 
 ## Naming an item
 
@@ -515,10 +630,6 @@ computes the plan for the last three without touching disk:
   warns under.
 - `bookrack doctor --rename-envelopes` migrates envelope files from
   older libraries into the kind-prefixed filename layout.
-- `bookrack doctor --backfill-ocr-derivation` recovers the OCR
-  provenance edge on a library upgraded across the catalog v14
-  boundary (see [UPGRADE.md](UPGRADE.md)); run it once so the OCR
-  worklist does not re-list already-processed sources.
 - `bookrack doctor --close-abandoned-runs` closes registry rows left
   at `running` by a command whose process died, stamping each
   `abandoned`. See the `pipeline runs` row below for how a run's owner

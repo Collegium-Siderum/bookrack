@@ -8,8 +8,66 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`bookrack ingest --rule <RULE>` ingests a book kept as plain-text
+  files.** A rule file, written in TOML and kept beside the text, names
+  the member files, says how they are cut into units — one per file, at
+  a marker line, or all as one — and where headings and the
+  bibliographic fields come from. The book is listed with the format
+  `rule-text`, and its page count is the number of units. The rule is
+  checked when it is submitted: one that does not parse, or matches no
+  file, is refused with exit `2`, naming the key and its line, and
+  nothing is queued. Submitting a rule again skips a book whose text and
+  rule are unchanged, and runs it again on the same id when the rule
+  changed what it produces. [operating.md](docs/operating.md) describes
+  the format. On the control plane the rule is a second form of
+  `ingest.submit`, taking `rule`, `source` and `allow_partial`.
+- **`--source <PDF>` brings in the text of a scan.** With `--rule`, it
+  names a scan the library holds as waiting for text. Each unit of the
+  rule stands for a page of the PDF; the job fails when a page has no
+  unit, unless `--allow-partial` accepts the text with pages missing,
+  and a unit numbered past the last page is refused either way. The
+  book is recorded as derived from the scan.
+- **`ingest --rule <RULE> --dry-run` previews a rule without a
+  daemon.** It reads the members in the calling process and reports the
+  units and their numbering, the title, the counts of blocks,
+  table-of-contents entries and chunks, and the audit verdict, as text
+  or with `--json`. It queues nothing and writes nothing, and needs no
+  library.
+- **`bookrack find --scope book --awaiting-text` lists the scans still
+  without text.** A row carries the page count and the reason the text
+  layer was rejected, and under `--json` an `awaiting_text` object with
+  the path to read the scan from and its SHA-256. A scan leaves the list
+  once a book derived from it is in the library; `--status needs_ocr`
+  still lists it. `library.find_books` takes the same filter as
+  `awaiting_text`, on the control plane and as an MCP tool argument.
+
 ### Changed
 
+- **Catalog schema 18 keys an intake row by item kind and source
+  hash.** The migration runs when the library is mounted, after the
+  usual snapshot; `intake_id` values are kept. An earlier release
+  cannot open a migrated catalog.
+- **A catalog holding rows of the OCR intake path is refused.** A
+  catalog below schema 18 with a row written by `bookrack intake ocr`
+  is not migrated and not changed: every open names the retired labels
+  it found with their row counts. The daemon skips such a library at
+  bring-up, a daemon started on it alone exits `2`, and the hint names
+  `bookrack libraries remove <name> --purge`, since nothing repairs
+  the catalog in place. [UPGRADE.md](docs/UPGRADE.md) gives the two
+  ways forward.
+- **The queue document moves to schema 8, and a job row holds its
+  operation under `op`.** `path`, `force`, `hold_for_metadata` and
+  `audit_profile` moved from the row into `op`, beside an `input` that
+  says whether the path is a source file or a rule file; `queue.list`
+  and `bookrack queue list --json` report the row in that shape. An
+  earlier document is converted as it loads. A job queued by
+  `bookrack intake ocr` that had not finished loads as `failed`, with a
+  hint naming `bookrack ingest --rule`. An earlier release refuses a
+  schema 8 document.
+- **The diagnose bundle manifest moves to schema 6**, because
+  `queue/queue.json` inside it carries the schema 8 rows.
 - **A dependency's source location is shown as the dependency printed
   it.** A LanceDB error names the source file it was raised in by its
   absolute path on the machine that built the binary. Since 0.13.0
@@ -132,6 +190,19 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Removed
 
+- **The `bookrack intake` command group; use `bookrack ingest --rule`
+  and `bookrack find --awaiting-text`.** `intake ocr` and
+  `intake list-ocr-pending` are no longer part of the grammar: typing
+  either is a usage error (exit `2`), and nothing is submitted. Text
+  recognised from a scan comes in through a rule file with `--source`,
+  and the scans waiting for it are a filter of `find`. The control
+  plane loses `intake.ocr` and `library.list_ocr_pending` with them,
+  and a queue row no longer carries `intake_ocr`. An OCR page directory
+  ingested by an earlier release is not carried over: see the catalog
+  entry under *Changed*.
+- **`bookrack doctor --backfill-ocr-derivation`.** The repair wrote the
+  derivation edge of rows the OCR intake path had produced, and no
+  catalog this build opens holds such a row.
 - **`bookrack papers ingest`; use `bookrack glean`.** Deprecated in
   0.14.0, the command is no longer part of the `papers` namespace:
   invoking it is now a usage error (exit `2`) that names the unknown

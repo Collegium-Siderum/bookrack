@@ -266,7 +266,7 @@ the machine uses it.
   two parallel stores under one data root; `library.search` queries
   one store or both.
 - **Four source formats** — EPUB, PDF, TXT, and HTML (`.html` /
-  `.htm` / `.xhtml`); image-only scans route to the OCR worklist.
+  `.htm` / `.xhtml`); an image-only scan is held as waiting for text.
   MOBI and AZW3 are not supported: convert them to EPUB first (e.g.
   with Calibre's `ebook-convert`).
 - **Cited, fully offline search** — passages return with precise
@@ -291,8 +291,11 @@ the machine uses it.
 - **One-screen status** — `bookrack status` answers "is a daemon
   running, which library does it serve, is it busy" in a single
   no-argument call, and through the exit code alone under `--quiet`.
-- **An OCR worklist** — image-only scans land on a durable worklist
-  instead of failing; run any OCR engine and re-enter the product.
+- **Scans and plain text, through a rule file** — an image-only scan
+  lands on a durable worklist instead of failing. Run any OCR engine,
+  then describe its output in a rule file: one file per page, or one
+  file with a marker line opening each page. The same rule file
+  ingests any book kept as plain-text files.
 - **Observable pipelines** — every ingest and search records to
   queryable run and retrieval logs (`bookrack runs`, `bookrack
   retrieval`), with a `doctor` health check and a `diagnose` bundle
@@ -302,7 +305,7 @@ the machine uses it.
 
 | Guide | Covers |
 | --- | --- |
-| [Operating](docs/operating.md) | the daemon, ingesting, the queue, the OCR worklist, the status card, health checks, observability |
+| [Operating](docs/operating.md) | the daemon, ingesting, the queue, scans waiting for text, rule files, the status card, health checks, observability |
 | [Configuration](docs/configuration.md) | data-root resolution, the library registry, `config.toml`, index profiles, the audit profile |
 | [Upgrading](docs/UPGRADE.md) | installing a new build, the bump-to-refresh matrix, downgrading, switching the embedding model |
 | [Control plane](docs/control-plane.md) | the JSON-RPC surface behind the CLI and MCP |

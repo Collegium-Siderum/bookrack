@@ -95,13 +95,14 @@ earlier ones already happened.
 | `rbook`, `scraper`, `encoding_rs`, `pdfium-render`, and the crates under them that parse or decode (`quick-xml`, `zip`, `percent-encoding`, `html5ever`, `markup5ever`, `tendril`, `web_atoms`, `selectors`, `cssparser`); the PDFium binary (`PDFIUM_RELEASE_TAG` and its archive digests) | `extractor_version` | extract → structure → chunks → vectors | re-ingest the affected sources |
 | `bookrack_extract::EXTRACTOR_VERSION` (manual bump) | `extractor_version` | same as above | re-ingest the affected sources: `bookrack ingest` (books), `bookrack glean` (papers) — see *Re-ingesting a source file* below |
 | Externalised extract-side knobs (HTML block / skip tags, PDF quality thresholds, language codes / ratios) — bumped 3 → 4 | `extractor_version` | same as above | re-ingest the affected sources |
-| `Block` carries per-paragraph `BlockStyle` geometry on the PDF path (font-size median / p90, bold-majority flag, line count, first-line left, normalized above-gap) — bumped 5 → 6 | `extractor_version` | same as above | re-ingest the affected PDF sources (book-side TXT / EPUB / OCR partitions read fine without a refresh, as their `style` is `None` on both old and new envelopes) |
+| `Block` carries per-paragraph `BlockStyle` geometry on the PDF path (font-size median / p90, bold-majority flag, line count, first-line left, normalized above-gap) — bumped 5 → 6 | `extractor_version` | same as above | re-ingest the affected PDF sources (book-side TXT and EPUB partitions read fine without a refresh, as their `style` is `None` on both old and new envelopes) |
 | PDFium `chromium/7763` → `chromium/7881` with `pdfium-render` 0.9.4, `rbook` 0.7.12 (bringing `quick-xml` 0.42 and `zip` 9), `encoding_rs` 0.8.44, `tendril` 0.5.1, `web_atoms` 0.2.6 — bumped 6 → 7 | `extractor_version` | same as above | re-ingest the affected sources; a book the new extractor reads as the old one did only has its stamp advanced, see *Re-ingesting a source file*. Books extracted at version 6 keep serving meanwhile, so the refresh can run a few sources at a time. The PDFium fixes apply to every PDF parsed after the upgrade, without a refresh. A library of the previous PDFium build no longer loads — see *A moved PDFium build* above |
 | PDFium `chromium/7881` → `chromium/8125` with `pdfium-render` 0.9.5 — bumped 7 → 8 | `extractor_version` | same as above | re-ingest the affected sources; a book the new extractor reads as the old one did only has its stamp advanced, see *Re-ingesting a source file*. `chromium/8125` takes a font's weight from the `/FontWeight` its descriptor declares, where earlier builds estimated it from the stem width, so a PDF whose fonts declare a weight can read with different bold flags on its paragraphs: re-ingesting such a book runs the full pipeline and re-embeds its chunks, although their text is unchanged. EPUB and TXT books only have their stamp advanced. Books extracted at version 6 or 7 keep serving meanwhile, so the refresh can run a few sources at a time; coming from version 6, one re-ingest covers this row and the one above. The PDFium fixes apply to every PDF parsed after the upgrade, without a refresh. A library of the previous PDFium build no longer loads — see *A moved PDFium build* above |
+| `regex`, `regex-automata`, `regex-syntax`, `aho-corasick`, `bookrack_extract::rule::RULE_ENGINE_VERSION` | the fingerprint recorded on every book ingested through a rule file | none until a rule is submitted again — a rule-text book keeps serving as it was ingested | submit each rule again with `bookrack ingest --rule` — see *Re-ingesting a source file* below |
 | `text-splitter`, `icu_*`, `bookrack_text::CHUNK_VERSION` | `chunk_version`, on the book store and the papers store | chunks → vectors, on both | `bookrack vectors reembed` (books); `bookrack papers vectors reset` (papers) |
 | `unicode-normalization`, `bookrack_text::NORMALIZE_VERSION` | `normalize_version` | chunks → vectors | `bookrack vectors reembed` (books); `bookrack papers vectors reembed` (papers) |
 | Embedding model name or vector width | `embed_model` / `vector_dim` | chunks → vectors | `bookrack libraries fork` (try it side by side) or `bookrack vectors reset` + `bookrack papers vectors reset` (in place) — see [Switching the embedding model](#switching-the-embedding-model) |
-| `catalog.db` / `papers_catalog.db` schema bump | catalog `user_version` | none — migrated forward in place (two exceptions, see below: the v14 OCR-derivation edge, and a catalog below v18 that holds OCR-path rows, which is refused) | open the library (migration is automatic); after upgrading a library that predates v14, run `bookrack doctor --backfill-ocr-derivation` once |
+| `catalog.db` / `papers_catalog.db` schema bump | catalog `user_version` | none — migrated forward in place (one exception, see below: a catalog below v18 that holds OCR-path rows is refused) | open the library (migration is automatic) |
 | `reference.db` schema bump | reference store `user_version` | none — migrated forward in place, after a snapshot | open the library (migration is automatic); `bookrack distill build` and the `reference.overlay_set` tool migrate it too. A read never does: `bookrack distill list` and `bookrack distill verify` refuse a store that is behind, naming both versions |
 | `corpus.db` schema bump | corpus `schema_version` | corpus tree | `bookrack corpus rebuild` |
 | `papers_corpus.db` schema bump | papers corpus `schema_version` | papers corpus tree | `bookrack papers corpus rebuild` |
@@ -148,8 +149,10 @@ they carry no runbook step:
   exception: a job queued by `bookrack intake ocr` that had not finished
   — pending, running, failed, or parked for OCR — loads as `failed`,
   with a hint naming `bookrack ingest --rule`, because the OCR intake
-  path it was queued for is being removed. A finished or cancelled one
-  keeps its record.
+  path it was queued for is removed. A finished or cancelled one
+  keeps its record. `bookrack queue retry` still selects such a row,
+  and the retry fails again, as a source file of an unsupported type:
+  leave the row as it is and bring the text in through a rule file.
   Version 7 added `problem` to every job row, the classified diagnostic
   of a failed job; a version 6 document loads with the field absent.
   The bump is one-way: a binary reading a document above its own
@@ -219,8 +222,8 @@ first: ingest skips a source already on file only when it is
 `Embedded` and its stored stamps match this binary's, so a row whose
 `extractor_version` is behind is extracted again. The new extraction
 is compared with the envelope in the intake store when the extractor
-stamp is the only thing out of date: a book whose intake is `Embedded`,
-not from an OCR directory, and whose embed model, `chunk_version`, and
+stamp is the only thing out of date: a book whose intake is `Embedded`
+and whose embed model, `chunk_version`, and
 `normalize_version` are current. When the two match apart from the
 version, the envelope is rewritten and the stamp advances, and the
 corpus tree, chunks, and vectors stay as they are: the refresh costs
@@ -234,6 +237,16 @@ therefore refreshes every stale file under it: the files whose stamps
 are current finish as `skipped_duplicate` jobs without doing any work.
 `--force` runs the full pipeline for every file, current or stale,
 without the comparison.
+
+A book ingested through a rule file is refreshed by submitting its rule
+again: `bookrack ingest --rule <rule.toml>`, with the member files
+still where the rule finds them. That one submission covers a stale
+`extractor_version` and a rule fingerprint recorded by an earlier rule
+engine alike, and a book the new build reads as the old one did only
+has its stamps advanced. No command reports a fingerprint that is
+behind. `bookrack find --scope book --format rule-text` lists the books
+to submit again, and `bookrack show <id> --json` names each one's rule
+file as `source_path`.
 
 A stale book's job ends `done` whether the run only advanced the stamp
 or went through the full pipeline; when the comparison ran, the book's
@@ -279,17 +292,6 @@ reembed only `Embedded` intakes whose partition holds chunks. An intake
 that stopped short of those states is on neither list, so neither is
 the full set a refresh has to cover.
 
-`bookrack doctor --backfill-ocr-derivation` — a one-time offline repair
-for libraries upgraded across the catalog v14 boundary. v14 added the
-`intake.derived_from_sha256` edge that links an OCR product back to the
-scan source it came from; OCR intakes written before v14 lack it, so
-the OCR worklist (`bookrack intake list-ocr-pending`) would re-list
-scan sources that were in fact already processed. The backfill recovers
-the edge by reading each OCR intake's recorded provenance. It is
-refused while a daemon is serving the library, and `--dry-run` opens
-the catalog read-only so a plan never migrates or writes. Libraries
-created at or after v14 never need it.
-
 Catalog v17 adds `pipeline_run_summary.profile_buckets`, the profile
 histogram a run materialises at close. Rollups written before v17 keep
 the column NULL, and nothing backfills it: the rows a closed run judged
@@ -317,6 +319,14 @@ in-place repair: remove that library with
 `bookrack libraries remove <name> --purge` and ingest its books again,
 or keep a 0.14 binary for it. The search runs only while the catalog
 is below v18; a catalog already at v18 is opened without it.
+
+The commands that wrote and read those rows are removed with them:
+`bookrack intake ocr`, `bookrack intake list-ocr-pending`, and
+`bookrack doctor --backfill-ocr-derivation`. The scans a library still
+holds no text for are listed by `bookrack find --scope book
+--awaiting-text`, and the text of one comes in through a rule file,
+`bookrack ingest --rule <rule.toml> --source <scan.pdf>`; see
+[Scans waiting for text](operating.md#scans-waiting-for-text).
 
 ## Recommended window
 
