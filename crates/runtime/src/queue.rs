@@ -2736,11 +2736,6 @@ mod tests {
         );
     }
 
-    /// A dependency source location under a build-machine prefix.
-    const LOCATED: &str = "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/train.rs:10:4";
-    /// What [`LOCATED`] reads as once redacted.
-    const KEPT: &str = "dep-1.0.0/src/train.rs:10:4";
-
     /// The wrapper the ops layer puts around a typed error before the
     /// worker sees it.
     fn registry_wrapped(err: impl std::error::Error + Send + Sync + 'static) -> eyre::Report {
@@ -2812,23 +2807,6 @@ mod tests {
             classify_ingest_error(&eyre::eyre!("boom"));
         assert_eq!(failure.message, "ingest: boom");
         assert!(failure.problem.is_none());
-    }
-
-    /// The recorded problem is redacted where it is recorded, so a
-    /// location a typed error's own wording carries never reaches the
-    /// row — whatever the entry layers did or did not catch.
-    #[test]
-    fn classify_ingest_error_redacts_what_it_records() {
-        let (JobError::Book(failure) | JobError::Process(failure)) =
-            classify_ingest_error(&registry_wrapped(bookrack_ingest::IngestError::Io(
-                std::io::Error::other(format!("train failed at {LOCATED}")),
-            )));
-        let problem = failure.problem.expect("IngestError is a known type");
-        assert!(problem.summary.contains(KEPT), "{problem:?}");
-        assert!(
-            !problem.summary.contains("/disk/cache/cargo/"),
-            "{problem:?}"
-        );
     }
 
     #[test]

@@ -585,11 +585,6 @@ pub struct LibrarySummary {
 
 /// A registered library the host decided not to serve, and why.
 ///
-/// Built only through [`UnmountedLibrary::new`], which runs every part
-/// of the reason through [`redact_source_paths`]: the reason reaches
-/// status cards and queue rows as plain text, so it is cleaned where
-/// it is made rather than at each surface that shows it.
-///
 /// The host closes the reason's hint, when it has one, with the step
 /// that serves the library again before it records the reason; a call
 /// naming the library carries that hint as it is.
@@ -607,7 +602,7 @@ impl UnmountedLibrary {
         UnmountedLibrary {
             name: name.into(),
             data_dir: data_dir.into(),
-            reason: reason.redacted(),
+            reason,
         }
     }
 
@@ -1626,41 +1621,5 @@ mod tests {
         assert_eq!(mounted, vec![("a", false), ("b", true)]);
         assert_eq!(snapshot.unmounted.len(), 1);
         assert_eq!(snapshot.unmounted[0].name(), "c");
-    }
-
-    /// The reason is cleaned where the record is made: a dependency
-    /// source location loses its build-machine prefix in every part,
-    /// while a data path, which names the operator's own file, stays.
-    #[test]
-    fn skip_reason_is_redacted_at_construction() {
-        let located = "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/io.rs:7:3";
-        let record = super::UnmountedLibrary::new(
-            "beta",
-            "/disk/library/beta",
-            bookrack_core::Problem::new(format!("cannot open the store, {located}"))
-                .detail(format!("read failed at {located} under /disk/library/beta"))
-                .hint(format!("See {located}.")),
-        );
-        let reason = record.reason();
-        for text in [
-            reason.summary.as_str(),
-            reason.data.detail.as_deref().unwrap_or(""),
-            reason.data.hint.as_deref().unwrap_or(""),
-        ] {
-            assert!(!text.contains("/disk/cache/cargo"), "{text}");
-            assert!(
-                text.contains("io.rs:7:3"),
-                "the crate-relative tail stays: {text}"
-            );
-        }
-        assert!(
-            reason
-                .data
-                .detail
-                .as_deref()
-                .is_some_and(|detail| detail.contains("/disk/library/beta")),
-            "a data path is not a source location: {:?}",
-            reason.data.detail
-        );
     }
 }

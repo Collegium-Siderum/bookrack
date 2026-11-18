@@ -196,7 +196,7 @@ async fn read_current_chunk_count(lancedb_dir: &Path) -> (Option<usize>, Option<
     match ChunkReader::open(lancedb_dir).await {
         Ok(Some(store)) => (store.count_rows().await.ok(), None),
         Ok(None) => (None, None),
-        Err(e) => (None, Some(e.to_string())),
+        Err(e) => (None, Some(bookrack_core::error_chain(&e))),
     }
 }
 

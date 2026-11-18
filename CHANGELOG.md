@@ -10,6 +10,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **A dependency's source location is shown as the dependency printed
+  it.** A LanceDB error names the source file it was raised in by its
+  absolute path on the machine that built the binary. Since 0.13.0
+  that path was rewritten crate-relative in control-plane and MCP error
+  replies, in the failure text and `problem` of queue jobs, in
+  `logs.tail` and the `log` event, and in the catalog's error columns
+  as they were read. The rewriting is removed: those surfaces carry
+  the text unchanged. `bookrack diagnose` is the one place paths are
+  redacted, and its rules are unchanged.
 - **Reading a catalog that is behind this build names the versions.**
   A read never migrates. A `catalog.db` or `papers_catalog.db` whose
   schema is older than the build used to be refused as a table-shape

@@ -294,9 +294,8 @@ fn classify(err: &Report) -> Option<RpcError> {
 
 /// The diagnostic a failed queue job records: the summary and data of
 /// the envelope [`handler_err`] would build for the same error, read
-/// back as one [`Problem`] and redacted as an envelope is on its way
-/// out. `None` when no type on the chain is known; the job then keeps
-/// only its flattened text.
+/// back as one [`Problem`]. `None` when no type on the chain is known;
+/// the job then keeps only its flattened text.
 pub fn job_failure_problem(err: &Report) -> Option<Problem> {
     let rpc = classify(err)?;
     let data = match rpc.data {
@@ -320,13 +319,10 @@ pub fn job_failure_problem(err: &Report) -> Option<Problem> {
             retryable: false,
         },
     };
-    Some(
-        Problem {
-            summary: rpc.message,
-            data,
-        }
-        .redacted(),
-    )
+    Some(Problem {
+        summary: rpc.message,
+        data,
+    })
 }
 
 /// Map a directly-held [`OpsError`] without an `eyre` round-trip: the

@@ -177,8 +177,7 @@ fn served_rows(ctx: &MethodContext, summaries: Vec<LibrarySummary>) -> Value {
 
 /// The registered libraries bring-up did not mount, one row each,
 /// sorted by name: `{ name, data_dir, reason }`, the reason in the four
-/// flat fields a `Problem` serializes to. A record is redacted where it
-/// is made, so the reason goes out as it is.
+/// flat fields a `Problem` serializes to.
 fn unmounted_rows(unmounted: &[UnmountedLibrary]) -> Value {
     let rows: Vec<Value> = unmounted
         .iter()
@@ -576,20 +575,17 @@ mod tests {
     }
 
     /// A library bring-up skipped is listed under `unmounted` with its
-    /// root and reason, beside the served rows. The reason reaches the
-    /// client clean of build-machine source prefixes: a success reply is
-    /// not redacted on its way out, so the record has to be.
+    /// root and reason, beside the served rows.
     #[test]
-    fn status_lists_skipped_libraries_with_a_clean_reason() {
+    fn status_lists_skipped_libraries_with_their_reason() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = method_context(dir.path(), Some("alpha"));
-        let located = "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/io.rs:7:3";
         ctx.registry
             .record_unmounted(bookrack_ops::registry::UnmountedLibrary::new(
                 "beta",
                 "/disk/library/beta",
                 bookrack_core::Problem::new("cannot read the catalog")
-                    .detail(format!("read failed at {located} under /disk/library/beta"))
+                    .detail("The read failed under /disk/library/beta.")
                     .hint("Upgrade bookrack."),
             ))
             .unwrap();
@@ -607,10 +603,10 @@ mod tests {
         );
         assert_eq!(row["reason"]["hint"], "Upgrade bookrack.", "{card}");
         assert_eq!(row["reason"]["retryable"], Value::Bool(false), "{card}");
-        let detail = row["reason"]["detail"].as_str().unwrap_or_default();
-        assert!(!detail.contains("/disk/cache/cargo"), "{detail}");
-        assert!(detail.contains("io.rs:7:3"), "{detail}");
-        assert!(detail.contains("/disk/library/beta"), "{detail}");
+        assert_eq!(
+            row["reason"]["detail"], "The read failed under /disk/library/beta.",
+            "{card}"
+        );
         assert_eq!(card["served"].as_array().map(Vec::len), Some(1), "{card}");
     }
 }

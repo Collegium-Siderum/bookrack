@@ -208,14 +208,6 @@ wording falls back to a flattened cause chain as the summary and sends
 `data` with `retryable` alone. `data` is additive — a client that
 ignores it sees exactly what it saw before the slot was filled.
 
-A source location inside a dependency appears crate-relative
-(`lance-index-7.0.0/src/vector/kmeans.rs:1365:20`), never with the
-absolute path of the machine that built the binary. That holds for the
-error envelope, for the failure text and the `problem` `queue.list` and
-`queue.tick` carry — including failures recorded by an older build —
-and for `logs.tail` and the `log` event. A book's text, and so a search hit,
-is returned as stored.
-
 #### Error mapping
 
 Write-class RPCs — `metadata.*`, `corpus.rebuild`, `vectors.*`,
@@ -462,8 +454,7 @@ the exit-code bucket does not distinguish the two.
   registered library came up, and `null` with `served` when the
   registry could not be read. Both lists come from one read, so no
   name is in both; a successful `library.mount` moves a name from
-  `unmounted` to `served`. The reason is redacted of build-machine
-  source prefixes where it is recorded.
+  `unmounted` to `served`.
 
   `auto_registered` lists the registry names bring-up recorded for the
   selected root — a path-class root carrying an identity manifest the

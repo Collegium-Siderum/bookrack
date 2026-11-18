@@ -121,16 +121,6 @@ where
     join_with_deadline(runtime, repl_handle, driver).await
 }
 
-/// Every string value in `value`, at any depth.
-fn strings_of(value: &Value) -> Vec<&str> {
-    match value {
-        Value::String(text) => vec![text.as_str()],
-        Value::Array(items) => items.iter().flat_map(strings_of).collect(),
-        Value::Object(fields) => fields.values().flat_map(strings_of).collect(),
-        _ => Vec::new(),
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_job_lists_its_problem_and_the_tick_carries_the_same() -> Result<()> {
     with_daemon(|sock| async move {
@@ -166,12 +156,6 @@ async fn a_failed_job_lists_its_problem_and_the_tick_carries_the_same() -> Resul
         let summary = problem["summary"].as_str().unwrap_or_default();
         assert!(!summary.is_empty(), "{problem}");
         assert_ne!(Some(summary), row["error"].as_str(), "{row}");
-        for text in strings_of(problem) {
-            assert!(
-                !text.contains("registry/src/"),
-                "no build-machine location in the diagnostic: {problem}"
-            );
-        }
 
         let closing = tick_closing(&mut sub_r, &id).await?;
         assert_eq!(

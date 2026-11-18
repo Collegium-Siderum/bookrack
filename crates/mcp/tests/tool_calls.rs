@@ -26,7 +26,7 @@
 //!   default mark, and its default name follows the registry's pointer;
 //! * `session.queue_status` filters `recent` on a state before capping
 //!   it, counts the whole queue, refuses a state no job can be in, and
-//!   carries a failure's cause without build-machine source prefixes;
+//!   carries a failure's cause as the job recorded it;
 //! * a client on protocol version 2026-07-28, served one request at a
 //!   time, receives a tool's `invalid_params` in band under HTTP 200,
 //!   and a request that neither initializes nor names a session is
@@ -504,19 +504,16 @@ async fn a_library_bring_up_skipped_is_invalid_params_with_the_mount_hint() {
 }
 
 /// `session.info` lists the libraries bring-up skipped beside the ones
-/// it mounted, each with its root and three-part reason, and the reason
-/// arrives clean of build-machine source prefixes.
+/// it mounted, each with its root and three-part reason.
 #[tokio::test]
-async fn session_info_lists_skipped_libraries_with_a_clean_reason() {
+async fn session_info_lists_skipped_libraries_with_their_reason() {
     let fx = Fixture::start().await;
-    let located =
-        "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/io.rs:7:3";
     fx.registry
         .record_unmounted(bookrack_ops::registry::UnmountedLibrary::new(
             "beta",
             "/disk/library/beta",
             bookrack_core::Problem::new("cannot read the catalog")
-                .detail(format!("read failed at {located} under /disk/library/beta"))
+                .detail("The read failed under /disk/library/beta.")
                 .hint("Upgrade bookrack."),
         ))
         .expect("record the skipped library");
@@ -540,10 +537,10 @@ async fn session_info_lists_skipped_libraries_with_a_clean_reason() {
         "{body}"
     );
     assert_eq!(row["reason"]["hint"], "Upgrade bookrack.", "{body}");
-    let detail = row["reason"]["detail"].as_str().unwrap_or_default();
-    assert!(!detail.contains("/disk/cache/cargo"), "{detail}");
-    assert!(detail.contains("io.rs:7:3"), "{detail}");
-    assert!(detail.contains("/disk/library/beta"), "{detail}");
+    assert_eq!(
+        row["reason"]["detail"], "The read failed under /disk/library/beta.",
+        "{body}"
+    );
     assert_eq!(
         body["libraries"].as_array().map(Vec::len),
         Some(2),
@@ -1049,46 +1046,6 @@ async fn queue_status_filters_on_state_before_capping_recent() {
     fx.stop().await;
 }
 
-/// A dependency source location under a build-machine prefix, as a
-/// recorded diagnostic may carry it.
-const LOCATED: &str =
-    "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/train.rs:10:4";
-/// What [`LOCATED`] reads as once redacted.
-const KEPT: &str = "dep-1.0.0/src/train.rs:10:4";
-
-/// The tool reads the queue state in memory, past the redaction a load
-/// applies, so each string of a recorded diagnostic is redacted as the
-/// row is projected.
-#[tokio::test]
-async fn queue_status_redacts_every_string_of_a_problem() {
-    let fx = Fixture::start().await;
-    fx.seed_queue(std::iter::once(finished_job_with(
-        0,
-        JobState::Failed,
-        Some("ingest: train failed"),
-        Some(
-            bookrack_core::Problem::new(format!("failed at {LOCATED}"))
-                .detail(format!("Detail at {LOCATED}."))
-                .hint(format!("Hint at {LOCATED}.")),
-        ),
-    )));
-    let client = fx.connect().await;
-
-    let body = body_json(
-        &client
-            .call_tool(call("session.queue_status", serde_json::json!({})))
-            .await
-            .expect("session.queue_status"),
-    );
-    let problem = &body["recent"][0]["problem"];
-    assert_eq!(problem["summary"], format!("failed at {KEPT}"), "{body}");
-    assert_eq!(problem["detail"], format!("Detail at {KEPT}."), "{body}");
-    assert_eq!(problem["hint"], format!("Hint at {KEPT}."), "{body}");
-
-    let _ = client.cancel().await;
-    fx.stop().await;
-}
-
 /// More failures than the cap: the filtered list is still capped, and
 /// holds the newest failures, newest first.
 #[tokio::test]
@@ -1182,21 +1139,16 @@ async fn queue_status_refuses_a_state_no_job_can_be_in() {
     fx.stop().await;
 }
 
-/// A failure's text leaves through `recent` with a dependency source
-/// location crate-relative, as the error envelope carries it, even when
-/// the text reached the queue snapshot unredacted.
+/// A failure's text leaves through `recent` as the job recorded it.
 #[tokio::test]
-async fn queue_status_reports_a_failure_without_build_prefixes() {
+async fn queue_status_reports_a_failure_as_recorded() {
     let fx = Fixture::start().await;
     fx.seed_queue([
         finished_job(0, JobState::Done, None),
         finished_job(
             1,
             JobState::Failed,
-            Some(
-                "ingest: train failed, /disk/cache/cargo/registry/src/\
-                 index.crates.io-0123456789abcdef/dep-1.0.0/src/train.rs:10:4: train failed",
-            ),
+            Some("ingest: train failed: out of memory"),
         ),
     ]);
     let client = fx.connect().await;
@@ -1208,9 +1160,8 @@ async fn queue_status_reports_a_failure_without_build_prefixes() {
             .expect("session.queue_status"),
     );
     assert_eq!(
-        body["recent"][0]["error"],
-        "ingest: train failed, dep-1.0.0/src/train.rs:10:4: train failed",
-        "the newest job failed, and its cause must arrive without the build prefix: {body}"
+        body["recent"][0]["error"], "ingest: train failed: out of memory",
+        "the newest job failed, and its cause must arrive as recorded: {body}"
     );
 
     let _ = client.cancel().await;

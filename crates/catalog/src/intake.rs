@@ -915,10 +915,10 @@ impl Catalog {
     }
 
     /// Why each source's text layer was rejected: the message of its
-    /// latest `extract` / `skipped` audit row, keyed by source hash and
-    /// read back redacted. A hash with no such row, or whose latest one
-    /// carries no message, is absent from the map. An empty `shas`
-    /// slice returns an empty map.
+    /// latest `extract` / `skipped` audit row, keyed by source hash. A
+    /// hash with no such row, or whose latest one carries no message,
+    /// is absent from the map. An empty `shas` slice returns an empty
+    /// map.
     pub fn extract_skip_reasons(&self, shas: &[&str]) -> Result<BTreeMap<String, String>> {
         if shas.is_empty() {
             return Ok(BTreeMap::new());
@@ -934,10 +934,7 @@ impl Catalog {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(shas.iter().copied()), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                crate::diagnostic_text::redacted(row.get(1)?),
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
         })?;
         let mut latest: BTreeMap<String, Option<String>> = BTreeMap::new();
         for r in rows {
@@ -3061,29 +3058,6 @@ mod tests {
         assert_eq!(pending[0].reason.as_deref(), Some("garbled text layer"));
     }
 
-    /// The OCR-pending listing projects the rejection reason straight
-    /// out of the audit table, past the audit row mapping, and still
-    /// reads it back redacted.
-    #[test]
-    fn list_ocr_pending_reads_the_reason_back_redacted() {
-        use crate::diagnostic_text::fixture::{READ, STORED};
-        let mut cat = catalog();
-        register_book(&mut cat, "pdf-located", "pdf", IntakeStatus::NeedsOcr);
-        let mut skip = crate::NewItemPipelineAudit::new(
-            "extract",
-            "quality_gate",
-            "skipped",
-            "run-ocr",
-            crate::ActorKind::Pipeline,
-        );
-        skip.source_sha256 = Some("pdf-located".to_string());
-        skip.error_message = Some(STORED.to_string());
-        cat.record_pipeline_audit(&skip).expect("skip row");
-
-        let pending = cat.list_ocr_pending(50, 0).expect("list");
-        assert_eq!(pending[0].reason.as_deref(), Some(READ));
-    }
-
     fn awaiting_text() -> IntakeFilter<'static> {
         IntakeFilter {
             awaiting_text: true,
@@ -3190,7 +3164,6 @@ mod tests {
 
     #[test]
     fn extract_skip_reasons_reads_the_latest_rejection_of_each_source() {
-        use crate::diagnostic_text::fixture::{READ, STORED};
         let cat = catalog();
         // Both land in the same second; the audit id breaks the tie.
         for reason in ["watermark text layer", "garbled text layer"] {
@@ -3202,8 +3175,8 @@ mod tests {
             .expect("ok row");
         cat.record_pipeline_audit(&skip_row("pdf-a", "embed", "skipped", "wrong stage"))
             .expect("other stage");
-        cat.record_pipeline_audit(&skip_row("pdf-b", "extract", "skipped", STORED))
-            .expect("located row");
+        cat.record_pipeline_audit(&skip_row("pdf-b", "extract", "skipped", "no text layer"))
+            .expect("second source");
         // A source nobody asks about.
         cat.record_pipeline_audit(&skip_row("pdf-c", "extract", "skipped", "unasked"))
             .expect("unasked row");
@@ -3213,7 +3186,7 @@ mod tests {
             .expect("reasons");
         let expected: BTreeMap<String, String> = [
             ("pdf-a".to_string(), "garbled text layer".to_string()),
-            ("pdf-b".to_string(), READ.to_string()),
+            ("pdf-b".to_string(), "no text layer".to_string()),
         ]
         .into_iter()
         .collect();

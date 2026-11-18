@@ -659,14 +659,11 @@ pub struct QueueJobSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
     /// The failure the job recorded — a `failed` job's cause, as one
-    /// flattened chain — or absent when it recorded none. A dependency
-    /// source location in it is crate-relative
-    /// ([`bookrack_core::redact_source_paths`]).
+    /// flattened chain — or absent when it recorded none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// The failure as the daemon classified it — summary, detail, hint,
-    /// `retryable` — when it did; absent otherwise. Its strings are
-    /// redacted as `error` is.
+    /// `retryable` — when it did; absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub problem: Option<Problem>,
 }
@@ -1877,11 +1874,8 @@ impl BookrackServer {
                 library: j.library.clone(),
                 path: j.source_path().map(|path| path.display().to_string()),
                 finished_at: j.finished_at,
-                error: j
-                    .error
-                    .as_deref()
-                    .map(|text| bookrack_core::redact_source_paths(text).into_owned()),
-                problem: j.problem.clone().map(Problem::redacted),
+                error: j.error.clone(),
+                problem: j.problem.clone(),
             })
             .collect();
         let result = SessionQueueStatusResult {

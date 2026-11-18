@@ -211,19 +211,16 @@ pub struct QueueJob {
     /// When the worker transitioned this job to `Done`,
     /// `SkippedDuplicate`, `NeedsOcr`, `Failed`, or `Cancelled`.
     pub finished_at: Option<DateTime<Utc>>,
-    /// Failure message recorded when `state == Failed`. Redacted as
-    /// it loads ([`crate::redact_source_paths`]), so a message recorded
-    /// before errors were redacted at their source leaves the process
-    /// as clean as a new one.
-    #[serde(default, deserialize_with = "deserialize_redacted")]
+    /// Failure message recorded when `state == Failed`.
+    #[serde(default)]
     pub error: Option<String>,
     /// The failure as the control plane classifies it: the same
     /// summary / detail / hint / retryable the error envelope carries
     /// when the same error fails a write RPC. Recorded beside `error`
     /// when `state == Failed` and the daemon recognised the error's
     /// type; `None` for a failure it did not and for every non-failure
-    /// state. Redacted as it loads, string by string, as `error` is.
-    #[serde(default, deserialize_with = "deserialize_redacted_problem")]
+    /// state.
+    #[serde(default)]
     pub problem: Option<Problem>,
     /// Intake id this job resolved to: the existing catalog row when the
     /// worker skipped the source as a duplicate (`SkippedDuplicate`), or
@@ -276,9 +273,9 @@ struct FlatQueueJob {
     queued_at: DateTime<Utc>,
     started_at: Option<DateTime<Utc>>,
     finished_at: Option<DateTime<Utc>>,
-    #[serde(default, deserialize_with = "deserialize_redacted")]
+    #[serde(default)]
     error: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_redacted_problem")]
+    #[serde(default)]
     problem: Option<Problem>,
     #[serde(default)]
     merged_into: Option<i64>,
@@ -411,27 +408,6 @@ where
 // setting: internal -- a fixed point in the document format's history, not a tunable
 const FIRST_OP_SCHEMA_VERSION: u32 = 8;
 
-/// An optional string, redacted of build-machine source prefixes.
-fn deserialize_redacted<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let text = Option::<String>::deserialize(deserializer)?;
-    Ok(text.map(|t| match crate::redact_source_paths(&t) {
-        std::borrow::Cow::Borrowed(_) => t,
-        std::borrow::Cow::Owned(redacted) => redacted,
-    }))
-}
-
-/// An optional problem, each of its strings redacted of build-machine
-/// source prefixes ([`Problem::redacted`]).
-fn deserialize_redacted_problem<'de, D>(deserializer: D) -> Result<Option<Problem>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(Option::<Problem>::deserialize(deserializer)?.map(Problem::redacted))
-}
-
 /// The full document persisted to disk.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct QueueState {
@@ -497,9 +473,6 @@ pub fn match_id_fragment(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const LOCATED: &str = "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/train.rs:10:4";
-    const KEPT: &str = "dep-1.0.0/src/train.rs:10:4";
 
     fn at(time: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(time)
@@ -571,66 +544,47 @@ mod tests {
         }
     }
 
-    /// A failure recorded before errors were redacted at their source
-    /// is redacted as it loads, from a flat row and from a current one
-    /// alike: the failure text reaches `queue.list`, the queue snapshot,
-    /// and the next save only through this field.
+    /// A recorded failure loads as it was written, text and diagnostic
+    /// alike, from a flat row and from a current one.
     #[test]
-    fn a_recorded_failure_loads_without_build_prefixes() {
-        let error = format!("ingest: train failed, {LOCATED}: train failed");
-        let kept = format!("ingest: train failed, {KEPT}: train failed");
-
-        let flat = read_row(
-            7,
-            flat_row_with(serde_json::json!({ "state": "failed", "error": error })),
-        );
-        assert_eq!(flat.error.as_deref(), Some(kept.as_str()));
-        assert_eq!(
-            flat.source_path(),
-            Some(Path::new("/srv/books/example.epub"))
-        );
-
-        let mut current = serde_json::to_value(job_with("0", JobState::Failed)).unwrap();
-        current["error"] = serde_json::json!(error);
-        let current = read_row(QUEUE_SCHEMA_VERSION, current);
-        assert_eq!(current.error.as_deref(), Some(kept.as_str()));
-
-        let missing = read_row(7, flat_row_with(serde_json::json!({ "state": "failed" })));
-        assert_eq!(missing.error, None);
-    }
-
-    /// A recorded diagnostic is redacted as it loads, every string of
-    /// it, from a flat row and from a current one alike.
-    #[test]
-    fn a_recorded_problem_loads_redacted() {
+    fn a_recorded_failure_loads_as_recorded() {
+        let error = "ingest: train failed: out of memory";
         let problem = serde_json::json!({
-            "summary": format!("failed at {LOCATED}"),
-            "detail": format!("Detail at {LOCATED}."),
-            "hint": format!("Hint at {LOCATED}."),
+            "summary": "could not train the index",
+            "detail": "The trainer ran out of memory.",
+            "hint": "Retry with fewer partitions.",
             "retryable": true
         });
         let mut current = serde_json::to_value(job_with("0", JobState::Failed)).unwrap();
+        current["error"] = serde_json::json!(error);
         current["problem"] = problem.clone();
         let rows = [
             read_row(
                 7,
-                flat_row_with(serde_json::json!({ "state": "failed", "problem": problem })),
+                flat_row_with(
+                    serde_json::json!({ "state": "failed", "error": error, "problem": problem }),
+                ),
             ),
             read_row(QUEUE_SCHEMA_VERSION, current),
         ];
         for job in rows {
+            assert_eq!(job.error.as_deref(), Some(error));
             let problem = job.problem.expect("the diagnostic loads");
-            assert_eq!(problem.summary, format!("failed at {KEPT}"));
+            assert_eq!(problem.summary, "could not train the index");
             assert_eq!(
                 problem.data.detail.as_deref(),
-                Some(format!("Detail at {KEPT}.").as_str())
+                Some("The trainer ran out of memory.")
             );
             assert_eq!(
                 problem.data.hint.as_deref(),
-                Some(format!("Hint at {KEPT}.").as_str())
+                Some("Retry with fewer partitions.")
             );
             assert!(problem.data.retryable);
         }
+
+        let missing = read_row(7, flat_row_with(serde_json::json!({ "state": "failed" })));
+        assert_eq!(missing.error, None);
+        assert_eq!(missing.problem, None);
     }
 
     #[test]

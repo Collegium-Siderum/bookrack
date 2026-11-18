@@ -62,20 +62,10 @@ pub(crate) fn invalid_params_message(message: String) -> ErrorData {
     envelope(ErrorCode::INVALID_PARAMS, message, None)
 }
 
-/// The one constructor of the MCP error envelope. The envelope leaves
-/// the process here, so the build-machine prefix of any dependency
-/// source location is removed from the message and from every string
-/// in `data` ([`bookrack_core::redact_source_paths`]), as the control
-/// socket's envelope does. Successful tool results are left as they
-/// are: they can carry a book's text.
-fn envelope(code: ErrorCode, message: String, mut data: Option<serde_json::Value>) -> ErrorData {
-    let message = match bookrack_core::redact_source_paths(&message) {
-        std::borrow::Cow::Borrowed(_) => message,
-        std::borrow::Cow::Owned(redacted) => redacted,
-    };
-    if let Some(data) = data.as_mut() {
-        bookrack_runtime::control::jsonrpc::redact_strings(data);
-    }
+/// The one constructor of the MCP error envelope: every outbound
+/// error of the crate is built in this file, where the flattening
+/// rule is enforced.
+fn envelope(code: ErrorCode, message: String, data: Option<serde_json::Value>) -> ErrorData {
     ErrorData::new(code, message, data)
 }
 
@@ -273,71 +263,6 @@ mod tests {
             "detail: {:?}",
             data.detail
         );
-    }
-
-    /// A synthetic dependency location under a build-machine prefix.
-    const LOCATED: &str =
-        "/disk/cache/cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/io.rs:7:3";
-
-    /// An error whose text carries [`LOCATED`], standing in for a
-    /// third-party error that never passed through the store's own
-    /// redaction.
-    #[derive(Debug)]
-    struct Located;
-
-    impl std::fmt::Display for Located {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "read failed, {LOCATED}: read failed")
-        }
-    }
-
-    impl std::error::Error for Located {}
-
-    /// Every constructor in this file is an exit, and each one drops
-    /// the build-machine prefix of a dependency location from the
-    /// message and the data, whatever the text came through.
-    #[test]
-    fn every_constructor_drops_build_prefixes() {
-        let envelopes = [
-            (
-                "mcp_from_problem",
-                mcp_from_problem(
-                    ErrorCode::INTERNAL_ERROR,
-                    Problem::new(format!("read failed, {LOCATED}")).detail(format!("at {LOCATED}")),
-                ),
-            ),
-            ("invalid_params_err", invalid_params_err(&Located)),
-            (
-                "ops_error_to_mcp",
-                ops_error_to_mcp(OpsError::Other(eyre::Report::new(Located))),
-            ),
-            (
-                "report_to_mcp",
-                report_to_mcp("library.read", eyre::Report::new(Located)),
-            ),
-            (
-                "reference_error_to_mcp",
-                reference_error_to_mcp(reference::ReferenceError::InvalidArgument(format!(
-                    "bad path {LOCATED}"
-                ))),
-            ),
-            (
-                "internal_message",
-                internal_message(format!("open reference.db: {LOCATED}")),
-            ),
-            (
-                "invalid_params_message",
-                invalid_params_message(format!("refused at {LOCATED}")),
-            ),
-        ];
-        for (constructor, envelope) in envelopes {
-            let wire = serde_json::to_string(&envelope).expect("serialize");
-            assert!(!wire.contains("/disk/cache/cargo"), "{constructor}: {wire}");
-            assert!(
-                wire.contains("dep-1.0.0/src/io.rs:7:3"),
-                "{constructor}: {wire}"
-            );
-        }
     }
 
     #[test]
