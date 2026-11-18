@@ -1004,18 +1004,6 @@ agreement = "pinned"
 pin = "scripts/dep-stamp-check.sh"
 
 [[parallel]]
-id = "page-marker"
-summary = "finding page markers in recognised text"
-sites = [
-  "crates/extract/src/ocr.rs::find_marker",
-  "crates/distill/src/segment.rs::PAGE_MARKER_RE",
-]
-reason = "transitional"
-detail = "extract anchors a marker at the start of a line and takes any label; distill takes a numeric label only and does not anchor"
-agreement = "divergent"
-exit = "distill reads pages through extract's parser"
-
-[[parallel]]
 id = "pdf-date-pattern"
 summary = "the pattern for a PDF date string"
 sites = [

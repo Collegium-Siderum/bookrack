@@ -16,7 +16,6 @@
 
 mod dryrun;
 mod embed_run;
-pub mod ocr;
 pub mod reaudit;
 pub mod rebuild;
 pub mod reembed;
@@ -190,39 +189,6 @@ pub enum IngestError {
     /// so its chunks are not on disk to reembed.
     #[error("intake {0} is not in the Embedded state; cannot reembed")]
     IntakeNotEmbedded(i64),
-
-    /// The source PDF an OCR product names is already registered in a
-    /// non-`NeedsOcr` state, so routing it through OCR would conflict
-    /// with the path it has already taken (extract, embed, or abort).
-    /// The intake's existing status is reported as a stable string.
-    #[error("source PDF intake {intake_id} is in {status}, not needs_ocr")]
-    OcrSourceStatusMismatch {
-        /// The conflicting intake id.
-        intake_id: i64,
-        /// The intake's existing status as the database string form.
-        status: &'static str,
-    },
-
-    /// The OCR product's sheet set is missing pages the source said
-    /// should be present, and the caller did not opt into a partial
-    /// ingest. The missing sheet numbers are 1-based.
-    #[error("OCR product is missing pages: {missing:?}")]
-    OcrPagesMissing {
-        /// The sheets the source declared (1-based) that the OCR
-        /// product did not cover.
-        missing: Vec<u32>,
-    },
-
-    /// The OCR product covers sheets the source PDF does not have,
-    /// which means the two were not produced from the same source.
-    /// Always an error — there is no `--allow-partial`-equivalent
-    /// route to ingest an OCR product paired with the wrong PDF.
-    #[error("OCR product carries pages not in the source: {excess:?}")]
-    OcrPagesExcess {
-        /// The 1-based sheets in the OCR product that the source did
-        /// not declare.
-        excess: Vec<u32>,
-    },
 
     /// A rule file, or the members it names, could not be read into an
     /// extraction.
@@ -698,7 +664,7 @@ pub async fn ingest_book_with_progress<E: Embedder>(
                 // Page count is best-effort: it needs a PDFium read, so a
                 // build without PDFium records NULL rather than failing
                 // the anchor.
-                if let Ok(pages) = bookrack_extract::ocr::count_pdf_pages(file) {
+                if let Ok(pages) = bookrack_extract::count_pdf_pages(file) {
                     catalog.set_page_count(ItemKind::Book, intake_id, i64::from(pages))?;
                 }
                 std::fs::create_dir_all(books_dir)?;
@@ -1058,8 +1024,7 @@ enum OnFile {
 /// `Embedded`, the book embedded with `embed_model`, and the corpus
 /// stamped with this binary's chunk and normalize versions. The extractor
 /// stamp then decides: equal to this binary's is [`OnFile::Current`];
-/// behind it is [`OnFile::ExtractorBehind`], except on an OCR-intake row,
-/// whose staleness is a separate version dimension.
+/// behind it is [`OnFile::ExtractorBehind`].
 ///
 /// `rule_fingerprint` is the fingerprint of the rule this run extracts
 /// under, `None` for a source no rule reads. With the extractor stamp
@@ -1103,9 +1068,6 @@ fn on_file(
         return Ok(OnFile::Rerun);
     }
     if intake.extractor_version != bookrack_extract::EXTRACTOR_VERSION {
-        if intake.adapter.as_deref() == Some(bookrack_extract::ocr::ADAPTER) {
-            return Ok(OnFile::Rerun);
-        }
         return Ok(OnFile::ExtractorBehind(Box::new(intake)));
     }
     if let Some(fingerprint) = rule_fingerprint
@@ -2006,15 +1968,8 @@ fn build_base_attrs(
             &mut actions,
         );
     }
-    // An OCR-derived row takes the `ocr_marker` token regardless of
-    // which channel filled which field: even when /Info supplied the
-    // title and /Outline the structure, the data still originated from
-    // an externally-OCR'd source manifestation, and that fact is what
-    // `source` is meant to record.
     attrs.source = Some(
-        if extraction.provenance.adapter == bookrack_extract::ocr::ADAPTER {
-            "ocr_marker".to_string()
-        } else if extraction.provenance.adapter == bookrack_extract::rule::ADAPTER {
+        if extraction.provenance.adapter == bookrack_extract::rule::ADAPTER {
             // A rule states its biblio outright; nothing was read out
             // of the text or a file name.
             "rule".to_string()
@@ -4145,42 +4100,6 @@ pub(crate) mod book_pipeline_tests {
             [first.intake_id],
             "neither sweep re-extracts, so the intake must still read as stale"
         );
-    }
-
-    /// An OCR-intake row behind on the born-digital extractor stamp is not
-    /// stale by that stamp, so it is never offered for comparison.
-    #[tokio::test]
-    async fn an_ocr_pages_row_is_never_offered_for_comparison() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let file = write_sample(dir.path());
-        let mut corpus = Corpus::open_in_memory().expect("corpus");
-        let mut catalog = Catalog::open_in_memory().expect("catalog");
-        let (first, stale) =
-            ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
-        let params = IngestParams::default();
-        let sha = catalog
-            .intake_by_id(first.intake_id)
-            .expect("intake")
-            .expect("present")
-            .source_sha256;
-        assert!(
-            matches!(
-                on_file(&catalog, &corpus, &sha, &params.embed.model, None).expect("on_file"),
-                OnFile::ExtractorBehind(_)
-            ),
-            "the born-digital row must be offered, or the OCR case proves nothing"
-        );
-
-        catalog
-            .set_extraction(
-                ItemKind::Book,
-                first.intake_id,
-                bookrack_extract::ocr::ADAPTER,
-                stale,
-            )
-            .expect("ocr adapter");
-        let decided = on_file(&catalog, &corpus, &sha, &params.embed.model, None).expect("on_file");
-        assert!(matches!(decided, OnFile::Rerun), "{decided:?}");
     }
 
     #[tokio::test]

@@ -3,18 +3,16 @@
 //! End-to-end check of the `worker.progress` contract: the queue
 //! worker reports a pulled job as `processing`, tagged with the job's
 //! pipeline `kind`, and names no pipeline stage it cannot observe. A
-//! book job carried through the real ingest pipeline, and an OCR
-//! intake carried through the same book pipeline, publish one
+//! book job carried through the real ingest pipeline, and a rule
+//! job carried through the same book pipeline, publish one
 //! `processing` marker and then the embedding pass's fraction; a paper
 //! job that fails on a missing source publishes the marker alone. The
 //! job's terminal state travels on its closing `queue.tick`, not on
 //! `worker.progress`.
 //!
 //! The embedder probe and the embedding pass are both answered by the
-//! loopback stub in `common`, so no Ollama daemon is required. The
-//! book and paper cases never reach PDF parsing; only the OCR case
-//! needs a PDFium library, and it skips through the extract crate's
-//! gate when none is loadable.
+//! loopback stub in `common`, so no Ollama daemon is required. No case
+//! reaches PDF parsing.
 
 #![cfg(unix)]
 

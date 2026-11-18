@@ -666,20 +666,6 @@ impl Intake {
     }
 }
 
-/// One scan source still awaiting OCR: a `NeedsOcr` intake anchor with
-/// no successfully-processed OCR product derived from it. Pairs the
-/// intake row with the reason the text layer was rejected, read from
-/// the latest `extract` / `skipped` audit row for the same source, so
-/// the operator sees why each source needs OCR without a second query.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OcrPending {
-    /// The scan source's intake row — the durable `NeedsOcr` anchor.
-    pub intake: Intake,
-    /// Why the text layer was rejected, from the `extract` / `skipped`
-    /// audit row. `None` when no such audit row survives.
-    pub reason: Option<String>,
-}
-
 /// The fields known when a file is first registered. The opaque
 /// `stored_path` is deliberately absent: it depends on the
 /// autoincremented `intake_id`, so it is filled in afterwards with
@@ -839,74 +825,6 @@ impl Catalog {
             named_params! { ":kind": kind.as_scope_str(), ":status": status.as_str() },
             Intake::from_row,
         )?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
-    /// Scan sources still awaiting OCR, ordered by ascending
-    /// `intake_id`, paged by `limit` and `offset`. Each row pairs the
-    /// `NeedsOcr` anchor with the reason its text layer was rejected,
-    /// pulled from the latest `extract` / `skipped` audit row for the
-    /// same source hash.
-    ///
-    /// A `limit` of zero, or an `offset` past the end, returns an empty
-    /// `Vec` rather than an error.
-    pub fn list_ocr_pending(&self, limit: u32, offset: u32) -> Result<Vec<OcrPending>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let sql = format!(
-            "SELECT {cols} FROM intake WHERE {predicate} \
-             ORDER BY intake.intake_id LIMIT :limit OFFSET :offset",
-            cols = SPEC.select_list(),
-            predicate = awaiting_text_predicate("intake"),
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(
-            named_params! { ":limit": limit, ":offset": offset },
-            Intake::from_row,
-        )?;
-        let mut intakes = Vec::new();
-        for r in rows {
-            intakes.push(r?);
-        }
-        let shas: Vec<&str> = intakes.iter().map(|i| i.source_sha256.as_str()).collect();
-        let mut reasons = self.extract_skip_reasons(&shas)?;
-        Ok(intakes
-            .into_iter()
-            .map(|intake| OcrPending {
-                reason: reasons.remove(&intake.source_sha256),
-                intake,
-            })
-            .collect())
-    }
-
-    /// Total number of scan sources still awaiting OCR, ignoring
-    /// pagination. Shares its predicate with [`Self::list_ocr_pending`]
-    /// so the count and the listing reach the same rows.
-    pub fn count_ocr_pending(&self) -> Result<u64> {
-        let sql = format!(
-            "SELECT COUNT(*) FROM intake WHERE {}",
-            awaiting_text_predicate("intake")
-        );
-        let n: i64 = self.conn.query_row(&sql, [], |row| row.get(0))?;
-        count_as_u64(n)
-    }
-
-    /// OCR product intakes (`format = 'ocr-markdown'`) whose derivation
-    /// edge is still NULL, ordered by ascending `intake_id`. These are
-    /// the rows a backfill pass revisits: written before
-    /// `derived_from_sha256` existed, they must recover the parent scan
-    /// PDF's hash from their envelope provenance so the "still needs
-    /// OCR" query stops counting their sources as pending.
-    pub fn ocr_intakes_missing_derivation(&self) -> Result<Vec<Intake>> {
-        let mut stmt = self.conn.prepare(&select_sql(
-            "WHERE format = 'ocr-markdown' AND derived_from_sha256 IS NULL ORDER BY intake_id",
-        ))?;
-        let rows = stmt.query_map([], Intake::from_row)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -1117,15 +1035,8 @@ impl Catalog {
     /// `Extracted | DedupHold | Embedded`, vectors reembed against
     /// `Embedded`.
     ///
-    /// Excludes rows whose adapter is the OCR-intake adapter, which
-    /// carries its own version dimension (`OCR_INTAKE_VERSION`) and
-    /// has its own staleness query in [`Self::stale_ocr_partitions`].
-    /// Without this filter, every bump of the born-digital
-    /// `EXTRACTOR_VERSION` would mark every OCR row stale even though
-    /// no behaviour change touched the OCR parser.
-    ///
-    /// Returns an empty `Vec` on a fresh database, or when every
-    /// non-OCR row's `extractor_version` already equals `current`.
+    /// Returns an empty `Vec` on a fresh database, or when every row's
+    /// `extractor_version` already equals `current`.
     ///
     /// [`bookrack_extract::EXTRACTOR_VERSION`]: https://docs.rs/bookrack-extract
     pub fn stale_partitions(&self, kind: ItemKind, current: u32) -> Result<Vec<i64>> {
@@ -1133,7 +1044,6 @@ impl Catalog {
             "SELECT intake_id FROM intake \
              WHERE kind = :kind \
                AND extractor_version != :current \
-               AND (adapter IS NULL OR adapter != 'ocr-pages') \
              ORDER BY intake_id",
         )?;
         let rows = stmt.query_map(
@@ -1154,48 +1064,8 @@ impl Catalog {
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM intake \
              WHERE kind = :kind \
-               AND extractor_version != :current \
-               AND (adapter IS NULL OR adapter != 'ocr-pages')",
-            named_params! { ":kind": kind.as_scope_str(), ":current": current },
-            |row| row.get(0),
-        )?;
-        count_as_u64(n)
-    }
-
-    /// OCR intakes whose stored `extractor_version` is not equal to
-    /// `current`, ordered by ascending `intake_id`. The OCR parser
-    /// carries its own version dimension (`OCR_INTAKE_VERSION`); a
-    /// bump there marks OCR-derived content stale without disturbing
-    /// the rest of the corpus.
-    ///
-    /// Mirrors [`Self::stale_partitions`] for the born-digital half:
-    /// the two together cover every staleness signal exactly once,
-    /// with no row reached by both queries.
-    pub fn stale_ocr_partitions(&self, current: u32) -> Result<Vec<i64>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT intake_id FROM intake \
-             WHERE adapter = 'ocr-pages' \
-               AND extractor_version != :current \
-             ORDER BY intake_id",
-        )?;
-        let rows = stmt.query_map(named_params! { ":current": current }, |row| row.get(0))?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
-    /// Number of OCR intakes whose stored `extractor_version` is not
-    /// equal to `current`. Shares the WHERE shape with
-    /// [`Self::stale_ocr_partitions`] so a count and a listing reach
-    /// the same rows.
-    pub fn count_stale_ocr_partitions(&self, current: u32) -> Result<u64> {
-        let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM intake \
-             WHERE adapter = 'ocr-pages' \
                AND extractor_version != :current",
-            named_params! { ":current": current },
+            named_params! { ":kind": kind.as_scope_str(), ":current": current },
             |row| row.get(0),
         )?;
         count_as_u64(n)
@@ -1599,105 +1469,6 @@ mod tests {
                 .expect("count"),
             3
         );
-    }
-
-    #[test]
-    fn stale_partitions_excludes_ocr_rows_and_stale_ocr_partitions_returns_them() {
-        let mut catalog = catalog();
-        // Three born-digital rows: `epub_old` at v1, `epub_new` at v2,
-        // `pdf_old` at v1. Two OCR rows: `ocr_old` at v1, `ocr_new`
-        // at v2. Born-digital staleness must not surface OCR rows;
-        // OCR staleness must not surface born-digital rows.
-        let epub_old = catalog
-            .register_intake(ItemKind::Book, &NewIntake::new("sha-epub-old"))
-            .expect("register")
-            .into_intake()
-            .intake_id;
-        let epub_new = catalog
-            .register_intake(ItemKind::Book, &NewIntake::new("sha-epub-new"))
-            .expect("register")
-            .into_intake()
-            .intake_id;
-        let pdf_old = catalog
-            .register_intake(ItemKind::Book, &NewIntake::new("sha-pdf-old"))
-            .expect("register")
-            .into_intake()
-            .intake_id;
-        let ocr_old = catalog
-            .register_intake(ItemKind::Book, &NewIntake::new("sha-ocr-old"))
-            .expect("register")
-            .into_intake()
-            .intake_id;
-        let ocr_new = catalog
-            .register_intake(ItemKind::Book, &NewIntake::new("sha-ocr-new"))
-            .expect("register")
-            .into_intake()
-            .intake_id;
-
-        assert!(
-            catalog
-                .set_extraction(ItemKind::Book, epub_old, "epub", 1)
-                .expect("epub_old")
-        );
-        assert!(
-            catalog
-                .set_extraction(ItemKind::Book, epub_new, "epub", 2)
-                .expect("epub_new")
-        );
-        assert!(
-            catalog
-                .set_extraction(ItemKind::Book, pdf_old, "pdf", 1)
-                .expect("pdf_old")
-        );
-        assert!(
-            catalog
-                .set_extraction(ItemKind::Book, ocr_old, "ocr-pages", 1)
-                .expect("ocr_old")
-        );
-        assert!(
-            catalog
-                .set_extraction(ItemKind::Book, ocr_new, "ocr-pages", 2)
-                .expect("ocr_new")
-        );
-
-        // Born-digital queries against current = 2: epub_old and pdf_old
-        // are stale; epub_new is current; OCR rows are filtered out
-        // regardless of their version.
-        let bd_stale = catalog
-            .stale_partitions(bookrack_core::ItemKind::Book, 2)
-            .expect("bd query");
-        assert_eq!(bd_stale, vec![epub_old, pdf_old]);
-        assert_eq!(
-            catalog
-                .count_stale_partitions(bookrack_core::ItemKind::Book, 2)
-                .expect("bd count"),
-            bd_stale.len() as u64
-        );
-
-        // OCR queries against current = 2: only ocr_old is stale;
-        // born-digital rows are filtered out regardless of version.
-        let ocr_stale = catalog.stale_ocr_partitions(2).expect("ocr query");
-        assert_eq!(ocr_stale, vec![ocr_old]);
-        assert_eq!(
-            catalog.count_stale_ocr_partitions(2).expect("ocr count"),
-            ocr_stale.len() as u64
-        );
-
-        // The two queries partition the stale set: their results never
-        // overlap. With current = 1 on both, only epub_new (v2) and
-        // ocr_new (v2) are stale, on disjoint sides.
-        let bd_v1 = catalog
-            .stale_partitions(bookrack_core::ItemKind::Book, 1)
-            .expect("bd v1");
-        let ocr_v1 = catalog.stale_ocr_partitions(1).expect("ocr v1");
-        assert_eq!(bd_v1, vec![epub_new]);
-        assert_eq!(ocr_v1, vec![ocr_new]);
-        for id in &bd_v1 {
-            assert!(
-                !ocr_v1.contains(id),
-                "row {id} reached by both staleness queries"
-            );
-        }
     }
 
     #[test]
@@ -2893,54 +2664,6 @@ mod tests {
     }
 
     #[test]
-    fn list_ocr_pending_lists_anchors_without_a_processed_product() {
-        let mut cat = catalog();
-        // A needs_ocr anchor with no OCR product yet: pending.
-        let anchor = register_book(&mut cat, "pdf-open", "pdf", IntakeStatus::NeedsOcr);
-        cat.set_page_count(ItemKind::Book, anchor, 12)
-            .expect("pages");
-
-        let pending = cat.list_ocr_pending(50, 0).expect("list");
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].intake.intake_id, anchor);
-        assert_eq!(pending[0].intake.page_count, Some(12));
-        assert_eq!(pending[0].reason, None);
-        assert_eq!(cat.count_ocr_pending().expect("count"), 1);
-    }
-
-    #[test]
-    fn list_ocr_pending_hides_an_anchor_once_its_product_is_processed() {
-        let mut cat = catalog();
-        register_book(&mut cat, "pdf-done", "pdf", IntakeStatus::NeedsOcr);
-        let product = register_book(&mut cat, "ocr-done", "ocr-markdown", IntakeStatus::Embedded);
-        cat.set_derived_from(ItemKind::Book, product, "pdf-done")
-            .expect("edge");
-
-        assert!(cat.list_ocr_pending(50, 0).expect("list").is_empty());
-        assert_eq!(cat.count_ocr_pending().expect("count"), 0);
-    }
-
-    #[test]
-    fn list_ocr_pending_keeps_an_anchor_whose_only_product_is_of_another_kind() {
-        let mut cat = catalog();
-        let anchor = register_book(&mut cat, "pdf-open", "pdf", IntakeStatus::NeedsOcr);
-        let reference = cat
-            .register_intake(ItemKind::Reference, &NewIntake::new("ref-sha"))
-            .expect("register")
-            .into_intake()
-            .intake_id;
-        cat.set_intake_status(ItemKind::Reference, reference, IntakeStatus::Embedded)
-            .expect("status");
-        cat.set_derived_from(ItemKind::Reference, reference, "pdf-open")
-            .expect("edge");
-
-        let pending = cat.list_ocr_pending(50, 0).expect("list");
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].intake.intake_id, anchor);
-        assert_eq!(cat.count_ocr_pending().expect("count"), 1);
-    }
-
-    #[test]
     fn every_query_that_takes_a_kind_sees_only_the_rows_of_that_kind() {
         // One book and two references, all `embedded`, all `pdf`, all at
         // extractor version 1: a query that ignored its kind would
@@ -3007,57 +2730,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn list_ocr_pending_surfaces_the_latest_extract_skip_reason() {
-        let mut cat = catalog();
-        let anchor = register_book(&mut cat, "pdf-why", "pdf", IntakeStatus::NeedsOcr);
-
-        // Two rejection reasons for the same source; both land in the
-        // same second, so the audit_id tiebreaker picks the later one.
-        for reason in ["watermark text layer", "garbled text layer"] {
-            let mut skip = crate::NewItemPipelineAudit::new(
-                "extract",
-                "quality_gate",
-                "skipped",
-                "run-ocr",
-                crate::ActorKind::Pipeline,
-            );
-            skip.source_sha256 = Some("pdf-why".to_string());
-            skip.error_message = Some(reason.to_string());
-            cat.record_pipeline_audit(&skip).expect("skip row");
-        }
-        // Newer rows that must NOT be picked: an extract row that did
-        // not skip, and a skip on a different stage. Both carry decoy
-        // messages, so a wrong stage or outcome literal in the subquery
-        // surfaces as the wrong reason.
-        let mut ok_row = crate::NewItemPipelineAudit::new(
-            "extract",
-            "parse",
-            "ok",
-            "run-ocr",
-            crate::ActorKind::Pipeline,
-        );
-        ok_row.source_sha256 = Some("pdf-why".to_string());
-        ok_row.error_message = Some("not a rejection".to_string());
-        cat.record_pipeline_audit(&ok_row).expect("ok row");
-        let mut other_stage = crate::NewItemPipelineAudit::new(
-            "embed",
-            "quality_gate",
-            "skipped",
-            "run-ocr",
-            crate::ActorKind::Pipeline,
-        );
-        other_stage.source_sha256 = Some("pdf-why".to_string());
-        other_stage.error_message = Some("wrong stage".to_string());
-        cat.record_pipeline_audit(&other_stage)
-            .expect("other stage");
-
-        let pending = cat.list_ocr_pending(50, 0).expect("list");
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].intake.intake_id, anchor);
-        assert_eq!(pending[0].reason.as_deref(), Some("garbled text layer"));
-    }
-
     fn awaiting_text() -> IntakeFilter<'static> {
         IntakeFilter {
             awaiting_text: true,
@@ -3116,15 +2788,6 @@ mod tests {
             ..IntakeFilter::default()
         };
         assert_eq!(found(&cat, &by_status).1, 4);
-
-        // The worklist and the filter select the same rows.
-        let worklist: Vec<i64> = cat
-            .list_ocr_pending(50, 0)
-            .expect("list")
-            .into_iter()
-            .map(|p| p.intake.intake_id)
-            .collect();
-        assert_eq!(worklist, ids);
     }
 
     #[test]
@@ -3217,46 +2880,5 @@ mod tests {
         for (status, s) in expected {
             assert_eq!(status.as_str(), s);
         }
-    }
-
-    #[test]
-    fn list_ocr_pending_keeps_an_anchor_whose_product_only_aborted() {
-        let mut cat = catalog();
-        let anchor = register_book(&mut cat, "pdf-retry", "pdf", IntakeStatus::NeedsOcr);
-        let product = register_book(&mut cat, "ocr-bad", "ocr-markdown", IntakeStatus::Aborted);
-        cat.set_derived_from(ItemKind::Book, product, "pdf-retry")
-            .expect("edge");
-
-        // An aborted product is not "processed": the source keeps
-        // surfacing so the operator can re-run OCR.
-        let pending = cat.list_ocr_pending(50, 0).expect("list");
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].intake.intake_id, anchor);
-    }
-
-    #[test]
-    fn ocr_intakes_missing_derivation_finds_only_unlinked_products() {
-        let mut cat = catalog();
-        let linked = register_book(
-            &mut cat,
-            "ocr-linked",
-            "ocr-markdown",
-            IntakeStatus::Embedded,
-        );
-        cat.set_derived_from(ItemKind::Book, linked, "pdf-x")
-            .expect("edge");
-        let unlinked = register_book(
-            &mut cat,
-            "ocr-unlinked",
-            "ocr-markdown",
-            IntakeStatus::Embedded,
-        );
-        // A born-digital book must never appear regardless of its edge.
-        register_book(&mut cat, "born", "pdf", IntakeStatus::Embedded);
-
-        let missing = cat.ocr_intakes_missing_derivation().expect("missing");
-        let ids: Vec<i64> = missing.iter().map(|i| i.intake_id).collect();
-        assert_eq!(ids, vec![unlinked]);
-        assert!(!ids.contains(&linked));
     }
 }

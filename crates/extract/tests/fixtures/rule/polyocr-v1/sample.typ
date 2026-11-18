@@ -1,10 +1,8 @@
-// FIXTURE: 3-page synthetic source for the OCR-intake round-trip test.
+// FIXTURE: 3-page synthetic PDF, the source the page-marked text beside
+// it stands for.
 //
-// The OCR adapter is fed `sample.bookrack-ocr.v1.md` and re-opens this
-// PDF to lift the /Outline and /Info — neither of which depends on the
-// PDF's text layer. The fixture's body text is deliberately short and
-// trivial; the assertions sit on the outline (one entry, "Chapter
-// One", on page 2) and the /Info (Title, Author, CreationDate -> year).
+// Tests name it as the scan a rule's text was produced from, and read
+// its page count. The body text is deliberately short and trivial.
 //
 // Regenerate:  typst compile sample.typ
 

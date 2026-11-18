@@ -18,7 +18,6 @@ pub mod gate;
 mod headings;
 mod html;
 mod html_parse;
-pub mod ocr;
 mod pdf;
 pub mod pdf_paper;
 pub mod pdfium_gate;
@@ -34,6 +33,7 @@ pub use envelope::{
     envelope_filename, envelope_filename_legacy, read_envelope, read_envelope_with_fallback,
     write_envelope,
 };
+pub use pdf::count_pdf_pages;
 pub use pdf_paper::{
     extract_paper_abstract, extract_paper_metadata_text, reason as paper_abstract_reason,
 };
@@ -73,19 +73,6 @@ bookrack_core::fixed_settings! {
 /// this value, forcing a deliberate bump.
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const EXTRACTOR_VERSION: u32 = 8;
-
-/// Monotonic version of the OCR adapter's output. Stored on the OCR
-/// intake's `intake.extractor_version`, decoupled from
-/// [`EXTRACTOR_VERSION`] so a bump on one side does not mark partitions
-/// on the other side stale. The catalog's
-/// `stale_partitions` / `stale_ocr_partitions` queries make that split
-/// load-bearing.
-///
-/// Bumped whenever the OCR adapter's parsing rules change in a way that
-/// could shift block boundaries: the marker grammar, the frontmatter
-/// handling, or the paragraph segmentation.
-// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
-pub const OCR_INTAKE_VERSION: u32 = 1;
 
 /// SHA-256 of the sorted `name@version` lines of the behaviour-
 /// sensitive crates the extractor depends on, thirteen in all: the

@@ -642,9 +642,6 @@ fn from_ingest(e: &IngestError) -> RpcError {
         | MissingEnvelope(_)
         | EnvelopeMismatch(_)
         | IntakeNotEmbedded(_)
-        | OcrSourceStatusMismatch { .. }
-        | OcrPagesMissing { .. }
-        | OcrPagesExcess { .. }
         | Rule(_)
         | RuleKindNotBook { .. }
         | RuleSourceNotPending { .. }

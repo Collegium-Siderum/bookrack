@@ -98,7 +98,6 @@ earlier ones already happened.
 | `Block` carries per-paragraph `BlockStyle` geometry on the PDF path (font-size median / p90, bold-majority flag, line count, first-line left, normalized above-gap) — bumped 5 → 6 | `extractor_version` | same as above | re-ingest the affected PDF sources (book-side TXT / EPUB / OCR partitions read fine without a refresh, as their `style` is `None` on both old and new envelopes) |
 | PDFium `chromium/7763` → `chromium/7881` with `pdfium-render` 0.9.4, `rbook` 0.7.12 (bringing `quick-xml` 0.42 and `zip` 9), `encoding_rs` 0.8.44, `tendril` 0.5.1, `web_atoms` 0.2.6 — bumped 6 → 7 | `extractor_version` | same as above | re-ingest the affected sources; a book the new extractor reads as the old one did only has its stamp advanced, see *Re-ingesting a source file*. Books extracted at version 6 keep serving meanwhile, so the refresh can run a few sources at a time. The PDFium fixes apply to every PDF parsed after the upgrade, without a refresh. A library of the previous PDFium build no longer loads — see *A moved PDFium build* above |
 | PDFium `chromium/7881` → `chromium/8125` with `pdfium-render` 0.9.5 — bumped 7 → 8 | `extractor_version` | same as above | re-ingest the affected sources; a book the new extractor reads as the old one did only has its stamp advanced, see *Re-ingesting a source file*. `chromium/8125` takes a font's weight from the `/FontWeight` its descriptor declares, where earlier builds estimated it from the stem width, so a PDF whose fonts declare a weight can read with different bold flags on its paragraphs: re-ingesting such a book runs the full pipeline and re-embeds its chunks, although their text is unchanged. EPUB and TXT books only have their stamp advanced. Books extracted at version 6 or 7 keep serving meanwhile, so the refresh can run a few sources at a time; coming from version 6, one re-ingest covers this row and the one above. The PDFium fixes apply to every PDF parsed after the upgrade, without a refresh. A library of the previous PDFium build no longer loads — see *A moved PDFium build* above |
-| `bookrack_extract::OCR_INTAKE_VERSION` (manual bump) | `extractor_version` on OCR rows only | OCR extract → structure → chunks → vectors | re-run `bookrack intake ocr` against each affected OCR product |
 | `text-splitter`, `icu_*`, `bookrack_text::CHUNK_VERSION` | `chunk_version`, on the book store and the papers store | chunks → vectors, on both | `bookrack vectors reembed` (books); `bookrack papers vectors reset` (papers) |
 | `unicode-normalization`, `bookrack_text::NORMALIZE_VERSION` | `normalize_version` | chunks → vectors | `bookrack vectors reembed` (books); `bookrack papers vectors reembed` (papers) |
 | Embedding model name or vector width | `embed_model` / `vector_dim` | chunks → vectors | `bookrack libraries fork` (try it side by side) or `bookrack vectors reset` + `bookrack papers vectors reset` (in place) — see [Switching the embedding model](#switching-the-embedding-model) |
@@ -279,16 +278,6 @@ intakes that are `Extracted`, `DedupHold`, or `Embedded`, and the
 reembed only `Embedded` intakes whose partition holds chunks. An intake
 that stopped short of those states is on neither list, so neither is
 the full set a refresh has to cover.
-
-OCR intakes carry their own version dimension and sit on a sibling
-track: `OCR_INTAKE_VERSION` advances them, `EXTRACTOR_VERSION` does
-not, and the `--stale-only` lists above never include an OCR row. A
-bump to `OCR_INTAKE_VERSION` is refreshed by re-running
-`bookrack intake ocr` against the OCR markdown the user produced — the
-original product is the source of truth for the OCR side.
-`Catalog::stale_ocr_partitions` is the catalog-level equivalent of
-`stale_partitions` for the OCR side; it is exposed as a query but not
-yet wired to a CLI sweep.
 
 `bookrack doctor --backfill-ocr-derivation` — a one-time offline repair
 for libraries upgraded across the catalog v14 boundary. v14 added the

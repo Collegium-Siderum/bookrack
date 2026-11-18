@@ -285,7 +285,7 @@ pub async fn ingest_rule_with_progress<E: Embedder>(
                     // anchor was registered without one.
                     let expected = match anchor.page_count {
                         Some(pages) => pages,
-                        None => bookrack_extract::ocr::count_pdf_pages(source_pdf)?,
+                        None => bookrack_extract::count_pdf_pages(source_pdf)?,
                     };
                     extraction.provenance.partial_pages = check_coverage(
                         rule_path,
@@ -478,7 +478,7 @@ mod tests {
     use crate::book_pipeline_tests::{Fake, Offline, rewrite_envelope};
     use crate::rebuild::{RebuildParams, rebuild_from_intakes};
     use crate::{plan_book_chunks, reaudit};
-    use bookrack_catalog::NewIntake;
+    use bookrack_catalog::{IntakeFilter, NewIntake};
     use bookrack_core::Explain;
     use bookrack_extract::rule::RULE_ENGINE_VERSION;
     use bookrack_extract::{ExtractionEnvelope, envelope_filename, read_envelope};
@@ -642,7 +642,7 @@ language = \"en\"
 
         fn unregistered_pdf(&self, name: &str, tail: &[u8]) -> PathBuf {
             let sample = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../extract/tests/fixtures/ocr/v1/sample.pdf");
+                .join("../extract/tests/fixtures/rule/polyocr-v1/sample.pdf");
             let mut bytes = std::fs::read(sample).expect("read sample pdf");
             bytes.extend_from_slice(tail);
             let path = self.dir.path().join(name);
@@ -651,7 +651,13 @@ language = \"en\"
         }
 
         fn pending(&self) -> u64 {
-            self.catalog.count_ocr_pending().expect("pending count")
+            let awaiting = IntakeFilter {
+                awaiting_text: true,
+                ..IntakeFilter::default()
+            };
+            self.catalog
+                .count_find_intakes(&awaiting)
+                .expect("pending count")
         }
     }
 

@@ -240,8 +240,7 @@ onto.
   `GleanError::UnknownIntake`.
 - **A validation refusal from the ingest or glean pipelines**
   (`-32602`): `EmptyExtraction`, `NeedsOcr`, `MissingEnvelope`,
-  `EnvelopeMismatch`, `IntakeNotEmbedded`, `OcrSourceStatusMismatch`,
-  `OcrPagesMissing`, `OcrPagesExcess`, `IntakeNotRebuildable`.
+  `EnvelopeMismatch`, `IntakeNotEmbedded`, `IntakeNotRebuildable`.
 - **A `library` parameter naming a library the registry does not
   hold** (`-32010`): `RegistryError::LibraryUnknown`, raised by any
   handler that resolves that parameter. The message names the name

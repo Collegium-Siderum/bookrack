@@ -87,7 +87,6 @@ struct PairBilingualEntries {
 
 // --- split_pages ----------------------------------------------------------
 
-// Parallel implementation: page-marker.
 static PAGE_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"<!--\s*page\s+(\d+)\s*\(sheet\s+(\d+)\)\s*-->").expect("page marker regex")
 });

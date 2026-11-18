@@ -28,7 +28,8 @@
 //! calls against a stateful document, and letting two sequences
 //! interleave corrupts PDFium's internal state (observed as a hard
 //! crash). So [`extract`] additionally holds [`EXTRACTION_LOCK`] for
-//! its whole body, admitting one extraction into PDFium at a time.
+//! its whole body, admitting one extraction into PDFium at a time, and
+//! [`count_pdf_pages`] holds it around its own open and read.
 //!
 //! The consequence for callers: [`crate::extract`] is safe to call
 //! concurrently from many threads, but PDF extraction does not run in
@@ -50,7 +51,7 @@ use crate::contract::{
 };
 use crate::quality::{self, QualityDecision};
 
-pub(crate) const ADAPTER: &str = "pdf";
+const ADAPTER: &str = "pdf";
 
 /// The process-wide PDFium handle.
 ///
@@ -81,6 +82,26 @@ pub(crate) struct LoadFailure {
 /// thread-safety note. It guards only a sequence of PDFium calls, never
 /// any data, hence `Mutex<()>`.
 pub(crate) static EXTRACTION_LOCK: Mutex<()> = Mutex::new(());
+
+/// Read a PDF's physical sheet count. `/Pages` is a PDF metadata-layer
+/// construct independent of the text layer, so this works against a
+/// scan whose body the quality gate rejected.
+pub fn count_pdf_pages(source_pdf: &Path) -> Result<u32, ExtractError> {
+    let pdfium = pdfium()?;
+    let _guard = EXTRACTION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let document =
+        pdfium
+            .load_pdf_from_file(source_pdf, None)
+            .map_err(|e| ExtractError::CorruptFile {
+                detail: e.to_string(),
+            })?;
+    let len = document.pages().len();
+    u32::try_from(len).map_err(|_| ExtractError::CorruptFile {
+        detail: format!("page count out of range: {len}"),
+    })
+}
 
 /// Extract one PDF file under the active quality thresholds.
 pub fn extract(
@@ -191,7 +212,7 @@ pub(crate) const MAX_TOC_ENTRIES: usize = 50_000;
 /// entry to a block. An outline entry points at a *target page*, not at
 /// a text fragment, so it is anchored to the first block on (or after)
 /// that page.
-pub(crate) fn build_toc(document: &PdfDocument, blocks: &[Block]) -> Toc {
+fn build_toc(document: &PdfDocument, blocks: &[Block]) -> Toc {
     let mut raw: Vec<(String, u8, Option<usize>)> = Vec::new();
     if let Some(root) = document.bookmarks().root() {
         walk_bookmarks(root, 0, &mut raw);
@@ -255,7 +276,7 @@ fn bookmark_target_page(node: &PdfBookmark) -> Option<usize> {
 /// page is the target page or later. Anchoring forward (rather than
 /// requiring an exact page) keeps the entry resolvable when its target
 /// page carries no extracted block — e.g. a part-title or blank page.
-pub(crate) fn anchor_block(blocks: &[Block], target_page: usize) -> Option<usize> {
+fn anchor_block(blocks: &[Block], target_page: usize) -> Option<usize> {
     blocks
         .iter()
         .position(|b| b.source_unit as usize >= target_page)
@@ -264,7 +285,7 @@ pub(crate) fn anchor_block(blocks: &[Block], target_page: usize) -> Option<usize
 // --- biblio: the /Info dictionary ----------------------------------------
 
 /// Read every populated `/Info` tag, verbatim and trimmed.
-pub(crate) fn read_info_tags(document: &PdfDocument) -> Vec<(&'static str, String)> {
+fn read_info_tags(document: &PdfDocument) -> Vec<(&'static str, String)> {
     use PdfDocumentMetadataTagType as Tag;
     let metadata = document.metadata();
     let mut tags = Vec::new();
@@ -296,7 +317,7 @@ pub(crate) fn read_info_tags(document: &PdfDocument) -> Vec<(&'static str, Strin
 ///
 /// `/Info` is transcribed faithfully, garbage and all: reconciling it
 /// against the page text is the METADATA stage's job, not extract's.
-pub(crate) fn build_biblio(
+fn build_biblio(
     info_tags: &[(&'static str, String)],
     fallbacks: &mut Vec<FallbackEvent>,
 ) -> Biblio {

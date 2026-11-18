@@ -19,7 +19,8 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use bookrack_extract::{
-    BlockKind, ContributorRole, ExtractError, ExtractOutcome, Extraction, TextLayerQuality, extract,
+    BlockKind, ContributorRole, ExtractError, ExtractOutcome, Extraction, TextLayerQuality,
+    count_pdf_pages, extract,
 };
 use common::{pdf_fixture, pdfium_available};
 
@@ -177,6 +178,28 @@ fn encrypted_userpw_pdf_is_drm_protected() {
     )
     .expect_err("user password");
     assert!(matches!(err, ExtractError::DrmProtected), "got {err:?}");
+}
+
+#[test]
+fn count_pdf_pages_reads_the_sheet_count_of_a_text_pdf() {
+    if !pdfium_available() {
+        return;
+    }
+    let sample = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/rule/polyocr-v1/sample.pdf");
+    assert_eq!(count_pdf_pages(&sample).expect("page count"), 3);
+}
+
+#[test]
+fn count_pdf_pages_reads_the_sheet_count_of_a_scan_with_no_text_layer() {
+    if !pdfium_available() {
+        return;
+    }
+    // The same file `image_only_pdf_routes_to_ocr` sees refused.
+    assert_eq!(
+        count_pdf_pages(&pdf_fixture("image_only.pdf")).expect("page count"),
+        1
+    );
 }
 
 #[test]

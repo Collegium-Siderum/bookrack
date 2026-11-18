@@ -455,7 +455,7 @@ impl RuleFile {
             Frontmatter::Each => true,
         };
         let body = if strip_fm {
-            crate::ocr::strip_frontmatter(raw)
+            strip_frontmatter(raw)
         } else {
             raw
         };
@@ -495,6 +495,30 @@ fn push_canonical(out: &mut String, decoded: &str) {
     }
     let kept = start + out[start..].trim_end_matches('\n').len();
     out.truncate(kept);
+}
+
+/// Strip an optional `---`-fenced YAML frontmatter prefix, tolerating
+/// both LF and CRLF line endings. The content is not interpreted: only
+/// its bracketing is recognised. An unclosed frontmatter leaves the
+/// input untouched, so the unit cut reports what it finds there.
+fn strip_frontmatter(text: &str) -> &str {
+    let rest = if let Some(r) = text.strip_prefix("---\n") {
+        r
+    } else if let Some(r) = text.strip_prefix("---\r\n") {
+        r
+    } else {
+        return text;
+    };
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n') {
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let content = content.strip_suffix('\r').unwrap_or(content);
+        if content == "---" {
+            return &rest[offset + line.len()..];
+        }
+        offset += line.len();
+    }
+    text
 }
 
 #[cfg(test)]
@@ -585,5 +609,29 @@ mod tests {
         let mut out = String::from("x\n\n");
         push_canonical(&mut out, "\n\n");
         assert_eq!(out, "x\n\n");
+    }
+
+    #[test]
+    fn strip_frontmatter_removes_a_well_formed_block() {
+        let text = "---\nschema: 1\nengine: x\n---\n\nbody";
+        assert_eq!(strip_frontmatter(text), "\nbody");
+    }
+
+    #[test]
+    fn strip_frontmatter_leaves_input_untouched_when_unopened() {
+        let text = "no frontmatter here\n";
+        assert_eq!(strip_frontmatter(text), "no frontmatter here\n");
+    }
+
+    #[test]
+    fn strip_frontmatter_leaves_input_untouched_when_unclosed() {
+        let text = "---\nopen but never closed\n";
+        assert_eq!(strip_frontmatter(text), "---\nopen but never closed\n");
+    }
+
+    #[test]
+    fn strip_frontmatter_removes_a_crlf_fenced_block() {
+        let text = "---\r\nschema: 1\r\nengine: x\r\n---\r\nbody\r\n";
+        assert_eq!(strip_frontmatter(text), "body\r\n");
     }
 }

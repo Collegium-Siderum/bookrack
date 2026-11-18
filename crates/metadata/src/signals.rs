@@ -288,7 +288,7 @@ fn source_prior(adapter: &str, doubtful: bool) -> SourcePrior {
         "rule-text" if doubtful => SourcePrior::None,
         "rule-text" => SourcePrior::Strong,
         "pdf" | "html" | "htm" | "xhtml" => SourcePrior::Weak,
-        "txt" | "text" | "ocr" => SourcePrior::None,
+        "txt" | "text" => SourcePrior::None,
         _ => SourcePrior::Weak,
     }
 }

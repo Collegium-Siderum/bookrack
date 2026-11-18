@@ -79,7 +79,7 @@ pub struct Block {
     pub source_unit: u32,
     /// Geometry summary the heading heuristics consume. Set by the PDF
     /// adapter; left absent by adapters whose source has no glyph
-    /// geometry (TXT, EPUB, OCR) and by older envelopes that predate
+    /// geometry (TXT, EPUB, rule text) and by older envelopes that predate
     /// this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<BlockStyle>,
@@ -304,17 +304,17 @@ pub struct Provenance {
     /// rather than aborting the whole file. Empty for born-digital
     /// formats, which abort on any sub-unit failure.
     pub skipped_units: Vec<SkippedUnit>,
-    /// For a derived manifestation (e.g. an OCR intake whose source
-    /// is a scan PDF), the SHA-256 of the source bytes the derivation
-    /// was performed from. `None` for born-digital adapters and for
+    /// For a derived manifestation (e.g. a rule book whose text was
+    /// produced from a scan PDF), the SHA-256 of the source bytes the
+    /// derivation was performed from. `None` for born-digital adapters and for
     /// any extraction whose source IS the manifestation. Kept as a
     /// forensic field so a future schema change can materialize it
     /// as an `intake_id` edge without information loss.
     #[serde(default)]
     pub derived_from_sha256: Option<String>,
-    /// For a partial OCR ingest (the user opted into
+    /// For a partial ingest of a derived text (the user opted into
     /// `--allow-partial`), the 1-based sheet numbers actually present
-    /// in the OCR product, ascending. `None` means the full expected
+    /// in the text, ascending. `None` means the full expected
     /// page range is present — the normal case for every adapter.
     #[serde(default)]
     pub partial_pages: Option<Vec<u32>>,

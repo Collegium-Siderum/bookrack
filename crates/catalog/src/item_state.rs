@@ -39,21 +39,19 @@ pub(crate) const SPEC: TableSpec = TableSpec {
 
 /// Insert or replace a book's pipeline state. The row is keyed by
 /// `book_root_id`, so re-recording a book overwrites its previous state.
-/// `ocr_marker_finished_at` is an append-only audit stamp: an update
-/// that does not provide a new value keeps the existing one rather
-/// than clearing it.
+/// `ocr_marker_finished_at` is not written: a new row leaves it `NULL`
+/// and an update keeps the value the row holds.
 const UPSERT_SQL: &str = "INSERT INTO item_state \
      (book_root_id, intake_id, current_stage, embed_model, parsed_at, \
-      embedded_at, ocr_marker_finished_at, last_error) \
+      embedded_at, last_error) \
      VALUES (:book_root_id, :intake_id, :current_stage, :embed_model, :parsed_at, \
-             :embedded_at, :ocr_marker_finished_at, :last_error) \
+             :embedded_at, :last_error) \
      ON CONFLICT(book_root_id) DO UPDATE SET \
        intake_id = excluded.intake_id, \
        current_stage = excluded.current_stage, \
        embed_model = excluded.embed_model, \
        parsed_at = excluded.parsed_at, \
        embedded_at = excluded.embedded_at, \
-       ocr_marker_finished_at = COALESCE(excluded.ocr_marker_finished_at, ocr_marker_finished_at), \
        last_error = excluded.last_error";
 
 /// A `SELECT` of every column with `tail` (a `WHERE` clause) appended.
@@ -110,7 +108,6 @@ pub struct NewItemState {
     embed_model: Option<String>,
     parsed_at: Option<String>,
     embedded_at: Option<String>,
-    ocr_marker_finished_at: Option<String>,
     last_error: Option<String>,
 }
 
@@ -128,7 +125,6 @@ impl NewItemState {
             embed_model: None,
             parsed_at: None,
             embedded_at: None,
-            ocr_marker_finished_at: None,
             last_error: None,
         }
     }
@@ -151,12 +147,6 @@ impl NewItemState {
         self
     }
 
-    /// Record when OCR-marker processing finished.
-    pub fn ocr_marker_finished_at(mut self, value: impl Into<String>) -> NewItemState {
-        self.ocr_marker_finished_at = Some(value.into());
-        self
-    }
-
     /// Record the last processing error.
     pub fn last_error(mut self, value: impl Into<String>) -> NewItemState {
         self.last_error = Some(value.into());
@@ -176,7 +166,6 @@ impl Catalog {
                 ":embed_model": new.embed_model,
                 ":parsed_at": new.parsed_at,
                 ":embedded_at": new.embedded_at,
-                ":ocr_marker_finished_at": new.ocr_marker_finished_at,
                 ":last_error": new.last_error,
             },
         )?;
@@ -221,7 +210,6 @@ mod tests {
             .embed_model("qwen3")
             .parsed_at("2026-01-01T00:00:00Z")
             .embedded_at("2026-01-02T00:00:00Z")
-            .ocr_marker_finished_at("2026-01-01T12:00:00Z")
             .last_error("none");
         catalog.upsert_book_state(&written).expect("write");
 
@@ -235,10 +223,7 @@ mod tests {
         assert_eq!(read.embed_model.as_deref(), Some("qwen3"));
         assert_eq!(read.parsed_at.as_deref(), Some("2026-01-01T00:00:00Z"));
         assert_eq!(read.embedded_at.as_deref(), Some("2026-01-02T00:00:00Z"));
-        assert_eq!(
-            read.ocr_marker_finished_at.as_deref(),
-            Some("2026-01-01T12:00:00Z")
-        );
+        assert_eq!(read.ocr_marker_finished_at, None);
         assert_eq!(read.last_error.as_deref(), Some("none"));
     }
 
@@ -278,49 +263,6 @@ mod tests {
                 .count_book_states_by_stage("unknown")
                 .expect("count unknown"),
             0
-        );
-    }
-
-    #[test]
-    fn upsert_keeps_the_ocr_marker_stamp_unless_a_new_one_is_given() {
-        let catalog = Catalog::open_in_memory().expect("open");
-        catalog
-            .upsert_book_state(
-                &NewItemState::new(100_000_001, 1, "extract")
-                    .ocr_marker_finished_at("2026-01-01T12:00:00Z"),
-            )
-            .expect("first write");
-
-        // An update that carries no stamp keeps the recorded one: the
-        // column is an append-only audit stamp, not ordinary state.
-        catalog
-            .upsert_book_state(&NewItemState::new(100_000_001, 1, "embed"))
-            .expect("stampless update");
-        let read = catalog
-            .book_state(100_000_001)
-            .expect("read")
-            .expect("present");
-        assert_eq!(read.current_stage, "embed");
-        assert_eq!(
-            read.ocr_marker_finished_at.as_deref(),
-            Some("2026-01-01T12:00:00Z"),
-            "a stampless upsert must not clear the recorded stamp"
-        );
-
-        // An update that does carry a stamp replaces the recorded one.
-        catalog
-            .upsert_book_state(
-                &NewItemState::new(100_000_001, 1, "embed")
-                    .ocr_marker_finished_at("2026-02-02T00:00:00Z"),
-            )
-            .expect("restamping update");
-        let read = catalog
-            .book_state(100_000_001)
-            .expect("read")
-            .expect("present");
-        assert_eq!(
-            read.ocr_marker_finished_at.as_deref(),
-            Some("2026-02-02T00:00:00Z")
         );
     }
 
