@@ -49,19 +49,15 @@ pub struct RuleSourceAnchor {
 /// Check that `source_pdf` can be named as the source of `rule`'s text.
 ///
 /// The rule has to be able to number its units: it splits by file, or
-/// by a marker with a `sheet` group. The PDF has to be registered as a
-/// book intake in the `needs_ocr` state. Reads the PDF and the catalog;
+/// by a marker with a `sheet` group. The PDF has to be a file, registered
+/// as a book intake in the `needs_ocr` state. Reads the PDF and the catalog;
 /// reads no member of the rule and writes nothing.
 pub fn check_rule_source(
     catalog: &Catalog,
     rule: &RuleFile,
     source_pdf: &Path,
 ) -> Result<RuleSourceAnchor> {
-    if !may_number_units(rule) {
-        return Err(IngestError::RuleSourceUnnumbered {
-            rule: rule.path().to_path_buf(),
-        });
-    }
+    check_source_shape(rule, source_pdf)?;
     let source_sha256 = sha256_hex(&std::fs::read(source_pdf)?);
     let status = match catalog.intake_by_sha(ItemKind::Book, &source_sha256)? {
         Some(intake) if intake.status == IntakeStatus::NeedsOcr => {
@@ -80,6 +76,57 @@ pub fn check_rule_source(
         source_pdf: source_pdf.to_path_buf(),
         status,
     })
+}
+
+/// The part of [`check_rule_source`] that needs no catalog: the rule can
+/// number its units, and `source_pdf` names a file.
+fn check_source_shape(rule: &RuleFile, source_pdf: &Path) -> Result<()> {
+    if !may_number_units(rule) {
+        return Err(IngestError::RuleSourceUnnumbered {
+            rule: rule.path().to_path_buf(),
+        });
+    }
+    if !source_pdf.is_file() {
+        return Err(IngestError::RuleSourceNotAFile {
+            source_pdf: source_pdf.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+/// Check a rule submission before a job is queued for it.
+///
+/// The rule file has to parse, describe a book, and name at least one
+/// member file. With `source_pdf` set, [`check_rule_source`] has to pass
+/// against `catalog`; `None` stands for a library that has no catalog
+/// yet, which has registered no PDF and so refuses every source. Reads
+/// the rule file, the listing of its directory, the PDF, and the
+/// catalog; reads no member's text and writes nothing.
+pub fn check_rule_submission(
+    rule_path: &Path,
+    catalog: Option<&Catalog>,
+    source_pdf: Option<&Path>,
+) -> Result<()> {
+    let rule = RuleFile::load(rule_path)?;
+    if rule.rule().kind != RuleKind::Book {
+        return Err(IngestError::RuleKindNotBook {
+            rule: rule_path.to_path_buf(),
+        });
+    }
+    rule.members()?;
+    let Some(source_pdf) = source_pdf else {
+        return Ok(());
+    };
+    match catalog {
+        Some(catalog) => check_rule_source(catalog, &rule, source_pdf).map(drop),
+        None => {
+            check_source_shape(&rule, source_pdf)?;
+            Err(IngestError::RuleSourceNotPending {
+                source_pdf: source_pdf.to_path_buf(),
+                status: None,
+            })
+        }
+    }
 }
 
 /// Whether the rule's way of splitting can give a unit a number at all.
@@ -1006,6 +1053,112 @@ language = \"en\"
             "{err:?}"
         );
         assert_eq!(bench.pending(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_source_path_that_is_not_a_file_is_refused_with_a_next_step() {
+        let (mut bench, rule) = Bench::with_chapters(3);
+        let absent = bench.dir.path().join("absent.pdf");
+        let err = bench
+            .run(&rule, &with_source(&absent, false))
+            .await
+            .expect_err("a path with nothing behind it");
+        assert!(
+            matches!(err, IngestError::RuleSourceNotAFile { .. }),
+            "{err:?}"
+        );
+        let problem = err.explain();
+        assert!(problem.summary.contains("absent.pdf"), "{problem:?}");
+        assert!(problem.data.hint.is_some(), "{problem:?}");
+        assert_eq!(
+            bench.catalog.count_intakes(ItemKind::Book).expect("count"),
+            0
+        );
+    }
+
+    // ---- the submission check -----------------------------------------------
+
+    #[test]
+    fn a_submission_passes_when_the_rule_names_a_book_with_members() {
+        let (bench, rule) = Bench::with_chapters(2);
+        check_rule_submission(&rule, Some(&bench.catalog), None).expect("a sound rule");
+        check_rule_submission(&rule, None, None).expect("no catalog is needed without a source");
+    }
+
+    #[test]
+    fn a_submission_is_refused_for_a_rule_that_cannot_run() {
+        let (bench, rule) = Bench::with_chapters(0);
+        let err = check_rule_submission(&rule, None, None).expect_err("no member matches");
+        assert!(
+            matches!(
+                err,
+                IngestError::Rule(bookrack_extract::rule::RuleError::NoMembers { .. })
+            ),
+            "{err:?}"
+        );
+
+        bench.write("01.txt", CHAPTER_ONE);
+        bench.write(
+            "rule.toml",
+            &PLAIN.replace("schema = 1", "schema = 1\nkind = \"reference\""),
+        );
+        let err = check_rule_submission(&rule, None, None).expect_err("a reference rule");
+        assert!(
+            matches!(err, IngestError::RuleKindNotBook { .. }),
+            "{err:?}"
+        );
+
+        bench.write("rule.toml", &format!("{PLAIN}\nstray = 1\n"));
+        let err = check_rule_submission(&rule, None, None).expect_err("an unknown key");
+        assert!(
+            matches!(
+                err,
+                IngestError::Rule(bookrack_extract::rule::RuleError::Parse { .. })
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_submission_checks_its_source_against_the_catalog() {
+        let (mut bench, rule) = Bench::with_chapters(3);
+        let pending = bench.pending_pdf("scan.pdf", b"");
+        check_rule_submission(&rule, Some(&bench.catalog), Some(&pending))
+            .expect("a scan waiting for OCR");
+
+        let unknown = bench.unregistered_pdf("unknown.pdf", b"\n%unknown");
+        let err = check_rule_submission(&rule, Some(&bench.catalog), Some(&unknown))
+            .expect_err("an unregistered PDF");
+        assert!(
+            matches!(err, IngestError::RuleSourceNotPending { status: None, .. }),
+            "{err:?}"
+        );
+
+        // A library with no catalog has registered nothing.
+        let err = check_rule_submission(&rule, None, Some(&pending))
+            .expect_err("no catalog, so no registered PDF");
+        assert!(
+            matches!(err, IngestError::RuleSourceNotPending { status: None, .. }),
+            "{err:?}"
+        );
+
+        let absent = bench.dir.path().join("absent.pdf");
+        for catalog in [Some(&bench.catalog), None] {
+            let err = check_rule_submission(&rule, catalog, Some(&absent))
+                .expect_err("a path with nothing behind it");
+            assert!(
+                matches!(err, IngestError::RuleSourceNotAFile { .. }),
+                "{err:?}"
+            );
+        }
+
+        split_as_whole(&bench);
+        let err = check_rule_submission(&rule, None, Some(&pending))
+            .expect_err("a rule that numbers nothing");
+        assert!(
+            matches!(err, IngestError::RuleSourceUnnumbered { .. }),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]

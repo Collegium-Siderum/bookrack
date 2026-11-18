@@ -341,13 +341,17 @@ enum Command {
         #[arg(long, requires = "repair")]
         dry_run: bool,
     },
-    /// Submit one or more files for ingest.
+    /// Submit one or more files, or one rule file, for ingest.
     ///
     /// Requires a running bookrack daemon; the command exits with code
-    /// 2 if no daemon is found.
+    /// 2 if no daemon is found. `--rule --dry-run` is the exception: it
+    /// previews a rule in this process and needs neither a daemon nor a
+    /// library.
     #[command(after_long_help = bookrack_cli_grammar::examples![
         "ingest /path/to/book.epub",
         "ingest /path/to/book.epub --hold-for-metadata",
+        "ingest --rule /path/to/rule.toml --dry-run",
+        "ingest --rule /path/to/rule.toml --source /path/to/scan.pdf",
     ])]
     Ingest(IngestArgs),
     /// Submit one or more papers for ingest.
@@ -1498,6 +1502,9 @@ async fn run() -> Result<()> {
             days,
             no_scrub,
         } => cmd::cli_client::diagnose::run(out, days, no_scrub, None).await,
+        Command::Ingest(args) if args.dry_run => {
+            cmd::cli_client::ingest::dry_run(&selection, &args, audit_profile)
+        }
         Command::Ingest(args) => cmd::cli_client::ingest::run(args, None, audit_profile).await,
         Command::Intake { action } => {
             cmd::cli_client::intake::run(action, None, audit_profile, json_global).await
@@ -2804,8 +2811,8 @@ mod tests {
     /// One representative invocation per side of
     /// [`selection_routing::resolves_root_locally`], keyed by the argv a
     /// caller would type. Namespaces that span both sides carry a row
-    /// each: `libraries` splits by verb, `index-profile apply` by
-    /// `--dry-run`.
+    /// each: `libraries` splits by verb, `index-profile apply` and
+    /// `ingest --rule` by `--dry-run`.
     ///
     /// The table mirrors the classification rather than deriving from
     /// it, which is what lets the two be compared; the comparison runs
@@ -2827,6 +2834,11 @@ mod tests {
         ),
         (&["index-profile", "apply", "demo"], Reach::Routed),
         (&["ingest", "/tmp/book.epub"], Reach::Routed),
+        (&["ingest", "--rule", "/tmp/rule.toml"], Reach::Routed),
+        (
+            &["ingest", "--rule", "/tmp/rule.toml", "--dry-run"],
+            Reach::Local,
+        ),
         (&["init"], Reach::Local),
         (&["intake", "list-ocr-pending"], Reach::Routed),
         (&["libraries", "detect", "/tmp/library"], Reach::Local),

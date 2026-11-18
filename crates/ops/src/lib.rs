@@ -27,6 +27,7 @@ pub mod dto;
 pub mod reads;
 pub(crate) mod recorder;
 pub mod registry;
+pub mod rule;
 pub mod writes;
 
 use std::path::{Path, PathBuf};

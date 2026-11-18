@@ -724,9 +724,11 @@ the exit-code bucket does not distinguish the two.
 ## Methods (Phase 2)
 
 - `ingest.submit` — `{ paths, library?, priority?, force?,
-  recursive?, hold_for_metadata?, audit_profile? }` → `{ job_ids: [<uuid v7>] }`.
+  recursive?, hold_for_metadata?, audit_profile? }`, or in its rule
+  form `{ rule, source?, allow_partial?, library?, priority?, force?,
+  audit_profile? }` → `{ job_ids: [<uuid v7>] }`.
   Appends jobs to the persistent queue document; the worker picks
-  them up on the next 200 ms tick. When `recursive` is `true`,
+  them up on the next 200 ms tick. The file form is described first. When `recursive` is `true`,
   every directory in `paths` is walked depth-first and expanded to
   its supported-format files before enqueueing; files passed
   directly are enqueued verbatim. With `recursive` omitted or
@@ -740,6 +742,23 @@ the exit-code bucket does not distinguish the two.
   reloads it before running the ingest; set to anything else, the call
   is refused with `-32602 invalid params` before a job is queued, and
   the error's `detail` lists the accepted names.
+
+  The rule form queues one job that ingests the book a rule file
+  describes. `rule` is the rule file and `source` the scan PDF its text
+  was produced from; both are absolute paths, since the daemon does not
+  share the caller's working directory. `allow_partial` accepts text
+  that leaves pages of `source` uncovered and is only meaningful with
+  it. The submission is checked before anything is queued: the rule
+  file parses, describes a book, and names at least one member file;
+  and with `source`, the rule can number its units, `source` is a
+  file, and the library holds it as a book waiting for OCR. Each
+  failed check is `-32602` with the three parts of the refusal, and no
+  job is written; what can only be judged by reading the members — a
+  unit that cannot be cut, pages `source` has and the text does not —
+  fails the job instead. The two forms do not mix: `rule` beside a
+  non-empty `paths`, `recursive`, or `hold_for_metadata`, and `source`
+  or `allow_partial` without `rule`, are each `-32602`. The reply
+  carries the one job's id in `job_ids`.
 - `ingest.cancel` — `{ job_id }` → `{ ok: true, job_id }`. Marks the
   one pending or running job whose id contains `job_id` as cancelled:
   the full id or any part of it, matched anywhere. A UUIDv7 leads with

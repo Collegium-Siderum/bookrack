@@ -20,7 +20,8 @@
 //!
 //! The split is leaf-grained where a namespace spans both sides:
 //! `libraries` has seven offline verbs among twelve, and `index-profile
-//! apply` executes through the daemon unless it is a `--dry-run`.
+//! apply` and `ingest --rule` execute through the daemon unless they
+//! are a `--dry-run`.
 //! The top-level command names this module mentions are cross-asserted
 //! against the surface's own top-level whitelist in `main`'s tests —
 //! the two tables have different granularity and evolve separately, so
@@ -75,12 +76,15 @@ pub(crate) fn resolves_root_locally(command: &Command) -> bool {
             | LibrariesAction::Unmount { .. } => false,
         },
 
+        // A rule's `--dry-run` runs in this process; every other
+        // `ingest` is a submission to the daemon's queue.
+        Command::Ingest(args) => args.dry_run,
+
         Command::Config { .. }
         | Command::Verify
         | Command::Diagnose { .. }
         | Command::Rpc { .. }
         | Command::Doctor { .. }
-        | Command::Ingest(_)
         | Command::Glean(_)
         | Command::Intake { .. }
         | Command::Queue { .. }

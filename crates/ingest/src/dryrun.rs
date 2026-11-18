@@ -723,6 +723,92 @@ fn chunk_stats(plans: &[crate::ChunkPlan]) -> ChunkStatsOut {
 // but the dryrun consumes them through `body_sample` already.
 const _: usize = METADATA_BODY_SAMPLE_BLOCKS + METADATA_BODY_SAMPLE_CHARS;
 
+/// What a rule file would produce as a book, without a library.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleDryrunReport {
+    /// The book-side report over the rule's extraction. Its `stem`,
+    /// `format`, and `bytes` describe the rule file itself.
+    pub book: DryrunBookReport,
+    /// How many units the rule cut its members into.
+    pub units: usize,
+    /// The unit numbers measured against the rule's `[completeness]`.
+    pub completeness: RuleCompletenessOut,
+    /// Every fallback the extraction recorded, in the order it took
+    /// them.
+    pub fallbacks: Vec<RuleFallbackOut>,
+}
+
+/// The numbering of a rule's units.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleCompletenessOut {
+    /// Count of units that carried a number.
+    pub numbered: usize,
+    /// Lowest unit number seen.
+    pub min: Option<u32>,
+    /// Highest unit number seen.
+    pub max: Option<u32>,
+    /// Numbers missing between `min` and `max`.
+    pub gaps: Vec<u32>,
+    /// Numbers that appeared more than once.
+    pub duplicates: Vec<u32>,
+    /// Whether the numbers never decreased in reading order.
+    pub ordered: bool,
+}
+
+/// One fallback an extraction recorded.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleFallbackOut {
+    /// The fallback's namespaced identifier.
+    pub kind: String,
+    /// What the fallback was taken over, when the kind alone does not
+    /// say.
+    pub detail: Option<String>,
+}
+
+/// Dryrun the book a rule file describes: read its members, extract
+/// them under the rule, and run the stages [`dryrun_extraction`] runs.
+///
+/// Opens no database and writes nothing. A rule that cannot be read,
+/// does not describe a book, or cannot be cut into units is an error
+/// rather than a report, the same refusal a submission of it meets.
+pub fn dryrun_rule(rule_path: &Path, params: &DryrunParams) -> crate::Result<RuleDryrunReport> {
+    let rule = bookrack_extract::rule::RuleFile::load(rule_path)?;
+    if rule.rule().kind != bookrack_extract::rule::RuleKind::Book {
+        return Err(crate::IngestError::RuleKindNotBook {
+            rule: rule_path.to_path_buf(),
+        });
+    }
+    let source = rule.read()?;
+    let (extraction, completeness) = rule.extract_with_report(&source, &params.heading_patterns)?;
+    let units = extraction
+        .provenance
+        .rule
+        .as_ref()
+        .map_or(0, |origin| origin.units.len());
+    let fallbacks = extraction
+        .provenance
+        .fallbacks
+        .iter()
+        .map(|fallback| RuleFallbackOut {
+            kind: fallback.kind.clone(),
+            detail: fallback.detail.clone(),
+        })
+        .collect();
+    Ok(RuleDryrunReport {
+        book: dryrun_extraction(&extraction, None, rule_path, params),
+        units,
+        completeness: RuleCompletenessOut {
+            numbered: completeness.numbered,
+            min: completeness.min,
+            max: completeness.max,
+            gaps: completeness.gaps,
+            duplicates: completeness.duplicates,
+            ordered: completeness.ordered,
+        },
+        fallbacks,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -835,6 +921,58 @@ mod tests {
         assert_eq!(
             rec.base_attrs.expect("base attrs").title.as_deref(),
             Some("A Title")
+        );
+    }
+
+    #[test]
+    fn a_rule_dryrun_reports_the_book_with_its_units_and_their_numbering() {
+        let dir = tempdir().expect("tempdir");
+        for name in ["01.txt", "02.txt", "04.txt"] {
+            std::fs::write(
+                dir.path().join(name),
+                "A paragraph of prose long enough to stand as the body of one unit.\n",
+            )
+            .expect("member");
+        }
+        let path = dir.path().join("rule.toml");
+        std::fs::write(
+            &path,
+            "schema = 1\n[members]\ninclude = [\"*.txt\"]\n[units]\nby = \"file\"\n\
+             [structure]\nunit_titles = \"none\"\nheadings = \"none\"\n\
+             [biblio]\ntitle = \"A Field Guide\"\n",
+        )
+        .expect("rule");
+
+        let report = dryrun_rule(&path, &DryrunParams::default()).expect("dryrun");
+        assert_eq!(report.units, 3);
+        assert_eq!(report.completeness.numbered, 3);
+        assert_eq!(report.completeness.gaps, vec![3]);
+        assert!(
+            report.fallbacks.iter().any(|f| f.kind == "rule:gap"),
+            "{:?}",
+            report.fallbacks
+        );
+        assert_eq!(report.book.extract_outcome, "extracted");
+        assert_eq!(report.book.adapter.as_deref(), Some("rule-text"));
+        assert_eq!(
+            report.book.base_attrs.expect("base attrs").title.as_deref(),
+            Some("A Field Guide")
+        );
+        let json =
+            serde_json::to_value(dryrun_rule(&path, &DryrunParams::default()).expect("dryrun"))
+                .expect("serialize");
+        assert_eq!(json["units"], 3);
+        assert_eq!(json["completeness"]["gaps"][0], 3);
+
+        // A rule that cannot run is an error, not a report.
+        std::fs::write(&path, "schema = 1\nstray = 1\n").expect("rule");
+        let err = dryrun_rule(&path, &DryrunParams::default()).expect_err("an unknown key");
+        assert!(
+            matches!(
+                err,
+                crate::IngestError::Rule(bookrack_extract::rule::RuleError::Parse { .. })
+            ),
+            "{err:?}"
         );
     }
 

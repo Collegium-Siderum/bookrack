@@ -684,6 +684,50 @@ pub fn enqueue_ocr_intake(
     id
 }
 
+/// Append one book-pipeline job whose input is the rule file at
+/// `rule`, and return its id. `source_pdf` and `allow_partial` ride on
+/// the job's input for the worker to hand to the rule ingest; a rule
+/// job is never held at the metadata gate.
+// Same trade-off as `enqueue_files`.
+#[allow(clippy::too_many_arguments)]
+pub fn enqueue_rule(
+    state: &mut QueueState,
+    rule: PathBuf,
+    source_pdf: Option<PathBuf>,
+    allow_partial: bool,
+    library: &str,
+    priority: Priority,
+    force: bool,
+    book_audit_profile: Option<String>,
+) -> String {
+    let id = Uuid::now_v7().to_string();
+    state.jobs.push(QueueJob {
+        id: id.clone(),
+        library: library.to_string(),
+        kind: ItemKind::Book,
+        priority,
+        op: JobOp::Ingest(IngestJob {
+            path: rule,
+            force,
+            hold_for_metadata: false,
+            audit_profile: book_audit_profile,
+            input: JobInput::Rule {
+                source_pdf,
+                allow_partial,
+            },
+        }),
+        intake_ocr: None,
+        state: JobState::Pending,
+        queued_at: Utc::now(),
+        started_at: None,
+        finished_at: None,
+        error: None,
+        problem: None,
+        merged_into: None,
+    });
+    id
+}
+
 /// Cancel the unique pending or running job whose id contains
 /// `fragment` anywhere: the full id or any part of it. A UUIDv7 leads
 /// with its millisecond timestamp, so jobs queued within the same

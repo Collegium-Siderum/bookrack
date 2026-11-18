@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 bookrack-config = { path = "../config" }
+bookrack-audit-profile.workspace = true
 bookrack-control-client = { path = "../control-client" }
 bookrack-core = { path = "../core" }
 bookrack-dbkit = { path = "../dbkit" }

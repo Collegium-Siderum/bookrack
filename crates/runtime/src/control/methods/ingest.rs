@@ -2,8 +2,10 @@
 
 //! `ingest.submit` and `ingest.cancel` JSON-RPC handlers.
 //!
-//! Neither method touches the catalog, corpus, or vector store
-//! directly — both only mutate the on-disk queue document. The actual
+//! Neither method writes the catalog, corpus, or vector store — both
+//! only mutate the on-disk queue document. A rule submission reads: the
+//! rule file, the listing of its directory, and, when it names a
+//! source PDF, that file and the library's catalog. The actual
 //! ingest runs out of the worker loop, where the daemon-state flag and
 //! the broadcast notifications already fire. As a result these
 //! handlers do not take the write mutex and do not transition the
@@ -20,13 +22,29 @@ use serde_json::{Value, json};
 
 use super::{MethodContext, input_err};
 use crate::audit_helpers::require_known_profile;
+use crate::cmd::input_error::CmdInputError;
+use crate::control::error_map::handler_err;
 use crate::control::events::Event;
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::queue::{self, Priority};
 
 #[derive(Debug, Deserialize)]
 pub struct IngestSubmitParams {
+    /// The files to ingest, one job each. Absent in the rule form.
+    #[serde(default)]
     paths: Vec<PathBuf>,
+    /// A rule file to ingest as one book, in place of `paths`. An
+    /// absolute path.
+    #[serde(default)]
+    rule: Option<PathBuf>,
+    /// The scan PDF the rule's text was produced from. An absolute
+    /// path; only with `rule`.
+    #[serde(default)]
+    source: Option<PathBuf>,
+    /// Accept rule text that leaves pages of `source` uncovered. Only
+    /// with `source`.
+    #[serde(default)]
+    allow_partial: bool,
     #[serde(default)]
     library: Option<String>,
     #[serde(default)]
@@ -76,7 +94,7 @@ impl PriorityRepr {
 }
 
 pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let parsed: IngestSubmitParams = match params {
+    let mut parsed: IngestSubmitParams = match params {
         Some(v) if !v.is_null() => serde_json::from_value(v.clone()).map_err(|e| {
             RpcError::new(INVALID_PARAMS, format!("invalid ingest.submit params: {e}"))
         })?,
@@ -87,7 +105,10 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             ));
         }
     };
-    if parsed.paths.is_empty() {
+    if let Some(refusal) = form_refusal(&parsed) {
+        return Err(input_err(refusal));
+    }
+    if parsed.rule.is_none() && parsed.paths.is_empty() {
         return Err(RpcError::new(INVALID_PARAMS, "paths: must be non-empty"));
     }
     require_known_profile(
@@ -98,8 +119,12 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
     let library = super::resolve_submit_target(ctx, parsed.library.as_deref())?;
     let priority = parsed
         .priority
+        .take()
         .map(PriorityRepr::into_priority)
         .unwrap_or_default();
+    if let Some(rule) = parsed.rule.clone() {
+        return submit_rule(ctx, rule, parsed, library, priority).await;
+    }
     // Paths that arrive without a directory walk are checked against the
     // extractor's allowlist up front, so an unsupported file is refused
     // here instead of becoming a job that fails at EXTRACT. Walked paths
@@ -147,6 +172,107 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
     })?;
     ctx.event_stream.publish(Event::QueueTick(tick));
     Ok(json!({ "job_ids": ids }))
+}
+
+/// Why `params` mixes the file form with the rule form, or names a
+/// rule-form field the rest of the call gives no meaning to; `None`
+/// when the call is one form or the other.
+fn form_refusal(params: &IngestSubmitParams) -> Option<CmdInputError> {
+    let refused = |summary: &str, hint: &str| {
+        Some(CmdInputError::Refused {
+            summary: summary.to_string(),
+            hint: Some(hint.to_string()),
+        })
+    };
+    let Some(rule) = &params.rule else {
+        if params.source.is_some() {
+            return refused(
+                "`source` applies only to a `rule` submission",
+                "Name the rule file in `rule`, or drop `source`.",
+            );
+        }
+        if params.allow_partial {
+            return refused(
+                "`allow_partial` applies only to a `rule` submission",
+                "Name the rule file in `rule`, or drop `allow_partial`.",
+            );
+        }
+        return None;
+    };
+    if !params.paths.is_empty() {
+        return refused(
+            "`rule` cannot be submitted together with `paths`",
+            "Send the rule file in one call and the files in another.",
+        );
+    }
+    if params.recursive {
+        return refused(
+            "`recursive` does not apply to a `rule` submission",
+            "Send the rule without `recursive`: the rule names its own member files.",
+        );
+    }
+    if params.hold_for_metadata {
+        return refused(
+            "`hold_for_metadata` does not apply to a `rule` submission",
+            "Send the rule without `hold_for_metadata`.",
+        );
+    }
+    if params.allow_partial && params.source.is_none() {
+        return refused(
+            "`allow_partial` needs a `source`",
+            "Name the scan PDF in `source`, or drop `allow_partial`.",
+        );
+    }
+    const ABSOLUTE: &str =
+        "Send an absolute path: the daemon does not share the caller's working directory.";
+    if !rule.is_absolute() {
+        return refused(
+            &format!("rule path \"{}\" is not absolute", rule.display()),
+            ABSOLUTE,
+        );
+    }
+    match &params.source {
+        Some(source) if !source.is_absolute() => refused(
+            &format!("source path \"{}\" is not absolute", source.display()),
+            ABSOLUTE,
+        ),
+        _ => None,
+    }
+}
+
+/// Queue one job for the rule file at `rule`, once the library's own
+/// check of the submission passes. A rule that cannot run, or a source
+/// PDF the library is not waiting on, is refused here and no row is
+/// written.
+async fn submit_rule(
+    ctx: &MethodContext,
+    rule: PathBuf,
+    parsed: IngestSubmitParams,
+    library: String,
+    priority: Priority,
+) -> Result<Value, RpcError> {
+    let handle = super::select_library(ctx, Some(&library))?;
+    let (checked_rule, checked_source) = (rule.clone(), parsed.source.clone());
+    tokio::task::spawn_blocking(move || {
+        handle.check_rule_submission(&checked_rule, checked_source.as_deref())
+    })
+    .await
+    .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("ingest.submit: join error: {e}")))?
+    .map_err(|e| handler_err("ingest.submit", e))?;
+    let (id, tick) = super::queue_writes::enqueue_against(ctx, &library, |guard| {
+        queue::enqueue_rule(
+            guard,
+            rule,
+            parsed.source,
+            parsed.allow_partial,
+            &library,
+            priority,
+            parsed.force,
+            parsed.audit_profile,
+        )
+    })?;
+    ctx.event_stream.publish(Event::QueueTick(tick));
+    Ok(json!({ "job_ids": [id] }))
 }
 
 #[derive(Debug, Deserialize)]

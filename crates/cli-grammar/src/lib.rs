@@ -227,20 +227,55 @@ impl std::fmt::Display for RetryStateFilter {
 /// Positional + flag bundle for `ingest`. Lives in a standalone struct
 /// so the same type can be embedded in the top-level `Command::Ingest`
 /// variant without duplicating attributes.
+///
+/// Two forms share the command: a source file or directory named by
+/// `<PATH>`, or a rule file named by `--rule`. Exactly one is given.
 #[derive(clap::Args, Debug, Clone)]
+#[command(group(
+    clap::ArgGroup::new("ingest_input")
+        .required(true)
+        .multiple(false)
+        .args(["path", "rule"])
+))]
 pub struct IngestArgs {
     /// Source file, or a directory the ingest walks recursively (with
     /// `--recursive`).
-    pub path: PathBuf,
+    pub path: Option<PathBuf>,
     /// Walk `<PATH>` as a directory and enqueue every supported file.
     /// Without this flag, `<PATH>` must point at a single book file.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "rule")]
     pub recursive: bool,
     /// Pause each book after EXTRACT so a curator can review the audit
     /// verdict before CHUNK / EMBED. Resume with `metadata advance`,
     /// `metadata approve`, or any of the other gate decisions.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "rule")]
     pub hold_for_metadata: bool,
+    /// Ingest the book a rule file describes, in place of `<PATH>`. The
+    /// rule names the text files that make up the book and how to cut
+    /// them into units.
+    #[arg(long, value_name = "RULE")]
+    pub rule: Option<PathBuf>,
+    /// With `--rule`: the scan PDF the rule's text was produced from.
+    /// The PDF must already be registered as waiting for OCR; the text
+    /// is checked against its pages and recorded as derived from it.
+    // `path` and `rule` share a group, and a requirement on one member
+    // of a group is met by any other, so the file form is ruled out by
+    // name.
+    #[arg(long, value_name = "PDF", requires = "rule", conflicts_with = "path")]
+    pub source: Option<PathBuf>,
+    /// With `--source`: accept text that leaves pages of the PDF
+    /// uncovered, recording the pages that are covered.
+    #[arg(long, requires = "source")]
+    pub allow_partial: bool,
+    /// With `--rule`: report what the rule would produce and exit.
+    /// Runs in this process, without a daemon; queues nothing and
+    /// writes nothing.
+    #[arg(
+        long,
+        requires = "rule",
+        conflicts_with_all = ["path", "source", "allow_partial", "force", "priority", "no_wait"]
+    )]
+    pub dry_run: bool,
     /// Re-ingest even when the source SHA-256 already exists in the
     /// catalog. Without this flag, duplicate sources are skipped.
     #[arg(long)]
@@ -2164,12 +2199,90 @@ mod tests {
             "--priority",
             "high",
         ]);
-        assert_eq!(args.path.to_string_lossy(), "/tmp/b.epub");
+        assert_eq!(
+            args.path.as_deref(),
+            Some(std::path::Path::new("/tmp/b.epub"))
+        );
         assert!(args.force);
         assert!(args.hold_for_metadata);
         assert!(!args.recursive);
         assert!(!args.no_wait);
         assert_eq!(args.priority.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn ingest_takes_a_rule_in_place_of_a_path() {
+        let args = parse_ingest(&[
+            "ingest",
+            "--rule",
+            "/tmp/rule.toml",
+            "--source",
+            "/tmp/scan.pdf",
+            "--allow-partial",
+            "--force",
+        ]);
+        assert!(args.path.is_none());
+        assert_eq!(
+            args.rule.as_deref(),
+            Some(std::path::Path::new("/tmp/rule.toml"))
+        );
+        assert_eq!(
+            args.source.as_deref(),
+            Some(std::path::Path::new("/tmp/scan.pdf"))
+        );
+        assert!(args.allow_partial && args.force && !args.dry_run);
+
+        let args = parse_ingest(&["ingest", "--rule", "/tmp/rule.toml", "--dry-run"]);
+        assert!(args.dry_run);
+    }
+
+    #[test]
+    fn ingest_refuses_a_mixed_or_incomplete_form() {
+        let refused: &[&[&str]] = &[
+            // Neither a path nor a rule.
+            &["ingest"],
+            // Both.
+            &["ingest", "/tmp/b.epub", "--rule", "/tmp/rule.toml"],
+            // File-form flags on the rule form.
+            &["ingest", "--rule", "/tmp/rule.toml", "--recursive"],
+            &["ingest", "--rule", "/tmp/rule.toml", "--hold-for-metadata"],
+            // Rule-form flags on the file form.
+            &["ingest", "/tmp/b.epub", "--source", "/tmp/scan.pdf"],
+            &["ingest", "/tmp/b.epub", "--dry-run"],
+            // A partial product is partial against a source.
+            &["ingest", "--rule", "/tmp/rule.toml", "--allow-partial"],
+            // A preview queues nothing and reads no catalog.
+            &[
+                "ingest",
+                "--rule",
+                "/tmp/rule.toml",
+                "--dry-run",
+                "--source",
+                "/tmp/scan.pdf",
+            ],
+            &["ingest", "--rule", "/tmp/rule.toml", "--dry-run", "--force"],
+            &[
+                "ingest",
+                "--rule",
+                "/tmp/rule.toml",
+                "--dry-run",
+                "--no-wait",
+            ],
+            &[
+                "ingest",
+                "--rule",
+                "/tmp/rule.toml",
+                "--dry-run",
+                "--priority",
+                "high",
+            ],
+        ];
+        for tokens in refused {
+            assert!(
+                TestCli::try_parse_from(*tokens).is_err(),
+                "{tokens:?} must be refused"
+            );
+        }
     }
 
     #[test]

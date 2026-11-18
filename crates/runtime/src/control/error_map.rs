@@ -216,6 +216,19 @@ pub fn state_refusal(err: &Report) -> Option<Problem> {
         .map(problem_of)
 }
 
+/// The three-part reading of `err` when it is a refusal of the
+/// caller's input, and `None` for every other error.
+///
+/// For a command that checks input itself, with no daemon in between:
+/// the refusal reads the same as the daemon's `-32602` reply for it.
+/// Nothing else is let through, so an error with no next step keeps the
+/// cause chain its caller attached.
+pub fn input_refusal(err: &Report) -> Option<Problem> {
+    classify(err)
+        .filter(|rpc| rpc.code == INVALID_PARAMS)
+        .map(problem_of)
+}
+
 /// The problem an envelope was built from: the inverse of
 /// [`rpc_from_problem`].
 fn problem_of(rpc: RpcError) -> Problem {
@@ -639,6 +652,7 @@ fn from_ingest(e: &IngestError) -> RpcError {
         | Rule(_)
         | RuleKindNotBook { .. }
         | RuleSourceNotPending { .. }
+        | RuleSourceNotAFile { .. }
         | RuleSourceUnnumbered { .. }
         | RuleCoverage { .. } => INVALID_PARAMS,
         _ => INTERNAL_ERROR,
@@ -1466,6 +1480,12 @@ mod tests {
                 IngestError::RuleSourceNotPending {
                     source_pdf: scan.clone(),
                     status: None,
+                },
+            ),
+            (
+                "not a file",
+                IngestError::RuleSourceNotAFile {
+                    source_pdf: scan.clone(),
                 },
             ),
             (

@@ -257,6 +257,14 @@ pub enum BookrackCliError {
     #[error("{}", .problem.summary)]
     InitRefused { problem: Problem },
 
+    /// A command that checks its input in this process, with no daemon
+    /// in between, refused it: a rule file that cannot run, a profile
+    /// name outside the built-in set. The three parts are the ones the
+    /// daemon's `-32602` reply carries for the same refusal. Operator
+    /// input, not a bug: exit 2, and the reporter draws the three parts.
+    #[error("{}", .problem.summary)]
+    InputRefused { problem: Problem },
+
     /// A wait on queue jobs was refused: a `--job` fragment matched no
     /// job or more than one, a selected job is pending on a paused
     /// queue, or the daemon runs without a queue worker. Judged from
@@ -317,6 +325,7 @@ impl BookrackCliError {
             | Self::FilterOffItsSide { .. }
             | Self::InitRefused { .. }
             | Self::QueueWaitRefused { .. }
+            | Self::InputRefused { .. }
             | Self::RootIdentityRefused { .. }
             | Self::StateUnusable { .. } => 2,
             Self::DetectNegative(_) => 1,
@@ -402,6 +411,7 @@ impl BookrackCliError {
             | Self::FilterOffItsSide { problem }
             | Self::InitRefused { problem }
             | Self::QueueWaitRefused { problem }
+            | Self::InputRefused { problem }
             | Self::RootIdentityRefused { problem }
             | Self::StateUnusable { problem } => {
                 return Some(problem.data.clone());

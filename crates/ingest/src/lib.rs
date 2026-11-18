@@ -28,14 +28,15 @@ pub use bookrack_corpus::IndexStamps;
 pub use bookrack_text::{ChunkParams, ChunkPlan};
 pub use dryrun::{
     BiblioOut, ChunkStatsOut, DryrunBookReport, DryrunParams, DryrunSummary, FieldOut,
-    StructureOut, TocStatsOut, collect_files, dryrun_book, dryrun_extraction, dryrun_path,
-    summarize,
+    RuleCompletenessOut, RuleDryrunReport, RuleFallbackOut, StructureOut, TocStatsOut,
+    collect_files, dryrun_book, dryrun_extraction, dryrun_path, dryrun_rule, summarize,
 };
 pub use embed_run::{
     EmbedRunReport, OnEmbedBatch, embed_book_chunks, embed_book_chunks_with_progress, now_rfc3339,
 };
 pub use rule::{
-    RuleIngestParams, RuleSourceAnchor, check_rule_source, ingest_rule, ingest_rule_with_progress,
+    RuleIngestParams, RuleSourceAnchor, check_rule_source, check_rule_submission, ingest_rule,
+    ingest_rule_with_progress,
 };
 
 use std::path::{Path, PathBuf};
@@ -247,6 +248,13 @@ pub enum IngestError {
         status: Option<&'static str>,
     },
 
+    /// The path named as a rule's source PDF is not a file.
+    #[error("source \"{}\" is not a file", source_pdf.display())]
+    RuleSourceNotAFile {
+        /// The path named as the source.
+        source_pdf: PathBuf,
+    },
+
     /// A source PDF was named, and the rule gives a unit that holds
     /// text no number to match against the PDF's pages.
     #[error("rule \"{}\" gives its units no page numbers", rule.display())]
@@ -312,6 +320,12 @@ impl bookrack_core::Explain for IngestError {
                         ),
                 }
             }
+            IngestError::RuleSourceNotAFile { source_pdf } => bookrack_core::Problem::new(format!(
+                "source \"{}\" is not a file",
+                source_pdf.display()
+            ))
+            .detail("The path does not exist, or it names something other than a file.")
+            .hint("Pass `--source` the scan PDF the rule's text was produced from."),
             IngestError::RuleSourceUnnumbered { rule } => bookrack_core::Problem::new(format!(
                 "rule \"{}\" gives its units no page numbers",
                 rule.display()

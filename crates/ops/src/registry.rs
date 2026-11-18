@@ -443,6 +443,22 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
         Ok(report)
     }
 
+    /// Check a rule submission against this library before a job is
+    /// queued for it: [`bookrack_ingest::check_rule_submission`] over the
+    /// library's catalog, opened read-only, or over none when the
+    /// library has no catalog yet. Writes nothing and takes no lock.
+    pub fn check_rule_submission(
+        &self,
+        rule: &Path,
+        source_pdf: Option<&Path>,
+    ) -> eyre::Result<()> {
+        let catalog = Catalog::open(self.ops.catalog_db())
+            .context("open catalog for the rule submission check")?;
+        bookrack_ingest::check_rule_submission(rule, catalog.as_ref(), source_pdf)
+            .context("rule submission check")?;
+        Ok(())
+    }
+
     /// Register an OCR markdown product as a derived-source intake of
     /// an already-recorded scan PDF, then run the book pipeline
     /// (STRUCTURE → CHUNK → EMBED) over its text layer.
