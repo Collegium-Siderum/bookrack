@@ -477,9 +477,9 @@ mod tests {
     use super::*;
     use crate::book_pipeline_tests::{Fake, Offline, rewrite_envelope};
     use crate::rebuild::{RebuildParams, rebuild_from_intakes};
-    use crate::{ingest_structure, plan_book_chunks, reaudit};
+    use crate::{plan_book_chunks, reaudit};
     use bookrack_catalog::NewIntake;
-    use bookrack_core::{Explain, NodeType};
+    use bookrack_core::Explain;
     use bookrack_extract::rule::RULE_ENGINE_VERSION;
     use bookrack_extract::{ExtractionEnvelope, envelope_filename, read_envelope};
 
@@ -1486,37 +1486,25 @@ language = \"en\"
         assert!(rebuilt.missing_envelope.is_empty() && rebuilt.failed.is_empty());
     }
 
+    /// The page-marked fixture chunks to these `norm_chunk_sha256`
+    /// values. They are frozen, and move only with a change to the rule
+    /// engine's output or to the chunk or normalize version, each of
+    /// which is a reason to re-derive them.
     #[tokio::test]
-    async fn a_page_marked_file_chunks_as_the_ocr_adapter_chunks_it() {
+    async fn a_page_marked_file_chunks_to_the_frozen_hashes() {
         let fixture =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../extract/tests/fixtures/rule/polyocr-v1");
         let mut bench = Bench::new();
         let report = bench.plain(&fixture.join("rule.toml")).await;
-        let by_rule = plan_book_chunks(&bench.corpus, report.book_root_id, &bench.params.chunk)
+        let plans = plan_book_chunks(&bench.corpus, report.book_root_id, &bench.params.chunk)
             .expect("rule chunks");
-
-        let extraction =
-            bookrack_extract::ocr::extract(&fixture.join("sample.bookrack-ocr.v1.md"), None, None)
-                .expect("ocr extract");
-        let mut corpus = Corpus::open_in_memory().expect("corpus");
-        let structure = ingest_structure(
-            &mut corpus,
-            report.intake_id,
-            NodeType::Work,
-            &extraction,
-            &bench.params.structure,
-        )
-        .expect("structure");
-        let by_ocr = plan_book_chunks(&corpus, structure.book_root_id, &bench.params.chunk)
-            .expect("ocr chunks");
-
-        let hashes = |plans: &[crate::ChunkPlan]| -> Vec<String> {
-            plans
-                .iter()
-                .map(|plan| plan.norm_chunk_sha256.clone())
-                .collect()
-        };
-        assert!(!by_rule.is_empty());
-        assert_eq!(hashes(&by_rule), hashes(&by_ocr));
+        let hashes: Vec<&str> = plans
+            .iter()
+            .map(|plan| plan.norm_chunk_sha256.as_str())
+            .collect();
+        assert_eq!(
+            hashes,
+            ["d39bee47ee6e4b4d3e41a41afa5b09b89860450dbf24c4ef2e1524c014f62b68"]
+        );
     }
 }

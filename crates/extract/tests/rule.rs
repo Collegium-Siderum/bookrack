@@ -13,7 +13,6 @@ use bookrack_extract::rule::{
 };
 use bookrack_extract::{
     BlockKind, ContributorRole, EXTRACTOR_VERSION, Extraction, TextLayerQuality, fallback_kinds,
-    ocr,
 };
 
 /// A rule that reads every `.txt` beside it as one unit per file.
@@ -663,39 +662,62 @@ fn extract_dir(dir: &Dir, rule: &str) -> (Extraction, CompletenessReport) {
         .expect("extract_with_report")
 }
 
-// ---- golden comparison against live ocr::extract --------------------------
+// ---- golden: a page-marked file ------------------------------------------
+
+/// The blocks of the page-marked fixture, as `(text, sheet)`, every one
+/// a body block. The values are frozen: a change to how the rule engine
+/// cuts units, strips frontmatter, or joins the lines of a paragraph
+/// shows up here.
+const POLYOCR_V1_BLOCKS: &[(&str, u32)] = &[
+    ("Synthetic OCR Fixture", 1),
+    ("A round-trip anchor for the OCR adapter", 1),
+    ("Chapter One", 2),
+    (
+        "The first paragraph of the first chapter. Plain English prose with no special \
+         characters; the sample exists to anchor the round-trip assertions in tests, not to \
+         look like a real book.",
+        2,
+    ),
+    ("A second paragraph follows on the same physical page.", 2),
+    (
+        "The third page continues the chapter. There is no outline entry for this page; the \
+         parser must place the body block here under the existing chapter, with the outline \
+         anchored at the chapter's first block on page two.",
+        3,
+    ),
+];
 
 #[test]
-fn golden_polyocr_v1_matches_live_ocr_adapter() {
-    let rule_path = rule_fixture("polyocr-v1/rule.toml");
-    let ocr_md = rule_fixture("polyocr-v1/sample.bookrack-ocr.v1.md");
-
-    let file = load(&rule_path);
+fn golden_polyocr_v1_yields_the_frozen_blocks() {
+    let file = load(&rule_fixture("polyocr-v1/rule.toml"));
     let source = file.read().expect("read rule source");
-    let rule_ex = file
+    let ex = file
         .extract(&source, &HeadingPatterns::default())
         .expect("rule extract");
-    let ocr_ex = ocr::extract(&ocr_md, None, None).expect("ocr extract");
 
-    assert!(rule_ex.toc.entries.is_empty());
-    assert!(ocr_ex.toc.entries.is_empty());
-    assert_eq!(rule_ex.blocks.len(), ocr_ex.blocks.len());
-
-    let origin = rule_ex
+    assert!(ex.toc.entries.is_empty());
+    let origin = ex
         .provenance
         .rule
         .as_ref()
         .expect("Provenance.rule must be populated");
     assert_eq!(origin.units.len(), 3);
 
-    for (rb, ob) in rule_ex.blocks.iter().zip(ocr_ex.blocks.iter()) {
-        assert_eq!(rb.kind, ob.kind);
-        assert_eq!(rb.text, ob.text);
-        let sheet = origin.units[rb.source_unit as usize]
-            .sheet
-            .expect("sheet number from marker");
-        assert_eq!(sheet - 1, ob.source_unit);
-    }
+    let blocks: Vec<(BlockKind, &str, u32)> = ex
+        .blocks
+        .iter()
+        .map(|b| {
+            let sheet = origin.units[b.source_unit as usize]
+                .sheet
+                .expect("sheet number from marker");
+            (b.kind, b.text.as_str(), sheet)
+        })
+        .collect();
+    let frozen: Vec<(BlockKind, &str, u32)> = POLYOCR_V1_BLOCKS
+        .iter()
+        .map(|&(text, sheet)| (BlockKind::Body, text, sheet))
+        .collect();
+    assert_eq!(blocks, frozen);
 }
 
 // ---- units & source_unit --------------------------------------------------
