@@ -266,11 +266,7 @@ pub enum IngestError {
     /// The rule's numbered units do not match the pages of the source
     /// PDF: pages are missing and a partial product was not asked for,
     /// or a unit is numbered outside the PDF's pages.
-    #[error(
-        "\"{}\" covers {covered} of {expected} pages of \"{}\"",
-        rule.display(),
-        source_pdf.display()
-    )]
+    #[error("{}", coverage_summary(rule, source_pdf, *covered, *expected, excess))]
     RuleCoverage {
         /// The rule file.
         rule: PathBuf,
@@ -285,6 +281,32 @@ pub enum IngestError {
         /// The unit numbers that are no page of the PDF, ascending.
         excess: Vec<u32>,
     },
+}
+
+/// The one line a [`IngestError::RuleCoverage`] is summed up in. A unit
+/// numbered outside the PDF is what failed whenever there is one, so it
+/// is named ahead of the page count: the count alone reads as full
+/// coverage when no page is missing.
+fn coverage_summary(
+    rule: &Path,
+    source_pdf: &Path,
+    covered: usize,
+    expected: u32,
+    excess: &[u32],
+) -> String {
+    if excess.is_empty() {
+        format!(
+            "\"{}\" covers {covered} of {expected} pages of \"{}\"",
+            rule.display(),
+            source_pdf.display()
+        )
+    } else {
+        format!(
+            "\"{}\" numbers a unit past page {expected}, the last of \"{}\"",
+            rule.display(),
+            source_pdf.display()
+        )
+    }
 }
 
 impl bookrack_core::Explain for IngestError {
@@ -369,10 +391,8 @@ impl bookrack_core::Explain for IngestError {
                     "A unit numbered outside the PDF's pages is never accepted. Check \
                      that the rule and the PDF belong together."
                 };
-                bookrack_core::Problem::new(format!(
-                    "\"{}\" covers {covered} of {expected} pages of \"{}\"",
-                    rule.display(),
-                    source_pdf.display()
+                bookrack_core::Problem::new(coverage_summary(
+                    rule, source_pdf, *covered, *expected, excess,
                 ))
                 .detail(detail.join(" "))
                 .hint(hint)

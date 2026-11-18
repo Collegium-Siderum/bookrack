@@ -1343,11 +1343,16 @@ language = \"en\"
         assert_eq!(*covered, 2);
         assert_eq!(missing, &[3]);
         assert_eq!(excess, &[4]);
+        // The summary says what failed: a count of covered pages would
+        // read as the whole story when no page is missing.
         let problem = err.explain();
         assert!(
-            problem.summary.contains("covers 2 of 3 pages"),
+            problem
+                .summary
+                .contains("numbers a unit past page 3, the last of"),
             "{problem:?}"
         );
+        assert_eq!(err.to_string(), problem.summary);
         assert!(
             !problem.data.hint.expect("hint").contains("--allow-partial"),
             "the switch does not help a unit outside the PDF"
