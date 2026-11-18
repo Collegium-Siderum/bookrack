@@ -190,9 +190,11 @@ pub struct Node {
     pub toc_lo: Option<i64>,
     /// High end of the document-order span this node covers.
     pub toc_hi: Option<i64>,
-    /// First source page this node was drawn from.
+    /// First source page this node was drawn from; for a book ingested
+    /// through a rule file, the first unit.
     pub page_index_start: Option<i64>,
-    /// Last source page this node was drawn from.
+    /// Last source page this node was drawn from; for a book ingested
+    /// through a rule file, the last unit.
     pub page_index_end: Option<i64>,
     /// Short prefix hash of a prose leaf, for approximate location.
     pub stable_anchor: Option<String>,

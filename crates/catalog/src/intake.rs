@@ -89,9 +89,9 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::int("expression_id").comment("FRBR soft reference; backfilled at METADATA"),
         ColumnSpec::text("notes"),
         ColumnSpec::int("page_count").comment(
-            "paginated source: physical sheet count. Nullable: reflow formats \
-             (EPUB / HTML / TXT) carry no page count, and rows registered \
-             before this column existed read back as NULL.",
+            "paginated source: physical sheet count; rule file: unit count. \
+             Nullable: reflow formats (EPUB / HTML / TXT) carry no page count, \
+             and rows registered before this column existed read back as NULL.",
         ),
         ColumnSpec::text("source_pdf_path").comment(
             "absolute path to the archived copy of the source PDF bytes \
@@ -618,9 +618,9 @@ pub struct Intake {
     pub expression_id: Option<i64>,
     /// Free-form notes.
     pub notes: Option<String>,
-    /// Physical sheet count for paginated sources (PDF, multi-frame
-    /// TIFF, image folders, OCR products). `None` for reflow formats
-    /// and for rows registered before the column was added.
+    /// Physical sheet count for a paginated source, and the number of
+    /// units for a book ingested through a rule file. `None` for reflow
+    /// formats and for rows registered before the column was added.
     pub page_count: Option<i64>,
     /// Absolute path to the archived copy of the source PDF's bytes,
     /// written by the paper pipeline at REGISTER alongside the

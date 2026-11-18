@@ -52,7 +52,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::text("original_year")
             .comment("pre-FRBR stopgap: a translation's original-language publication year"),
         ColumnSpec::text("source_format"),
-        ColumnSpec::text("source").comment("ocr_marker / extracted / web"),
+        ColumnSpec::text("source").comment("rule / extracted / filename"),
         ColumnSpec::text("confidence").comment("high / medium / low"),
         ColumnSpec::text("audit_verdict").comment("clean / needs_work"),
         ColumnSpec::text("enriched_by"),
@@ -160,7 +160,7 @@ pub struct PublicationAttrs {
     pub original_year: Option<String>,
     /// Format of the source the attributes were drawn from.
     pub source_format: Option<String>,
-    /// Where the attributes came from (`ocr_marker` / `extracted` / `web`).
+    /// Where the attributes came from (`rule` / `extracted` / `filename`).
     pub source: Option<String>,
     /// Extraction confidence (`high` / `medium` / `low`).
     pub confidence: Option<String>,

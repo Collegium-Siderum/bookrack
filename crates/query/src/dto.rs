@@ -198,7 +198,8 @@ pub struct BookDetail {
     pub source_sha256: String,
     /// When the file was first registered, ISO-8601 UTC.
     pub intake_at: String,
-    /// Physical sheet count for paginated sources. `None` for reflow
+    /// Physical sheet count for a paginated source, and the number of
+    /// units for a book ingested through a rule file. `None` for reflow
     /// formats and for rows registered before the column existed.
     pub page_count: Option<i64>,
     /// Size of the source file in bytes, as recorded at intake.
@@ -430,7 +431,8 @@ pub struct Passage {
     pub node_type: String,
     /// Document-order position of this leaf within its book.
     pub toc_position: i64,
-    /// Source page index the leaf starts on, if known.
+    /// Source page index the leaf starts on, if known. For a book
+    /// ingested through a rule file it is the index of the unit.
     pub page_index_start: Option<i64>,
     /// The leaf's body text.
     pub text: String,

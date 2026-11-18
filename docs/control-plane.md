@@ -1048,7 +1048,11 @@ defined profile, or an embedding model the backend does not hold is
 `-32602` with its detail and hint; a store this build cannot serve is
 `-32018`; a fault is `-32603`.
 
-- `library.stats` — aggregate counts over the library.
+- `library.stats` — aggregate counts over the library. Its
+  `intake_counts_by_status.needs_ocr` counts every scan source the
+  library holds, those whose text has since been ingested through a
+  rule file included; the scans still without text are the page
+  `library.find_books` returns under `awaiting_text: true`.
 - `library.categories` — `{ library? }` → `{ categories: [{ category,
   books }], uncategorised, total }`; the library-wide category
   distribution, most-used first and by name within a count, plus the

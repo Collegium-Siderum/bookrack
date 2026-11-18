@@ -84,8 +84,9 @@ struct Cli {
     /// environment.
     ///
     /// On local commands (`run`, `init`, `audit-profile`,
-    /// `index-profile`, `distill`, `runs`, `retrieval`) this switches
-    /// the data root for the invocation. On commands that route
+    /// `index-profile`, `distill`, `runs`, `retrieval`, and `ingest
+    /// --rule --dry-run`) this switches the data root for the
+    /// invocation. On commands that route
     /// through a running daemon, the registry names the library that
     /// owns this root and the call goes there; a root no entry claims
     /// is refused unless the daemon is the one serving it. Mutually

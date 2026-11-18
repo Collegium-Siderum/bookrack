@@ -18,7 +18,7 @@ use bookrack_core::ItemKind;
 use bookrack_corpus::Corpus;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::BookFilter;
-use bookrack_ops::reads::books::{find_books, show_book};
+use bookrack_ops::reads::books::{find_books, show_book, show_stats};
 use bookrack_ops::{Caller, Ops};
 use tempfile::TempDir;
 
@@ -280,6 +280,33 @@ fn a_scan_leaves_the_page_once_a_book_derived_from_it_is_embedded() {
     drop(catalog);
 
     assert!(awaiting_text_rows(&fx).is_empty());
+}
+
+#[test]
+fn the_needs_ocr_count_keeps_a_scan_whose_text_is_in_the_library() {
+    let fx = Fixture::build();
+    seed_scan(&fx, "sha-scan", "inbox/scan.pdf", None);
+
+    let mut catalog = Catalog::open_for_write_unbacked(&fx.catalog_db).expect("open catalog");
+    let text = catalog
+        .register_intake(
+            ItemKind::Book,
+            &NewIntake::new("sha-text").format("rule-text"),
+        )
+        .expect("register intake")
+        .into_intake()
+        .intake_id;
+    catalog
+        .set_intake_status(ItemKind::Book, text, IntakeStatus::Embedded)
+        .expect("status");
+    catalog
+        .set_derived_from(ItemKind::Book, text, "sha-scan")
+        .expect("edge");
+    drop(catalog);
+
+    assert!(awaiting_text_rows(&fx).is_empty());
+    let stats = serde_json::to_value(show_stats(&fx.ops).expect("stats")).expect("serialize");
+    assert_eq!(stats["intake_counts_by_status"]["needs_ocr"], 1);
 }
 
 #[test]
