@@ -25,26 +25,17 @@ use serde::Serialize;
 
 use crate::render::table::RowTable;
 
-/// Every crate that registers compiled-in values.
+/// The crates above the center tier that register compiled-in values.
 ///
-/// The counterpart of [`crate::config_effective::CONTRIBUTORS`]: a
-/// crate absent from this list contributes nothing, and the gate reads
-/// the same list so a registration that no surface collects fails
-/// rather than going quiet.
+/// The counterpart of [`crate::config_effective::CONTRIBUTORS`].
+/// [`catalog`] chains these after
+/// [`bookrack_ops::settings::FIXED_REGISTRIES`]; a crate absent from
+/// both lists contributes nothing, and the gate reads the chained
+/// result so a registration that no surface collects fails rather than
+/// going quiet.
 pub const REGISTRIES: &[&[FixedSetting]] = &[
     crate::FIXED_SETTINGS,
-    bookrack_config::FIXED_SETTINGS,
-    bookrack_control_client::FIXED_SETTINGS,
-    bookrack_diagnose::FIXED_SETTINGS,
-    bookrack_distill::FIXED_SETTINGS,
-    bookrack_extract::FIXED_SETTINGS,
-    bookrack_dbkit::FIXED_SETTINGS,
-    bookrack_ingest::FIXED_SETTINGS,
-    bookrack_embed::FIXED_SETTINGS,
     bookrack_mcp::FIXED_SETTINGS,
-    bookrack_obs::stream::FIXED_SETTINGS,
-    bookrack_query::dto::FIXED_SETTINGS,
-    bookrack_rerank::FIXED_SETTINGS,
     bookrack_runtime::fixed::FIXED_SETTINGS,
 ];
 
@@ -96,8 +87,11 @@ pub fn run() -> Result<()> {
 /// share one namespace across crates, so the order a reader scans has
 /// to be the key's, not the order crates happen to be listed in.
 pub fn catalog() -> Vec<&'static FixedSetting> {
-    let mut rows: Vec<&'static FixedSetting> =
-        REGISTRIES.iter().flat_map(|reg| reg.iter()).collect();
+    let mut rows: Vec<&'static FixedSetting> = bookrack_ops::settings::FIXED_REGISTRIES
+        .iter()
+        .chain(REGISTRIES)
+        .flat_map(|reg| reg.iter())
+        .collect();
     rows.sort_by_key(|setting| setting.key);
     rows
 }

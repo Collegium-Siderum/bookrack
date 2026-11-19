@@ -14,19 +14,10 @@ bookrack-config = { path = "../config" }
 bookrack-audit-profile.workspace = true
 bookrack-control-client = { path = "../control-client" }
 bookrack-core = { path = "../core" }
-bookrack-dbkit = { path = "../dbkit" }
 bookrack-diagnose = { path = "../diagnose" }
-bookrack-embed = { path = "../embed" }
-# Knob-origin producers for the effective-configuration report.
-bookrack-extract = { path = "../extract" }
-bookrack-ingest = { path = "../ingest" }
-bookrack-search = { path = "../search" }
 bookrack-mcp = { path = "../mcp" }
 bookrack-obs = { path = "../obs" }
 bookrack-ops = { path = "../ops" }
-# Registrations of compiled-in values for `config fixed`.
-bookrack-query = { path = "../query" }
-bookrack-rerank = { path = "../rerank" }
 bookrack-catalog = { path = "../catalog" }
 bookrack-cli-grammar = { path = "../cli-grammar" }
 bookrack-runtime = { path = "../runtime" }
@@ -51,6 +42,8 @@ indicatif.workspace = true
 anstyle.workspace = true
 
 [dev-dependencies]
+bookrack-dbkit = { path = "../dbkit" }
+bookrack-extract = { path = "../extract" }
 # Lay down a corpus store in a fixture library, so a verify report can
 # be about a whole library rather than one with a store missing.
 bookrack-corpus = { path = "../corpus" }

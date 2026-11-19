@@ -9,17 +9,23 @@ repository.workspace = true
 bookrack-audit-profile.workspace = true
 bookrack-catalog = { path = "../catalog" }
 bookrack-config = { path = "../config" }
+bookrack-control-client = { path = "../control-client" }
 bookrack-core = { path = "../core" }
 bookrack-corpus = { path = "../corpus" }
+bookrack-dbkit = { path = "../dbkit" }
+bookrack-diagnose = { path = "../diagnose" }
 bookrack-distill = { path = "../distill" }
 bookrack-embed = { path = "../embed" }
+bookrack-extract = { path = "../extract" }
 bookrack-glean = { path = "../glean" }
 bookrack-ingest = { path = "../ingest" }
 bookrack-metadata = { path = "../metadata" }
+bookrack-obs = { path = "../obs" }
 bookrack-query = { path = "../query" }
 bookrack-refs = { path = "../refs" }
 bookrack-rerank = { path = "../rerank" }
 bookrack-search = { path = "../search" }
+bookrack-session = { path = "../session" }
 bookrack-vectors = { path = "../vectors" }
 eyre.workspace = true
 serde.workspace = true
@@ -29,6 +35,5 @@ tokio = { workspace = true, features = ["sync", "rt"] }
 tracing.workspace = true
 
 [dev-dependencies]
-bookrack-extract = { path = "../extract" }
 tokio.workspace = true
 tempfile.workspace = true

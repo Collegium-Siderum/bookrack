@@ -140,17 +140,41 @@ fn the_inventory_names_exactly_the_config_toml_keys_that_can_be_written() {
 /// nobody calls: an unreached `pub fn knob_origins` contributes no rows,
 /// so no amount of calling the collectors can reveal it.
 ///
-/// The `Contributor` pair means one entry in `CONTRIBUTORS` serves both
-/// surfaces, so most crates are checked against `config_effective.rs`
-/// alone. `bookrack-config` is the exception: its report takes the
-/// resolved `Config` no other contributor takes, so each surface calls
-/// it directly, and both of those calls are checked here — dropping one
-/// would leave a surface silently short of six knobs.
+/// The `Contributor` pair means one entry serves both surfaces. The
+/// entries sit in two lists: `KNOB_CONTRIBUTORS` in the ops crate's
+/// `settings.rs` for the center tier and below, `CONTRIBUTORS` in
+/// `config_effective.rs` for the rest, and a crate named in either
+/// counts. Both surfaces must name `KNOB_CONTRIBUTORS`, or the ops
+/// list would be collected by nothing. `bookrack-config` is the
+/// exception: its report takes the resolved `Config` no other
+/// contributor takes, so each surface calls it directly, and both of
+/// those calls are checked here — dropping one would leave a surface
+/// silently short of six knobs.
 #[test]
 fn every_knob_reporting_crate_is_named_by_a_collector() -> Result<()> {
     let root = workspace_root();
     let report = std::fs::read_to_string(root.join("crates/cli/src/config_effective.rs"))?;
     let inventory = std::fs::read_to_string(root.join("crates/cli/src/config_knobs.rs"))?;
+    let center = std::fs::read_to_string(root.join("crates/ops/src/settings.rs"))?;
+
+    for (which, source) in [
+        ("config_effective.rs", &report),
+        ("config_knobs.rs", &inventory),
+    ] {
+        // A comment or an import naming the list collects nothing.
+        let collects = source.lines().map(str::trim_start).any(|line| {
+            line.contains("KNOB_CONTRIBUTORS")
+                && !line.starts_with("//")
+                && !line.starts_with("use ")
+        });
+        assert!(
+            collects,
+            "{which} does not name KNOB_CONTRIBUTORS, so the knobs the ops crate \
+             collects are missing from that surface"
+        );
+    }
+
+    let lists = format!("{report}\n{center}");
 
     let mut missing = Vec::new();
     let mut checked = 0usize;
@@ -169,19 +193,20 @@ fn every_knob_reporting_crate_is_named_by_a_collector() -> Result<()> {
         // knob from a module rather than through a crate name, and
         // `config` is called directly by each surface rather than
         // through `CONTRIBUTORS`, so its catalog call is the one that
-        // lives in the inventory file.
-        let (path, catalog_in) = match name.as_str() {
+        // lives in the inventory file. Every other crate is named in
+        // one of the two contributor lists.
+        let listed = ("a contributor list", &lists);
+        let (path, origins_in, catalog_in) = match name.as_str() {
             "config" => (
                 "bookrack_config::".to_string(),
+                ("config_effective.rs", &report),
                 ("config_knobs.rs", &inventory),
             ),
-            "cli" => (
-                "crate::render::confirm::".to_string(),
-                ("config_effective.rs", &report),
-            ),
+            "cli" => ("crate::render::confirm::".to_string(), listed, listed),
             other => (
                 format!("bookrack_{}::", other.replace('-', "_")),
-                ("config_effective.rs", &report),
+                listed,
+                listed,
             ),
         };
 
@@ -189,10 +214,8 @@ fn every_knob_reporting_crate_is_named_by_a_collector() -> Result<()> {
         // may expose its reporter from a module
         // (`bookrack_extract::pdfium_gate::knob_origins`) and a rule
         // keyed to the crate path alone would then miss it.
-        for (fname, (which, source)) in [
-            ("knob_origins", ("config_effective.rs", &report)),
-            ("knob_catalog", catalog_in),
-        ] {
+        for (fname, (which, source)) in [("knob_origins", origins_in), ("knob_catalog", catalog_in)]
+        {
             let named = source
                 .lines()
                 .any(|line| line.contains(&path) && line.contains(fname));

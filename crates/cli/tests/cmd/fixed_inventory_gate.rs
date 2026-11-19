@@ -324,7 +324,8 @@ fn every_crate_that_marks_a_key_is_collected_by_the_inventory() -> Result<()> {
     assert!(
         uncollected.is_empty(),
         "these crates mark constants with keys but contribute nothing to the inventory: \
-         {uncollected:?}. Add each crate's `FIXED_SETTINGS` to `config_fixed::REGISTRIES`."
+         {uncollected:?}. Add each crate's `FIXED_SETTINGS` to `bookrack_ops::settings::FIXED_REGISTRIES`, \
+         or to `config_fixed::REGISTRIES` for a crate above the center tier."
     );
 
     let members = member_crates(&root)?;

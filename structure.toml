@@ -19,48 +19,6 @@
 
 [[edge]]
 from = "cli"
-to = "dbkit"
-reason = "transitional"
-exit = "the configuration inventories live in ops"
-
-[[edge]]
-from = "cli"
-to = "embed"
-reason = "transitional"
-exit = "the configuration inventories live in ops"
-
-[[edge]]
-from = "cli"
-to = "extract"
-reason = "transitional"
-exit = "the configuration inventories live in ops"
-
-[[edge]]
-from = "cli"
-to = "ingest"
-reason = "transitional"
-exit = "the configuration inventories live in ops"
-
-[[edge]]
-from = "cli"
-to = "query"
-reason = "transitional"
-exit = "the configuration inventories live in ops"
-
-[[edge]]
-from = "cli"
-to = "rerank"
-reason = "transitional"
-exit = "the configuration inventories live in ops"
-
-[[edge]]
-from = "cli"
-to = "search"
-reason = "transitional"
-exit = "the configuration inventories live in ops"
-
-[[edge]]
-from = "cli"
 to = "catalog"
 reason = "transitional"
 exit = "run and retrieval records are read through ops, and the distill build runs in the daemon's worker"
@@ -180,14 +138,6 @@ reason = "transitional"
 exit = "the effective-attributes type lives outside catalog"
 
 # Files of the host and the front ends that name a crate below their tier.
-
-[[file]]
-paths = [
-  "crates/cli/src/config_effective.rs",
-  "crates/cli/src/config_fixed.rs",
-]
-reason = "transitional"
-exit = "the configuration inventories live in ops"
 
 [[file]]
 paths = [

@@ -4,7 +4,8 @@
 //! each one can be set.
 //!
 //! The inventory beside `config effective`'s report. Both are assembled
-//! from the same crates through [`crate::config_effective::CONTRIBUTORS`],
+//! from the same crates through `bookrack_ops::settings::KNOB_CONTRIBUTORS`
+//! and [`crate::config_effective::CONTRIBUTORS`],
 //! and each crate answers with the same resolution fed a different
 //! environment — this one an empty environment, so every row reports the
 //! layer that backstops it rather than what this machine happens to
@@ -104,7 +105,10 @@ pub fn run() -> Result<()> {
 /// entry point of each crate they call.
 pub fn catalog() -> Vec<KnobOrigin> {
     let mut rows = bookrack_config::knob_catalog();
-    for contributor in crate::config_effective::CONTRIBUTORS {
+    for contributor in bookrack_ops::settings::KNOB_CONTRIBUTORS
+        .iter()
+        .chain(crate::config_effective::CONTRIBUTORS)
+    {
         rows.extend((contributor.catalog)());
     }
     rows

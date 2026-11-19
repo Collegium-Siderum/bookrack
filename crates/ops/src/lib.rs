@@ -28,6 +28,7 @@ pub mod reads;
 pub(crate) mod recorder;
 pub mod registry;
 pub mod rule;
+pub mod settings;
 pub mod writes;
 
 use std::path::{Path, PathBuf};
@@ -38,6 +39,7 @@ use bookrack_embed::Embedder;
 use bookrack_query::{Library, QueryError};
 use bookrack_rerank::RerankClient;
 
+pub use bookrack_extract::pdfium_pin::PDFIUM_RELEASE_TAG;
 pub use bookrack_ingest::{AuditData, AuditProfile};
 pub use bookrack_metadata::paper::{
     ALL_BUILT_IN_NAMES as PAPER_AUDIT_BUILT_IN_NAMES, PROFILE_DEFAULT as PAPER_PROFILE_DEFAULT,
