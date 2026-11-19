@@ -34,6 +34,8 @@ use bookrack_text::{
 use bookrack_vectors::{ChunkRow, ChunkStore};
 use sha2::{Digest, Sha256};
 
+use crate::pipeline::common::on_file::{OnFile, OnFileError, on_file};
+
 pub mod audit;
 pub mod dryrun;
 pub mod identify;
@@ -235,6 +237,15 @@ impl bookrack_core::Explain for GleanError {
     }
 }
 
+impl From<OnFileError> for GleanError {
+    fn from(e: OnFileError) -> Self {
+        match e {
+            OnFileError::Catalog(e) => GleanError::Catalog(e),
+            OnFileError::Corpus(e) => GleanError::Corpus(e),
+        }
+    }
+}
+
 /// Convenience alias for the pipeline's fallible operations.
 pub type Result<T> = std::result::Result<T, GleanError>;
 
@@ -286,15 +297,38 @@ pub async fn glean_paper<E: Embedder>(
     let run_id = new_run_id(&source_sha);
 
     // No-op fast path: the source is already on file at `Embedded`
-    // with stamps matching what this binary would write.
+    // with stamps matching what this binary would write. A paper has
+    // no rule fingerprint and is never restamped, so every other
+    // answer runs the whole pipeline.
     if !params.force
-        && let Some(report) = noop_if_up_to_date(catalog, &source_sha, &params.embed.model)?
+        && let OnFile::Current(current) = on_file(
+            ItemKind::Paper,
+            catalog,
+            corpus,
+            &source_sha,
+            &params.embed.model,
+            None,
+        )?
     {
         tracing::info!(
-            intake_id = report.intake_id,
+            intake_id = current.intake_id,
             "glean noop: source unchanged and stamps current",
         );
-        return Ok(report);
+        return Ok(GleanReport {
+            intake_id: current.intake_id,
+            work_node_id: current.root_id,
+            nodes_written: 0,
+            chunks_written: 0,
+            already_registered: true,
+            no_op: true,
+            forced: false,
+            doi: None,
+            arxiv_id: None,
+            venue: None,
+            abstract_source: None,
+            audit_verdict: current.audit_verdict,
+            audit_confidence: current.audit_confidence,
+        });
     }
 
     // ── EXTRACT ───────────────────────────────────────────────────────
@@ -1414,55 +1448,6 @@ fn paper_body_sample(blocks: &[Block]) -> String {
         out.push('\n');
     }
     out
-}
-
-/// Return a [`GleanReport`] when re-running the pipeline against this
-/// source would be a no-op: the file is already on file at
-/// `Embedded` status, the stored extractor version equals this
-/// binary's, and the embed model on the work state matches.
-// Parallel implementation: pipeline-noop.
-fn noop_if_up_to_date(
-    catalog: &Catalog,
-    source_sha: &str,
-    embed_model: &str,
-) -> Result<Option<GleanReport>> {
-    let Some(intake) = catalog.intake_by_sha(bookrack_core::ItemKind::Paper, source_sha)? else {
-        return Ok(None);
-    };
-    if intake.status != IntakeStatus::Embedded {
-        return Ok(None);
-    }
-    if intake.extractor_version != bookrack_extract::EXTRACTOR_VERSION {
-        return Ok(None);
-    }
-    let book_root_id = PartitionIdx::new(intake.intake_id).root().get();
-    let Some(state) = catalog.book_state(book_root_id)? else {
-        return Ok(None);
-    };
-    if state.embed_model.as_deref() != Some(embed_model) {
-        return Ok(None);
-    }
-    // Surface the audit outcome stored on the row at the previous
-    // glean run so a no-op still tells the operator whether the paper
-    // landed `clean` or `needs_work`.
-    let attrs = catalog.publication_attrs(intake.intake_id, ItemKind::Paper)?;
-    let audit_verdict = attrs.as_ref().and_then(|a| a.audit_verdict.clone());
-    let audit_confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
-    Ok(Some(GleanReport {
-        intake_id: intake.intake_id,
-        work_node_id: NodeId::new(state.book_root_id),
-        nodes_written: 0,
-        chunks_written: 0,
-        already_registered: true,
-        no_op: true,
-        forced: false,
-        doi: None,
-        arxiv_id: None,
-        venue: None,
-        abstract_source: None,
-        audit_verdict,
-        audit_confidence,
-    }))
 }
 
 /// Hex-encoded SHA-256 of a byte slice — the source identity anchor.

@@ -198,6 +198,19 @@ release workflow extracts the matching section verbatim from this file.
 - **`library.search_in_book` on a library with no catalog reports the
   unknown intake**, as `library.search_in_paper` does, instead of
   failing to open the catalog file.
+- **Submitting an unchanged paper again is no longer reported as
+  unchanged after the chunking or normalization version moved.**
+  `bookrack glean` skipped a paper already on file whenever its
+  extractor version and embedding model were current, without reading
+  the `chunk_version` and `normalize_version` the papers store is
+  stamped with, so a paper whose chunks an earlier build had cut
+  finished as `skipped_duplicate`. It now compares both stamps, as
+  `bookrack ingest` does for a book, and runs the pipeline when either
+  differs; the run then stops at the stamp check with the same error a
+  book gets, until `bookrack papers vectors reset` has rebuilt the
+  store. One consequence: a paper with no abstract, in a library where
+  no paper has been embedded yet, is run again on every submission,
+  because nothing has stamped the store; it sends no embedding request.
 
 ### Removed
 

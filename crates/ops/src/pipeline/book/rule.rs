@@ -16,9 +16,10 @@ use bookrack_extract::Extraction;
 use bookrack_extract::rule::{RuleFile, RuleKind, UnitsBy};
 
 use crate::pipeline::book::{
-    IngestError, IngestParams, IngestReport, OnEmbedBatch, OnFile, Result, Staged, audit,
-    finish_extraction_ingest, new_run_id, on_file, sha256_hex,
+    IngestError, IngestParams, IngestReport, OnEmbedBatch, Result, Staged, audit,
+    finish_extraction_ingest, new_run_id, noop_report, sha256_hex,
 };
+use crate::pipeline::common::on_file::{OnFile, on_file};
 
 /// What one [`ingest_rule`] run is told beyond the rule file itself.
 /// Neither value is part of the rule, so neither reaches its
@@ -242,13 +243,15 @@ pub async fn ingest_rule_with_progress<E: Embedder>(
         None
     } else {
         match on_file(
+            ItemKind::Book,
             catalog,
             corpus,
             &source_sha,
             &params.embed.model,
             Some(&fingerprint),
         )? {
-            OnFile::Current(report) => {
+            OnFile::Current(current) => {
+                let report = noop_report(current);
                 tracing::Span::current().record("intake_id", report.intake_id);
                 tracing::info!(
                     intake_id = report.intake_id,

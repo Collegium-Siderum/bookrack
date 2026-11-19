@@ -234,7 +234,13 @@ tree, chunks, and vectors are derived afresh. Any other stale row — a
 book in another state or with another stamp behind as well, or a
 paper — runs the full pipeline without the comparison. Pointing `--recursive` at the original source directory
 therefore refreshes every stale file under it: the files whose stamps
-are current finish as `skipped_duplicate` jobs without doing any work.
+are current finish as `skipped_duplicate` jobs without doing any work. One
+exception: a paper in which no abstract was found has no chunk, and
+while no paper of its library has been embedded the papers store
+carries no `chunk_version` or `normalize_version` to compare, so
+submitting it again runs the pipeline again — extraction, tree, and
+audit, with no embedding request — until another paper stamps the
+store.
 `--force` runs the full pipeline for every file, current or stale,
 without the comparison.
 

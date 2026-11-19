@@ -897,18 +897,6 @@ agreement = "divergent"
 exit = "one embed stage serves both kinds"
 
 [[parallel]]
-id = "pipeline-noop"
-summary = "deciding that a known file needs no rerun"
-sites = [
-  "crates/ops/src/pipeline/book/mod.rs::on_file",
-  "crates/ops/src/pipeline/paper/mod.rs::noop_if_up_to_date",
-]
-reason = "transitional"
-detail = "the book side compares the chunk and normalize stamps in the corpus; the paper side compares the extractor version and the embed model only"
-agreement = "divergent"
-exit = "one no-op check serves both kinds"
-
-[[parallel]]
 id = "pipeline-run-id"
 summary = "run ids built from a prefix and the clock"
 sites = [

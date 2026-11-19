@@ -52,6 +52,10 @@ use bookrack_extract::{ExtractOutcome, Extraction};
 use sha2::{Digest, Sha256};
 use tracing::Instrument;
 
+use crate::pipeline::common::on_file::{
+    Current, OnFile, OnFileError, on_file, stored_audit_outcome,
+};
+
 bookrack_core::fixed_settings! {
     owner = "ops";
     "ingest.ann_rebuild_floor" = embed_run::L2_ABSOLUTE_FLOOR,
@@ -368,6 +372,15 @@ impl bookrack_core::Explain for IngestError {
     }
 }
 
+impl From<OnFileError> for IngestError {
+    fn from(e: OnFileError) -> Self {
+        match e {
+            OnFileError::Catalog(e) => IngestError::Catalog(e),
+            OnFileError::Corpus(e) => IngestError::Corpus(e),
+        }
+    }
+}
+
 /// A fallible `ingest` operation.
 pub type Result<T> = std::result::Result<T, IngestError>;
 
@@ -620,8 +633,16 @@ pub async fn ingest_book_with_progress<E: Embedder>(
     let behind = if params.force {
         None
     } else {
-        match on_file(catalog, corpus, &source_sha, &params.embed.model, None)? {
-            OnFile::Current(report) => {
+        match on_file(
+            ItemKind::Book,
+            catalog,
+            corpus,
+            &source_sha,
+            &params.embed.model,
+            None,
+        )? {
+            OnFile::Current(current) => {
+                let report = noop_report(current);
                 tracing::Span::current().record("intake_id", report.intake_id);
                 tracing::info!(
                     intake_id = report.intake_id,
@@ -1001,84 +1022,11 @@ async fn finish_extraction_ingest<E: Embedder>(
     })
 }
 
-/// What the catalog already holds for a source, against what this run
-/// would write.
-#[derive(Debug)]
-enum OnFile {
-    /// Run every stage.
-    Rerun,
-    /// Every stamp matches: return this report and do nothing.
-    Current(IngestReport),
-    /// Only `extractor_version` is behind: extract, then compare the
-    /// result with the envelope on file.
-    ExtractorBehind(Box<bookrack_catalog::Intake>),
-    /// Every stamp matches and the rule's fingerprint does not: extract,
-    /// then compare the result with the envelope on file.
-    RuleChanged(Box<bookrack_catalog::Intake>),
-}
-
-/// Inspect the catalog and book state to decide how much of a re-ingest
-/// of `source_sha` has work to do.
-///
-/// Anything short of [`OnFile::Rerun`] needs the intake on file and
-/// `Embedded`, the book embedded with `embed_model`, and the corpus
-/// stamped with this binary's chunk and normalize versions. The extractor
-/// stamp then decides: equal to this binary's is [`OnFile::Current`];
-/// behind it is [`OnFile::ExtractorBehind`].
-///
-/// `rule_fingerprint` is the fingerprint of the rule this run extracts
-/// under, `None` for a source no rule reads. With the extractor stamp
-/// current, a row recording another fingerprint, or none, is
-/// [`OnFile::RuleChanged`].
-// Parallel implementation: pipeline-noop.
-fn on_file(
-    catalog: &Catalog,
-    corpus: &Corpus,
-    source_sha: &str,
-    embed_model: &str,
-    rule_fingerprint: Option<&str>,
-) -> Result<OnFile> {
-    let Some(intake) = catalog.intake_by_sha(bookrack_core::ItemKind::Book, source_sha)? else {
-        return Ok(OnFile::Rerun);
-    };
-    if intake.status != IntakeStatus::Embedded {
-        return Ok(OnFile::Rerun);
-    }
-    let book_root_id = PartitionIdx::new(intake.intake_id).root();
-    let Some(state) = catalog.book_state(book_root_id.get())? else {
-        return Ok(OnFile::Rerun);
-    };
-    if state.embed_model.as_deref() != Some(embed_model) {
-        return Ok(OnFile::Rerun);
-    }
-    // The chunk and normalize versions are recorded in corpus index_meta
-    // rather than on the catalog row; a bump on either invalidates the
-    // existing chunks, so a noop is only safe when both still match the
-    // versions this binary writes.
-    let stored_chunk = corpus
-        .meta_get(bookrack_corpus::CHUNK_VERSION_KEY)?
-        .and_then(|v| v.parse::<u32>().ok());
-    if stored_chunk != Some(bookrack_text::CHUNK_VERSION) {
-        return Ok(OnFile::Rerun);
-    }
-    let stored_normalize = corpus
-        .meta_get(bookrack_corpus::NORMALIZE_VERSION_KEY)?
-        .and_then(|v| v.parse::<u32>().ok());
-    if stored_normalize != Some(bookrack_text::NORMALIZE_VERSION) {
-        return Ok(OnFile::Rerun);
-    }
-    if intake.extractor_version != bookrack_extract::EXTRACTOR_VERSION {
-        return Ok(OnFile::ExtractorBehind(Box::new(intake)));
-    }
-    if let Some(fingerprint) = rule_fingerprint
-        && intake.rule_fingerprint.as_deref() != Some(fingerprint)
-    {
-        return Ok(OnFile::RuleChanged(Box::new(intake)));
-    }
-    let (audit_verdict, audit_confidence) = stored_audit_outcome(catalog, intake.intake_id)?;
-    Ok(OnFile::Current(IngestReport {
-        intake_id: intake.intake_id,
-        book_root_id,
+/// The report of a run that found the book current and did nothing.
+fn noop_report(current: Current) -> IngestReport {
+    IngestReport {
+        intake_id: current.intake_id,
+        book_root_id: current.root_id,
         nodes_written: 0,
         prose_leaves: 0,
         chunks_written: 0,
@@ -1086,23 +1034,9 @@ fn on_file(
         no_op: true,
         forced: false,
         restamped: false,
-        audit_verdict,
-        audit_confidence,
-    }))
-}
-
-/// The audit verdict and confidence stored on the book's attrs row by its
-/// previous ingest, so a run that skips the metadata sub-step still tells
-/// the operator whether the book landed `clean` or `needs_work`.
-fn stored_audit_outcome(
-    catalog: &Catalog,
-    intake_id: i64,
-) -> Result<(Option<String>, Option<String>)> {
-    let attrs = catalog.publication_attrs(intake_id, ItemKind::Book)?;
-    Ok(match attrs {
-        Some(attrs) => (attrs.audit_verdict, attrs.confidence),
-        None => (None, None),
-    })
+        audit_verdict: current.audit_verdict,
+        audit_confidence: current.audit_confidence,
+    }
 }
 
 /// How a fresh extraction compares with the envelope on file. Each value
@@ -1223,7 +1157,8 @@ fn restamp_if_unchanged(
         "ingest restamp: extraction unchanged, stamp advanced"
     );
 
-    let (audit_verdict, audit_confidence) = stored_audit_outcome(catalog, intake_id)?;
+    let (audit_verdict, audit_confidence) =
+        stored_audit_outcome(ItemKind::Book, catalog, intake_id)?;
     Ok(Some(IngestReport {
         intake_id,
         book_root_id,

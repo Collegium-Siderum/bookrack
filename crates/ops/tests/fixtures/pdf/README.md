@@ -18,14 +18,21 @@ of the build dependency set.
   reserved sample-only blocks (`10.5555/…`, `arXiv:0000.00001`); no
   real paper is reproduced or referenced.
 
+- `synthetic_paper_no_abstract.typ` / `.pdf` — three pages, the first
+  two blank and the third plain body text with no abstract heading.
+  The abstract pick finds nothing in it, so the paper is gleaned with
+  no chunk.
+
 ## Regeneration
 
 Tools used (pin these when regenerating):
 
-- Typst `0.14.2`
+- Typst `0.14.2` for `synthetic_paper_en`
+- Typst `0.15.1` for `synthetic_paper_no_abstract`
 
 ```sh
 typst compile synthetic_paper_en.typ synthetic_paper_en.pdf
+typst compile synthetic_paper_no_abstract.typ synthetic_paper_no_abstract.pdf
 ```
 
 Re-run after editing the `.typ` source. The PDF must be committed
