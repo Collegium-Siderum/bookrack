@@ -15,8 +15,9 @@
 //! A single untyped error would force one blunt response to all three.
 //!
 //! Batching, resource-sensitive scheduling, the cross-batch retry
-//! policy and the embed cache are deliberately *not* here — they belong
-//! to the ingest pipeline, which owns the whole book stream. This
+//! policy and the reuse of stored vectors are deliberately *not* here —
+//! they belong to the embed stage of `bookrack-ops`, which owns an
+//! item's whole chunk stream. This
 //! crate's retry loop only smooths a transient transport failure of a
 //! single request.
 
@@ -246,8 +247,13 @@ fn record_dimension(model: &str, base_url: &str, dimension: usize) {
 
 /// Wrap a search query with the asymmetric instruction prefix the
 /// embedding model expects on the query side. The document side is
-/// embedded as bare normalized text, with no prefix — the asymmetry is
-/// deliberate and part of the embedding contract.
+/// embedded as the chunk's text as stored, with no prefix — the
+/// asymmetry is deliberate and part of the embedding contract.
+///
+/// The shape of the document-side input is part of the model's
+/// identity: a stored vector is reused for any chunk carrying the same
+/// text under the same model name. Changing that shape is a change of
+/// model, and takes a `vectors reset` like one.
 pub fn build_query_input(query: &str) -> String {
     format!(
         "Instruct: Given a query about books in a personal library, \

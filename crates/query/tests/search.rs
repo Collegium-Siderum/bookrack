@@ -162,9 +162,8 @@ async fn search_returns_a_cited_passage_through_the_facade() {
 /// `MODEL` at `DIM`. Each intake owns its own id partition, so the
 /// intake ids double as the partition indices a search can exclude.
 ///
-/// The chunk hashes are made distinct per intake: they are the
-/// near-duplicate fold key, and every book here carries the same
-/// fixture text.
+/// The chunk hashes are made distinct per intake: each names a chunk's
+/// content, and every book here carries the same fixture text.
 async fn build_stamped_books(
     corpus_db: &std::path::Path,
     lancedb_dir: &std::path::Path,

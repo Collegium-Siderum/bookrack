@@ -11,8 +11,8 @@
 //! the node range it covers, so a hit maps back to a precise source span.
 //!
 //! [`plan_chunks`] is pure and deterministic: the same leaves and the same
-//! [`ChunkParams`] yield byte-identical chunks, which is what lets
-//! `norm_chunk_sha256` serve as a stable dedup and cache key. Any change
+//! [`ChunkParams`] yield byte-identical chunks, which is what makes
+//! `norm_chunk_sha256` a stable identity for a chunk's content. Any change
 //! that moves a chunk boundary — target length, overlap, the join
 //! separator, the splitter version, or trimming — changes that identity
 //! and so must bump [`CHUNK_VERSION`].
@@ -92,7 +92,10 @@ pub struct ChunkPlan {
     pub end_char_offset: i32,
     /// The chunk text, joined and trimmed.
     pub text: String,
-    /// SHA-256 of the normalized chunk text; the dedup and cache key.
+    /// SHA-256 of the normalized chunk text: the chunk's content
+    /// identity, stored beside its vector and recorded in the search
+    /// log. A stored vector is matched to a chunk by the bytes of
+    /// `text`, not by this hash.
     pub norm_chunk_sha256: String,
 }
 

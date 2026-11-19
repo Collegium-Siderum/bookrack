@@ -558,8 +558,9 @@ pub struct ChunkRow {
     pub end_node_id: NodeId,
     /// Character offset of the chunk end within `end_node_id`.
     pub end_char_offset: i32,
-    /// SHA-256 of the normalized chunk text — the query-time
-    /// near-duplicate fold key and the embed-cache key.
+    /// SHA-256 of the normalized chunk text — the chunk's content
+    /// identity, recorded in the search log. A stored vector is reused
+    /// for a chunk by the bytes of `text`, not by this hash.
     pub norm_chunk_sha256: String,
 }
 
