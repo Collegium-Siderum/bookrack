@@ -1420,6 +1420,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_run_with_fewer_plans_rewrites_the_partition_from_stored_vectors() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let plans = three_plans();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let cfg = EmbedConfig::default();
+        let source = EmbedSource::SamePartition;
+        embed_chunks(&plans, source, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
+            .await
+            .expect("first run");
+
+        // Two of the three stored rows are planned again: each has its
+        // vector, and the third row has to go.
+        let embedder = counting(8);
+        let second = embed_chunks(&plans[..2], source, &embedder, &corpus, dir.path(), &cfg)
+            .await
+            .expect("second run");
+        assert_eq!(embedder.calls(), 0);
+        assert_eq!(
+            second,
+            EmbedRunReport {
+                chunks_written: 2,
+                chunks_reused: 2,
+                batches: 0,
+                shrink_events: 0,
+                total_chars: 0,
+            }
+        );
+        let texts: Vec<String> = stored_rows(dir.path())
+            .await
+            .into_iter()
+            .map(|row| row.text)
+            .collect();
+        assert_eq!(texts, ["prose 1", "prose 2"]);
+        let meta = bookrack_vectors::meta::load(dir.path())
+            .expect("load meta")
+            .expect("meta present");
+        assert_eq!(
+            meta.churn_since_rebuild, 5,
+            "three rows deleted and two appended"
+        );
+    }
+
+    #[tokio::test]
     async fn recompute_sends_every_plan_of_an_unchanged_partition() {
         let dir = tempfile::tempdir().expect("temp dir");
         let plans = three_plans();
