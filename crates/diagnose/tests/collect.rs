@@ -38,6 +38,23 @@ fn isolate_daemon_state_dir() -> PathBuf {
     process_env(ProcessEnv::isolated()).daemon_state_dir()
 }
 
+/// The placeholder `root` folds to in a bundle. The OS-prefix rule
+/// runs before the literal-root rule, so a root under a user root or a
+/// volume mount carries that rule's placeholder and any other root
+/// carries `own`. Which one a tempdir-backed root gets depends on where
+/// the host keeps temporary files.
+fn folded(root: &Path, own: &'static str) -> &'static str {
+    let by_prefix_rule = bookrack_diagnose::Scrubber::new(None, None, Vec::new())
+        .scrub_string(&root.to_string_lossy());
+    [
+        bookrack_diagnose::VOL_PLACEHOLDER,
+        bookrack_diagnose::USER_PLACEHOLDER,
+    ]
+    .into_iter()
+    .find(|placeholder| by_prefix_rule.starts_with(placeholder))
+    .unwrap_or(own)
+}
+
 struct Fixture {
     _tmp: tempfile::TempDir,
     cfg: Config,
@@ -321,7 +338,7 @@ fn scrub_replaces_private_paths_and_titles_inside_the_bundle() {
         "the literal data-dir path leaked into the bundle: {body}"
     );
     assert!(
-        body.contains(bookrack_diagnose::DATA_DIR_PLACEHOLDER),
+        body.contains(folded(&data_dir, bookrack_diagnose::DATA_DIR_PLACEHOLDER)),
         "expected the data-dir placeholder in: {body}"
     );
     assert!(
@@ -385,6 +402,7 @@ fn shared_logs_fold_every_mounted_root_and_the_state_dir() {
         (&beta, bookrack_diagnose::DATA_DIR_PLACEHOLDER),
         (&state_dir, bookrack_diagnose::STATE_DIR_PLACEHOLDER),
     ] {
+        let placeholder = folded(raw, placeholder);
         let raw = raw.display().to_string();
         assert!(
             !body.contains(&raw),
@@ -881,7 +899,10 @@ fn collect_snapshots_the_queue_document_and_reports_a_refused_one() {
         .as_str()
         .expect("the job path is a string");
     assert!(
-        path.starts_with(bookrack_diagnose::DATA_DIR_PLACEHOLDER),
+        path.starts_with(folded(
+            fx.cfg.data_dir(),
+            bookrack_diagnose::DATA_DIR_PLACEHOLDER
+        )),
         "the job's source path must be scrubbed like every other path: {path}"
     );
     assert!(
@@ -939,7 +960,10 @@ fn collect_snapshots_the_queue_document_and_reports_a_refused_one() {
     assert!(jobs[0].get("path").is_none(), "{snapshot}");
     let path = jobs[0]["op"]["path"].as_str().expect("a path under op");
     assert!(
-        path.starts_with(bookrack_diagnose::DATA_DIR_PLACEHOLDER) && !path.contains("sample"),
+        path.starts_with(folded(
+            fx.cfg.data_dir(),
+            bookrack_diagnose::DATA_DIR_PLACEHOLDER
+        )) && !path.contains("sample"),
         "{path}"
     );
     assert_eq!(jobs[1]["state"], "failed", "{snapshot}");
@@ -952,8 +976,10 @@ fn collect_snapshots_the_queue_document_and_reports_a_refused_one() {
     assert!(hint.contains("`bookrack ingest --rule`"), "{snapshot}");
     let detail = jobs[1]["problem"]["detail"].as_str().unwrap_or_default();
     assert!(
-        detail.contains(bookrack_diagnose::DATA_DIR_PLACEHOLDER)
-            && !detail.contains(&fx.cfg.data_dir().display().to_string()),
+        detail.contains(folded(
+            fx.cfg.data_dir(),
+            bookrack_diagnose::DATA_DIR_PLACEHOLDER
+        )) && !detail.contains(&fx.cfg.data_dir().display().to_string()),
         "the data root in the recorded failure is folded as well: {detail}"
     );
 
