@@ -181,7 +181,8 @@ release workflow extracts the matching section verbatim from this file.
   out unchanged sends no request and leaves its rows as they are; such
   a job completes even while the backend is unreachable. `--force`
   therefore no longer recomputes vectors: `bookrack vectors reembed`
-  and `bookrack papers vectors reembed` do, as before.
+  and `bookrack papers vectors reembed` do, as before. A text that
+  several chunks of one item share is sent to the backend once.
   `worker.progress` counts a kept chunk like an embedded one.
 - **An ingest refused for mismatched index stamps no longer contacts
   the embedding backend first.** A book or paper whose embedding model,

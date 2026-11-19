@@ -12,11 +12,13 @@
 //!
 //! A chunk whose text the item's partition already holds a vector for
 //! takes that vector instead of a new one, so a run over unchanged text
-//! sends no request. Writing an item is delete-then-append on its
+//! sends no request. A text that several of the item's chunks share is
+//! sent once, and every one of them stores the vector that comes back. Writing an item is delete-then-append on its
 //! partition, so a run replaces its rows rather than duplicating them;
 //! a run that finds every row already in place writes nothing.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -70,7 +72,8 @@ pub struct EmbedRunReport {
     pub batches: usize,
     /// Times an overloaded server forced a batch to be halved.
     pub shrink_events: usize,
-    /// Total characters of chunk text sent to the embedder.
+    /// Total characters of chunk text sent to the embedder; a text
+    /// several chunks share is counted once.
     pub total_chars: usize,
 }
 
@@ -177,16 +180,20 @@ pub async fn embed_chunks_with_progress<E: Embedder>(
         }
     }
     let mut reused_rows: Vec<ChunkRow> = Vec::new();
-    let mut to_embed: Vec<&ChunkPlan> = Vec::new();
+    let mut unstored: Vec<&ChunkPlan> = Vec::new();
     for (plan, vector) in plans.iter().zip(reused) {
         match vector {
             Some(vector) => reused_rows.push(row_of(plan, vector)),
-            None => to_embed.push(plan),
+            None => unstored.push(plan),
         }
     }
+    // A text several of the item's chunks share is sent once. Batches
+    // are cut over the texts to send, not over the chunks.
+    let (to_embed, repeats) = fold_repeated_texts(unstored);
     tracing::info!(
         reused = reused_rows.len(),
         to_embed = to_embed.len(),
+        repeated = repeats.iter().map(Vec::len).sum::<usize>(),
         total,
         "embed stage entered"
     );
@@ -343,7 +350,9 @@ pub async fn embed_chunks_with_progress<E: Embedder>(
         let batch = &to_embed[start..end];
         let batch_chars: usize = batch.iter().map(|p| p.text.chars().count()).sum();
 
-        let rows = store.append(&to_rows(batch, vectors)).await?;
+        let rows = store
+            .append(&rows_with_repeats(batch, &repeats[start..end], vectors))
+            .await?;
         tracing::debug!(rows, chars = batch_chars, "appended batch to store");
 
         consumed += rows;
@@ -709,9 +718,29 @@ async fn embed_with_shrink<E: Embedder>(
     }
 }
 
+/// Split `plans` into the first plan of each distinct text, in order,
+/// and beside each one the later plans carrying that same text. Texts
+/// are compared as [`reuse_vectors`] compares them.
+fn fold_repeated_texts(plans: Vec<&ChunkPlan>) -> (Vec<&ChunkPlan>, Vec<Vec<&ChunkPlan>>) {
+    let mut first_of: HashMap<[u8; 32], usize> = HashMap::new();
+    let mut firsts: Vec<&ChunkPlan> = Vec::new();
+    let mut repeats: Vec<Vec<&ChunkPlan>> = Vec::new();
+    for plan in plans {
+        match first_of.entry(sent_text_digest(&plan.text)) {
+            Entry::Occupied(seen) => repeats[*seen.get()].push(plan),
+            Entry::Vacant(unseen) => {
+                unseen.insert(firsts.len());
+                firsts.push(plan);
+                repeats.push(Vec::new());
+            }
+        }
+    }
+    (firsts, repeats)
+}
+
 /// Refuse an answer that does not carry one vector per text sent. The
 /// embed client checks this itself; another [`Embedder`] may not, and
-/// [`to_rows`] pairs vectors with plans by position.
+/// [`rows_with_repeats`] pairs vectors with plans by position.
 fn expect_one_vector_each(sent: usize, vectors: &[Vec<f32>]) -> Result<()> {
     if vectors.len() == sent {
         return Ok(());
@@ -726,13 +755,22 @@ fn expect_one_vector_each(sent: usize, vectors: &[Vec<f32>]) -> Result<()> {
 }
 
 /// Zip a batch of plans with its embedding vectors into store rows, one
-/// vector per plan, in order.
-fn to_rows(plans: &[&ChunkPlan], vectors: Vec<Vec<f32>>) -> Vec<ChunkRow> {
-    plans
-        .iter()
-        .zip(vectors)
-        .map(|(plan, vector)| row_of(plan, vector))
-        .collect()
+/// vector per plan, in order. `repeats` holds, beside each plan, the
+/// plans that carry its text again: each gets a row with a copy of the
+/// same vector.
+fn rows_with_repeats(
+    plans: &[&ChunkPlan],
+    repeats: &[Vec<&ChunkPlan>],
+    vectors: Vec<Vec<f32>>,
+) -> Vec<ChunkRow> {
+    let mut rows = Vec::with_capacity(plans.len() + repeats.iter().map(Vec::len).sum::<usize>());
+    for ((plan, again), vector) in plans.iter().zip(repeats).zip(vectors) {
+        for repeat in again {
+            rows.push(row_of(repeat, vector.clone()));
+        }
+        rows.push(row_of(plan, vector));
+    }
+    rows
 }
 
 /// The store row of one plan carrying `vector`.
@@ -903,7 +941,7 @@ mod tests {
             .await
             .expect("create table");
         store
-            .append(&to_rows(&[&plan(1, "seed")], vec![vec![0.5f32; dim]]))
+            .append(&[row_of(&plan(1, "seed"), vec![0.5f32; dim])])
             .await
             .expect("seed row");
     }
@@ -1421,7 +1459,7 @@ mod tests {
             .await
             .expect("create table");
         store
-            .append(&to_rows(&[&plan(1, "prose")], vec![vec![0.5f32; 8]]))
+            .append(&[row_of(&plan(1, "prose"), vec![0.5f32; 8])])
             .await
             .expect("seed row");
         let corpus = Corpus::open_in_memory().expect("corpus");
@@ -1502,6 +1540,129 @@ mod tests {
         // Three reused rows land in slices of two, then the one batch
         // of two embedded plans.
         assert_eq!(*seen.lock().unwrap(), vec![(2, 5), (3, 5), (5, 5)]);
+    }
+
+    /// A [`Scripted`] fake whose vector for a text is `dim` copies of the
+    /// text's length, so two texts of different lengths get different
+    /// vectors.
+    fn length_valued(dim: usize) -> Scripted {
+        Scripted::new(move |_, texts: &[String]| {
+            Ok(texts
+                .iter()
+                .map(|text| vec![text.chars().count() as f32; dim])
+                .collect())
+        })
+    }
+
+    #[tokio::test]
+    async fn a_text_repeated_within_an_item_is_sent_once_and_stored_for_each_chunk() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let plans = vec![
+            plan(1, "a repeated line"),
+            plan(2, "prose"),
+            plan(3, "a repeated line"),
+        ];
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let embedder = length_valued(8);
+        let report = embed_chunks(
+            &plans,
+            EmbedSource::SamePartition,
+            &embedder,
+            &corpus,
+            dir.path(),
+            &EmbedConfig::default(),
+        )
+        .await
+        .expect("embed");
+        assert_eq!(embedder.sent(), ["a repeated line", "prose"]);
+        assert_eq!(
+            report,
+            EmbedRunReport {
+                chunks_written: 3,
+                chunks_reused: 0,
+                batches: 1,
+                shrink_events: 0,
+                total_chars: "a repeated line".len() + "prose".len(),
+            }
+        );
+        let stored: Vec<(String, Vec<f32>)> = stored_rows(dir.path())
+            .await
+            .into_iter()
+            .map(|row| (row.text, row.vector))
+            .collect();
+        assert_eq!(
+            stored,
+            [
+                ("a repeated line".to_string(), vec![15.0; 8]),
+                ("prose".to_string(), vec![5.0; 8]),
+                ("a repeated line".to_string(), vec![15.0; 8]),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repeated_text_lands_with_the_batch_that_embedded_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let plans = vec![
+            plan(1, "a repeated line"),
+            plan(2, "prose"),
+            plan(3, "a repeated line"),
+            plan(4, "more prose"),
+        ];
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        // One text to a batch: the repeat rides with the first batch.
+        let cfg = EmbedConfig {
+            batch_max_chunks: 1,
+            ..EmbedConfig::default()
+        };
+        let seen = std::sync::Mutex::new(Vec::new());
+        let report = embed_chunks_with_progress(
+            &plans,
+            EmbedSource::SamePartition,
+            &length_valued(8),
+            &corpus,
+            dir.path(),
+            &cfg,
+            &|consumed, total| seen.lock().unwrap().push((consumed, total)),
+        )
+        .await
+        .expect("embed");
+        assert_eq!(report.batches, 3);
+        assert_eq!(*seen.lock().unwrap(), vec![(2, 4), (3, 4), (4, 4)]);
+        assert_eq!(partition_rows(dir.path()).await, 4);
+    }
+
+    #[tokio::test]
+    async fn a_repeated_text_among_reused_rows_keeps_the_count_rising() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut plans: Vec<ChunkPlan> = (1..=4).map(|i| plan(i, &format!("prose {i}"))).collect();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let cfg = EmbedConfig::default();
+        let source = EmbedSource::SamePartition;
+        embed_chunks(&plans, source, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
+            .await
+            .expect("first run");
+
+        plans[1] = plan(2, "a repeated line");
+        plans[3] = plan(4, "a repeated line");
+        let embedder = counting(8);
+        let seen = std::sync::Mutex::new(Vec::new());
+        let report = embed_chunks_with_progress(
+            &plans,
+            source,
+            &embedder,
+            &corpus,
+            dir.path(),
+            &cfg,
+            &|consumed, total| seen.lock().unwrap().push((consumed, total)),
+        )
+        .await
+        .expect("second run");
+        assert_eq!(embedder.sent(), ["a repeated line"]);
+        assert_eq!(report.chunks_written, 4);
+        assert_eq!(report.chunks_reused, 2, "a repeat is not a reused row");
+        // The two reused rows, then the one embedded text and its repeat.
+        assert_eq!(*seen.lock().unwrap(), vec![(2, 4), (4, 4)]);
     }
 
     fn identity(embed_model: &str, vector_dim: u32) -> VectorIdentity<'_> {
