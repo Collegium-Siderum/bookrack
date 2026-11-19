@@ -15,7 +15,6 @@
 //! drops any prior tree for the intake, making the operation idempotent.
 
 mod dryrun;
-mod embed_run;
 pub mod reaudit;
 pub mod rebuild;
 pub mod reembed;
@@ -23,15 +22,13 @@ pub mod reset;
 mod rule;
 mod structure;
 
+pub use crate::pipeline::common::embed::{EmbedRunReport, OnEmbedBatch, now_rfc3339};
 pub use bookrack_corpus::IndexStamps;
 pub use bookrack_text::{ChunkParams, ChunkPlan};
 pub use dryrun::{
     BiblioOut, ChunkStatsOut, DryrunBookReport, DryrunParams, DryrunSummary, FieldOut,
     RuleCompletenessOut, RuleDryrunReport, RuleFallbackOut, StructureOut, TocStatsOut,
     collect_files, dryrun_book, dryrun_extraction, dryrun_path, dryrun_rule, summarize,
-};
-pub use embed_run::{
-    EmbedRunReport, OnEmbedBatch, embed_book_chunks, embed_book_chunks_with_progress, now_rfc3339,
 };
 pub use rule::{
     RuleIngestParams, RuleSourceAnchor, check_rule_source, check_rule_submission, ingest_rule,
@@ -52,33 +49,10 @@ use bookrack_extract::{ExtractOutcome, Extraction};
 use sha2::{Digest, Sha256};
 use tracing::Instrument;
 
+use crate::pipeline::common::embed::{EmbedStageError, embed_chunks_with_progress};
 use crate::pipeline::common::on_file::{
     Current, OnFile, OnFileError, on_file, stored_audit_outcome,
 };
-
-bookrack_core::fixed_settings! {
-    owner = "ops";
-    "ingest.ann_rebuild_floor" = embed_run::L2_ABSOLUTE_FLOOR,
-        "chunks of accumulated churn below which the ANN index is not rebuilt",
-        acts on "how often an ingest pays for an index rebuild";
-}
-
-/// The index stamps this binary builds an index with.
-///
-/// The single assembly point for "what this build expects": the model and
-/// vector width are runtime values the caller supplies, while the chunk and
-/// normalize versions are this binary's compiled-in constants. Both the
-/// build-side gate (in [`embed_book_chunks`]) and the serve-side gate (in
-/// the query facade) compare against the [`IndexStamps`] this returns.
-// Parallel implementation: pipeline-stamps.
-pub fn current_index_stamps(embed_model: impl Into<String>, vector_dim: u32) -> IndexStamps {
-    IndexStamps {
-        embed_model: embed_model.into(),
-        vector_dim,
-        chunk_version: bookrack_text::CHUNK_VERSION,
-        normalize_version: bookrack_text::NORMALIZE_VERSION,
-    }
-}
 
 /// Tuning parameters for STRUCTURE.
 #[derive(Debug, Clone)]
@@ -377,6 +351,17 @@ impl From<OnFileError> for IngestError {
         match e {
             OnFileError::Catalog(e) => IngestError::Catalog(e),
             OnFileError::Corpus(e) => IngestError::Corpus(e),
+        }
+    }
+}
+
+impl From<EmbedStageError> for IngestError {
+    fn from(e: EmbedStageError) -> Self {
+        match e {
+            EmbedStageError::Embed(e) => IngestError::Embed(e),
+            EmbedStageError::EmptyEmbedding => IngestError::EmptyEmbedding,
+            EmbedStageError::Vectors(e) => IngestError::Vectors(e),
+            EmbedStageError::Corpus(e) => IngestError::Corpus(e),
         }
     }
 }
@@ -1373,7 +1358,7 @@ pub async fn resume_from_chunk<E: Embedder>(
 
     // EMBED.
     let started = std::time::Instant::now();
-    let embed = match embed_run::embed_book_chunks_with_progress(
+    let embed = match embed_chunks_with_progress(
         &plans,
         embedder,
         corpus,
@@ -1383,6 +1368,7 @@ pub async fn resume_from_chunk<E: Embedder>(
     )
     .instrument(tracing::info_span!("operation", stage = "embed"))
     .await
+    .map_err(IngestError::from)
     {
         Ok(report) => report,
         Err(e) => {

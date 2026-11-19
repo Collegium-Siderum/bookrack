@@ -52,7 +52,8 @@ pub async fn reconcile(cfg: &Config) -> Result<StampsReconcileReport> {
         .first()
         .map(Vec::len)
         .context("embedder returned no vector")?;
-    let stamps = bookrack_ops::pipeline::book::current_index_stamps(&embed_cfg.model, dim as u32);
+    let stamps =
+        bookrack_ops::pipeline::common::stamps::current_index_stamps(&embed_cfg.model, dim as u32);
     let corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open corpus")?;
     corpus
         .reconcile_index_stamps(&stamps)

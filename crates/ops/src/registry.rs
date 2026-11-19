@@ -478,6 +478,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
         &self,
         path: &Path,
         params: &GleanParams,
+        on_embed_batch: &OnEmbedBatch<'_>,
     ) -> eyre::Result<GleanReport> {
         let embedder = self
             .ops
@@ -517,7 +518,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
         if let Some(run) = owned_run.as_ref() {
             effective.pipeline_run_id = Some(run.id().to_string());
         }
-        let result = crate::pipeline::paper::glean_paper(
+        let result = crate::pipeline::paper::glean_paper_with_progress(
             path,
             &mut corpus,
             &mut catalog,
@@ -525,6 +526,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
             papers_dir,
             embedder,
             &effective,
+            on_embed_batch,
         )
         .await
         .context("registry-mediated glean");
@@ -1345,7 +1347,11 @@ mod tests {
     async fn glean_paper_without_papers_backend_errors_without_running_glean() {
         let h = handle("books");
         let err = h
-            .glean_paper(Path::new("/does/not/exist.pdf"), &GleanParams::default())
+            .glean_paper(
+                Path::new("/does/not/exist.pdf"),
+                &GleanParams::default(),
+                &|_, _| {},
+            )
             .await
             .expect_err("handle without papers backend must refuse glean");
         let msg = format!("{err}");

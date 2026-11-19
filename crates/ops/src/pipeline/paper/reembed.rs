@@ -20,7 +20,8 @@ use bookrack_vectors::ChunkReader;
 
 use bookrack_text::ChunkPlan;
 
-use crate::pipeline::paper::{GleanError, Result, audit_as, embed_and_write_chunks, new_run_id};
+use crate::pipeline::common::embed::embed_chunks;
+use crate::pipeline::paper::{GleanError, Result, audit_as, new_run_id};
 
 /// A planned per-paper reembed: what would happen if [`reembed_paper`]
 /// ran on this `intake_id`.
@@ -123,7 +124,8 @@ pub async fn reembed_paper<E: Embedder>(
     if plans.is_empty() {
         return Ok(0);
     }
-    embed_and_write_chunks(corpus, lancedb_dir, embedder, cfg, intake_id, &plans).await
+    let run = embed_chunks(&plans, embedder, corpus, lancedb_dir, cfg).await?;
+    Ok(run.chunks_written)
 }
 
 /// Reembed every paper intake at [`IntakeStatus::Embedded`], or just

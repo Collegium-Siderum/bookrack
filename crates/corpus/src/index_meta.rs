@@ -90,7 +90,7 @@ impl Corpus {
     ///
     /// After this runs, the next [`Self::reconcile_index_stamps`] call
     /// writes the supplied stamps verbatim instead of validating against
-    /// them, so any subsequent `embed_book_chunks` can commit a fresh model
+    /// them, so any subsequent embed run can commit a fresh model
     /// / dimension pair. The serve-side [`Self::verify_index_stamps`] gate
     /// rejects the cleared index with [`CorpusError::IndexNotStamped`]
     /// until something embeds again.

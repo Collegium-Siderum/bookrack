@@ -13,12 +13,12 @@ use std::path::Path;
 
 use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_core::ItemKind;
-use bookrack_corpus::{Corpus, IndexStamps};
+use bookrack_corpus::Corpus;
 use bookrack_extract::envelope::ExtractionEnvelope;
 use bookrack_extract::{EXTRACTOR_VERSION, EnvelopeError, read_envelope_with_fallback};
-use bookrack_text::{CHUNK_VERSION, NORMALIZE_VERSION};
 use bookrack_vectors::ChunkReader;
 
+use crate::pipeline::common::stamps::current_index_stamps;
 use crate::pipeline::paper::{GleanError, Result, build_structure};
 
 /// What to rebuild and how.
@@ -162,7 +162,6 @@ fn walk_rebuild_targets(
 ///
 /// Returns `Ok(true)` if stamps were written or already matched,
 /// `Ok(false)` if the chunks table is missing or empty.
-// Parallel implementation: pipeline-stamps.
 pub async fn stamp_index_from_existing_chunks(
     corpus: &Corpus,
     lancedb_dir: &Path,
@@ -175,12 +174,7 @@ pub async fn stamp_index_from_existing_chunks(
         return Ok(false);
     }
     let dim = store.dimension() as u32;
-    corpus.reconcile_index_stamps(&IndexStamps {
-        embed_model: embed_model.to_string(),
-        vector_dim: dim,
-        chunk_version: CHUNK_VERSION,
-        normalize_version: NORMALIZE_VERSION,
-    })?;
+    corpus.reconcile_index_stamps(&current_index_stamps(embed_model, dim))?;
     Ok(true)
 }
 

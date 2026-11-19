@@ -107,7 +107,7 @@ async fn registry_glean_records_a_pipeline_run_on_the_paper_catalog() {
         ..GleanParams::default()
     };
     let report = handle
-        .glean_paper(&fixture_path(), &params)
+        .glean_paper(&fixture_path(), &params, &|_, _| {})
         .await
         .expect("glean must succeed");
 

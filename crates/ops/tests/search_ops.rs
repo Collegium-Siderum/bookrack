@@ -21,7 +21,8 @@ use bookrack_core::{ItemKind, NodeType};
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, Result as EmbedResult};
 use bookrack_extract::{Biblio, Block, BlockKind, Extraction, Provenance, TextLayerQuality, Toc};
-use bookrack_ops::pipeline::book::{StructureParams, current_index_stamps, ingest_structure};
+use bookrack_ops::pipeline::book::{StructureParams, ingest_structure};
+use bookrack_ops::pipeline::common::stamps::current_index_stamps;
 use bookrack_ops::reads::search::{
     search, search_in_book, search_in_paper, search_paper, search_unified,
 };

@@ -5,7 +5,7 @@
 //!
 //! Each book's existing [`ChunkRow`]s are read back via
 //! [`ChunkReader::scan_partition`], mapped to [`ChunkPlan`]s by dropping
-//! the vector column, and fed back through [`embed_book_chunks`]. The
+//! the vector column, and fed back through [`embed_chunks`]. The
 //! latter owns the delete-then-append / churn-bump / cold-start ANN
 //! decisions, so reembed inherits them automatically — stamps mismatch
 //! handling is the same.
@@ -23,8 +23,8 @@ use bookrack_embed::Embedder;
 use bookrack_extract::EXTRACTOR_VERSION;
 use bookrack_vectors::{ChunkReader, ChunkRow};
 
-use crate::pipeline::book::embed_run::{EmbedRunReport, embed_book_chunks};
 use crate::pipeline::book::{IngestError, Result, audit_as, maintenance_run_id};
+use crate::pipeline::common::embed::{EmbedRunReport, embed_chunks};
 use bookrack_text::ChunkPlan;
 
 /// A planned per-book reembed: what would happen if [`reembed_book`]
@@ -117,7 +117,7 @@ pub async fn plan_reembed(
 }
 
 /// Reembed one book: read its rows back, drop their vectors, and run
-/// [`embed_book_chunks`] on the resulting [`ChunkPlan`]s. Returns the
+/// [`embed_chunks`] on the resulting [`ChunkPlan`]s. Returns the
 /// underlying [`EmbedRunReport`].
 ///
 /// On an empty partition returns a zeroed report — the caller may treat
@@ -134,7 +134,7 @@ pub async fn reembed_book<E: Embedder>(
     if plans.is_empty() {
         return Ok(EmbedRunReport::default());
     }
-    embed_book_chunks(&plans, embedder, corpus, lancedb_dir, cfg).await
+    Ok(embed_chunks(&plans, embedder, corpus, lancedb_dir, cfg).await?)
 }
 
 /// Reembed every intake currently in [`IntakeStatus::Embedded`], or
@@ -298,7 +298,7 @@ mod tests {
     use bookrack_embed::{EmbedError, Embedder, Result as EmbedResult};
     use bookrack_vectors::{ChunkRow, ChunkStore};
 
-    use crate::pipeline::book::current_index_stamps;
+    use crate::pipeline::common::stamps::current_index_stamps;
 
     /// A toy embedder whose vector encodes its call generation, so the
     /// reembed test can prove the vectors changed.

@@ -154,6 +154,30 @@ release workflow extracts the matching section verbatim from this file.
   pipeline alone.
   `bookrack config fixed` reports `ops` as the owner of
   `ingest.ann_rebuild_floor`; the key and its value are unchanged.
+- **Papers go through the embedding stage books use.** After a paper
+  is embedded its vector table is compacted, and the papers store gets
+  an ANN index declared in its own `vectors_meta.json`, built under the
+  library's index profile like the book store's. The first
+  `bookrack glean` into a papers store that has no such file builds the
+  index and writes it; `library.info` and `bookrack index-profile
+  current` then report it for papers. With the default `ivf-flat`
+  profile a search still reads every partition, and so returns what an
+  exhaustive scan would, while the store holds no more partitions than
+  the profile's `nprobes` (40, reached near ten thousand chunks); past
+  that, or under a profile with fewer probes or a quantized index, paper
+  search is approximate. Later rebuilds wait for
+  `ingest.ann_rebuild_floor` chunks of churn, as for books.
+- **A paper job reports its embedding progress.** `worker.progress`
+  carries the `embed` stage for a paper job as it does for a book job,
+  when the paper has chunks to embed; a paper in which no abstract was
+  found, and a job that ends as a no-op, report `processing` only.
+- **A write refused for mismatched index stamps no longer deletes
+  `vectors_meta.json`.** An ingest whose embedding model, vector width,
+  chunk version, or normalize version differs from the store's is
+  refused before it writes, as before; it used to remove the book
+  store's `vectors_meta.json` on the way out, dropping the index
+  declaration and churn count of a table that was left in place. The
+  file is now removed only with the table itself.
 
 ### Fixed
 

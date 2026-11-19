@@ -19,7 +19,7 @@ use bookrack_catalog::{
 };
 use bookrack_config::EmbedConfig;
 use bookrack_core::{ItemKind, NodeId, NodeType, PartitionIdx};
-use bookrack_corpus::{Corpus, IndexStamps, NewNode};
+use bookrack_corpus::{Corpus, NewNode};
 use bookrack_embed::Embedder;
 use bookrack_extract::{
     Block, BlockKind, Contributor, ContributorRole, ExtractOutcome, envelope_filename,
@@ -28,12 +28,10 @@ use bookrack_extract::{
 use bookrack_metadata::paper::{
     PaperAuditData, PaperAuditInput, PaperAuditProfile, PaperVerdict, audit_paper, csl_type_token,
 };
-use bookrack_text::{
-    CHUNK_VERSION, ChunkLeaf, ChunkPlan, NORMALIZE_VERSION, norm_text_sha256, plan_chunks,
-};
-use bookrack_vectors::{ChunkRow, ChunkStore};
+use bookrack_text::{ChunkLeaf, norm_text_sha256, plan_chunks};
 use sha2::{Digest, Sha256};
 
+use crate::pipeline::common::embed::{EmbedStageError, OnEmbedBatch, embed_chunks_with_progress};
 use crate::pipeline::common::on_file::{OnFile, OnFileError, on_file};
 
 pub mod audit;
@@ -43,7 +41,6 @@ pub mod reaudit;
 pub mod rebuild;
 pub mod reembed;
 pub mod reset;
-pub mod stamps;
 
 pub use bookrack_text::ChunkParams;
 
@@ -237,6 +234,17 @@ impl bookrack_core::Explain for GleanError {
     }
 }
 
+impl From<EmbedStageError> for GleanError {
+    fn from(e: EmbedStageError) -> Self {
+        match e {
+            EmbedStageError::Embed(e) => GleanError::Embed(e),
+            EmbedStageError::EmptyEmbedding => GleanError::EmptyEmbedding,
+            EmbedStageError::Vectors(e) => GleanError::Vectors(e),
+            EmbedStageError::Corpus(e) => GleanError::Corpus(e),
+        }
+    }
+}
+
 impl From<OnFileError> for GleanError {
     fn from(e: OnFileError) -> Self {
         match e {
@@ -255,11 +263,6 @@ pub type Result<T> = std::result::Result<T, GleanError>;
 /// idempotent when the file is at `Embedded` with current stamps;
 /// pass `params.force = true` to bypass that check.
 // Parallel implementation: pipeline-entry.
-#[tracing::instrument(
-    name = "paper",
-    skip_all,
-    fields(file = %file.display(), intake_id = tracing::field::Empty)
-)]
 pub async fn glean_paper<E: Embedder>(
     file: &Path,
     corpus: &mut Corpus,
@@ -268,6 +271,44 @@ pub async fn glean_paper<E: Embedder>(
     papers_dir: &Path,
     embedder: &E,
     params: &GleanParams,
+) -> Result<GleanReport> {
+    glean_paper_with_progress(
+        file,
+        corpus,
+        catalog,
+        lancedb_dir,
+        papers_dir,
+        embedder,
+        params,
+        &|_, _| {},
+    )
+    .await
+}
+
+/// [`glean_paper`], reporting each embedded batch to `on_embed_batch`.
+///
+/// The callback is invoked only when the paper has chunks to embed: a
+/// paper in which no abstract is found, and a run that ends as a no-op,
+/// never call it.
+// Parallel implementation: pipeline-entry.
+#[tracing::instrument(
+    name = "paper",
+    skip_all,
+    fields(file = %file.display(), intake_id = tracing::field::Empty)
+)]
+// `glean_paper`'s seven parameters plus the callback; folding the
+// callback into `GleanParams` would put a borrowed closure into a plain
+// configuration value that callers clone and build from defaults.
+#[allow(clippy::too_many_arguments)]
+pub async fn glean_paper_with_progress<E: Embedder>(
+    file: &Path,
+    corpus: &mut Corpus,
+    catalog: &mut Catalog,
+    lancedb_dir: &Path,
+    papers_dir: &Path,
+    embedder: &E,
+    params: &GleanParams,
+    on_embed_batch: &OnEmbedBatch<'_>,
 ) -> Result<GleanReport> {
     // Reject the reserved strategy / enrichment variants up front rather
     // than letting them silently fall back to a default.
@@ -619,15 +660,16 @@ pub async fn glean_paper<E: Embedder>(
             }],
             &params.chunk,
         );
-        embed_and_write_chunks(
+        embed_chunks_with_progress(
+            &plans,
+            embedder,
             corpus,
             lancedb_dir,
-            embedder,
             &params.embed,
-            intake_id,
-            &plans,
+            on_embed_batch,
         )
         .await?
+        .chunks_written
     } else {
         0
     };
@@ -1224,62 +1266,6 @@ fn role_str(role: ContributorRole) -> &'static str {
         ContributorRole::Translator => "translator",
         ContributorRole::Other => "other",
     }
-}
-
-/// Embed each planned chunk and append the rows to the paper vector
-/// store. Reconciles the store's index_meta with this pipeline's
-/// stamps on the first write into an empty dir.
-// Parallel implementation: pipeline-embed-write.
-pub(crate) async fn embed_and_write_chunks<E: Embedder>(
-    corpus: &mut Corpus,
-    lancedb_dir: &Path,
-    embedder: &E,
-    cfg: &EmbedConfig,
-    intake_id: i64,
-    plans: &[ChunkPlan],
-) -> Result<usize> {
-    if plans.is_empty() {
-        return Ok(0);
-    }
-    let dim = probe_dimension(embedder).await?;
-    let stamps = IndexStamps {
-        embed_model: cfg.model.clone(),
-        vector_dim: dim as u32,
-        chunk_version: CHUNK_VERSION,
-        normalize_version: NORMALIZE_VERSION,
-    };
-    corpus.reconcile_index_stamps(&stamps)?;
-    let store = ChunkStore::open_for_write(lancedb_dir, dim).await?;
-    // Drop the previous rows for this intake so a re-glean replaces
-    // them rather than duplicating.
-    store.delete_partition(PartitionIdx::new(intake_id)).await?;
-    let texts: Vec<String> = plans.iter().map(|p| p.text.clone()).collect();
-    let vectors = embedder.embed_batch(&texts).await?;
-    let mut rows = Vec::with_capacity(plans.len());
-    for (plan, vector) in plans.iter().zip(vectors) {
-        rows.push(ChunkRow {
-            vector,
-            text: plan.text.clone(),
-            start_node_id: plan.start_node_id,
-            start_char_offset: plan.start_char_offset,
-            end_node_id: plan.end_node_id,
-            end_char_offset: plan.end_char_offset,
-            norm_chunk_sha256: plan.norm_chunk_sha256.clone(),
-        });
-    }
-    let written = store.append(&rows).await?;
-    Ok(written)
-}
-
-async fn probe_dimension<E: Embedder>(embedder: &E) -> Result<usize> {
-    let vectors = embedder
-        .embed_batch(&["bookrack glean probe".to_string()])
-        .await?;
-    let first = vectors
-        .into_iter()
-        .next()
-        .ok_or(GleanError::EmptyEmbedding)?;
-    Ok(first.len())
 }
 
 /// Write the paper's review row through

@@ -254,15 +254,11 @@ site = "crates/cli/src/distill_cmd.rs::write_distill_audit"
 access = "write"
 
 [[write_door]]
-site = "crates/ops/src/pipeline/paper/mod.rs::embed_and_write_chunks"
-access = "write"
-
-[[write_door]]
 site = "crates/ops/src/pipeline/paper/reset.rs::reset_and_rechunk"
 access = "write"
 
 [[write_door]]
-site = "crates/ops/src/pipeline/book/embed_run.rs::embed_book_chunks_with_progress"
+site = "crates/ops/src/pipeline/common/embed.rs::embed_chunks_with_progress"
 access = "write"
 
 [[write_door]]
@@ -732,7 +728,7 @@ sites = [
   "crates/ops/src/registry.rs::glean_paper",
 ]
 reason = "transitional"
-detail = "the paper side resolves its optional paper paths and opens a pipeline run when its caller has none; the book side reports embed progress through a callback"
+detail = "the paper side resolves its optional paper paths and opens a pipeline run when its caller has none"
 agreement = "divergent"
 exit = "the pipelines live in ops and take the kind as a parameter"
 
@@ -842,10 +838,12 @@ id = "pipeline-entry"
 summary = "pipeline entry point, one per kind"
 sites = [
   "crates/ops/src/pipeline/book/mod.rs::ingest_book",
+  "crates/ops/src/pipeline/book/mod.rs::ingest_book_with_progress",
   "crates/ops/src/pipeline/paper/mod.rs::glean_paper",
+  "crates/ops/src/pipeline/paper/mod.rs::glean_paper_with_progress",
 ]
 reason = "transitional"
-detail = "the book side embeds in batches with progress, optimizes, and builds the index, and its no-op check compares the chunk and normalize stamps; the paper side embeds in one batch and does none of that"
+detail = "the book side compares a source behind on the extractor alone with its envelope and restamps it, and can hold a book for metadata; the paper side has an identify stage and reruns in full"
 agreement = "divergent"
 exit = "the pipeline takes the kind as a parameter"
 
@@ -871,30 +869,6 @@ sites = [
 reason = "transitional"
 agreement = "unverified"
 exit = "the pipeline takes the kind as a parameter"
-
-[[parallel]]
-id = "pipeline-stamps"
-summary = "the index stamps this build writes"
-sites = [
-  "crates/ops/src/pipeline/book/mod.rs::current_index_stamps",
-  "crates/ops/src/pipeline/paper/stamps.rs::current_index_stamps",
-  "crates/ops/src/pipeline/paper/rebuild.rs::stamp_index_from_existing_chunks",
-]
-reason = "transitional"
-agreement = "unverified"
-exit = "one embed stage writes the stamps for both kinds"
-
-[[parallel]]
-id = "pipeline-embed-write"
-summary = "embedding a plan and writing its vectors"
-sites = [
-  "crates/ops/src/pipeline/book/embed_run.rs",
-  "crates/ops/src/pipeline/paper/mod.rs::embed_and_write_chunks",
-]
-reason = "transitional"
-detail = "the book side embeds in batches, halves a batch on overload, reports progress, optimizes, and builds the index; the paper side sends one batch and does none of that"
-agreement = "divergent"
-exit = "one embed stage serves both kinds"
 
 [[parallel]]
 id = "pipeline-run-id"
@@ -1187,7 +1161,7 @@ exit = "core holds the hash, the prefix, and the verification"
 id = "rfc3339-now"
 summary = "the current time as an RFC 3339 string in seconds"
 sites = [
-  "crates/ops/src/pipeline/book/embed_run.rs::now_rfc3339",
+  "crates/ops/src/pipeline/common/embed.rs::now_rfc3339",
   "crates/diagnose/src/manifest.rs::iso8601_z",
   "crates/cli/src/distill_cmd.rs::format_iso8601",
   "crates/extract/src/envelope.rs::write_envelope",

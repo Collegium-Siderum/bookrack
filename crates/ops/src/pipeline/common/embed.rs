@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The EMBED stage: turn a book's [`ChunkPlan`]s into vectors and write
-//! them to the dense store.
+//! The EMBED stage: turn an item's [`ChunkPlan`]s into vectors and
+//! write them to the dense store. Books and papers both run it.
 //!
 //! Batching is sequential and greedy: chunks are packed into a batch up
 //! to a character budget and a hard chunk cap, each batch is embedded in
@@ -10,10 +10,8 @@
 //! each half, down to a single chunk — the producer/consumer overlap and
 //! AIMD scheduling the config leaves room for are deferred.
 //!
-//! Writing a book is delete-then-append on its partition, so re-ingesting
-//! the same file replaces its rows rather than duplicating them.
-
-// Parallel implementation: pipeline-embed-write.
+//! Writing an item is delete-then-append on its partition, so running
+//! the same file again replaces its rows rather than duplicating them.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -21,10 +19,35 @@ use std::time::{Duration, Instant};
 use bookrack_config::EmbedConfig;
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
+use bookrack_text::ChunkPlan;
 use bookrack_vectors::{AnnConfig, AnnKind, ChunkRow, ChunkStore};
 
-use crate::pipeline::book::{IngestError, Result, current_index_stamps};
-use bookrack_text::ChunkPlan;
+use crate::pipeline::common::stamps::current_index_stamps;
+
+bookrack_core::fixed_settings! {
+    owner = "ops";
+    "ingest.ann_rebuild_floor" = L2_ABSOLUTE_FLOOR,
+        "chunks of accumulated churn below which the ANN index is not rebuilt",
+        acts on "how often an ingest pays for an index rebuild";
+}
+
+/// Why an EMBED run failed. Each pipeline's error type takes it apart
+/// into its own variant of the same name.
+#[derive(Debug, thiserror::Error)]
+pub enum EmbedStageError {
+    #[error("embed error")]
+    Embed(#[from] bookrack_embed::EmbedError),
+    /// The embedder answered the dimension probe with no vector, or
+    /// with an empty one.
+    #[error("the embedder returned no vector for the dimension probe")]
+    EmptyEmbedding,
+    #[error("vector store error")]
+    Vectors(#[from] bookrack_vectors::VectorsError),
+    #[error("corpus error")]
+    Corpus(#[from] bookrack_corpus::CorpusError),
+}
+
+type Result<T> = std::result::Result<T, EmbedStageError>;
 
 /// What one EMBED run produced — the row count plus the batching metrics
 /// that diagnose how the run behaved against the server.
@@ -45,25 +68,27 @@ pub struct EmbedRunReport {
 /// number the run was given. The last call has `consumed == total`.
 pub type OnEmbedBatch<'a> = dyn Fn(usize, usize) + Send + Sync + 'a;
 
-/// Embed a book's chunk plans and write them to the store under
+/// Embed one item's chunk plans and write them to the store under
 /// `lancedb_dir`. Returns the run's [`EmbedRunReport`].
 ///
 /// The embedding dimension is probed from the first chunk and the store
-/// is opened fixed to it. The book's prior rows are cleared before the
-/// first append, keying the deletion on the partition the chunks live in.
-pub async fn embed_book_chunks<E: Embedder>(
+/// is opened fixed to it. The item's prior rows are cleared before the
+/// first append, keying the deletion on the partition the first chunk
+/// lives in: every plan of one call belongs to one item.
+pub async fn embed_chunks<E: Embedder>(
     plans: &[ChunkPlan],
     embedder: &E,
     corpus: &Corpus,
     lancedb_dir: &Path,
     cfg: &EmbedConfig,
 ) -> Result<EmbedRunReport> {
-    embed_book_chunks_with_progress(plans, embedder, corpus, lancedb_dir, cfg, &|_, _| {}).await
+    embed_chunks_with_progress(plans, embedder, corpus, lancedb_dir, cfg, &|_, _| {}).await
 }
 
-/// [`embed_book_chunks`], reporting each batch to `on_batch` once it
-/// is written. An empty `plans` writes nothing and reports nothing.
-pub async fn embed_book_chunks_with_progress<E: Embedder>(
+/// [`embed_chunks`], reporting each batch to `on_batch` once it is
+/// written. An empty `plans` writes nothing, reports nothing, and
+/// leaves the item's prior rows where they are.
+pub async fn embed_chunks_with_progress<E: Embedder>(
     plans: &[ChunkPlan],
     embedder: &E,
     corpus: &Corpus,
@@ -80,30 +105,20 @@ pub async fn embed_book_chunks_with_progress<E: Embedder>(
     let probe = embedder
         .embed_batch(std::slice::from_ref(&plans[0].text))
         .await
-        .map_err(IngestError::Embed)?;
+        .map_err(EmbedStageError::Embed)?;
     let dim = probe
         .first()
         .map(Vec::len)
         .filter(|&d| d > 0)
-        .ok_or(IngestError::EmptyEmbedding)?;
+        .ok_or(EmbedStageError::EmptyEmbedding)?;
 
-    // Stamp the build parameters on a fresh index, or refuse a book whose
-    // model or algorithm version differs from the one the index was built
-    // with — before any vector is written, so the index is never mixed.
-    // On mismatch, also delete `vectors_meta.json`: the ANN configuration
-    // is tied to the embedding model/dim, so it must not survive a model
-    // swap. Upper layers separately drop the chunks table.
-    if let Err(e) = corpus.reconcile_index_stamps(&current_index_stamps(&cfg.model, dim as u32)) {
-        if matches!(e, bookrack_corpus::CorpusError::IndexStampMismatch { .. })
-            && let Err(meta_err) = bookrack_vectors::meta::remove(lancedb_dir)
-        {
-            tracing::warn!(
-                error = ?meta_err,
-                "failed to remove vectors_meta.json after stamps mismatch"
-            );
-        }
-        return Err(e.into());
-    }
+    // Stamp the build parameters on a fresh index, or refuse an item
+    // whose model or algorithm version differs from the one the index
+    // was built with — before any vector is written, so the index is
+    // never mixed. A refusal writes nothing: the chunks table stands, and
+    // `vectors_meta.json`, which describes that table, stands with it.
+    // The file goes only when the table does, in `drop_chunks_table`.
+    corpus.reconcile_index_stamps(&current_index_stamps(&cfg.model, dim as u32))?;
 
     let store = ChunkStore::open_for_write(lancedb_dir, dim).await?;
     let rows_before_delete = store.count_rows().await?;
@@ -196,12 +211,13 @@ pub async fn embed_book_chunks_with_progress<E: Embedder>(
 /// present. Absent meta is a no-op (returns Ok) — the cold-start path
 /// owns the first build.
 fn bump_churn(lancedb_dir: &Path, delta: u64) -> Result<()> {
-    let Some(mut meta) = bookrack_vectors::meta::load(lancedb_dir).map_err(IngestError::Vectors)?
+    let Some(mut meta) =
+        bookrack_vectors::meta::load(lancedb_dir).map_err(EmbedStageError::Vectors)?
     else {
         return Ok(());
     };
     meta.churn_since_rebuild = meta.churn_since_rebuild.saturating_add(delta);
-    bookrack_vectors::meta::store(lancedb_dir, &meta).map_err(IngestError::Vectors)?;
+    bookrack_vectors::meta::store(lancedb_dir, &meta).map_err(EmbedStageError::Vectors)?;
     Ok(())
 }
 
@@ -215,7 +231,9 @@ pub(crate) const L2_ABSOLUTE_FLOOR: u64 = 20_000;
 /// Build the ANN index if it should be: either the cold-start case
 /// (no meta yet) or the L2 churn-threshold case.
 async fn maybe_build_ann_index(store: &ChunkStore, lancedb_dir: &Path) -> Result<()> {
-    let template = match bookrack_vectors::meta::load(lancedb_dir).map_err(IngestError::Vectors)? {
+    let template = match bookrack_vectors::meta::load(lancedb_dir)
+        .map_err(EmbedStageError::Vectors)?
+    {
         None => {
             // Cold start: no meta file. Build the C1-recommended default.
             AnnConfig::default_for(AnnKind::IvfFlat)
@@ -223,7 +241,7 @@ async fn maybe_build_ann_index(store: &ChunkStore, lancedb_dir: &Path) -> Result
         Some(meta) => {
             // BruteForce kind means a previous drop_ann_index set it
             // explicitly. Respect that — don't auto-rebuild.
-            let parsed = AnnConfig::from_meta(&meta).map_err(IngestError::Vectors)?;
+            let parsed = AnnConfig::from_meta(&meta).map_err(EmbedStageError::Vectors)?;
             if parsed.kind == AnnKind::BruteForce {
                 return Ok(());
             }
@@ -240,12 +258,12 @@ async fn maybe_build_ann_index(store: &ChunkStore, lancedb_dir: &Path) -> Result
             parsed
         }
     };
-    let chunk_count = store.count_rows().await.map_err(IngestError::Vectors)? as u64;
+    let chunk_count = store.count_rows().await.map_err(EmbedStageError::Vectors)? as u64;
     let cfg = scale_to_corpus(template, chunk_count);
     store
         .build_ann_index(&cfg, lancedb_dir, now_rfc3339())
         .await
-        .map_err(IngestError::Vectors)?;
+        .map_err(EmbedStageError::Vectors)?;
     Ok(())
 }
 
@@ -360,7 +378,7 @@ async fn embed_with_shrink<E: Embedder>(
             left.extend(right);
             Ok((left, 1 + left_shrinks + right_shrinks))
         }
-        Err(e) => Err(IngestError::Embed(e)),
+        Err(e) => Err(EmbedStageError::Embed(e)),
     }
 }
 
@@ -452,7 +470,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some prose text")).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
-        let report = embed_book_chunks(
+        let report = embed_chunks(
             &plans,
             &Fake { dim: 8 },
             &corpus,
@@ -482,7 +500,7 @@ mod tests {
             ..EmbedConfig::default()
         };
         let calls = std::sync::Mutex::new(Vec::new());
-        let report = embed_book_chunks_with_progress(
+        let report = embed_chunks_with_progress(
             &plans,
             &Fake { dim: 8 },
             &corpus,
@@ -501,7 +519,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let corpus = Corpus::open_in_memory().expect("corpus");
         let calls = std::sync::Mutex::new(Vec::new());
-        embed_book_chunks_with_progress(
+        embed_chunks_with_progress(
             &[],
             &Fake { dim: 8 },
             &corpus,
@@ -539,7 +557,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some text")).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
-        embed_book_chunks(
+        embed_chunks(
             &plans,
             &Fake { dim: 8 },
             &corpus,
@@ -574,7 +592,7 @@ mod tests {
 
         let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some text")).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
-        embed_book_chunks(
+        embed_chunks(
             &plans,
             &Fake { dim: 8 },
             &corpus,
@@ -607,7 +625,7 @@ mod tests {
 
         let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some text")).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
-        embed_book_chunks(
+        embed_chunks(
             &plans,
             &Fake { dim: 8 },
             &corpus,
@@ -639,7 +657,7 @@ mod tests {
 
         let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some text")).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
-        embed_book_chunks(
+        embed_chunks(
             &plans,
             &Fake { dim: 8 },
             &corpus,
@@ -673,7 +691,7 @@ mod tests {
 
         let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some text")).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
-        embed_book_chunks(
+        embed_chunks(
             &plans,
             &Fake { dim: 8 },
             &corpus,
@@ -704,10 +722,10 @@ mod tests {
         let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, "text")).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         let cfg = EmbedConfig::default();
-        embed_book_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
+        embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
             .await
             .expect("first embed");
-        embed_book_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
+        embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
             .await
             .expect("second embed");
         let meta = bookrack_vectors::meta::load(dir.path())
@@ -719,7 +737,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stamps_mismatch_removes_vectors_meta() {
+    async fn a_refused_write_leaves_vectors_meta_as_it_was() {
         let dir = tempfile::tempdir().expect("temp dir");
         let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, "prose")).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
@@ -728,7 +746,7 @@ mod tests {
             ..EmbedConfig::default()
         };
         // First run: cold-start writes a meta.
-        embed_book_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &first)
+        embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &first)
             .await
             .expect("first run");
         assert!(
@@ -737,29 +755,31 @@ mod tests {
                 .is_some(),
             "first run should leave a meta",
         );
-        // Second run with a different model is refused, and the meta
-        // is cleared so a follow-up run does not serve a config tied
-        // to the old model.
+        let before = std::fs::read(dir.path().join("vectors_meta.json")).expect("meta bytes");
+        // Second run with a different model is refused before anything
+        // is written: the chunks table stands, and so do the index
+        // declaration and churn count that describe it.
         let second = EmbedConfig {
             model: "model-b".to_string(),
             ..EmbedConfig::default()
         };
-        let err = embed_book_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &second)
+        let err = embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &second)
             .await
             .expect_err("model swap must be refused");
         assert!(matches!(
             err,
-            IngestError::Corpus(bookrack_corpus::CorpusError::IndexStampMismatch { .. })
+            EmbedStageError::Corpus(bookrack_corpus::CorpusError::IndexStampMismatch { .. })
         ));
-        let meta_after = bookrack_vectors::meta::load(dir.path()).expect("load after");
-        assert!(meta_after.is_none(), "meta must be cleared on mismatch");
+        let after = std::fs::read(dir.path().join("vectors_meta.json"))
+            .expect("a refused write must leave vectors_meta.json in place");
+        assert_eq!(after, before, "a refused write must not rewrite the file");
     }
 
     #[tokio::test]
     async fn empty_plans_write_nothing() {
         let dir = tempfile::tempdir().expect("temp dir");
         let corpus = Corpus::open_in_memory().expect("corpus");
-        let report = embed_book_chunks(
+        let report = embed_chunks(
             &[],
             &Fake { dim: 8 },
             &corpus,
@@ -777,10 +797,10 @@ mod tests {
         let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, "text")).collect();
         let cfg = EmbedConfig::default();
         let corpus = Corpus::open_in_memory().expect("corpus");
-        embed_book_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
+        embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
             .await
             .expect("first");
-        embed_book_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
+        embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
             .await
             .expect("second");
 
@@ -799,7 +819,7 @@ mod tests {
         // batch above two, forcing repeated halving down to that size.
         let plans: Vec<ChunkPlan> = (1..=8).map(|i| plan(i, "x")).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
-        let report = embed_book_chunks(
+        let report = embed_chunks(
             &plans,
             &Overloading {
                 dim: 4,
@@ -826,7 +846,7 @@ mod tests {
             model: "model-a".to_string(),
             ..EmbedConfig::default()
         };
-        embed_book_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &first)
+        embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &first)
             .await
             .expect("first run stamps the index");
         assert_eq!(
@@ -842,12 +862,12 @@ mod tests {
             model: "model-b".to_string(),
             ..EmbedConfig::default()
         };
-        let err = embed_book_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &second)
+        let err = embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &second)
             .await
             .expect_err("a different model must be refused");
         assert!(matches!(
             err,
-            IngestError::Corpus(CorpusError::IndexStampMismatch { key, .. })
+            EmbedStageError::Corpus(CorpusError::IndexStampMismatch { key, .. })
                 if key == bookrack_corpus::EMBED_MODEL_KEY
         ));
     }

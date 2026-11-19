@@ -26,9 +26,8 @@ use bookrack_corpus::Corpus;
 use bookrack_extract::EXTRACTOR_VERSION;
 use bookrack_vectors::ChunkReader;
 
-use crate::pipeline::book::{
-    IngestError, Result, StructureParams, current_index_stamps, ingest_structure,
-};
+use crate::pipeline::book::{IngestError, Result, StructureParams, ingest_structure};
+use crate::pipeline::common::stamps::current_index_stamps;
 use bookrack_extract::envelope::{self, EnvelopeError};
 
 /// Per-intake outcome bucket the driver fills in.

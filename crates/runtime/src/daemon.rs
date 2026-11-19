@@ -923,9 +923,9 @@ impl DaemonRuntime {
                                         "registry: {e}"
                                     )))
                                 })?;
-                                // Both book-pipeline legs below report
-                                // their embedding pass through one
-                                // throttled reporter on the job's sink.
+                                // Every pipeline leg below reports its
+                                // embedding pass through one throttled
+                                // reporter on the job's sink.
                                 let on_embed_batch =
                                     embed_batch_reporter(&sink, EMBED_PROGRESS_INTERVAL);
                                 if let queue::JobInput::Rule {
@@ -1023,7 +1023,7 @@ impl DaemonRuntime {
                                         let mut params = handle.templates().glean.clone();
                                         params.force = force;
                                         let report = handle
-                                            .glean_paper(&path, &params)
+                                            .glean_paper(&path, &params, &on_embed_batch)
                                             .await
                                             .map_err(|e| queue::classify_ingest_error(&e))?;
                                         Ok::<queue::JobSuccess, queue::JobError>(

@@ -1307,10 +1307,12 @@ the tool description says which one it ran.
   where `kind` is the job's pipeline (`book` / `paper` / `reference`,
   as on `queue.list`). `stage` names only a position the worker can
   observe: `processing`, published once when the worker pulls the
-  job, and — for a book job, a rule job included — `embed`,
-  whose `stage_progress` is the fraction of the book's chunks written
-  to the vector store, published always for the first and the last
-  batch and throttled in between. Paper jobs report `processing` only.
+  job, and `embed`, whose `stage_progress` is the fraction of the
+  item's chunks written to the vector store, published always for the
+  first and the last batch and throttled in between. A book job, a
+  rule job included, and a paper job report `embed` alike, and only
+  when the job has chunks to embed: a paper in which no abstract was
+  found, and a job that ends as a no-op, report `processing` only.
   The event does
   not name pipeline stages the worker cannot see, and it does not
   report the job's terminal state — that arrives on the `queue.tick`

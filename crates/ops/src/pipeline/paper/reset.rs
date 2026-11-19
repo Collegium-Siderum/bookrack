@@ -20,7 +20,8 @@ use bookrack_vectors::ChunkStore;
 
 use bookrack_text::{ChunkLeaf, plan_chunks};
 
-use crate::pipeline::paper::{ChunkParams, Result, audit_as, embed_and_write_chunks, new_run_id};
+use crate::pipeline::common::embed::embed_chunks;
+use crate::pipeline::paper::{ChunkParams, GleanError, Result, audit_as, new_run_id};
 
 /// What one [`reset_and_rechunk`] call produced.
 #[derive(Debug, Clone, Default)]
@@ -125,28 +126,28 @@ pub async fn reset_and_rechunk<E: Embedder>(
         }
 
         let started = Instant::now();
-        let chunks_written =
-            match embed_and_write_chunks(corpus, lancedb_dir, embedder, cfg, intake_id, &plans)
-                .await
-            {
-                Ok(n) => n,
-                Err(e) => {
-                    audit_as(
-                        catalog,
-                        "glean-reset",
-                        &run_id,
-                        sha,
-                        Some(work_root_raw),
-                        "embed",
-                        "embed",
-                        "fail",
-                        started,
-                        None,
-                        Some(&e.to_string()),
-                    );
-                    return Err(e);
-                }
-            };
+        let chunks_written = match embed_chunks(&plans, embedder, corpus, lancedb_dir, cfg)
+            .await
+            .map_err(GleanError::from)
+        {
+            Ok(run) => run.chunks_written,
+            Err(e) => {
+                audit_as(
+                    catalog,
+                    "glean-reset",
+                    &run_id,
+                    sha,
+                    Some(work_root_raw),
+                    "embed",
+                    "embed",
+                    "fail",
+                    started,
+                    None,
+                    Some(&e.to_string()),
+                );
+                return Err(e);
+            }
+        };
         audit_as(
             catalog,
             "glean-reset",
@@ -261,16 +262,16 @@ mod tests {
             &ChunkParams::default(),
         );
         assert!(!plans.is_empty(), "seed needs at least one chunk plan");
-        let written = embed_and_write_chunks(
+        let written = embed_chunks(
+            &plans,
+            &Fake { dim, generation: 1 },
             corpus,
             lancedb_dir,
-            &Fake { dim, generation: 1 },
             &embed_cfg("old-model"),
-            intake_id,
-            &plans,
         )
         .await
-        .expect("embed");
+        .expect("embed")
+        .chunks_written;
         assert!(written > 0);
         catalog
             .set_intake_status(ItemKind::Paper, intake_id, IntakeStatus::Embedded)

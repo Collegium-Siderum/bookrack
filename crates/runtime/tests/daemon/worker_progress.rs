@@ -3,16 +3,17 @@
 //! End-to-end check of the `worker.progress` contract: the queue
 //! worker reports a pulled job as `processing`, tagged with the job's
 //! pipeline `kind`, and names no pipeline stage it cannot observe. A
-//! book job carried through the real ingest pipeline, and a rule
-//! job carried through the same book pipeline, publish one
-//! `processing` marker and then the embedding pass's fraction; a paper
-//! job that fails on a missing source publishes the marker alone. The
-//! job's terminal state travels on its closing `queue.tick`, not on
-//! `worker.progress`.
+//! book job carried through the real ingest pipeline, a rule job
+//! carried through the same book pipeline, and a paper job with an
+//! abstract to embed each publish one `processing` marker and then the
+//! embedding pass's fraction. A paper job that fails on a missing
+//! source, and one whose paper has no abstract, publish the marker
+//! alone. The job's terminal state travels on its closing `queue.tick`,
+//! not on `worker.progress`.
 //!
 //! The embedder probe and the embedding pass are both answered by the
-//! loopback stub in `common`, so no Ollama daemon is required. No case
-//! reaches PDF parsing.
+//! loopback stub in `common`, so no Ollama daemon is required. One case
+//! parses a PDF, and is skipped where PDFium is not available.
 
 #![cfg(unix)]
 
@@ -176,14 +177,38 @@ async fn a_book_job_reports_processing_and_no_stage_it_cannot_observe() -> Resul
 
     let (progress, last_finished) =
         drive_one_job("ingest.submit", json!({"paths": [book_path]})).await?;
-    assert_book_pipeline_progress("book", &progress, &last_finished)
+    assert_embed_progress("book", "book", &progress, &last_finished)
 }
 
-/// Asserts the progress a job carried through the book pipeline
-/// publishes: one `processing` marker on pull, then the embedding
-/// pass's measured fraction, both under `kind = "book"`.
-fn assert_book_pipeline_progress(
+/// A synthetic paper whose abstract is one chunk.
+const PAPER_TEXT: &str = "\
+A Synthetic Paper
+
+Abstract. This synthetic paper describes a deliberately fictional study
+of how a queue worker reports the embedding of one abstract, in enough
+words for the abstract pick to accept the paragraph.
+
+The first section restates the fictional problem in plain terms.
+";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paper_job_reports_embed_progress_under_its_own_kind() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let paper_dir = tempfile::tempdir()?;
+    let paper_path = paper_dir.path().join("synthetic-paper.txt");
+    std::fs::write(&paper_path, PAPER_TEXT)?;
+
+    let (progress, last_finished) =
+        drive_one_job("glean.submit", json!({"paths": [paper_path]})).await?;
+    assert_embed_progress("paper", "paper", &progress, &last_finished)
+}
+
+/// Asserts the progress a job that embeds chunks publishes: one
+/// `processing` marker on pull, then the embedding pass's measured
+/// fraction, both under `kind`.
+fn assert_embed_progress(
     what: &str,
+    kind: &str,
     progress: &[Value],
     last_finished: &Value,
 ) -> Result<()> {
@@ -203,7 +228,7 @@ fn assert_book_pipeline_progress(
         .with_context(|| format!("{what} job published no worker.progress: {progress:?}"))?;
     assert_eq!(
         first,
-        &("processing".to_string(), "book".to_string()),
+        &("processing".to_string(), kind.to_string()),
         "{what} job's first worker.progress is not the pull marker: {progress:?}"
     );
     assert!(
@@ -212,7 +237,7 @@ fn assert_book_pipeline_progress(
     );
     assert!(
         rest.iter()
-            .all(|pair| pair == &("embed".to_string(), "book".to_string())),
+            .all(|pair| pair == &("embed".to_string(), kind.to_string())),
         "{what} job reported something other than embed after the pull marker: {progress:?}"
     );
     let fractions: Vec<f64> = progress[1..]
@@ -243,7 +268,7 @@ async fn a_rule_job_reports_embed_progress_like_a_book() -> Result<()> {
     )?;
 
     let (progress, last_finished) = drive_one_job("ingest.submit", json!({ "rule": rule })).await?;
-    assert_book_pipeline_progress("rule", &progress, &last_finished)
+    assert_embed_progress("rule", "book", &progress, &last_finished)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -274,6 +299,35 @@ async fn a_paper_job_reports_processing_under_its_own_kind() -> Result<()> {
         stage_kind_pairs(&progress),
         vec![("processing".to_string(), "paper".to_string())],
         "paper job's worker.progress drifted from the documented contract: {progress:?}"
+    );
+    Ok(())
+}
+
+/// A paper in which no abstract is found has no chunk: the job
+/// succeeds and never enters the embedding pass, so the pull marker is
+/// all it publishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paper_job_with_nothing_to_embed_reports_processing_alone() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    if !bookrack_extract::pdfium_gate::available() {
+        eprintln!("pdfium binary not available; skipping");
+        return Ok(());
+    }
+    let paper_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ops/tests/fixtures/pdf/synthetic_paper_no_abstract.pdf");
+
+    let (progress, last_finished) =
+        drive_one_job("glean.submit", json!({"paths": [paper_path]})).await?;
+
+    assert_eq!(
+        last_finished["state"].as_str(),
+        Some("done"),
+        "a paper with no abstract is a clean run: {last_finished}"
+    );
+    assert_eq!(
+        stage_kind_pairs(&progress),
+        vec![("processing".to_string(), "paper".to_string())],
+        "a paper job with no chunk reported an embedding pass: {progress:?}"
     );
     Ok(())
 }
