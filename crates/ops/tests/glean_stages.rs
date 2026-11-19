@@ -10,18 +10,21 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bookrack_catalog::Catalog;
-use bookrack_core::PartitionIdx;
+use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::{CHUNK_VERSION_KEY, Corpus, NORMALIZE_VERSION_KEY};
 use bookrack_embed::{Embedder, Result as EmbedResult};
+use bookrack_ops::pipeline::paper::reembed::reembed_paper;
 use bookrack_ops::pipeline::paper::{
     GleanError, GleanParams, GleanReport, glean_paper, glean_paper_with_progress,
 };
-use bookrack_vectors::ChunkReader;
+use bookrack_vectors::{ChunkReader, ChunkStore};
 
-/// A constant-vector embedder that counts the batches it is asked for.
+/// A constant-vector embedder that counts the batches it is asked for
+/// and records the texts in them.
 struct Fake {
     dim: usize,
     calls: AtomicUsize,
+    sent: Mutex<Vec<String>>,
 }
 
 impl Fake {
@@ -29,7 +32,15 @@ impl Fake {
         Fake {
             dim: 8,
             calls: AtomicUsize::new(0),
+            sent: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Every text received so far, sorted.
+    fn sent(&self) -> Vec<String> {
+        let mut texts = self.sent.lock().expect("lock").clone();
+        texts.sort();
+        texts
     }
 
     fn calls(&self) -> usize {
@@ -43,6 +54,7 @@ impl Embedder for Fake {
         texts: &[String],
     ) -> impl Future<Output = EmbedResult<Vec<Vec<f32>>>> + Send {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.sent.lock().expect("lock").extend_from_slice(texts);
         let (dim, n) = (self.dim, texts.len());
         async move { Ok(vec![vec![0.25f32; dim]; n]) }
     }
@@ -323,22 +335,22 @@ async fn a_rerun_replaces_the_rows_of_its_own_paper_only() {
         PartitionIdx::new(first.intake_id)
     );
 
-    let own = fx.file.clone();
     fx.another_paper("second.txt", SECOND_PAPER);
     let second = fx.glean().await.expect("second paper");
     assert_ne!(second.intake_id, first.intake_id);
     assert_eq!(fx.rows().await, 2);
 
-    fx.file = own;
-    let forced = fx
-        .glean_with(&GleanParams {
-            force: true,
-            ..GleanParams::default()
-        })
-        .await
-        .expect("forced rerun");
-    assert_eq!(forced.intake_id, first.intake_id);
-    assert_eq!(forced.chunks_written, 1);
+    let rewritten = reembed_paper(
+        first.intake_id,
+        &fx.embedder,
+        &mut fx.corpus,
+        &fx.lancedb_dir,
+        &GleanParams::default().embed,
+    )
+    .await
+    .expect("reembed the first paper");
+    assert_eq!(rewritten.chunks_written, 1);
+    assert_eq!(rewritten.chunks_reused, 0, "a reembed recomputes");
     assert_eq!(
         fx.rows().await,
         2,
@@ -352,7 +364,8 @@ async fn a_rerun_replaces_the_rows_of_its_own_paper_only() {
 }
 
 /// The first paper into a store builds its index and writes
-/// `vectors_meta.json`; later runs count their churn in it.
+/// `vectors_meta.json`; later runs count their churn in it. A forced
+/// rerun of an unchanged paper finds its row in place and adds none.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_first_paper_builds_the_index_and_later_runs_count_churn() {
     let mut fx = Fixture::new(WITH_ABSTRACT);
@@ -374,7 +387,7 @@ async fn the_first_paper_builds_the_index_and_later_runs_count_churn() {
     assert_eq!(reader.list_indices().await.expect("indices").len(), 1);
 
     fx.another_paper("second.txt", SECOND_PAPER);
-    fx.glean().await.expect("second paper");
+    let second = fx.glean().await.expect("second paper");
     assert_eq!(fx.vectors_meta().churn_since_rebuild, 1, "one row appended");
 
     fx.glean_with(&GleanParams {
@@ -383,6 +396,21 @@ async fn the_first_paper_builds_the_index_and_later_runs_count_churn() {
     })
     .await
     .expect("forced rerun");
+    assert_eq!(
+        fx.vectors_meta().churn_since_rebuild,
+        1,
+        "a rerun that finds its row in place writes nothing",
+    );
+
+    reembed_paper(
+        second.intake_id,
+        &fx.embedder,
+        &mut fx.corpus,
+        &fx.lancedb_dir,
+        &GleanParams::default().embed,
+    )
+    .await
+    .expect("reembed");
     let meta = fx.vectors_meta();
     assert_eq!(
         meta.churn_since_rebuild, 3,
@@ -392,6 +420,102 @@ async fn the_first_paper_builds_the_index_and_later_runs_count_churn() {
         meta.built_at_chunk_count, 1,
         "churn this small retrains nothing"
     );
+}
+
+/// A forced rerun of an unchanged paper keeps its stored vector and
+/// asks the embedder for nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forced_rerun_of_an_unchanged_paper_sends_no_embed_request() {
+    let mut fx = Fixture::new(WITH_ABSTRACT);
+    fx.glean().await.expect("first glean");
+    let calls_before = fx.embedder.calls();
+
+    let forced = fx
+        .glean_with(&GleanParams {
+            force: true,
+            ..GleanParams::default()
+        })
+        .await
+        .expect("forced rerun");
+    assert!(forced.forced && !forced.no_op);
+    assert_eq!(fx.embedder.calls(), calls_before);
+    assert_eq!(forced.chunks_written, 1);
+    assert_eq!(forced.chunks_reused, 1);
+}
+
+/// A paper whose extractor stamp is behind runs the whole pipeline
+/// again. Its abstract comes out as before, so the rerun keeps the
+/// stored vector and asks the embedder for nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_paper_behind_on_the_extractor_stamp_reruns_without_an_embed_request() {
+    let mut fx = Fixture::new(WITH_ABSTRACT);
+    let first = fx.glean().await.expect("first glean");
+    let intake = fx
+        .catalog
+        .intake_by_id(first.intake_id)
+        .expect("intake")
+        .expect("present");
+    fx.catalog
+        .set_extraction(
+            ItemKind::Paper,
+            first.intake_id,
+            intake.adapter.as_deref().expect("adapter stamped"),
+            bookrack_extract::EXTRACTOR_VERSION - 1,
+        )
+        .expect("stale extractor stamp");
+    let calls_before = fx.embedder.calls();
+
+    let again = fx.glean().await.expect("rerun");
+    assert!(!again.no_op, "a stale stamp reruns the pipeline");
+    assert_eq!(fx.embedder.calls(), calls_before);
+    assert_eq!(again.chunks_written, 1);
+    assert_eq!(again.chunks_reused, 1);
+}
+
+/// A paper whose abstract runs to several chunks.
+fn with_a_long_abstract() -> String {
+    let mut text = String::from("A Long Synthetic Paper\n\nAbstract.");
+    for i in 0..40 {
+        text.push_str(&format!(
+            " Sentence {i} of this synthetic abstract reports one more measured \
+             property of the method in plain words."
+        ));
+    }
+    text.push_str("\n\nThe first section describes the method in plain terms.\n");
+    text
+}
+
+/// A forced rerun of a paper that lost one of its stored rows embeds
+/// the chunk that row held and no other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forced_rerun_embeds_only_the_chunk_whose_row_is_missing() {
+    let mut fx = Fixture::new(&with_a_long_abstract());
+    let first = fx.glean().await.expect("first glean");
+    assert!(first.chunks_written >= 2, "{first:?}");
+
+    let partition = PartitionIdx::new(first.intake_id);
+    let store = ChunkStore::open_for_write(&fx.lancedb_dir, 8)
+        .await
+        .expect("open store");
+    let mut kept = store.scan_partition(partition).await.expect("scan");
+    kept.sort_by_key(|row| (row.start_node_id.get(), row.start_char_offset));
+    let dropped = kept.remove(0).text;
+    store.delete_partition(partition).await.expect("clear");
+    store.append(&kept).await.expect("write back");
+    drop(store);
+    fx.embedder.sent.lock().expect("lock").clear();
+
+    let forced = fx
+        .glean_with(&GleanParams {
+            force: true,
+            ..GleanParams::default()
+        })
+        .await
+        .expect("forced rerun");
+    assert_eq!(fx.embedder.sent(), [dropped]);
+    assert_eq!(forced.chunks_written, first.chunks_written);
+    assert_eq!(forced.chunks_reused, first.chunks_written - 1);
+    assert_eq!(fx.rows().await, first.chunks_written);
 }
 
 /// A store whose index was dropped on purpose stays without one.

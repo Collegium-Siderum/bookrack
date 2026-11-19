@@ -97,7 +97,7 @@ earlier ones already happened.
 | Externalised extract-side knobs (HTML block / skip tags, PDF quality thresholds, language codes / ratios) — bumped 3 → 4 | `extractor_version` | same as above | re-ingest the affected sources |
 | `Block` carries per-paragraph `BlockStyle` geometry on the PDF path (font-size median / p90, bold-majority flag, line count, first-line left, normalized above-gap) — bumped 5 → 6 | `extractor_version` | same as above | re-ingest the affected PDF sources (book-side TXT and EPUB partitions read fine without a refresh, as their `style` is `None` on both old and new envelopes) |
 | PDFium `chromium/7763` → `chromium/7881` with `pdfium-render` 0.9.4, `rbook` 0.7.12 (bringing `quick-xml` 0.42 and `zip` 9), `encoding_rs` 0.8.44, `tendril` 0.5.1, `web_atoms` 0.2.6 — bumped 6 → 7 | `extractor_version` | same as above | re-ingest the affected sources; a book the new extractor reads as the old one did only has its stamp advanced, see *Re-ingesting a source file*. Books extracted at version 6 keep serving meanwhile, so the refresh can run a few sources at a time. The PDFium fixes apply to every PDF parsed after the upgrade, without a refresh. A library of the previous PDFium build no longer loads — see *A moved PDFium build* above |
-| PDFium `chromium/7881` → `chromium/8125` with `pdfium-render` 0.9.5 — bumped 7 → 8 | `extractor_version` | same as above | re-ingest the affected sources; a book the new extractor reads as the old one did only has its stamp advanced, see *Re-ingesting a source file*. `chromium/8125` takes a font's weight from the `/FontWeight` its descriptor declares, where earlier builds estimated it from the stem width, so a PDF whose fonts declare a weight can read with different bold flags on its paragraphs: re-ingesting such a book runs the full pipeline and re-embeds its chunks, although their text is unchanged. EPUB and TXT books only have their stamp advanced. Books extracted at version 6 or 7 keep serving meanwhile, so the refresh can run a few sources at a time; coming from version 6, one re-ingest covers this row and the one above. The PDFium fixes apply to every PDF parsed after the upgrade, without a refresh. A library of the previous PDFium build no longer loads — see *A moved PDFium build* above |
+| PDFium `chromium/7881` → `chromium/8125` with `pdfium-render` 0.9.5 — bumped 7 → 8 | `extractor_version` | same as above | re-ingest the affected sources; a book the new extractor reads as the old one did only has its stamp advanced, see *Re-ingesting a source file*. `chromium/8125` takes a font's weight from the `/FontWeight` its descriptor declares, where earlier builds estimated it from the stem width, so a PDF whose fonts declare a weight can read with different bold flags on its paragraphs: re-ingesting such a book runs the full pipeline; its chunks keep the vectors already stored, since their text is unchanged. EPUB and TXT books only have their stamp advanced. Books extracted at version 6 or 7 keep serving meanwhile, so the refresh can run a few sources at a time; coming from version 6, one re-ingest covers this row and the one above. The PDFium fixes apply to every PDF parsed after the upgrade, without a refresh. A library of the previous PDFium build no longer loads — see *A moved PDFium build* above |
 | `regex`, `regex-automata`, `regex-syntax`, `aho-corasick`, `bookrack_extract::rule::RULE_ENGINE_VERSION` | the fingerprint recorded on every book ingested through a rule file | none until a rule is submitted again — a rule-text book keeps serving as it was ingested | submit each rule again with `bookrack ingest --rule` — see *Re-ingesting a source file* below |
 | `text-splitter`, `icu_*`, `bookrack_text::CHUNK_VERSION` | `chunk_version`, on the book store and the papers store | chunks → vectors, on both | `bookrack vectors reembed` (books); `bookrack papers vectors reset` (papers) |
 | `unicode-normalization`, `bookrack_text::NORMALIZE_VERSION` | `normalize_version` | chunks → vectors | `bookrack vectors reembed` (books); `bookrack papers vectors reembed` (papers) |
@@ -229,8 +229,9 @@ version, the envelope is rewritten and the stamp advances, and the
 corpus tree, chunks, and vectors stay as they are: the refresh costs
 the extraction alone. When they differ, or the envelope is missing,
 unreadable, recorded for another source or intake, older than the
-stamp, or cannot be rewritten, the full pipeline runs and the corpus
-tree, chunks, and vectors are derived afresh. Any other stale row — a
+stamp, or cannot be rewritten, the full pipeline runs: the corpus tree
+and the chunks are derived afresh, a chunk whose text is unchanged
+keeps the vector already stored for it, and the rest are embedded. Any other stale row — a
 book in another state or with another stamp behind as well, or a
 paper — runs the full pipeline without the comparison. Pointing `--recursive` at the original source directory
 therefore refreshes every stale file under it: the files whose stamps
@@ -242,7 +243,10 @@ submitting it again runs the pipeline again — extraction, tree, and
 audit, with no embedding request — until another paper stamps the
 store.
 `--force` runs the full pipeline for every file, current or stale,
-without the comparison.
+without the comparison. It does not recompute vectors: a chunk whose
+text is unchanged keeps the one stored, so forcing an unchanged source
+sends no embedding request. `bookrack vectors reembed` and
+`bookrack papers vectors reembed` are what recompute them.
 
 A book ingested through a rule file is refreshed by submitting its rule
 again: `bookrack ingest --rule <rule.toml>`, with the member files
@@ -337,8 +341,10 @@ holds no text for are listed by `bookrack find --scope book
 ## Recommended window
 
 A refresh that touches `extractor_version` or the embedding model is
-the most expensive — it re-runs every behaviour-sensitive parser on
-every book, and re-embeds every chunk through the embedding model.
+the most expensive. A change of embedding model re-embeds every chunk
+through the new model. A refresh of `extractor_version` re-runs every
+behaviour-sensitive parser on every book, and embeds only the chunks
+whose text the new extraction changed.
 Allocate a low-activity window for these runs; on macOS, wrap them in
 `caffeinate -i` so the host does not idle-sleep mid-run (see
 [Long ingestions](operating.md#long-ingestions)). A reembed that only

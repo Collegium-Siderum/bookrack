@@ -31,7 +31,7 @@ use bookrack_embed::Embedder;
 use bookrack_vectors::ChunkStore;
 
 use crate::pipeline::book::{IngestError, Result, audit_as, maintenance_run_id, plan_book_chunks};
-use crate::pipeline::common::embed::embed_chunks;
+use crate::pipeline::common::embed::{EmbedSource, embed_chunks};
 use bookrack_text::ChunkParams;
 
 /// What one [`reset_and_rechunk`] call produced.
@@ -140,9 +140,16 @@ pub async fn reset_and_rechunk<E: Embedder>(
         }
 
         let started = Instant::now();
-        let embed_run = match embed_chunks(&plans, embedder, corpus, lancedb_dir, cfg)
-            .await
-            .map_err(IngestError::from)
+        let embed_run = match embed_chunks(
+            &plans,
+            EmbedSource::Recompute,
+            embedder,
+            corpus,
+            lancedb_dir,
+            cfg,
+        )
+        .await
+        .map_err(IngestError::from)
         {
             Ok(r) => r,
             Err(e) => {
@@ -173,11 +180,12 @@ pub async fn reset_and_rechunk<E: Embedder>(
             "ok",
             started,
             Some(format!(
-                r#"{{"chunks":{},"batches":{},"shrink_events":{},"chars":{}}}"#,
+                r#"{{"chunks":{},"batches":{},"shrink_events":{},"chars":{},"reused":{}}}"#,
                 embed_run.chunks_written,
                 embed_run.batches,
                 embed_run.shrink_events,
-                embed_run.total_chars
+                embed_run.total_chars,
+                embed_run.chunks_reused
             )),
             None,
         );

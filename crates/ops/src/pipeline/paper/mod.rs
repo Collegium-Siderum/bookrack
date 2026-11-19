@@ -31,7 +31,9 @@ use bookrack_metadata::paper::{
 use bookrack_text::{ChunkLeaf, norm_text_sha256, plan_chunks};
 use sha2::{Digest, Sha256};
 
-use crate::pipeline::common::embed::{EmbedStageError, OnEmbedBatch, embed_chunks_with_progress};
+use crate::pipeline::common::embed::{
+    EmbedRunReport, EmbedSource, EmbedStageError, OnEmbedBatch, embed_chunks_with_progress,
+};
 use crate::pipeline::common::on_file::{OnFile, OnFileError, on_file};
 
 pub mod audit;
@@ -149,7 +151,12 @@ pub struct GleanReport {
     pub intake_id: i64,
     pub work_node_id: NodeId,
     pub nodes_written: usize,
+    /// How many chunk rows the paper has in the vector store when the
+    /// run ends.
     pub chunks_written: usize,
+    /// How many of those rows took their vector from the store instead
+    /// of from the embedder.
+    pub chunks_reused: usize,
     /// `true` when the source was already on file at the time of the
     /// call.
     pub already_registered: bool,
@@ -259,9 +266,10 @@ pub type Result<T> = std::result::Result<T, GleanError>;
 
 /// Glean one paper end to end. The whole-file SHA-256 keys the intake;
 /// re-gleaning the same file reuses its intake and replaces its corpus
-/// tree and vector rows rather than duplicating them. Re-glean is
-/// idempotent when the file is at `Embedded` with current stamps;
-/// pass `params.force = true` to bypass that check.
+/// tree rather than duplicating it, and a chunk whose text comes out
+/// unchanged keeps its stored vector. Re-glean is idempotent when the
+/// file is at `Embedded` with current stamps; pass
+/// `params.force = true` to bypass that check.
 // Parallel implementation: pipeline-entry.
 pub async fn glean_paper<E: Embedder>(
     file: &Path,
@@ -360,6 +368,7 @@ pub async fn glean_paper_with_progress<E: Embedder>(
             work_node_id: current.root_id,
             nodes_written: 0,
             chunks_written: 0,
+            chunks_reused: 0,
             already_registered: true,
             no_op: true,
             forced: false,
@@ -649,7 +658,7 @@ pub async fn glean_paper_with_progress<E: Embedder>(
 
     // ── CHUNK + EMBED ─────────────────────────────────────────────────
     let started = Instant::now();
-    let chunks_written = if let Some(leaf_id) = structure.leaf_node_id
+    let embed = if let Some(leaf_id) = structure.leaf_node_id
         && let Some(text) = structure.leaf_text.as_deref()
     {
         let plans = plan_chunks(
@@ -662,6 +671,7 @@ pub async fn glean_paper_with_progress<E: Embedder>(
         );
         embed_chunks_with_progress(
             &plans,
+            EmbedSource::SamePartition,
             embedder,
             corpus,
             lancedb_dir,
@@ -669,10 +679,10 @@ pub async fn glean_paper_with_progress<E: Embedder>(
             on_embed_batch,
         )
         .await?
-        .chunks_written
     } else {
-        0
+        EmbedRunReport::default()
     };
+    let (chunks_written, chunks_reused) = (embed.chunks_written, embed.chunks_reused);
     audit(
         catalog,
         &run_id,
@@ -682,7 +692,9 @@ pub async fn glean_paper_with_progress<E: Embedder>(
         "embed",
         "ok",
         started,
-        Some(format!(r#"{{"chunks":{chunks_written}}}"#)),
+        Some(format!(
+            r#"{{"chunks":{chunks_written},"reused":{chunks_reused}}}"#
+        )),
         None,
     );
 
@@ -700,6 +712,7 @@ pub async fn glean_paper_with_progress<E: Embedder>(
         work_node_id: structure.work_node_id,
         nodes_written: structure.nodes_written,
         chunks_written,
+        chunks_reused,
         already_registered,
         no_op: false,
         forced: params.force,

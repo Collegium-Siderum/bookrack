@@ -276,8 +276,10 @@ pub struct IngestArgs {
         conflicts_with_all = ["path", "source", "allow_partial", "force", "priority", "no_wait"]
     )]
     pub dry_run: bool,
-    /// Re-ingest even when the source SHA-256 already exists in the
-    /// catalog. Without this flag, duplicate sources are skipped.
+    /// Run every stage again for a source already in the catalog.
+    /// Without this flag, a source whose stamps are current is
+    /// skipped. A chunk whose text comes out unchanged keeps its stored
+    /// vector: `vectors reembed` is what recomputes vectors.
     #[arg(long)]
     pub force: bool,
     /// Queue priority for the enqueued job(s): `low`, `normal`, or
@@ -1424,8 +1426,10 @@ pub struct PapersIngestArgs {
     /// Without this flag, `<PATH>` must point at a single paper file.
     #[arg(long)]
     pub recursive: bool,
-    /// Re-ingest even when the source SHA-256 already exists in the
-    /// paper catalog. Without this flag, duplicate sources are skipped.
+    /// Run every stage again for a source already in the paper
+    /// catalog. Without this flag, a source whose stamps are current is
+    /// skipped. A chunk whose text comes out unchanged keeps its stored
+    /// vector: `papers vectors reembed` is what recomputes vectors.
     #[arg(long)]
     pub force: bool,
     /// Queue priority for the enqueued job: `low`, `normal`, or

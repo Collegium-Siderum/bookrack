@@ -1308,8 +1308,11 @@ the tool description says which one it ran.
   as on `queue.list`). `stage` names only a position the worker can
   observe: `processing`, published once when the worker pulls the
   job, and `embed`, whose `stage_progress` is the fraction of the
-  item's chunks written to the vector store, published always for the
-  first and the last batch and throttled in between. A book job, a
+  item's chunks in place in the vector store, published always for the
+  first and the last batch and throttled in between. A chunk that
+  keeps the vector already stored for its text counts like one that was
+  embedded, so a job whose chunks are all unchanged reports `embed`
+  once, at `1.0`. A book job, a
   rule job included, and a paper job report `embed` alike, and only
   when the job has chunks to embed: a paper in which no abstract was
   found, and a job that ends as a no-op, report `processing` only.

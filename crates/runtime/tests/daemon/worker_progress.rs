@@ -23,7 +23,7 @@ use eyre::{ContextCompat, Result, eyre};
 use serde_json::{Value, json};
 
 use crate::common::{Reader, build_opts, connect, join_with_deadline, recv, send};
-use bookrack_test_support::{ProcessEnv, process_env};
+use bookrack_test_support::{EmbedFailure, EmbedStub, ProcessEnv, process_env};
 
 /// A synthetic text long enough for the ingest pipeline to extract
 /// prose, plan chunks, and embed them against the stub.
@@ -106,6 +106,20 @@ fn stage_kind_pairs(progress: &[Value]) -> Vec<(String, String)> {
 /// `last_finished`. The submit reply is read as `job_ids[0]` or, for a
 /// single-job method, `job_id`.
 async fn drive_one_job(submit_method: &'static str, params: Value) -> Result<(Vec<Value>, Value)> {
+    let mut outcomes = drive_jobs(submit_method, vec![params], || {}).await?;
+    outcomes.pop().context("one job was driven")
+}
+
+/// [`drive_one_job`] for several jobs on one daemon and one data root,
+/// each submitted once the one before it has closed. `before_last`
+/// runs after every job but the last has closed, ahead of the last
+/// submit. Returns each job's progress and closing `last_finished`, in
+/// submit order.
+async fn drive_jobs(
+    submit_method: &'static str,
+    jobs: Vec<Value>,
+    before_last: fn(),
+) -> Result<Vec<(Vec<Value>, Value)>> {
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
@@ -134,23 +148,31 @@ async fn drive_one_job(submit_method: &'static str, params: Value) -> Result<(Ve
         }
 
         let (mut wr_reader, mut wr_w) = connect(&sock).await?;
-        let submit = json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": submit_method,
-            "params": params,
-        });
-        send(&mut wr_w, &submit.to_string()).await?;
-        let submit_resp = recv(&mut wr_reader).await?;
-        let result = &submit_resp["result"];
-        let job_id = result["job_ids"][0]
-            .as_str()
-            .or_else(|| result["job_id"].as_str())
-            .with_context(|| format!("missing job id: {submit_resp}"))?
-            .to_string();
-
-        let collected =
-            collect_progress_until_done(&mut obs_reader, &job_id, Duration::from_secs(45)).await?;
+        let last = jobs.len().saturating_sub(1);
+        let mut collected = Vec::new();
+        for (index, params) in jobs.into_iter().enumerate() {
+            if index == last && index > 0 {
+                before_last();
+            }
+            let submit = json!({
+                "jsonrpc": "2.0",
+                "id": 2 + index,
+                "method": submit_method,
+                "params": params,
+            });
+            send(&mut wr_w, &submit.to_string()).await?;
+            let submit_resp = recv(&mut wr_reader).await?;
+            let result = &submit_resp["result"];
+            let job_id = result["job_ids"][0]
+                .as_str()
+                .or_else(|| result["job_id"].as_str())
+                .with_context(|| format!("missing job id: {submit_resp}"))?
+                .to_string();
+            collected.push(
+                collect_progress_until_done(&mut obs_reader, &job_id, Duration::from_secs(45))
+                    .await?,
+            );
+        }
         let _ = out_tx.send(collected);
 
         send(
@@ -166,6 +188,54 @@ async fn drive_one_job(submit_method: &'static str, params: Value) -> Result<(Ve
     out_rx
         .await
         .map_err(|_| eyre!("driver finished without reporting the job's progress"))
+}
+
+/// Submits `path` through `submit_method`, then again with `force`
+/// while the embed backend answers every request with an error, and
+/// returns the forced job's progress and closing `last_finished`.
+async fn drive_a_forced_resubmit_with_the_backend_failing(
+    submit_method: &'static str,
+    path: &std::path::Path,
+) -> Result<(Vec<Value>, Value)> {
+    let outcomes = drive_jobs(
+        submit_method,
+        vec![
+            json!({"paths": [path]}),
+            json!({"paths": [path], "force": true}),
+        ],
+        || EmbedStub::shared().set_failure(EmbedFailure::ModelNotFound),
+    )
+    .await;
+    EmbedStub::shared().set_failure(EmbedFailure::None);
+    outcomes?.pop().context("two jobs were driven")
+}
+
+/// A forced resubmit of an unchanged book finds every chunk's vector
+/// stored: the job needs no embed backend, and still reports the
+/// embedding pass as complete.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forced_resubmit_of_an_unchanged_book_completes_without_the_backend() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let book_dir = tempfile::tempdir()?;
+    let book_path = book_dir.path().join("synthetic-ledger.txt");
+    std::fs::write(&book_path, BOOK_TEXT)?;
+
+    let (progress, last_finished) =
+        drive_a_forced_resubmit_with_the_backend_failing("ingest.submit", &book_path).await?;
+    assert_embed_progress("forced book", "book", &progress, &last_finished)
+}
+
+/// The same for a paper.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forced_resubmit_of_an_unchanged_paper_completes_without_the_backend() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let paper_dir = tempfile::tempdir()?;
+    let paper_path = paper_dir.path().join("synthetic-paper.txt");
+    std::fs::write(&paper_path, PAPER_TEXT)?;
+
+    let (progress, last_finished) =
+        drive_a_forced_resubmit_with_the_backend_failing("glean.submit", &paper_path).await?;
+    assert_embed_progress("forced paper", "paper", &progress, &last_finished)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

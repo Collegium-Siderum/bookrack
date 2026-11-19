@@ -171,6 +171,18 @@ release workflow extracts the matching section verbatim from this file.
   carries the `embed` stage for a paper job as it does for a book job,
   when the paper has chunks to embed; a paper in which no abstract was
   found, and a job that ends as a no-op, report `processing` only.
+- **Running an item again keeps the vectors of its unchanged text.**
+  When `bookrack ingest` or `bookrack glean` runs the pipeline for a
+  source already in the library — with `--force`, after an
+  `extractor_version` bump, or after a run that failed part-way through
+  embedding — a chunk whose text is byte-for-byte what the store
+  already holds for that item keeps its stored vector, and only the
+  rest are sent to the embedding backend. An item whose chunks all come
+  out unchanged sends no request and leaves its rows as they are; such
+  a job completes even while the backend is unreachable. `--force`
+  therefore no longer recomputes vectors: `bookrack vectors reembed`
+  and `bookrack papers vectors reembed` do, as before.
+  `worker.progress` counts a kept chunk like an embedded one.
 - **An ingest refused for mismatched index stamps no longer contacts
   the embedding backend first.** A book or paper whose embedding model,
   chunk version, or normalize version differs from the store's is

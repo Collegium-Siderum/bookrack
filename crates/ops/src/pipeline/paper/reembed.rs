@@ -20,7 +20,7 @@ use bookrack_vectors::ChunkReader;
 
 use bookrack_text::ChunkPlan;
 
-use crate::pipeline::common::embed::embed_chunks;
+use crate::pipeline::common::embed::{EmbedRunReport, EmbedSource, embed_chunks};
 use crate::pipeline::paper::{GleanError, Result, audit_as, new_run_id};
 
 /// A planned per-paper reembed: what would happen if [`reembed_paper`]
@@ -110,22 +110,29 @@ pub async fn plan_reembed(
 }
 
 /// Reembed one paper intake: scan its partition, re-embed every row,
-/// and replace the partition in place. Returns the number of rows
-/// written; an empty partition returns `0` for the caller to interpret
-/// as a skip.
+/// and replace the partition in place. Returns the underlying
+/// [`EmbedRunReport`]; an empty partition returns a zeroed one for the
+/// caller to interpret as a skip.
 pub async fn reembed_paper<E: Embedder>(
     intake_id: i64,
     embedder: &E,
     corpus: &mut Corpus,
     lancedb_dir: &Path,
     cfg: &EmbedConfig,
-) -> Result<usize> {
+) -> Result<EmbedRunReport> {
     let plans = read_chunk_plans(lancedb_dir, PartitionIdx::new(intake_id)).await?;
     if plans.is_empty() {
-        return Ok(0);
+        return Ok(EmbedRunReport::default());
     }
-    let run = embed_chunks(&plans, embedder, corpus, lancedb_dir, cfg).await?;
-    Ok(run.chunks_written)
+    Ok(embed_chunks(
+        &plans,
+        EmbedSource::Recompute,
+        embedder,
+        corpus,
+        lancedb_dir,
+        cfg,
+    )
+    .await?)
 }
 
 /// Reembed every paper intake at [`IntakeStatus::Embedded`], or just
@@ -173,26 +180,26 @@ pub async fn reembed_all<E: Embedder>(
         let sha = intake.source_sha256.as_str();
         let work_root_raw = PartitionIdx::new(intake_id).root().get();
         let started = Instant::now();
-        let chunks_written =
-            match reembed_paper(intake_id, embedder, corpus, lancedb_dir, cfg).await {
-                Ok(n) => n,
-                Err(e) => {
-                    audit_as(
-                        catalog,
-                        "glean-reembed",
-                        &run_id,
-                        sha,
-                        Some(work_root_raw),
-                        "embed",
-                        "embed",
-                        "fail",
-                        started,
-                        None,
-                        Some(&e.to_string()),
-                    );
-                    return Err(e);
-                }
-            };
+        let embed_run = match reembed_paper(intake_id, embedder, corpus, lancedb_dir, cfg).await {
+            Ok(run) => run,
+            Err(e) => {
+                audit_as(
+                    catalog,
+                    "glean-reembed",
+                    &run_id,
+                    sha,
+                    Some(work_root_raw),
+                    "embed",
+                    "embed",
+                    "fail",
+                    started,
+                    None,
+                    Some(&e.to_string()),
+                );
+                return Err(e);
+            }
+        };
+        let chunks_written = embed_run.chunks_written;
         if chunks_written == 0 {
             report.skipped_empty.push(intake_id);
             continue;
@@ -207,7 +214,10 @@ pub async fn reembed_all<E: Embedder>(
             "embed",
             "ok",
             started,
-            Some(format!(r#"{{"chunks":{chunks_written}}}"#)),
+            Some(format!(
+                r#"{{"chunks":{chunks_written},"reused":{}}}"#,
+                embed_run.chunks_reused
+            )),
             None,
         );
         report.intakes.push(ReembedOutcome {
@@ -563,7 +573,11 @@ mod tests {
             .await
             .expect("nothing to reembed");
 
-        assert_eq!(report, 0, "nothing was there to write");
+        assert_eq!(
+            report,
+            EmbedRunReport::default(),
+            "nothing was there to write"
+        );
         assert!(
             !lancedb_dir.exists(),
             "reembedding created the vector table it found missing",

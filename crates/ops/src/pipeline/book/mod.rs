@@ -49,7 +49,7 @@ use bookrack_extract::{ExtractOutcome, Extraction};
 use sha2::{Digest, Sha256};
 use tracing::Instrument;
 
-use crate::pipeline::common::embed::{EmbedStageError, embed_chunks_with_progress};
+use crate::pipeline::common::embed::{EmbedSource, EmbedStageError, embed_chunks_with_progress};
 use crate::pipeline::common::on_file::{
     Current, OnFile, OnFileError, on_file, stored_audit_outcome,
 };
@@ -476,8 +476,10 @@ pub struct IngestParams {
     /// and without comparing a fresh extraction against the stored
     /// envelope when only `extractor_version` is behind. Off by default
     /// — a re-ingest of an up-to-date source returns a no-op report
-    /// instead of re-extracting and re-embedding, and one whose fresh
-    /// extraction matches its envelope only advances the stamp.
+    /// instead of running the stages again, and one whose fresh
+    /// extraction matches its envelope only advances the stamp. A
+    /// forced run still keeps the stored vector of every chunk whose
+    /// text comes out unchanged.
     pub force: bool,
 }
 
@@ -508,9 +510,13 @@ pub struct IngestReport {
     pub nodes_written: usize,
     /// How many of those nodes are prose leaves. Zero on a `no_op` run.
     pub prose_leaves: usize,
-    /// How many chunk rows were embedded and written to the vector
-    /// store. Zero on a `no_op` run.
+    /// How many chunk rows the book has in the vector store when the
+    /// run ends, whether the run embedded them or found their vectors
+    /// already stored. Zero on a `no_op` run.
     pub chunks_written: usize,
+    /// How many of those rows took their vector from the store instead
+    /// of from the embedder.
+    pub chunks_reused: usize,
     /// Whether the file was already registered (idempotent re-ingest).
     pub already_registered: bool,
     /// True when the source was already on file and every recorded
@@ -553,7 +559,9 @@ pub struct IngestReport {
 /// `extractor_version` extracts the file again and, when the result
 /// matches the stored envelope apart from that stamp, rewrites the
 /// envelope and advances the stamp alone (see [`IngestReport::restamped`]).
-/// Every other re-ingest replaces the corpus tree and vector rows.
+/// Every other re-ingest replaces the corpus tree and re-derives the
+/// chunks; a chunk whose text is unchanged keeps its stored vector, and
+/// the rest are embedded.
 /// `lancedb_dir` is the vector store directory; `embedder` turns chunk
 /// text into vectors. A file whose text layer is unusable yields
 /// [`IngestError::NeedsOcr`].
@@ -614,7 +622,7 @@ pub async fn ingest_book_with_progress<E: Embedder>(
     // When `extractor_version` is the only stamp behind, the run extracts
     // and compares the result with the stored envelope before deciding
     // whether the later stages run. The caller can override both with
-    // [`IngestParams::force`] to re-extract and re-embed regardless.
+    // [`IngestParams::force`] to run every stage regardless.
     let behind = if params.force {
         None
     } else {
@@ -964,6 +972,7 @@ async fn finish_extraction_ingest<E: Embedder>(
             nodes_written: structure.nodes_written,
             prose_leaves: structure.prose_leaves,
             chunks_written: 0,
+            chunks_reused: 0,
             already_registered,
             no_op: false,
             forced: params.force,
@@ -998,6 +1007,7 @@ async fn finish_extraction_ingest<E: Embedder>(
         nodes_written: structure.nodes_written,
         prose_leaves: structure.prose_leaves,
         chunks_written: embed.chunks_written,
+        chunks_reused: embed.chunks_reused,
         already_registered,
         no_op: false,
         forced: params.force,
@@ -1015,6 +1025,7 @@ fn noop_report(current: Current) -> IngestReport {
         nodes_written: 0,
         prose_leaves: 0,
         chunks_written: 0,
+        chunks_reused: 0,
         already_registered: true,
         no_op: true,
         forced: false,
@@ -1150,6 +1161,7 @@ fn restamp_if_unchanged(
         nodes_written: 0,
         prose_leaves: 0,
         chunks_written: 0,
+        chunks_reused: 0,
         already_registered: true,
         no_op: false,
         forced: false,
@@ -1360,6 +1372,7 @@ pub async fn resume_from_chunk<E: Embedder>(
     let started = std::time::Instant::now();
     let embed = match embed_chunks_with_progress(
         &plans,
+        EmbedSource::SamePartition,
         embedder,
         corpus,
         lancedb_dir,
@@ -1395,8 +1408,12 @@ pub async fn resume_from_chunk<E: Embedder>(
         }
     };
     let metric = format!(
-        r#"{{"chunks":{},"batches":{},"shrink_events":{},"chars":{}}}"#,
-        embed.chunks_written, embed.batches, embed.shrink_events, embed.total_chars
+        r#"{{"chunks":{},"batches":{},"shrink_events":{},"chars":{},"reused":{}}}"#,
+        embed.chunks_written,
+        embed.batches,
+        embed.shrink_events,
+        embed.total_chars,
+        embed.chunks_reused
     );
     audit(
         catalog,
@@ -1412,6 +1429,7 @@ pub async fn resume_from_chunk<E: Embedder>(
     );
     tracing::info!(
         chunks_written = embed.chunks_written,
+        chunks_reused = embed.chunks_reused,
         batches = embed.batches,
         shrink_events = embed.shrink_events,
         "embedded chunks"
@@ -2754,6 +2772,20 @@ pub(crate) mod book_pipeline_tests {
         pub(crate) fn calls(&self) -> usize {
             self.requests.lock().expect("requests").len()
         }
+
+        /// Every text received, across all requests, sorted.
+        pub(crate) fn sent(&self) -> Vec<String> {
+            let mut texts: Vec<String> = self
+                .requests
+                .lock()
+                .expect("requests")
+                .iter()
+                .flatten()
+                .cloned()
+                .collect();
+            texts.sort();
+            texts
+        }
     }
 
     impl Embedder for Counting {
@@ -3203,8 +3235,10 @@ pub(crate) mod book_pipeline_tests {
                 .len();
             let vectors_before = vector_rows(dir.path()).await;
 
-            // An embedder that fails on any call: a run that reaches
-            // EMBED fails, so success means EMBED never ran.
+            // The run must stop short of EMBED: `restamped` and the zero
+            // counts below say so. The failing embedder does not, since
+            // a run whose chunks all have stored vectors asks it for
+            // nothing.
             let again = ingest_book(
                 &file,
                 &mut corpus,
@@ -3360,13 +3394,14 @@ pub(crate) mod book_pipeline_tests {
             });
         });
 
+        let embedder = Counting::new(8);
         let again = ingest_book(
             &file,
             &mut corpus,
             &mut catalog,
             dir.path(),
             dir.path(),
-            &Fake { dim: 8 },
+            &embedder,
             &IngestParams::default(),
         )
         .await
@@ -3381,6 +3416,12 @@ pub(crate) mod book_pipeline_tests {
         );
         assert!(!again.restamped);
         assert!(again.chunks_written > 0, "the chunks must be re-derived");
+        assert_eq!(
+            embedder.calls(),
+            0,
+            "the text did not change, so the stored vectors are kept"
+        );
+        assert_eq!(again.chunks_reused, again.chunks_written);
         let after = read_envelope(&envelope_path).expect("envelope");
         assert_eq!(
             after.extraction.blocks[0].style, None,
@@ -3838,8 +3879,19 @@ pub(crate) mod book_pipeline_tests {
         assert_eq!(rebuilt.missing_envelope, [intake.intake_id]);
     }
 
+    /// The `embed` audit rows of the book rooted at `root`.
+    fn embed_rows(catalog: &Catalog, root: NodeId) -> usize {
+        catalog
+            .pipeline_audit_for_book(root.get())
+            .expect("audit")
+            .iter()
+            .filter(|row| row.stage == "embed")
+            .count()
+    }
+
     /// `--force` runs every stage for a stale book whose extraction has
-    /// not changed, without comparing.
+    /// not changed, without comparing. The chunks come out as they were,
+    /// so each keeps its stored vector and the embedder is not asked.
     #[tokio::test]
     async fn force_takes_a_stale_book_read_as_before_through_the_full_pipeline() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3851,25 +3903,16 @@ pub(crate) mod book_pipeline_tests {
             force: true,
             ..Default::default()
         };
+        let embeds_before = embed_rows(&catalog, first.book_root_id);
 
-        ingest_book(
-            &file,
-            &mut corpus,
-            &mut catalog,
-            dir.path(),
-            dir.path(),
-            &Offline,
-            &forced,
-        )
-        .await
-        .expect_err("a forced run reaches EMBED");
+        let embedder = Counting::new(8);
         let again = ingest_book(
             &file,
             &mut corpus,
             &mut catalog,
             dir.path(),
             dir.path(),
-            &Fake { dim: 8 },
+            &embedder,
             &forced,
         )
         .await
@@ -3877,9 +3920,124 @@ pub(crate) mod book_pipeline_tests {
         assert!(again.forced);
         assert!(!again.restamped);
         assert!(again.chunks_written > 0);
+        assert_eq!(embedder.calls(), 0, "every chunk has a stored vector");
+        assert_eq!(again.chunks_reused, again.chunks_written);
+        assert_eq!(
+            embed_rows(&catalog, first.book_root_id),
+            embeds_before + 1,
+            "the forced run reached EMBED"
+        );
         assert!(
             compare_rows(&catalog, first.book_root_id).is_empty(),
             "a forced run must not compare"
+        );
+    }
+
+    /// A forced run of a book whose stored rows are gone has no vector
+    /// to keep, and needs the embedder.
+    #[tokio::test]
+    async fn force_embeds_a_stale_book_whose_stored_rows_are_gone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let (first, _) = ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
+        bookrack_vectors::ChunkStore::open_for_write(dir.path(), 8)
+            .await
+            .expect("open store")
+            .delete_partition(first.book_root_id.partition())
+            .await
+            .expect("clear the book's rows");
+
+        let err = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Offline,
+            &IngestParams {
+                force: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("a forced run with nothing stored reaches the embedder");
+        assert!(matches!(err, IngestError::Embed(_)), "{err:?}");
+    }
+
+    /// Write a plain-text book of twelve distinct paragraphs, long
+    /// enough to be cut into several chunks.
+    fn write_long_sample(dir: &Path) -> std::path::PathBuf {
+        let path = dir.join("long.txt");
+        let mut file = std::fs::File::create(&path).expect("create sample");
+        for i in 0..12 {
+            write!(
+                file,
+                "Paragraph {i} opens the sample. The quick brown fox jumps over the \
+                 lazy dog while a second clause keeps the sentence going. A third \
+                 sentence closes paragraph {i} with a few more plain words about \
+                 nothing in particular, so that the text runs to several chunks.\n\n"
+            )
+            .expect("write paragraph");
+        }
+        path
+    }
+
+    /// A forced rerun of a book that lost some of its stored rows
+    /// embeds the chunks those rows held and no others.
+    #[tokio::test]
+    async fn a_forced_rerun_embeds_only_the_chunks_whose_rows_are_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_long_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let first = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("first ingest");
+        assert!(first.chunks_written >= 3, "{first:?}");
+
+        // Take two rows out of the book's partition.
+        let partition = first.book_root_id.partition();
+        let store = bookrack_vectors::ChunkStore::open_for_write(dir.path(), 8)
+            .await
+            .expect("open store");
+        let mut kept = store.scan_partition(partition).await.expect("scan");
+        kept.sort_by_key(|row| (row.start_node_id.get(), row.start_char_offset));
+        let mut dropped: Vec<String> = kept.drain(..2).map(|row| row.text).collect();
+        dropped.sort();
+        store.delete_partition(partition).await.expect("clear");
+        store.append(&kept).await.expect("write back");
+
+        let embedder = Counting::new(8);
+        let again = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &embedder,
+            &IngestParams {
+                force: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("forced re-ingest");
+        assert_eq!(embedder.sent(), dropped, "only the missing chunks are sent");
+        assert_eq!(again.chunks_written, first.chunks_written);
+        assert_eq!(again.chunks_reused, first.chunks_written - 2);
+        assert_eq!(
+            store.scan_partition(partition).await.expect("scan").len(),
+            first.chunks_written
         );
     }
 
@@ -5891,9 +6049,9 @@ pub(crate) mod book_pipeline_tests {
             "the first run must have committed at least one batch",
         );
 
-        // Second run: the same file with a working embedder. The
-        // partition delete inside the EMBED stage wipes the crashed
-        // run's rows before writing the fresh batches.
+        // Second run: the same file with a working embedder. The EMBED
+        // stage keeps the vectors the crashed run stored and embeds the
+        // rest, rewriting the partition without a duplicate.
         let report = ingest_book(
             &file,
             &mut corpus,
@@ -5907,6 +6065,10 @@ pub(crate) mod book_pipeline_tests {
         .expect("resume must succeed");
         assert!(!report.no_op);
         assert!(report.chunks_written > 0);
+        assert_eq!(
+            report.chunks_reused, rows_after_crash,
+            "the rows the crashed run stored keep their vectors",
+        );
 
         let intake_after_resume = catalog
             .intake_by_id(report.intake_id)

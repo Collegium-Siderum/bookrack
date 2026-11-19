@@ -24,7 +24,7 @@ use bookrack_extract::EXTRACTOR_VERSION;
 use bookrack_vectors::{ChunkReader, ChunkRow};
 
 use crate::pipeline::book::{IngestError, Result, audit_as, maintenance_run_id};
-use crate::pipeline::common::embed::{EmbedRunReport, embed_chunks};
+use crate::pipeline::common::embed::{EmbedRunReport, EmbedSource, embed_chunks};
 use bookrack_text::ChunkPlan;
 
 /// A planned per-book reembed: what would happen if [`reembed_book`]
@@ -134,7 +134,15 @@ pub async fn reembed_book<E: Embedder>(
     if plans.is_empty() {
         return Ok(EmbedRunReport::default());
     }
-    Ok(embed_chunks(&plans, embedder, corpus, lancedb_dir, cfg).await?)
+    Ok(embed_chunks(
+        &plans,
+        EmbedSource::Recompute,
+        embedder,
+        corpus,
+        lancedb_dir,
+        cfg,
+    )
+    .await?)
 }
 
 /// Reembed every intake currently in [`IntakeStatus::Embedded`], or
@@ -218,11 +226,12 @@ pub async fn reembed_all<E: Embedder>(
             "ok",
             started,
             Some(format!(
-                r#"{{"chunks":{},"batches":{},"shrink_events":{},"chars":{}}}"#,
+                r#"{{"chunks":{},"batches":{},"shrink_events":{},"chars":{},"reused":{}}}"#,
                 embed_run.chunks_written,
                 embed_run.batches,
                 embed_run.shrink_events,
-                embed_run.total_chars
+                embed_run.total_chars,
+                embed_run.chunks_reused
             )),
             None,
         );

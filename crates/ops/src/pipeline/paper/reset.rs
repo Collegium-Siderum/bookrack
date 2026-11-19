@@ -20,7 +20,7 @@ use bookrack_vectors::ChunkStore;
 
 use bookrack_text::{ChunkLeaf, plan_chunks};
 
-use crate::pipeline::common::embed::embed_chunks;
+use crate::pipeline::common::embed::{EmbedSource, embed_chunks};
 use crate::pipeline::paper::{ChunkParams, GleanError, Result, audit_as, new_run_id};
 
 /// What one [`reset_and_rechunk`] call produced.
@@ -126,11 +126,18 @@ pub async fn reset_and_rechunk<E: Embedder>(
         }
 
         let started = Instant::now();
-        let chunks_written = match embed_chunks(&plans, embedder, corpus, lancedb_dir, cfg)
-            .await
-            .map_err(GleanError::from)
+        let embed_run = match embed_chunks(
+            &plans,
+            EmbedSource::Recompute,
+            embedder,
+            corpus,
+            lancedb_dir,
+            cfg,
+        )
+        .await
+        .map_err(GleanError::from)
         {
-            Ok(run) => run.chunks_written,
+            Ok(run) => run,
             Err(e) => {
                 audit_as(
                     catalog,
@@ -158,12 +165,15 @@ pub async fn reset_and_rechunk<E: Embedder>(
             "embed",
             "ok",
             started,
-            Some(format!(r#"{{"chunks":{chunks_written}}}"#)),
+            Some(format!(
+                r#"{{"chunks":{},"reused":{}}}"#,
+                embed_run.chunks_written, embed_run.chunks_reused
+            )),
             None,
         );
         catalog.set_intake_status(ItemKind::Paper, intake_id, IntakeStatus::Embedded)?;
         report.intakes_reembedded += 1;
-        report.chunks_written += chunks_written;
+        report.chunks_written += embed_run.chunks_written;
     }
 
     Ok(report)
@@ -264,6 +274,7 @@ mod tests {
         assert!(!plans.is_empty(), "seed needs at least one chunk plan");
         let written = embed_chunks(
             &plans,
+            EmbedSource::Recompute,
             &Fake { dim, generation: 1 },
             corpus,
             lancedb_dir,

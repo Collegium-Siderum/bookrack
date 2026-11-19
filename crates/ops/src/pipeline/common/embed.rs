@@ -10,17 +10,23 @@
 //! each half, down to a single chunk — the producer/consumer overlap and
 //! AIMD scheduling the config leaves room for are deferred.
 //!
-//! Writing an item is delete-then-append on its partition, so running
-//! the same file again replaces its rows rather than duplicating them.
+//! A chunk whose text the item's partition already holds a vector for
+//! takes that vector instead of a new one, so a run over unchanged text
+//! sends no request. Writing an item is delete-then-append on its
+//! partition, so a run replaces its rows rather than duplicating them;
+//! a run that finds every row already in place writes nothing.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bookrack_config::EmbedConfig;
+use bookrack_core::PartitionIdx;
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_text::ChunkPlan;
 use bookrack_vectors::{AnnConfig, AnnKind, ChunkReader, ChunkRow, ChunkStore, VectorsError};
+use sha2::{Digest, Sha256};
 
 use crate::pipeline::common::stamps::{current_index_identity, current_index_stamps};
 
@@ -53,46 +59,85 @@ type Result<T> = std::result::Result<T, EmbedStageError>;
 /// that diagnose how the run behaved against the server.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EmbedRunReport {
-    /// Rows written to the vector store.
+    /// Rows the item has in the vector store when the run ends. A run
+    /// that found every row already in place and wrote none still
+    /// counts them all.
     pub chunks_written: usize,
+    /// How many of those rows took their vector from the store instead
+    /// of from the embedder.
+    pub chunks_reused: usize,
     /// Embed requests issued, after any overload shrinking.
     pub batches: usize,
     /// Times an overloaded server forced a batch to be halved.
     pub shrink_events: usize,
-    /// Total characters of chunk text embedded.
+    /// Total characters of chunk text sent to the embedder.
     pub total_chars: usize,
 }
 
-/// Callback an EMBED run invokes after each batch lands in the store,
-/// with `(consumed, total)`: the chunk plans written so far and the
-/// number the run was given. The last call has `consumed == total`.
+/// Where an EMBED run may take a chunk's vector from instead of asking
+/// the embedder for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbedSource {
+    /// The rows the item's own partition holds when the run starts: a
+    /// plan whose text one of them carries takes that row's vector.
+    SamePartition,
+    /// Nowhere: every plan is sent to the embedder.
+    Recompute,
+}
+
+/// The model and width a set of vectors was produced with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VectorIdentity<'a> {
+    pub embed_model: &'a str,
+    pub vector_dim: u32,
+}
+
+/// Callback an EMBED run invokes as the item's rows come to stand in
+/// the store, with `(consumed, total)`: the chunk plans in place so far
+/// and the number the run was given. The last call has
+/// `consumed == total`.
 pub type OnEmbedBatch<'a> = dyn Fn(usize, usize) + Send + Sync + 'a;
 
 /// Embed one item's chunk plans and write them to the store under
 /// `lancedb_dir`. Returns the run's [`EmbedRunReport`].
 ///
 /// The index's recorded model and algorithm versions are compared
-/// before any request is sent. The first batch's vectors fix the
-/// embedding dimension; once they agree with the recorded stamp and the
-/// table on disk, the store is opened at that dimension and the item's
-/// prior rows are cleared before the first append. The deletion is keyed
-/// on the partition the first chunk lives in: every plan of one call
-/// belongs to one item.
+/// before any request is sent. A plan whose text `source` already holds
+/// a vector for takes that vector; the rest are embedded. The first
+/// batch's vectors fix the embedding dimension; once they agree with
+/// the recorded stamp and the table on disk, the store is opened at
+/// that dimension and the item's prior rows are cleared before the
+/// first append. The deletion is keyed on the partition the first chunk
+/// lives in: every plan of one call belongs to one item.
+///
+/// A run whose every plan is already stored, row for row, sends no
+/// request and leaves the table as it is.
 pub async fn embed_chunks<E: Embedder>(
     plans: &[ChunkPlan],
+    source: EmbedSource,
     embedder: &E,
     corpus: &Corpus,
     lancedb_dir: &Path,
     cfg: &EmbedConfig,
 ) -> Result<EmbedRunReport> {
-    embed_chunks_with_progress(plans, embedder, corpus, lancedb_dir, cfg, &|_, _| {}).await
+    embed_chunks_with_progress(
+        plans,
+        source,
+        embedder,
+        corpus,
+        lancedb_dir,
+        cfg,
+        &|_, _| {},
+    )
+    .await
 }
 
-/// [`embed_chunks`], reporting each batch to `on_batch` once it is
-/// written. An empty `plans` writes nothing, reports nothing, and
+/// [`embed_chunks`], reporting to `on_batch` as rows come to stand in
+/// the store. An empty `plans` writes nothing, reports nothing, and
 /// leaves the item's prior rows where they are.
 pub async fn embed_chunks_with_progress<E: Embedder>(
     plans: &[ChunkPlan],
+    source: EmbedSource,
     embedder: &E,
     corpus: &Corpus,
     lancedb_dir: &Path,
@@ -108,13 +153,100 @@ pub async fn embed_chunks_with_progress<E: Embedder>(
     // differ from the index's is refused with no request sent and
     // nothing opened.
     let recorded_dim = corpus.precheck_index_stamps(&current_index_identity(&cfg.model))?;
+    let partition = plans[0].start_node_id.partition();
+    let total = plans.len();
+
+    // The item's stored rows are a source of vectors only on a stamped
+    // index: the stamp is the one record of which model produced them.
+    let mut table_dim: Option<usize> = None;
+    let mut table_looked_at = false;
+    let mut source_rows: Vec<ChunkRow> = Vec::new();
+    let mut reused: Vec<Option<Vec<f32>>> = vec![None; total];
+    if source == EmbedSource::SamePartition
+        && let Some(vector_dim) = recorded_dim
+    {
+        table_looked_at = true;
+        if let Some(reader) = ChunkReader::open(lancedb_dir).await? {
+            table_dim = Some(reader.dimension());
+            source_rows = reader.scan_partition(partition).await?;
+            let identity = VectorIdentity {
+                embed_model: &cfg.model,
+                vector_dim,
+            };
+            reused = reuse_vectors(Some((&identity, &source_rows)), &identity, plans);
+        }
+    }
+    let mut reused_rows: Vec<ChunkRow> = Vec::new();
+    let mut to_embed: Vec<&ChunkPlan> = Vec::new();
+    for (plan, vector) in plans.iter().zip(reused) {
+        match vector {
+            Some(vector) => reused_rows.push(row_of(plan, vector)),
+            None => to_embed.push(plan),
+        }
+    }
+    tracing::info!(
+        reused = reused_rows.len(),
+        to_embed = to_embed.len(),
+        total,
+        "embed stage entered"
+    );
+    let mut report = EmbedRunReport {
+        chunks_reused: reused_rows.len(),
+        ..EmbedRunReport::default()
+    };
+    let slice_len = cfg.batch_max_chunks.max(1);
+
+    // Every plan has a stored vector: no request is sent. The reused
+    // vectors all have the recorded width, so the first one names it.
+    if to_embed.is_empty() {
+        let dim = reused_rows[0].vector.len();
+        let unchanged = rows_unchanged(&source_rows, plans, dim);
+        if unchanged && bookrack_vectors::meta::load(lancedb_dir)?.is_some() {
+            tracing::info!(
+                total,
+                "every chunk is stored as planned; the table is left as it is"
+            );
+            report.chunks_written = total;
+            on_batch(total, total);
+            return Ok(report);
+        }
+        let store = ChunkStore::open_for_write(lancedb_dir, dim).await?;
+        if store.dimension() != dim {
+            return Err(VectorsError::DimensionMismatch {
+                got: dim,
+                expected: store.dimension(),
+            }
+            .into());
+        }
+        let mut churn = 0usize;
+        if unchanged {
+            // The rows stand; only the index declaration is missing.
+            report.chunks_written = total;
+            on_batch(total, total);
+        } else {
+            let deleted = clear_partition(&store, partition).await?;
+            let mut consumed = 0usize;
+            append_in_slices(
+                &store,
+                &reused_rows,
+                slice_len,
+                &mut consumed,
+                total,
+                on_batch,
+            )
+            .await?;
+            report.chunks_written = consumed;
+            churn = deleted + consumed;
+        }
+        finish_write(&store, lancedb_dir, churn as u64).await;
+        return Ok(report);
+    }
 
     // The first batch fixes the vector width, and is held in memory
     // until it has passed every check below.
-    let total = plans.len();
-    let first_end = greedy_batch_end(plans, 0, cfg);
+    let first_end = greedy_batch_end(&to_embed, 0, cfg);
     let (first_vectors, first_shrinks) =
-        embed_with_shrink(embedder, &plans[..first_end], 0).await?;
+        embed_with_shrink(embedder, &to_embed[..first_end], 0).await?;
     let dim = first_vectors
         .first()
         .map(Vec::len)
@@ -137,12 +269,17 @@ pub async fn embed_chunks_with_progress<E: Embedder>(
         }
         .into());
     }
-    if let Some(reader) = ChunkReader::open(lancedb_dir).await?
-        && reader.dimension() != dim
+    if !table_looked_at {
+        table_dim = ChunkReader::open(lancedb_dir)
+            .await?
+            .map(|reader| reader.dimension());
+    }
+    if let Some(on_disk) = table_dim
+        && on_disk != dim
     {
         return Err(VectorsError::DimensionMismatch {
             got: dim,
-            expected: reader.dimension(),
+            expected: on_disk,
         }
         .into());
     }
@@ -167,25 +304,33 @@ pub async fn embed_chunks_with_progress<E: Embedder>(
     }
 
     let store = ChunkStore::open_for_write(lancedb_dir, dim).await?;
-    let rows_before_delete = store.count_rows().await?;
-    store
-        .delete_partition(plans[0].start_node_id.partition())
-        .await?;
-    let rows_after_delete = store.count_rows().await?;
-    let deleted = rows_before_delete.saturating_sub(rows_after_delete);
+    let deleted = clear_partition(&store, partition).await?;
 
-    let mut report = EmbedRunReport::default();
+    // The reused rows go back first, then each embedded batch as it
+    // arrives.
+    let mut consumed = 0usize;
+    append_in_slices(
+        &store,
+        &reused_rows,
+        slice_len,
+        &mut consumed,
+        total,
+        on_batch,
+    )
+    .await?;
+
     let mut start = 0usize;
     let phase_started = Instant::now();
     let mut ticker = ProgressTicker::new(cfg.progress_interval);
     let mut held = Some((first_end, first_vectors, first_shrinks));
-    while start < plans.len() {
+    while start < to_embed.len() {
         let (end, vectors, shrinks) = match held.take() {
             Some(first) => first,
             None => {
-                let end = greedy_batch_end(plans, start, cfg);
+                let end = greedy_batch_end(&to_embed, start, cfg);
                 let started = Instant::now();
-                let (vectors, shrinks) = embed_with_shrink(embedder, &plans[start..end], 0).await?;
+                let (vectors, shrinks) =
+                    embed_with_shrink(embedder, &to_embed[start..end], 0).await?;
                 tracing::debug!(
                     vectors = vectors.len(),
                     elapsed_ms = started.elapsed().as_secs_f64() * 1e3,
@@ -195,22 +340,22 @@ pub async fn embed_chunks_with_progress<E: Embedder>(
                 (end, vectors, shrinks)
             }
         };
-        let batch = &plans[start..end];
+        let batch = &to_embed[start..end];
         let batch_chars: usize = batch.iter().map(|p| p.text.chars().count()).sum();
 
         let rows = store.append(&to_rows(batch, vectors)).await?;
         tracing::debug!(rows, chars = batch_chars, "appended batch to store");
 
-        report.chunks_written += rows;
+        consumed += rows;
         report.batches += 1;
         report.shrink_events += shrinks;
         report.total_chars += batch_chars;
         start = end;
-        on_batch(start, total);
+        on_batch(consumed, total);
 
         if ticker.should_emit(Instant::now()) {
             tracing::info!(
-                chunks_done = report.chunks_written,
+                chunks_done = consumed,
                 chunks_total = total,
                 batch = report.batches,
                 elapsed_s = phase_started.elapsed().as_secs_f64(),
@@ -218,7 +363,141 @@ pub async fn embed_chunks_with_progress<E: Embedder>(
             );
         }
     }
+    report.chunks_written = consumed;
 
+    finish_write(&store, lancedb_dir, (deleted + consumed) as u64).await;
+    Ok(report)
+}
+
+/// For each plan, the stored vector it may take, or `None` when it has
+/// to be embedded.
+///
+/// A plan takes the vector of a `source` row whose text is byte-equal
+/// to its own, compared by the SHA-256 of the text as it is sent to the
+/// embedder. Nothing is taken when there is no source, or when the
+/// source's model or width differs from `target`'s. A source row whose
+/// vector is not `source`'s width, or is unusable for cosine search, is
+/// passed over. Of several rows carrying one text, the one first by
+/// chunk coordinates gives its vector, whatever order the rows arrive
+/// in.
+pub(crate) fn reuse_vectors(
+    source: Option<(&VectorIdentity<'_>, &[ChunkRow])>,
+    target: &VectorIdentity<'_>,
+    plans: &[ChunkPlan],
+) -> Vec<Option<Vec<f32>>> {
+    let Some((identity, rows)) = source.filter(|(identity, _)| *identity == target) else {
+        return vec![None; plans.len()];
+    };
+    let width = identity.vector_dim as usize;
+    let mut usable: Vec<&ChunkRow> = rows
+        .iter()
+        .filter(|row| vector_is_usable(&row.vector, width))
+        .collect();
+    usable.sort_by_key(|row| row_coordinates(row));
+    let mut by_text: HashMap<[u8; 32], &[f32]> = HashMap::new();
+    for row in usable {
+        by_text
+            .entry(sent_text_digest(&row.text))
+            .or_insert(&row.vector);
+    }
+    plans
+        .iter()
+        .map(|plan| {
+            by_text
+                .get(&sent_text_digest(&plan.text))
+                .map(|vector| vector.to_vec())
+        })
+        .collect()
+}
+
+/// Whether the stored rows are exactly the rows the plans would write:
+/// the same count, and, paired by chunk coordinates, the same text and
+/// normalized-text hash. Any stored vector that is not `expected_dim`
+/// wide or is unusable for cosine search makes the answer `false`, so a
+/// defective row is rewritten instead of left standing.
+pub(crate) fn rows_unchanged(
+    source_rows: &[ChunkRow],
+    plans: &[ChunkPlan],
+    expected_dim: usize,
+) -> bool {
+    if source_rows.len() != plans.len()
+        || source_rows
+            .iter()
+            .any(|row| !vector_is_usable(&row.vector, expected_dim))
+    {
+        return false;
+    }
+    let mut rows: Vec<&ChunkRow> = source_rows.iter().collect();
+    rows.sort_by_key(|row| row_coordinates(row));
+    let mut planned: Vec<&ChunkPlan> = plans.iter().collect();
+    planned.sort_by_key(|plan| plan_coordinates(plan));
+    rows.iter().zip(planned).all(|(row, plan)| {
+        row_coordinates(row) == plan_coordinates(plan)
+            && row.text == plan.text
+            && row.norm_chunk_sha256 == plan.norm_chunk_sha256
+    })
+}
+
+/// Where a chunk starts and ends: node and character offset, twice.
+type Coordinates = (i64, i32, i64, i32);
+
+fn row_coordinates(row: &ChunkRow) -> Coordinates {
+    (
+        row.start_node_id.get(),
+        row.start_char_offset,
+        row.end_node_id.get(),
+        row.end_char_offset,
+    )
+}
+
+fn plan_coordinates(plan: &ChunkPlan) -> Coordinates {
+    (
+        plan.start_node_id.get(),
+        plan.start_char_offset,
+        plan.end_node_id.get(),
+        plan.end_char_offset,
+    )
+}
+
+/// Whether a stored vector is `width` wide and usable for cosine search.
+fn vector_is_usable(vector: &[f32], width: usize) -> bool {
+    vector.len() == width && bookrack_core::vector_defect(vector).is_none()
+}
+
+/// SHA-256 of a chunk's text as the embedder is sent it.
+fn sent_text_digest(text: &str) -> [u8; 32] {
+    Sha256::digest(text.as_bytes()).into()
+}
+
+/// Delete every row of `partition`, returning how many there were.
+async fn clear_partition(store: &ChunkStore, partition: PartitionIdx) -> Result<usize> {
+    let before = store.count_rows().await?;
+    store.delete_partition(partition).await?;
+    let after = store.count_rows().await?;
+    Ok(before.saturating_sub(after))
+}
+
+/// Append `rows` in slices of `slice_len`, adding each slice's rows to
+/// `consumed` and reporting it once the slice has landed.
+async fn append_in_slices(
+    store: &ChunkStore,
+    rows: &[ChunkRow],
+    slice_len: usize,
+    consumed: &mut usize,
+    total: usize,
+    on_batch: &OnEmbedBatch<'_>,
+) -> Result<()> {
+    for slice in rows.chunks(slice_len) {
+        *consumed += store.append(slice).await?;
+        on_batch(*consumed, total);
+    }
+    Ok(())
+}
+
+/// Close a run that opened the store for writing: compact, account for
+/// `churn_delta` rows of delete-and-append churn, and build or retrain
+/// the ANN index when it is due. Every step is best-effort.
+async fn finish_write(store: &ChunkStore, lancedb_dir: &Path, churn_delta: u64) {
     // Drain the delete-then-append churn: compact fragments, prune old
     // versions, and absorb the freshly-appended rows into any existing
     // index. Failure is non-fatal — the table is still consistent, just
@@ -235,7 +514,6 @@ pub async fn embed_chunks_with_progress<E: Embedder>(
     // present. Skip when none — that's the "ANN not yet adopted" state,
     // handled by the cold-start path below. Failures here are
     // non-fatal: the next run will recompute against the new state.
-    let churn_delta = (deleted + report.chunks_written) as u64;
     if churn_delta > 0
         && let Err(e) = bump_churn(lancedb_dir, churn_delta)
     {
@@ -248,14 +526,12 @@ pub async fn embed_chunks_with_progress<E: Embedder>(
     // set); skip the rebuild when optimize failed so tombstones do not
     // poison the kmeans training set, and let the next run retry.
     if optimize_ok {
-        if let Err(e) = maybe_build_ann_index(&store, lancedb_dir).await {
+        if let Err(e) = maybe_build_ann_index(store, lancedb_dir).await {
             tracing::warn!(error = ?e, "ann build/retrain failed; will retry next run");
         }
     } else {
         tracing::warn!("skipping ann build/retrain after optimize failure; will retry next run");
     }
-
-    Ok(report)
 }
 
 /// Add `delta` to `vectors_meta::churn_since_rebuild` if a meta file is
@@ -381,7 +657,7 @@ impl ProgressTicker {
 /// running character count stays under the budget and the chunk count
 /// stays under the cap, but always take at least one chunk so an
 /// over-budget chunk still makes progress.
-fn greedy_batch_end(plans: &[ChunkPlan], start: usize, cfg: &EmbedConfig) -> usize {
+fn greedy_batch_end(plans: &[&ChunkPlan], start: usize, cfg: &EmbedConfig) -> usize {
     let mut end = start;
     let mut chars = 0usize;
     while end < plans.len() {
@@ -408,7 +684,7 @@ fn greedy_batch_end(plans: &[ChunkPlan], start: usize, cfg: &EmbedConfig) -> usi
 /// recursion.
 async fn embed_with_shrink<E: Embedder>(
     embedder: &E,
-    batch: &[ChunkPlan],
+    batch: &[&ChunkPlan],
     depth: usize,
 ) -> Result<(Vec<Vec<f32>>, usize)> {
     let texts: Vec<String> = batch.iter().map(|p| p.text.clone()).collect();
@@ -451,20 +727,25 @@ fn expect_one_vector_each(sent: usize, vectors: &[Vec<f32>]) -> Result<()> {
 
 /// Zip a batch of plans with its embedding vectors into store rows, one
 /// vector per plan, in order.
-fn to_rows(plans: &[ChunkPlan], vectors: Vec<Vec<f32>>) -> Vec<ChunkRow> {
+fn to_rows(plans: &[&ChunkPlan], vectors: Vec<Vec<f32>>) -> Vec<ChunkRow> {
     plans
         .iter()
         .zip(vectors)
-        .map(|(p, vector)| ChunkRow {
-            vector,
-            text: p.text.clone(),
-            start_node_id: p.start_node_id,
-            start_char_offset: p.start_char_offset,
-            end_node_id: p.end_node_id,
-            end_char_offset: p.end_char_offset,
-            norm_chunk_sha256: p.norm_chunk_sha256.clone(),
-        })
+        .map(|(plan, vector)| row_of(plan, vector))
         .collect()
+}
+
+/// The store row of one plan carrying `vector`.
+fn row_of(plan: &ChunkPlan, vector: Vec<f32>) -> ChunkRow {
+    ChunkRow {
+        vector,
+        text: plan.text.clone(),
+        start_node_id: plan.start_node_id,
+        start_char_offset: plan.start_char_offset,
+        end_node_id: plan.end_node_id,
+        end_char_offset: plan.end_char_offset,
+        norm_chunk_sha256: plan.norm_chunk_sha256.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -542,6 +823,7 @@ mod tests {
     /// `answer(call, texts)`, where `call` counts from zero.
     struct Scripted {
         calls: std::sync::atomic::AtomicUsize,
+        sent: std::sync::Mutex<Vec<String>>,
         answer: Box<Answer>,
     }
 
@@ -553,8 +835,14 @@ mod tests {
         ) -> Self {
             Scripted {
                 calls: std::sync::atomic::AtomicUsize::new(0),
+                sent: std::sync::Mutex::new(Vec::new()),
                 answer: Box::new(answer),
             }
+        }
+
+        /// Every text received so far, in the order it was sent.
+        fn sent(&self) -> Vec<String> {
+            self.sent.lock().expect("sent").clone()
         }
 
         fn calls(&self) -> usize {
@@ -568,6 +856,7 @@ mod tests {
             texts: &[String],
         ) -> impl Future<Output = EmbedResult<Vec<Vec<f32>>>> + Send {
             let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.sent.lock().expect("sent").extend_from_slice(texts);
             let answer = (self.answer)(call, texts);
             async move { answer }
         }
@@ -614,7 +903,7 @@ mod tests {
             .await
             .expect("create table");
         store
-            .append(&to_rows(&[plan(1, "seed")], vec![vec![0.5f32; dim]]))
+            .append(&to_rows(&[&plan(1, "seed")], vec![vec![0.5f32; dim]]))
             .await
             .expect("seed row");
     }
@@ -628,9 +917,16 @@ mod tests {
             model: "model-a".to_string(),
             ..EmbedConfig::default()
         };
-        embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &first)
-            .await
-            .expect("first run");
+        embed_chunks(
+            &plans,
+            EmbedSource::SamePartition,
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &first,
+        )
+        .await
+        .expect("first run");
         let before = tree(dir.path());
 
         let second = EmbedConfig {
@@ -638,9 +934,16 @@ mod tests {
             ..EmbedConfig::default()
         };
         let embedder = counting(8);
-        let err = embed_chunks(&plans, &embedder, &corpus, dir.path(), &second)
-            .await
-            .expect_err("a different model must be refused");
+        let err = embed_chunks(
+            &plans,
+            EmbedSource::SamePartition,
+            &embedder,
+            &corpus,
+            dir.path(),
+            &second,
+        )
+        .await
+        .expect_err("a different model must be refused");
         assert!(matches!(
             err,
             EmbedStageError::Corpus(CorpusError::IndexStampMismatch { key, .. })
@@ -657,6 +960,7 @@ mod tests {
         let embedder = counting(8);
         let report = embed_chunks(
             &[plan(1, "prose")],
+            EmbedSource::SamePartition,
             &embedder,
             &corpus,
             dir.path(),
@@ -675,6 +979,7 @@ mod tests {
         let corpus = Corpus::open_in_memory().expect("corpus");
         let err = embed_chunks(
             &[plan(1, "prose")],
+            EmbedSource::SamePartition,
             &Fake { dim: 8 },
             &corpus,
             dir.path(),
@@ -713,6 +1018,7 @@ mod tests {
             .expect("stamp");
         let err = embed_chunks(
             &[plan(1, "prose")],
+            EmbedSource::SamePartition,
             &Fake { dim: 8 },
             &corpus,
             dir.path(),
@@ -740,12 +1046,26 @@ mod tests {
         let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, &format!("prose {i}"))).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         let cfg = EmbedConfig::default();
-        embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
-            .await
-            .expect("first run");
-        let err = embed_chunks(&plans, second, &corpus, dir.path(), &cfg)
-            .await
-            .expect_err("the second run must be refused");
+        embed_chunks(
+            &plans,
+            EmbedSource::SamePartition,
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &cfg,
+        )
+        .await
+        .expect("first run");
+        let err = embed_chunks(
+            &plans,
+            EmbedSource::Recompute,
+            second,
+            &corpus,
+            dir.path(),
+            &cfg,
+        )
+        .await
+        .expect_err("the second run must be refused");
         (err, partition_rows(dir.path()).await)
     }
 
@@ -809,6 +1129,7 @@ mod tests {
         let embedder = one_vector_short_on(0);
         let err = embed_chunks(
             &plans,
+            EmbedSource::SamePartition,
             &embedder,
             &corpus,
             dir.path(),
@@ -837,9 +1158,16 @@ mod tests {
         };
         // Request 0 is the first batch of two, request 1 the second.
         let embedder = one_vector_short_on(1);
-        let err = embed_chunks(&plans, &embedder, &corpus, dir.path(), &cfg)
-            .await
-            .expect_err("a short answer must not be zipped onto the plans");
+        let err = embed_chunks(
+            &plans,
+            EmbedSource::SamePartition,
+            &embedder,
+            &corpus,
+            dir.path(),
+            &cfg,
+        )
+        .await
+        .expect_err("a short answer must not be zipped onto the plans");
         assert!(
             matches!(
                 err,
@@ -864,6 +1192,7 @@ mod tests {
         });
         embed_chunks(
             &plans,
+            EmbedSource::SamePartition,
             &embedder,
             &corpus,
             &lancedb_dir,
@@ -887,6 +1216,412 @@ mod tests {
         );
     }
 
+    /// Three plans of distinct text in partition 1.
+    fn three_plans() -> Vec<ChunkPlan> {
+        (1..=3).map(|i| plan(i, &format!("prose {i}"))).collect()
+    }
+
+    /// The rows stored for partition 1, ordered by chunk coordinates.
+    async fn stored_rows(lancedb_dir: &Path) -> Vec<ChunkRow> {
+        let reader = ChunkReader::open(lancedb_dir)
+            .await
+            .expect("open reader")
+            .expect("a table");
+        let mut rows = reader
+            .scan_partition(plan(1, "").start_node_id.partition())
+            .await
+            .expect("scan");
+        rows.sort_by_key(row_coordinates);
+        rows
+    }
+
+    #[tokio::test]
+    async fn a_second_run_over_the_same_plans_sends_no_request() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let plans = three_plans();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let cfg = EmbedConfig::default();
+        let embedder = counting(8);
+        let source = EmbedSource::SamePartition;
+        embed_chunks(&plans, source, &embedder, &corpus, dir.path(), &cfg)
+            .await
+            .expect("first run");
+        let calls_after_first = embedder.calls();
+
+        let second = embed_chunks(&plans, source, &embedder, &corpus, dir.path(), &cfg)
+            .await
+            .expect("second run");
+        assert_eq!(
+            embedder.calls(),
+            calls_after_first,
+            "every vector is stored"
+        );
+        assert_eq!(
+            second,
+            EmbedRunReport {
+                chunks_written: 3,
+                chunks_reused: 3,
+                batches: 0,
+                shrink_events: 0,
+                total_chars: 0,
+            }
+        );
+        assert_eq!(partition_rows(dir.path()).await, 3);
+    }
+
+    #[tokio::test]
+    async fn only_the_plan_whose_text_changed_is_sent() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut plans = three_plans();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let cfg = EmbedConfig::default();
+        let source = EmbedSource::SamePartition;
+        embed_chunks(&plans, source, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
+            .await
+            .expect("first run");
+
+        plans[1] = plan(2, "prose rewritten");
+        let embedder = counting(8);
+        let second = embed_chunks(&plans, source, &embedder, &corpus, dir.path(), &cfg)
+            .await
+            .expect("second run");
+        assert_eq!(embedder.sent(), ["prose rewritten"]);
+        assert_eq!(
+            second,
+            EmbedRunReport {
+                chunks_written: 3,
+                chunks_reused: 2,
+                batches: 1,
+                shrink_events: 0,
+                total_chars: "prose rewritten".len(),
+            }
+        );
+        let texts: Vec<String> = stored_rows(dir.path())
+            .await
+            .into_iter()
+            .map(|row| row.text)
+            .collect();
+        assert_eq!(texts, ["prose 1", "prose rewritten", "prose 3"]);
+    }
+
+    #[tokio::test]
+    async fn a_first_batch_of_another_width_leaves_the_reusable_rows_in_place() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut plans = three_plans();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let cfg = EmbedConfig::default();
+        let source = EmbedSource::SamePartition;
+        embed_chunks(&plans, source, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
+            .await
+            .expect("first run");
+
+        plans[1] = plan(2, "prose rewritten");
+        let err = embed_chunks(&plans, source, &Fake { dim: 5 }, &corpus, dir.path(), &cfg)
+            .await
+            .expect_err("a vector of another width must be refused");
+        assert!(
+            matches!(
+                err,
+                EmbedStageError::Corpus(CorpusError::IndexStampMismatch { key, .. })
+                    if key == bookrack_corpus::VECTOR_DIM_KEY
+            ),
+            "{err:?}"
+        );
+        let texts: Vec<String> = stored_rows(dir.path())
+            .await
+            .into_iter()
+            .map(|row| row.text)
+            .collect();
+        assert_eq!(texts, ["prose 1", "prose 2", "prose 3"]);
+    }
+
+    #[tokio::test]
+    async fn a_run_that_finds_its_rows_in_place_adds_no_churn() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let plans = three_plans();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let cfg = EmbedConfig::default();
+        let source = EmbedSource::SamePartition;
+        embed_chunks(&plans, source, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
+            .await
+            .expect("first run");
+        let meta_path = dir.path().join("vectors_meta.json");
+        let before = std::fs::read(&meta_path).expect("the first run wrote the file");
+
+        embed_chunks(&plans, source, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
+            .await
+            .expect("second run");
+        assert_eq!(std::fs::read(&meta_path).expect("meta bytes"), before);
+    }
+
+    #[tokio::test]
+    async fn a_run_that_finds_its_rows_in_place_rebuilds_a_missing_index_declaration() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let plans = three_plans();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let cfg = EmbedConfig::default();
+        let source = EmbedSource::SamePartition;
+        embed_chunks(&plans, source, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
+            .await
+            .expect("first run");
+        let meta_path = dir.path().join("vectors_meta.json");
+        std::fs::remove_file(&meta_path).expect("remove the declaration");
+
+        let embedder = counting(8);
+        let second = embed_chunks(&plans, source, &embedder, &corpus, dir.path(), &cfg)
+            .await
+            .expect("second run");
+        assert_eq!(embedder.calls(), 0);
+        assert_eq!(second.chunks_reused, 3);
+        let meta = bookrack_vectors::meta::load(dir.path())
+            .expect("load meta")
+            .expect("the declaration is back");
+        assert_eq!(meta.built_at_chunk_count, 3);
+        assert_eq!(meta.churn_since_rebuild, 0);
+        assert_eq!(partition_rows(dir.path()).await, 3);
+    }
+
+    #[tokio::test]
+    async fn recompute_sends_every_plan_of_an_unchanged_partition() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let plans = three_plans();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let cfg = EmbedConfig::default();
+        embed_chunks(
+            &plans,
+            EmbedSource::SamePartition,
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &cfg,
+        )
+        .await
+        .expect("first run");
+
+        let embedder = counting(8);
+        let second = embed_chunks(
+            &plans,
+            EmbedSource::Recompute,
+            &embedder,
+            &corpus,
+            dir.path(),
+            &cfg,
+        )
+        .await
+        .expect("second run");
+        assert_eq!(embedder.sent(), ["prose 1", "prose 2", "prose 3"]);
+        assert_eq!(second.chunks_reused, 0);
+        assert_eq!(partition_rows(dir.path()).await, 3);
+    }
+
+    #[tokio::test]
+    async fn rows_on_an_unstamped_index_are_not_a_source() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = ChunkStore::open_for_write(dir.path(), 8)
+            .await
+            .expect("create table");
+        store
+            .append(&to_rows(&[&plan(1, "prose")], vec![vec![0.5f32; 8]]))
+            .await
+            .expect("seed row");
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let embedder = counting(8);
+        let report = embed_chunks(
+            &[plan(1, "prose")],
+            EmbedSource::SamePartition,
+            &embedder,
+            &corpus,
+            dir.path(),
+            &EmbedConfig::default(),
+        )
+        .await
+        .expect("embed");
+        assert_eq!(embedder.sent(), ["prose"], "no stamp names the rows' model");
+        assert_eq!(report.chunks_reused, 0);
+        assert_eq!(partition_rows(dir.path()).await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_run_that_writes_nothing_reports_its_total_once() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let plans = three_plans();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        // One chunk to a batch: a run that embedded would report thrice.
+        let cfg = EmbedConfig {
+            batch_max_chunks: 1,
+            ..EmbedConfig::default()
+        };
+        let source = EmbedSource::SamePartition;
+        embed_chunks(&plans, source, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
+            .await
+            .expect("first run");
+
+        let seen = std::sync::Mutex::new(Vec::new());
+        embed_chunks_with_progress(
+            &plans,
+            source,
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &cfg,
+            &|consumed, total| seen.lock().unwrap().push((consumed, total)),
+        )
+        .await
+        .expect("second run");
+        assert_eq!(*seen.lock().unwrap(), vec![(3, 3)]);
+    }
+
+    #[tokio::test]
+    async fn a_partly_reused_run_reports_rising_counts_ending_at_the_total() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, &format!("prose {i}"))).collect();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let cfg = EmbedConfig {
+            batch_max_chunks: 2,
+            ..EmbedConfig::default()
+        };
+        let source = EmbedSource::SamePartition;
+        embed_chunks(&plans, source, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
+            .await
+            .expect("first run");
+
+        plans[0] = plan(1, "prose rewritten");
+        plans[4] = plan(5, "prose rewritten too");
+        let seen = std::sync::Mutex::new(Vec::new());
+        embed_chunks_with_progress(
+            &plans,
+            source,
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &cfg,
+            &|consumed, total| seen.lock().unwrap().push((consumed, total)),
+        )
+        .await
+        .expect("second run");
+        // Three reused rows land in slices of two, then the one batch
+        // of two embedded plans.
+        assert_eq!(*seen.lock().unwrap(), vec![(2, 5), (3, 5), (5, 5)]);
+    }
+
+    fn identity(embed_model: &str, vector_dim: u32) -> VectorIdentity<'_> {
+        VectorIdentity {
+            embed_model,
+            vector_dim,
+        }
+    }
+
+    /// One stored row per plan, each carrying a distinct usable vector
+    /// of width 4: the row at position `i` holds `i + 1` in every slot.
+    fn rows_for(plans: &[ChunkPlan]) -> Vec<ChunkRow> {
+        plans
+            .iter()
+            .enumerate()
+            .map(|(i, plan)| row_of(plan, vec![i as f32 + 1.0; 4]))
+            .collect()
+    }
+
+    #[test]
+    fn each_plan_takes_the_vector_stored_under_its_text() {
+        let plans = three_plans();
+        let rows = rows_for(&plans);
+        let id = identity("model-a", 4);
+        assert_eq!(
+            reuse_vectors(Some((&id, &rows)), &id, &plans),
+            [Some(vec![1.0; 4]), Some(vec![2.0; 4]), Some(vec![3.0; 4])]
+        );
+    }
+
+    #[test]
+    fn nothing_is_reused_without_a_source_or_across_identities() {
+        let plans = three_plans();
+        let rows = rows_for(&plans);
+        let target = identity("model-a", 4);
+        assert_eq!(reuse_vectors(None, &target, &plans), [None, None, None]);
+        let other_model = identity("model-b", 4);
+        assert_eq!(
+            reuse_vectors(Some((&other_model, &rows)), &target, &plans),
+            [None, None, None]
+        );
+        let other_width = identity("model-a", 8);
+        assert_eq!(
+            reuse_vectors(Some((&other_width, &rows)), &target, &plans),
+            [None, None, None]
+        );
+    }
+
+    #[test]
+    fn a_stored_vector_that_cannot_be_used_is_passed_over() {
+        let plans = three_plans();
+        let id = identity("model-a", 4);
+        for bad in [vec![1.0; 3], vec![0.0; 4], vec![f32::NAN; 4]] {
+            let mut rows = rows_for(&plans);
+            rows[1].vector = bad.clone();
+            assert_eq!(
+                reuse_vectors(Some((&id, &rows)), &id, &plans),
+                [Some(vec![1.0; 4]), None, Some(vec![3.0; 4])],
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn of_several_rows_with_one_text_the_first_by_coordinates_is_taken() {
+        let plans = vec![plan(1, "same"), plan(2, "same")];
+        let mut rows = rows_for(&plans);
+        // The row at the later coordinates arrives first.
+        rows.reverse();
+        let id = identity("model-a", 4);
+        assert_eq!(
+            reuse_vectors(Some((&id, &rows)), &id, &plans),
+            [Some(vec![1.0; 4]), Some(vec![1.0; 4])]
+        );
+    }
+
+    #[test]
+    fn rows_in_another_order_are_still_unchanged() {
+        let plans = three_plans();
+        let mut rows = rows_for(&plans);
+        rows.swap(0, 2);
+        assert!(rows_unchanged(&rows, &plans, 4));
+    }
+
+    #[test]
+    fn rows_are_changed_when_their_count_or_content_differs() {
+        let plans = three_plans();
+        let rows = rows_for(&plans);
+        assert!(!rows_unchanged(&rows[..2], &plans, 4), "a row is missing");
+        let mut extra = rows.clone();
+        extra.push(rows[0].clone());
+        assert!(!rows_unchanged(&extra, &plans, 4), "a row is doubled");
+        let mut moved = rows.clone();
+        moved[1].end_char_offset += 1;
+        assert!(!rows_unchanged(&moved, &plans, 4), "a coordinate moved");
+        let mut rehashed = rows.clone();
+        rehashed[1].norm_chunk_sha256 = "0".repeat(64);
+        assert!(!rows_unchanged(&rehashed, &plans, 4), "a hash differs");
+    }
+
+    #[test]
+    fn two_texts_trading_places_under_the_same_hashes_are_a_change() {
+        let plans = three_plans();
+        let mut rows = rows_for(&plans);
+        let (first, second) = (rows[0].text.clone(), rows[1].text.clone());
+        rows[0].text = second;
+        rows[1].text = first;
+        assert!(!rows_unchanged(&rows, &plans, 4));
+    }
+
+    #[test]
+    fn a_stored_vector_that_cannot_be_used_makes_the_rows_changed() {
+        let plans = three_plans();
+        for bad in [vec![1.0; 3], vec![0.0; 4], vec![f32::NAN; 4]] {
+            let mut rows = rows_for(&plans);
+            rows[1].vector = bad.clone();
+            assert!(!rows_unchanged(&rows, &plans, 4), "{bad:?}");
+        }
+    }
+
     #[tokio::test]
     async fn embeds_every_chunk_and_writes_one_row_each() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -896,6 +1631,7 @@ mod tests {
         let corpus = Corpus::open_in_memory().expect("corpus");
         let report = embed_chunks(
             &plans,
+            EmbedSource::SamePartition,
             &Fake { dim: 8 },
             &corpus,
             dir.path(),
@@ -928,6 +1664,7 @@ mod tests {
         let calls = std::sync::Mutex::new(Vec::new());
         let report = embed_chunks_with_progress(
             &plans,
+            EmbedSource::SamePartition,
             &Fake { dim: 8 },
             &corpus,
             dir.path(),
@@ -947,6 +1684,7 @@ mod tests {
         let calls = std::sync::Mutex::new(Vec::new());
         embed_chunks_with_progress(
             &[],
+            EmbedSource::SamePartition,
             &Fake { dim: 8 },
             &corpus,
             dir.path(),
@@ -987,6 +1725,7 @@ mod tests {
         let corpus = Corpus::open_in_memory().expect("corpus");
         embed_chunks(
             &plans,
+            EmbedSource::SamePartition,
             &Fake { dim: 8 },
             &corpus,
             dir.path(),
@@ -1024,6 +1763,7 @@ mod tests {
         let corpus = Corpus::open_in_memory().expect("corpus");
         embed_chunks(
             &plans,
+            EmbedSource::SamePartition,
             &Fake { dim: 8 },
             &corpus,
             dir.path(),
@@ -1059,6 +1799,7 @@ mod tests {
         let corpus = Corpus::open_in_memory().expect("corpus");
         embed_chunks(
             &plans,
+            EmbedSource::SamePartition,
             &Fake { dim: 8 },
             &corpus,
             dir.path(),
@@ -1093,6 +1834,7 @@ mod tests {
         let corpus = Corpus::open_in_memory().expect("corpus");
         embed_chunks(
             &plans,
+            EmbedSource::SamePartition,
             &Fake { dim: 8 },
             &corpus,
             dir.path(),
@@ -1129,6 +1871,7 @@ mod tests {
         let corpus = Corpus::open_in_memory().expect("corpus");
         embed_chunks(
             &plans,
+            EmbedSource::SamePartition,
             &Fake { dim: 8 },
             &corpus,
             dir.path(),
@@ -1158,17 +1901,31 @@ mod tests {
         let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, &format!("text {i}"))).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         let cfg = EmbedConfig::default();
-        embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
-            .await
-            .expect("first embed");
-        embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
-            .await
-            .expect("second embed");
+        embed_chunks(
+            &plans,
+            EmbedSource::SamePartition,
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &cfg,
+        )
+        .await
+        .expect("first embed");
+        embed_chunks(
+            &plans,
+            EmbedSource::Recompute,
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &cfg,
+        )
+        .await
+        .expect("second embed");
         let meta = bookrack_vectors::meta::load(dir.path())
             .expect("load meta")
             .expect("meta present");
-        // First run: 0 + 3 = 3. Second run: 3 deleted + 3 inserted = 6.
-        // Cumulative: 3 + 6 = 9.
+        // First run: 0 + 3 = 3. The second recomputes every vector:
+        // 3 deleted + 3 inserted = 6. Cumulative: 3 + 6 = 9.
         assert_eq!(meta.churn_since_rebuild, 9);
     }
 
@@ -1182,9 +1939,16 @@ mod tests {
             ..EmbedConfig::default()
         };
         // First run: cold-start writes a meta.
-        embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &first)
-            .await
-            .expect("first run");
+        embed_chunks(
+            &plans,
+            EmbedSource::SamePartition,
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &first,
+        )
+        .await
+        .expect("first run");
         assert!(
             bookrack_vectors::meta::load(dir.path())
                 .expect("load")
@@ -1200,9 +1964,16 @@ mod tests {
             ..EmbedConfig::default()
         };
         let embedder = counting(8);
-        let err = embed_chunks(&plans, &embedder, &corpus, dir.path(), &second)
-            .await
-            .expect_err("model swap must be refused");
+        let err = embed_chunks(
+            &plans,
+            EmbedSource::SamePartition,
+            &embedder,
+            &corpus,
+            dir.path(),
+            &second,
+        )
+        .await
+        .expect_err("model swap must be refused");
         assert_eq!(embedder.calls(), 0, "the refusal precedes any request");
         assert!(matches!(
             err,
@@ -1219,6 +1990,7 @@ mod tests {
         let corpus = Corpus::open_in_memory().expect("corpus");
         let report = embed_chunks(
             &[],
+            EmbedSource::SamePartition,
             &Fake { dim: 8 },
             &corpus,
             dir.path(),
@@ -1235,12 +2007,26 @@ mod tests {
         let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, &format!("text {i}"))).collect();
         let cfg = EmbedConfig::default();
         let corpus = Corpus::open_in_memory().expect("corpus");
-        embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
-            .await
-            .expect("first");
-        embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
-            .await
-            .expect("second");
+        embed_chunks(
+            &plans,
+            EmbedSource::SamePartition,
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &cfg,
+        )
+        .await
+        .expect("first");
+        embed_chunks(
+            &plans,
+            EmbedSource::Recompute,
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &cfg,
+        )
+        .await
+        .expect("second");
 
         let store = ChunkStore::open_for_write(dir.path(), 8)
             .await
@@ -1259,6 +2045,7 @@ mod tests {
         let corpus = Corpus::open_in_memory().expect("corpus");
         let report = embed_chunks(
             &plans,
+            EmbedSource::SamePartition,
             &Overloading {
                 dim: 4,
                 max_batch: 2,
@@ -1284,9 +2071,16 @@ mod tests {
             model: "model-a".to_string(),
             ..EmbedConfig::default()
         };
-        embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &first)
-            .await
-            .expect("first run stamps the index");
+        embed_chunks(
+            &plans,
+            EmbedSource::SamePartition,
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &first,
+        )
+        .await
+        .expect("first run stamps the index");
         assert_eq!(
             corpus
                 .meta_get(bookrack_corpus::EMBED_MODEL_KEY)
@@ -1300,9 +2094,16 @@ mod tests {
             model: "model-b".to_string(),
             ..EmbedConfig::default()
         };
-        let err = embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &second)
-            .await
-            .expect_err("a different model must be refused");
+        let err = embed_chunks(
+            &plans,
+            EmbedSource::SamePartition,
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &second,
+        )
+        .await
+        .expect_err("a different model must be refused");
         assert!(matches!(
             err,
             EmbedStageError::Corpus(CorpusError::IndexStampMismatch { key, .. })
@@ -1361,6 +2162,7 @@ mod tests {
         let corpus = Corpus::open_in_memory().expect("corpus");
         let err = embed_chunks(
             &[plan(1, "prose")],
+            EmbedSource::SamePartition,
             &Hollow,
             &corpus,
             &lancedb_dir,
@@ -1388,13 +2190,21 @@ mod tests {
             batch_max_chunks: 1,
             ..EmbedConfig::default()
         };
-        let report = embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
-            .await
-            .expect("embed");
+        let report = embed_chunks(
+            &plans,
+            EmbedSource::SamePartition,
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &cfg,
+        )
+        .await
+        .expect("embed");
         assert_eq!(
             report,
             EmbedRunReport {
                 chunks_written: 3,
+                chunks_reused: 0,
                 batches: 3,
                 shrink_events: 0,
                 total_chars: 15,
@@ -1421,6 +2231,7 @@ mod tests {
         let corpus = Corpus::open_in_memory().expect("corpus");
         embed_chunks(
             &plans,
+            EmbedSource::SamePartition,
             &Fake { dim: 8 },
             &corpus,
             dir.path(),
@@ -1451,6 +2262,10 @@ mod tests {
             .collect()
     }
 
+    fn refs(plans: &[ChunkPlan]) -> Vec<&ChunkPlan> {
+        plans.iter().collect()
+    }
+
     fn batching(batch_char_budget: usize, batch_max_chunks: usize) -> EmbedConfig {
         EmbedConfig {
             batch_char_budget,
@@ -1463,14 +2278,17 @@ mod tests {
     fn a_batch_fills_to_the_character_budget_and_not_past_it() {
         // Three chunks of two fill a budget of six exactly.
         assert_eq!(
-            greedy_batch_end(&plans_of(&[2, 2, 2]), 0, &batching(6, 99)),
+            greedy_batch_end(&refs(&plans_of(&[2, 2, 2])), 0, &batching(6, 99)),
             3
         );
         // Three and four overrun it by one: the second chunk waits.
-        assert_eq!(greedy_batch_end(&plans_of(&[3, 4]), 0, &batching(6, 99)), 1);
+        assert_eq!(
+            greedy_batch_end(&refs(&plans_of(&[3, 4])), 0, &batching(6, 99)),
+            1
+        );
         // The budget counts from the batch's own start.
         assert_eq!(
-            greedy_batch_end(&plans_of(&[5, 3, 3, 3]), 1, &batching(6, 99)),
+            greedy_batch_end(&refs(&plans_of(&[5, 3, 3, 3])), 1, &batching(6, 99)),
             3
         );
     }
@@ -1478,11 +2296,11 @@ mod tests {
     #[test]
     fn a_chunk_over_the_budget_is_a_batch_of_its_own() {
         assert_eq!(
-            greedy_batch_end(&plans_of(&[10, 1]), 0, &batching(5, 99)),
+            greedy_batch_end(&refs(&plans_of(&[10, 1])), 0, &batching(5, 99)),
             1
         );
         assert_eq!(
-            greedy_batch_end(&plans_of(&[1, 10, 1]), 1, &batching(5, 99)),
+            greedy_batch_end(&refs(&plans_of(&[1, 10, 1])), 1, &batching(5, 99)),
             2
         );
     }
@@ -1490,11 +2308,11 @@ mod tests {
     #[test]
     fn a_batch_stops_at_the_chunk_cap() {
         assert_eq!(
-            greedy_batch_end(&plans_of(&[1, 1, 1, 1]), 0, &batching(99, 2)),
+            greedy_batch_end(&refs(&plans_of(&[1, 1, 1, 1])), 0, &batching(99, 2)),
             2
         );
         assert_eq!(
-            greedy_batch_end(&plans_of(&[1, 1, 1, 1]), 2, &batching(99, 3)),
+            greedy_batch_end(&refs(&plans_of(&[1, 1, 1, 1])), 2, &batching(99, 3)),
             4
         );
     }
@@ -1508,6 +2326,7 @@ mod tests {
         let corpus = Corpus::open_in_memory().expect("corpus");
         let report = embed_chunks(
             &plans,
+            EmbedSource::SamePartition,
             &Overloading {
                 dim: 4,
                 max_batch: 1,
@@ -1571,6 +2390,7 @@ mod tests {
         let embedder = Failing::new(true);
         let err = embed_chunks(
             &[plan(1, "prose")],
+            EmbedSource::SamePartition,
             &embedder,
             &corpus,
             dir.path(),
@@ -1593,6 +2413,7 @@ mod tests {
         let embedder = Failing::new(false);
         let err = embed_chunks(
             &plans,
+            EmbedSource::SamePartition,
             &embedder,
             &corpus,
             dir.path(),
