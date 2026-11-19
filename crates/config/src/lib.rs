@@ -2110,7 +2110,7 @@ impl McpConfig {
 #[derive(Debug, Clone)]
 pub struct LogConfig {
     /// Filter directive for the file layer's `EnvFilter`, e.g. `info`,
-    /// `debug`, or `bookrack_ingest=debug,info`. Overridden by
+    /// `debug`, or `bookrack_ops=debug,info`. Overridden by
     /// [`LOG_ENV`].
     pub directive: String,
     /// Filter directive for the stderr console layer's `EnvFilter`.

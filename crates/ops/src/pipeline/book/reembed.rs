@@ -23,8 +23,8 @@ use bookrack_embed::Embedder;
 use bookrack_extract::EXTRACTOR_VERSION;
 use bookrack_vectors::{ChunkReader, ChunkRow};
 
-use crate::embed_run::{EmbedRunReport, embed_book_chunks};
-use crate::{IngestError, Result, audit_as, maintenance_run_id};
+use crate::pipeline::book::embed_run::{EmbedRunReport, embed_book_chunks};
+use crate::pipeline::book::{IngestError, Result, audit_as, maintenance_run_id};
 use bookrack_text::ChunkPlan;
 
 /// A planned per-book reembed: what would happen if [`reembed_book`]
@@ -298,7 +298,7 @@ mod tests {
     use bookrack_embed::{EmbedError, Embedder, Result as EmbedResult};
     use bookrack_vectors::{ChunkRow, ChunkStore};
 
-    use crate::current_index_stamps;
+    use crate::pipeline::book::current_index_stamps;
 
     /// A toy embedder whose vector encodes its call generation, so the
     /// reembed test can prove the vectors changed.

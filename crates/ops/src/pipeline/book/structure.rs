@@ -36,7 +36,7 @@ use sha2::{Digest, Sha256};
 use bookrack_audit_profile::TocShapeToggles;
 use bookrack_metadata::TocStats;
 
-use crate::{IngestError, StructureParams};
+use crate::pipeline::book::{IngestError, StructureParams};
 
 /// The vec index of the book root within a plan. The root is always the
 /// first planned node and is the only one with no parent.

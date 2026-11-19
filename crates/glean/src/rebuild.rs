@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Paper-side corpus rebuild. Peer of `bookrack_ingest::rebuild` for the
+//! Paper-side corpus rebuild. Peer of `bookrack_ops::pipeline::book::rebuild` for the
 //! paper pipeline: reconstructs the corpus node tree of each rebuildable
 //! paper intake from its on-disk envelope without re-running EXTRACT or
 //! IDENTIFY. The abstract leaf is reseated from the `node_publication_attrs`
@@ -156,7 +156,7 @@ fn walk_rebuild_targets(
 
 /// Stamp `papers_corpus.db`'s `index_meta` from the dimension currently
 /// on disk in `lancedb_papers`. Mirrors
-/// [`bookrack_ingest::stamp_index_from_existing_chunks`] for the paper
+/// [`bookrack_ops::pipeline::book::stamp_index_from_existing_chunks`] for the paper
 /// store: use after a rebuild that refreshed the corpus tree without
 /// touching the chunks table.
 ///

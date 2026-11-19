@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Paper-side reset+rechunk. Peer of `bookrack_ingest::reset` for the
+//! Paper-side reset+rechunk. Peer of `bookrack_ops::pipeline::book::reset` for the
 //! paper pipeline: drops the chunks table, demotes every `Embedded`
 //! paper intake to `Extracted`, then re-chunks the abstract leaf of
 //! each one under the current [`bookrack_text::CHUNK_VERSION`] and re-embeds it under

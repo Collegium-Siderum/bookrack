@@ -691,7 +691,7 @@ mod tests {
     use bookrack_extract::{
         Biblio, Block, BlockKind, Extraction, Provenance, TextLayerQuality, Toc, TocEntry,
     };
-    use bookrack_ingest::{StructureParams, ingest_structure};
+    use bookrack_ops::pipeline::book::{StructureParams, ingest_structure};
     use bookrack_vectors::{ChunkRow, ChunkStore};
     use std::future::Future;
 

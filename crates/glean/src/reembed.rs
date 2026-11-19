@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Paper-side reembed. Peer of `bookrack_ingest::reembed` for the paper
+//! Paper-side reembed. Peer of `bookrack_ops::pipeline::book::reembed` for the paper
 //! pipeline: takes the chunk rows currently on disk in `lancedb_papers`,
 //! re-embeds them under the active embedder, and writes the new vectors
 //! back. The corpus node tree is not touched — only the chunks table.

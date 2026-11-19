@@ -19,7 +19,7 @@ pub const FIXED_REGISTRIES: &[&[FixedSetting]] = &[
     bookrack_distill::FIXED_SETTINGS,
     bookrack_extract::FIXED_SETTINGS,
     bookrack_dbkit::FIXED_SETTINGS,
-    bookrack_ingest::FIXED_SETTINGS,
+    crate::pipeline::book::FIXED_SETTINGS,
     bookrack_embed::FIXED_SETTINGS,
     bookrack_obs::stream::FIXED_SETTINGS,
     bookrack_query::dto::FIXED_SETTINGS,

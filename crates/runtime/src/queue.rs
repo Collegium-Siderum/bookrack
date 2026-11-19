@@ -298,7 +298,7 @@ pub fn collect_supported_files(dir: &Path) -> Result<Vec<PathBuf>> {
 /// re-picks it after a crash or `kill -9`. There is no concurrency
 /// ambiguity to worry about: only one worker pulls per session, so a
 /// row left in `Running` always belongs to a session that did not
-/// complete. The ingest crate's noop-if-up-to-date check makes a
+/// complete. The book pipeline's noop-if-up-to-date check makes a
 /// resumed job cheap when the previous attempt finished its writes.
 pub fn crash_recovery_reset(state: &mut QueueState) {
     for job in state.jobs.iter_mut() {
@@ -510,12 +510,14 @@ pub fn classify_ingest_error(err: &eyre::Report) -> JobError {
 /// does. `None` for every other error, which then flows through
 /// [`classify_ingest_error`] as usual.
 pub fn ingest_needs_ocr(err: &eyre::Report) -> Option<i64> {
-    err.chain().find_map(
-        |cause| match cause.downcast_ref::<bookrack_ingest::IngestError>() {
-            Some(bookrack_ingest::IngestError::NeedsOcr { intake_id, .. }) => Some(*intake_id),
+    err.chain().find_map(|cause| {
+        match cause.downcast_ref::<bookrack_ops::pipeline::book::IngestError>() {
+            Some(bookrack_ops::pipeline::book::IngestError::NeedsOcr { intake_id, .. }) => {
+                Some(*intake_id)
+            }
             _ => None,
-        },
-    )
+        }
+    })
 }
 
 fn is_fd_exhaustion(err: &eyre::Report) -> bool {
@@ -2767,7 +2769,7 @@ mod tests {
     #[test]
     fn classify_ingest_error_records_the_control_planes_problem() {
         let problem = problem_matching_the_envelope(|| {
-            registry_wrapped(bookrack_ingest::IngestError::Embed(
+            registry_wrapped(bookrack_ops::pipeline::book::IngestError::Embed(
                 bookrack_embed::EmbedError::ModelNotFound {
                     model: "m".to_string(),
                     reason: "model \"m\" not found".to_string(),
@@ -2782,7 +2784,7 @@ mod tests {
     #[test]
     fn classify_ingest_error_keeps_retryable() {
         let problem = problem_matching_the_envelope(|| {
-            registry_wrapped(bookrack_ingest::IngestError::Embed(
+            registry_wrapped(bookrack_ops::pipeline::book::IngestError::Embed(
                 bookrack_embed::EmbedError::Unreachable("connection refused".to_string()),
             ))
         });
@@ -2795,7 +2797,7 @@ mod tests {
     #[test]
     fn classify_ingest_error_records_a_known_type_without_a_hint() {
         let problem = problem_matching_the_envelope(|| {
-            registry_wrapped(bookrack_ingest::IngestError::EmptyExtraction)
+            registry_wrapped(bookrack_ops::pipeline::book::IngestError::EmptyExtraction)
         });
         assert!(problem.data.hint.is_none(), "{problem:?}");
         assert!(!problem.summary.starts_with("ingest: "), "{problem:?}");
@@ -2813,7 +2815,7 @@ mod tests {
     fn ingest_needs_ocr_recovers_the_anchor_from_a_wrapped_error() {
         // The typed error, wrapped exactly as the ops layer wraps it
         // before the worker sees it, still yields the anchor id.
-        let typed = bookrack_ingest::IngestError::NeedsOcr {
+        let typed = bookrack_ops::pipeline::book::IngestError::NeedsOcr {
             reason: "no text layer".to_string(),
             intake_id: 99,
         };

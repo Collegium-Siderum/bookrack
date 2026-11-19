@@ -212,7 +212,7 @@ impl<E: Embedder> Library<E> {
 
     /// Borrow the warm embedder driving this library. Consumed by the
     /// registry-level ingest wrapper, which forwards the reference to
-    /// [`bookrack_ingest::ingest_book`].
+    /// [`bookrack_ops::pipeline::book::ingest_book`].
     pub fn embedder(&self) -> &E {
         &self.embedder
     }

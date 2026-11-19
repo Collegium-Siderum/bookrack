@@ -53,7 +53,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
 
 /// The contribution roles the write surface accepts. Matches the
 /// canonical string forms of the extractor's `ContributorRole` enum —
-/// a test in `bookrack-ingest` pins the two lists together — so a
+/// a test in the book pipeline pins the two lists together — so a
 /// curated row and an extracted row always spell the same role the
 /// same way.
 pub const CONTRIBUTOR_ROLES: &[&str] = &["author", "translator", "editor", "other"];

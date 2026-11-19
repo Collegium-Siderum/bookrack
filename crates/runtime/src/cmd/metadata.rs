@@ -9,9 +9,9 @@ use bookrack_config::Config;
 use bookrack_core::PartitionIdx;
 use bookrack_corpus::Corpus;
 use bookrack_embed::OllamaEmbedClient;
-use bookrack_ingest::{EmbedRunReport, IngestParams, resume_from_chunk};
 use bookrack_ops::Ops;
 use bookrack_ops::dto::writes::{AddContributorOutcome, ReauditOutcome, WriteOutcome};
+use bookrack_ops::pipeline::book::{EmbedRunReport, IngestParams, resume_from_chunk};
 use eyre::{Context, Result};
 use serde::Serialize;
 
@@ -299,7 +299,7 @@ fn reaudit(
     profile_name: Option<&str>,
 ) -> Result<ReauditOutcome> {
     let audit_profile = load_audit_profile(cfg, profile_name);
-    let audit_data = bookrack_ingest::AuditData::default_data();
+    let audit_data = bookrack_ops::pipeline::book::AuditData::default_data();
     let req = bookrack_ops::dto::writes::ReauditMetadataRequest { intake_id: book };
     match bookrack_ops::writes::metadata::reaudit_metadata(ops, req, &audit_data, &audit_profile) {
         Ok(outcome) => Ok(outcome),

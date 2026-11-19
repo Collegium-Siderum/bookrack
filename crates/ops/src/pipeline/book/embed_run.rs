@@ -23,7 +23,7 @@ use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_vectors::{AnnConfig, AnnKind, ChunkRow, ChunkStore};
 
-use crate::{IngestError, Result, current_index_stamps};
+use crate::pipeline::book::{IngestError, Result, current_index_stamps};
 use bookrack_text::ChunkPlan;
 
 /// What one EMBED run produced — the row count plus the batching metrics

@@ -307,20 +307,20 @@ pub fn remove_contributor<E: Embedder>(
 pub fn reaudit_metadata<E: Embedder>(
     ops: &Ops<E>,
     req: ReauditMetadataRequest,
-    audit_data: &bookrack_ingest::AuditData,
-    audit_profile: &bookrack_ingest::AuditProfile,
+    audit_data: &crate::pipeline::book::AuditData,
+    audit_profile: &crate::pipeline::book::AuditProfile,
 ) -> Result<ReauditOutcome> {
     let args = serde_json::json!({ "intake_id": req.intake_id });
     record_call_sync!(ops, "library.metadata.reaudit", args, {
         let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
-        let outcome = bookrack_ingest::reaudit::reaudit_book(
+        let outcome = crate::pipeline::book::reaudit::reaudit_book(
             &catalog,
             req.intake_id,
             audit_data,
             audit_profile,
         )
         .map_err(|e| match e {
-            bookrack_ingest::IngestError::UnknownIntake(intake_id) => {
+            crate::pipeline::book::IngestError::UnknownIntake(intake_id) => {
                 OpsError::IntakeNotFound { intake_id }
             }
             other => OpsError::Other(eyre::Report::new(other)),

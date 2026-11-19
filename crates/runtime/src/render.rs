@@ -9,7 +9,7 @@ use bookrack_audit_profile::AuditProfile;
 use bookrack_config::LibraryEntry;
 
 use crate::cmd::libraries::DaemonLibraries;
-use bookrack_ingest::IngestReport;
+use bookrack_ops::pipeline::book::IngestReport;
 
 /// Print the outcome of one `ingest` run.
 pub fn ingest(report: &IngestReport) {

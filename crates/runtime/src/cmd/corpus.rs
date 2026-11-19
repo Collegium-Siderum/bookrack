@@ -27,22 +27,22 @@ pub fn plan_rebuild(
     cfg: &Config,
     book: Option<i64>,
     stale_only: bool,
-) -> Result<bookrack_ingest::rebuild::RebuildReport> {
+) -> Result<bookrack_ops::pipeline::book::rebuild::RebuildReport> {
     let Some(catalog) = Catalog::open(&cfg.catalog_db()).context("open catalog")? else {
         return match book {
-            Some(id) => {
-                Err(bookrack_ingest::IngestError::UnknownIntake(id)).context("plan rebuild")
-            }
-            None => Ok(bookrack_ingest::rebuild::RebuildReport::default()),
+            Some(id) => Err(bookrack_ops::pipeline::book::IngestError::UnknownIntake(id))
+                .context("plan rebuild"),
+            None => Ok(bookrack_ops::pipeline::book::rebuild::RebuildReport::default()),
         };
     };
-    let params = bookrack_ingest::rebuild::RebuildParams {
+    let params = bookrack_ops::pipeline::book::rebuild::RebuildParams {
         only: book,
         stale_only,
         dry_run: true,
         ..Default::default()
     };
-    bookrack_ingest::rebuild::classify_rebuild_targets(&catalog, &params).context("plan rebuild")
+    bookrack_ops::pipeline::book::rebuild::classify_rebuild_targets(&catalog, &params)
+        .context("plan rebuild")
 }
 
 /// Aggregate outcome of [`execute_rebuild_from_plan`]: the rebuild
@@ -50,7 +50,7 @@ pub fn plan_rebuild(
 /// execute leg performed.
 #[derive(Debug, Clone, Default)]
 pub struct ExecuteRebuildOutcome {
-    pub report: bookrack_ingest::rebuild::RebuildReport,
+    pub report: bookrack_ops::pipeline::book::rebuild::RebuildReport,
     /// `Some(true)` if `stamp_index_from_existing_chunks` wrote
     /// stamps; `Some(false)` if the chunks table was empty so no
     /// stamping happened; `None` when the `include_vectors` path
@@ -85,10 +85,10 @@ pub async fn execute_rebuild_from_plan(
     let catalog =
         Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
 
-    let report = bookrack_ingest::rebuild::rebuild_from_intakes(
+    let report = bookrack_ops::pipeline::book::rebuild::rebuild_from_intakes(
         &mut corpus,
         &catalog,
-        &bookrack_ingest::rebuild::RebuildParams {
+        &bookrack_ops::pipeline::book::rebuild::RebuildParams {
             only_ids: Some(pinned_ids),
             dry_run: false,
             ..Default::default()
@@ -108,7 +108,7 @@ pub async fn execute_rebuild_from_plan(
         let lancedb_dir = cfg.lancedb_dir();
         let embed_cfg = crate::profile::effective_embed_config(cfg)?;
         let embedder_client = embedder(cfg, &embed_cfg)?;
-        let reembed = bookrack_ingest::reembed::reembed_all(
+        let reembed = bookrack_ops::pipeline::book::reembed::reembed_all(
             &catalog,
             &corpus,
             &lancedb_dir,
@@ -132,7 +132,7 @@ pub async fn execute_rebuild_from_plan(
     } else {
         let lancedb_dir = cfg.lancedb_dir();
         let embed_cfg = crate::profile::effective_embed_config(cfg)?;
-        let stamped = bookrack_ingest::rebuild::stamp_index_from_existing_chunks(
+        let stamped = bookrack_ops::pipeline::book::rebuild::stamp_index_from_existing_chunks(
             &corpus,
             &lancedb_dir,
             &embed_cfg.model,
@@ -194,8 +194,10 @@ mod tests {
 
         assert!(
             err.chain().any(|cause| matches!(
-                cause.downcast_ref::<bookrack_ingest::IngestError>(),
-                Some(bookrack_ingest::IngestError::UnknownIntake(9_999_999))
+                cause.downcast_ref::<bookrack_ops::pipeline::book::IngestError>(),
+                Some(bookrack_ops::pipeline::book::IngestError::UnknownIntake(
+                    9_999_999
+                ))
             )),
             "{err:?}",
         );

@@ -38,9 +38,9 @@ use bookrack_core::Problem;
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_glean::GleanParams;
-use bookrack_ingest::IngestParams;
 use bookrack_obs::WorkerGuard;
 use bookrack_obs::stream::LogStreamHandle;
+use bookrack_ops::pipeline::book::IngestParams;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{JobTemplates, LibraryHandle, LibraryRegistry, MountGuard};
 use bookrack_ops::{Caller, Ops, PapersPaths};
@@ -954,7 +954,7 @@ impl DaemonRuntime {
                                         false,
                                         audit_profile.as_deref(),
                                     );
-                                    let rule_params = bookrack_ingest::RuleIngestParams {
+                                    let rule_params = bookrack_ops::pipeline::book::RuleIngestParams {
                                         source_pdf,
                                         allow_partial,
                                     };

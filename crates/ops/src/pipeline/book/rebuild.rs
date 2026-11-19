@@ -14,7 +14,7 @@
 //! Pair with [`reembed_all`] for a `--include-vectors` flow: nodes are
 //! rebuilt here, vectors are refreshed there.
 //!
-//! [`reembed_all`]: crate::reembed::reembed_all
+//! [`reembed_all`]: crate::pipeline::book::reembed::reembed_all
 
 // Parallel implementation: pipeline-rebuild.
 
@@ -26,7 +26,9 @@ use bookrack_corpus::Corpus;
 use bookrack_extract::EXTRACTOR_VERSION;
 use bookrack_vectors::ChunkReader;
 
-use crate::{IngestError, Result, StructureParams, current_index_stamps, ingest_structure};
+use crate::pipeline::book::{
+    IngestError, Result, StructureParams, current_index_stamps, ingest_structure,
+};
 use bookrack_extract::envelope::{self, EnvelopeError};
 
 /// Per-intake outcome bucket the driver fills in.

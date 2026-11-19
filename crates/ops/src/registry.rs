@@ -19,12 +19,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use crate::pipeline::book::{IngestParams, IngestReport, OnEmbedBatch, RuleIngestParams};
 use bookrack_catalog::{Catalog, RunHandle, RunLock};
 use bookrack_config::Config;
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_glean::{GleanParams, GleanReport};
-use bookrack_ingest::{IngestParams, IngestReport, OnEmbedBatch, RuleIngestParams};
 use eyre::WrapErr;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -337,7 +337,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
     /// Holds the per-library ingest mutex for the duration of the call,
     /// opens fresh [`Catalog`] and [`Corpus`] handles from the library's
     /// stored paths, then forwards to
-    /// [`bookrack_ingest::ingest_book_with_progress`] with the library's
+    /// [`crate::pipeline::book::ingest_book_with_progress`] with the library's
     /// warm embedder, passing `on_embed_batch` through. The caller —
     /// currently the `bookrack run` REPL's queue worker — never opens a
     /// database on its own.
@@ -361,7 +361,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
             Corpus::open_for_write(self.ops.corpus_db()).context("open corpus for ingest write")?;
         let mut catalog = Catalog::open_for_write(self.ops.catalog_db(), self.ops.backup_dir())
             .context("open catalog for ingest write")?;
-        let report = bookrack_ingest::ingest_book_with_progress(
+        let report = crate::pipeline::book::ingest_book_with_progress(
             path,
             &mut corpus,
             &mut catalog,
@@ -394,7 +394,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
     /// Mirrors [`Self::ingest_book`]: holds the per-library ingest
     /// mutex, opens fresh [`Catalog`] and [`Corpus`] handles from the
     /// library's stored paths, then forwards to
-    /// [`bookrack_ingest::ingest_rule_with_progress`] with the library's
+    /// [`crate::pipeline::book::ingest_rule_with_progress`] with the library's
     /// warm embedder, reporting each EMBED batch to `on_embed_batch`.
     /// Rebinds the book-side [`Library`] store afterwards, so the first
     /// rule ingest into a previously empty data dir lights up the read
@@ -420,7 +420,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
             .context("open corpus for rule ingest write")?;
         let mut catalog = Catalog::open_for_write(self.ops.catalog_db(), self.ops.backup_dir())
             .context("open catalog for rule ingest write")?;
-        let report = bookrack_ingest::ingest_rule_with_progress(
+        let report = crate::pipeline::book::ingest_rule_with_progress(
             rule,
             &mut corpus,
             &mut catalog,
@@ -443,7 +443,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
     }
 
     /// Check a rule submission against this library before a job is
-    /// queued for it: [`bookrack_ingest::check_rule_submission`] over the
+    /// queued for it: [`crate::pipeline::book::check_rule_submission`] over the
     /// library's catalog, opened read-only, or over none when the
     /// library has no catalog yet. Writes nothing and takes no lock.
     pub fn check_rule_submission(
@@ -453,7 +453,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
     ) -> eyre::Result<()> {
         let catalog = Catalog::open(self.ops.catalog_db())
             .context("open catalog for the rule submission check")?;
-        bookrack_ingest::check_rule_submission(rule, catalog.as_ref(), source_pdf)
+        crate::pipeline::book::check_rule_submission(rule, catalog.as_ref(), source_pdf)
             .context("rule submission check")?;
         Ok(())
     }
@@ -1014,9 +1014,9 @@ fn sorted_names<E: Embedder>(libs: &HashMap<String, Arc<LibraryHandle<E>>>) -> V
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use crate::pipeline::book::IngestParams;
     use bookrack_embed::{EmbedError, Embedder};
     use bookrack_glean::GleanParams;
-    use bookrack_ingest::IngestParams;
 
     use bookrack_config::Config;
 

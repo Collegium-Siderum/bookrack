@@ -94,7 +94,7 @@ impl MetadataAuditReport {
     pub fn build(
         intake_id: i64,
         profile: &str,
-        report: &bookrack_ingest::MetadataReport,
+        report: &crate::pipeline::book::MetadataReport,
         overrides: &[bookrack_catalog::NodeOverride],
         stored_verdict: Option<String>,
         stored_confidence: Option<String>,

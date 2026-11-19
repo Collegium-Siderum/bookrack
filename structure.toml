@@ -67,12 +67,6 @@ exit = "ops supplies the context radius and the embedding client type"
 
 [[edge]]
 from = "runtime"
-to = "ingest"
-reason = "transitional"
-exit = "the ingest and glean pipelines live in ops"
-
-[[edge]]
-from = "runtime"
 to = "glean"
 reason = "transitional"
 exit = "the ingest and glean pipelines live in ops"
@@ -210,7 +204,6 @@ paths = [
   "crates/runtime/src/pipeline_run_helpers.rs",
   "crates/runtime/src/profile.rs",
   "crates/runtime/src/queue.rs",
-  "crates/runtime/src/render.rs",
 ]
 reason = "transitional"
 exit = "the ingest and glean pipelines live in ops"
@@ -281,11 +274,11 @@ site = "crates/glean/src/reset.rs::reset_and_rechunk"
 access = "write"
 
 [[write_door]]
-site = "crates/ingest/src/embed_run.rs::embed_book_chunks_with_progress"
+site = "crates/ops/src/pipeline/book/embed_run.rs::embed_book_chunks_with_progress"
 access = "write"
 
 [[write_door]]
-site = "crates/ingest/src/reset.rs::reset_and_rechunk"
+site = "crates/ops/src/pipeline/book/reset.rs::reset_and_rechunk"
 access = "write"
 
 [[write_door]]
@@ -814,7 +807,7 @@ exit = "one renderer takes the kind"
 id = "pipeline-reembed"
 summary = "re-embedding, one module per pipeline"
 sites = [
-  "crates/ingest/src/reembed.rs",
+  "crates/ops/src/pipeline/book/reembed.rs",
   "crates/glean/src/reembed.rs",
 ]
 reason = "transitional"
@@ -825,7 +818,7 @@ exit = "the pipeline takes the kind as a parameter"
 id = "pipeline-reaudit"
 summary = "metadata re-audit, one module per pipeline"
 sites = [
-  "crates/ingest/src/reaudit.rs",
+  "crates/ops/src/pipeline/book/reaudit.rs",
   "crates/glean/src/reaudit.rs",
 ]
 reason = "transitional"
@@ -837,7 +830,7 @@ exit = "the pipeline takes the kind as a parameter"
 id = "pipeline-dryrun"
 summary = "dry run, one module per pipeline"
 sites = [
-  "crates/ingest/src/dryrun.rs",
+  "crates/ops/src/pipeline/book/dryrun.rs",
   "crates/glean/src/dryrun.rs",
 ]
 reason = "transitional"
@@ -849,7 +842,7 @@ exit = "the paper dry run takes the book side's approach"
 id = "pipeline-body-sample"
 summary = "body sample handed to the metadata audit"
 sites = [
-  "crates/ingest/src/lib.rs::body_sample",
+  "crates/ops/src/pipeline/book/mod.rs::body_sample",
   "crates/glean/src/lib.rs::paper_body_sample",
 ]
 reason = "transitional"
@@ -860,7 +853,7 @@ exit = "the pipelines merge"
 id = "pipeline-entry"
 summary = "pipeline entry point, one per kind"
 sites = [
-  "crates/ingest/src/lib.rs::ingest_book",
+  "crates/ops/src/pipeline/book/mod.rs::ingest_book",
   "crates/glean/src/lib.rs::glean_paper",
 ]
 reason = "transitional"
@@ -872,7 +865,7 @@ exit = "the pipeline takes the kind as a parameter"
 id = "pipeline-reset"
 summary = "vector reset, one module per pipeline"
 sites = [
-  "crates/ingest/src/reset.rs",
+  "crates/ops/src/pipeline/book/reset.rs",
   "crates/glean/src/reset.rs",
 ]
 reason = "transitional"
@@ -884,7 +877,7 @@ exit = "the pipeline takes the kind as a parameter"
 id = "pipeline-rebuild"
 summary = "corpus rebuild from envelopes, one module per pipeline"
 sites = [
-  "crates/ingest/src/rebuild.rs",
+  "crates/ops/src/pipeline/book/rebuild.rs",
   "crates/glean/src/rebuild.rs",
 ]
 reason = "transitional"
@@ -895,7 +888,7 @@ exit = "the pipeline takes the kind as a parameter"
 id = "pipeline-stamps"
 summary = "the index stamps this build writes"
 sites = [
-  "crates/ingest/src/lib.rs::current_index_stamps",
+  "crates/ops/src/pipeline/book/mod.rs::current_index_stamps",
   "crates/glean/src/stamps.rs::current_index_stamps",
   "crates/glean/src/rebuild.rs::stamp_index_from_existing_chunks",
 ]
@@ -907,7 +900,7 @@ exit = "one embed stage writes the stamps for both kinds"
 id = "pipeline-embed-write"
 summary = "embedding a plan and writing its vectors"
 sites = [
-  "crates/ingest/src/embed_run.rs",
+  "crates/ops/src/pipeline/book/embed_run.rs",
   "crates/glean/src/lib.rs::embed_and_write_chunks",
 ]
 reason = "transitional"
@@ -919,7 +912,7 @@ exit = "one embed stage serves both kinds"
 id = "pipeline-noop"
 summary = "deciding that a known file needs no rerun"
 sites = [
-  "crates/ingest/src/lib.rs::on_file",
+  "crates/ops/src/pipeline/book/mod.rs::on_file",
   "crates/glean/src/lib.rs::noop_if_up_to_date",
 ]
 reason = "transitional"
@@ -931,8 +924,8 @@ exit = "one no-op check serves both kinds"
 id = "pipeline-run-id"
 summary = "run ids built from a prefix and the clock"
 sites = [
-  "crates/ingest/src/lib.rs::new_run_id",
-  "crates/ingest/src/lib.rs::maintenance_run_id",
+  "crates/ops/src/pipeline/book/mod.rs::new_run_id",
+  "crates/ops/src/pipeline/book/mod.rs::maintenance_run_id",
   "crates/glean/src/lib.rs::new_run_id",
   "crates/glean/src/reaudit.rs::maintenance_run_id",
 ]
@@ -1049,7 +1042,7 @@ summary = "collecting the files under a directory"
 sites = [
   "crates/cli/src/util.rs::collect_pdf_files",
   "crates/runtime/src/queue.rs::collect_supported_files",
-  "crates/ingest/src/dryrun.rs::collect_files",
+  "crates/ops/src/pipeline/book/dryrun.rs::collect_files",
   "crates/glean/src/dryrun.rs::collect_files",
 ]
 reason = "transitional"
@@ -1201,8 +1194,8 @@ exit = "core holds one atomic write that also syncs the directory"
 id = "sha256-hex"
 summary = "SHA-256 as lowercase hex, whole or cut short"
 sites = [
-  "crates/ingest/src/structure.rs::sha256_hex",
-  "crates/ingest/src/lib.rs::sha256_hex",
+  "crates/ops/src/pipeline/book/structure.rs::sha256_hex",
+  "crates/ops/src/pipeline/book/mod.rs::sha256_hex",
   "crates/glean/src/lib.rs::sha256_hex",
   "crates/audit-profile/src/fingerprint.rs::digest_hex",
   "crates/diagnose/src/scrub.rs::sha8",
@@ -1218,7 +1211,7 @@ exit = "core holds the hash, the prefix, and the verification"
 id = "rfc3339-now"
 summary = "the current time as an RFC 3339 string in seconds"
 sites = [
-  "crates/ingest/src/embed_run.rs::now_rfc3339",
+  "crates/ops/src/pipeline/book/embed_run.rs::now_rfc3339",
   "crates/diagnose/src/manifest.rs::iso8601_z",
   "crates/cli/src/distill_cmd.rs::format_iso8601",
   "crates/extract/src/envelope.rs::write_envelope",

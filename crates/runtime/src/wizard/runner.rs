@@ -19,7 +19,7 @@ use bookrack_config::{
 
 use bookrack_corpus::Corpus;
 use bookrack_embed::OllamaEmbedClient;
-use bookrack_ingest::{IngestParams, ingest_book};
+use bookrack_ops::pipeline::book::{IngestParams, ingest_book};
 use bookrack_ops::{Caller, Ops, SearchOptions, reads};
 use bookrack_query::Library;
 use eyre::{Context, Result};
@@ -234,7 +234,7 @@ async fn smoke_ingest(
     cfg: &Config,
     embed_cfg: &EmbedConfig,
     fixture: &Path,
-) -> Result<bookrack_ingest::IngestReport> {
+) -> Result<bookrack_ops::pipeline::book::IngestReport> {
     let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open smoke corpus")?;
     let mut catalog = Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir())
         .context("open smoke catalog")?;

@@ -15,7 +15,7 @@ use bookrack_extract::{
     Biblio, Block, BlockKind, EXTRACTOR_VERSION, Extraction, Provenance, TextLayerQuality, Toc,
     TocEntry,
 };
-use bookrack_ingest::{StructureParams, current_index_stamps, ingest_structure};
+use bookrack_ops::pipeline::book::{StructureParams, current_index_stamps, ingest_structure};
 use bookrack_query::{Library, SearchOptions};
 use bookrack_vectors::{ChunkRow, ChunkStore};
 

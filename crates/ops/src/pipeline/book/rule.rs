@@ -15,7 +15,7 @@ use bookrack_embed::Embedder;
 use bookrack_extract::Extraction;
 use bookrack_extract::rule::{RuleFile, RuleKind, UnitsBy};
 
-use crate::{
+use crate::pipeline::book::{
     IngestError, IngestParams, IngestReport, OnEmbedBatch, OnFile, Result, Staged, audit,
     finish_extraction_ingest, new_run_id, on_file, sha256_hex,
 };
@@ -145,7 +145,7 @@ fn may_number_units(rule: &RuleFile) -> bool {
 
 /// Ingest the book a rule file describes end to end: read its members,
 /// extract them under the rule, then register, structure, audit, chunk,
-/// and embed the result as [`ingest_book`](crate::ingest_book) does a
+/// and embed the result as [`ingest_book`](crate::pipeline::book::ingest_book) does a
 /// born-digital file.
 ///
 /// The SHA-256 of the members' canonical text keys the intake. A
@@ -475,9 +475,9 @@ fn check_coverage(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::book_pipeline_tests::{Fake, Offline, rewrite_envelope};
-    use crate::rebuild::{RebuildParams, rebuild_from_intakes};
-    use crate::{plan_book_chunks, reaudit};
+    use crate::pipeline::book::book_pipeline_tests::{Fake, Offline, rewrite_envelope};
+    use crate::pipeline::book::rebuild::{RebuildParams, rebuild_from_intakes};
+    use crate::pipeline::book::{plan_book_chunks, reaudit};
     use bookrack_catalog::{IntakeFilter, NewIntake};
     use bookrack_core::Explain;
     use bookrack_extract::rule::RULE_ENGINE_VERSION;

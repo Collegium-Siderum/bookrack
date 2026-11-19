@@ -5,7 +5,7 @@
 //! Pure function: hand a file stem in, get back a [`FilenameBiblio`]
 //! filled with whatever the three supported templates could recognize.
 //! The caller decides how to merge those tentative values with the
-//! adapter-extracted biblio — see `bookrack-ingest` for the merge.
+//! adapter-extracted biblio — see the book pipeline in `bookrack-ops` for the merge.
 //!
 //! Three Calibre-flavoured templates are tried in priority order; the
 //! first whose anchor matches wins:

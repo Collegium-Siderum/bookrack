@@ -200,7 +200,11 @@ pub async fn rebuild(
         base.refine_factor = Some(v);
     }
     store
-        .build_ann_index(&base, &lancedb_dir, bookrack_ingest::now_rfc3339())
+        .build_ann_index(
+            &base,
+            &lancedb_dir,
+            bookrack_ops::pipeline::book::now_rfc3339(),
+        )
         .await
         .context("build ann index")?;
     Ok(AnnRebuildReport::from(&base))
@@ -217,19 +221,24 @@ pub async fn plan_reembed(
     cfg: &Config,
     book: Option<i64>,
     stale_only: bool,
-) -> Result<Vec<bookrack_ingest::reembed::ReembedPlan>> {
+) -> Result<Vec<bookrack_ops::pipeline::book::reembed::ReembedPlan>> {
     let lancedb_dir = cfg.lancedb_dir();
     let Some(catalog) = Catalog::open(&cfg.catalog_db()).context("open catalog")? else {
         return match book {
-            Some(id) => {
-                Err(bookrack_ingest::IngestError::UnknownIntake(id)).context("plan reembed")
-            }
+            Some(id) => Err(bookrack_ops::pipeline::book::IngestError::UnknownIntake(id))
+                .context("plan reembed"),
             None => Ok(Vec::new()),
         };
     };
-    bookrack_ingest::reembed::plan_reembed(&catalog, &lancedb_dir, book, None, stale_only)
-        .await
-        .context("plan reembed")
+    bookrack_ops::pipeline::book::reembed::plan_reembed(
+        &catalog,
+        &lancedb_dir,
+        book,
+        None,
+        stale_only,
+    )
+    .await
+    .context("plan reembed")
 }
 
 /// Execute a reembed against the exact pinned set computed by an
@@ -239,7 +248,7 @@ pub async fn plan_reembed(
 pub async fn execute_reembed_from_plan(
     cfg: &Config,
     pinned_ids: Vec<i64>,
-) -> Result<bookrack_ingest::reembed::ReembedReport> {
+) -> Result<bookrack_ops::pipeline::book::reembed::ReembedReport> {
     let lancedb_dir = cfg.lancedb_dir();
     let catalog =
         Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
@@ -252,7 +261,7 @@ pub async fn execute_reembed_from_plan(
         "reembed",
         cfg.data_dir().to_str(),
     );
-    let result = bookrack_ingest::reembed::reembed_all(
+    let result = bookrack_ops::pipeline::book::reembed::reembed_all(
         &catalog,
         &corpus,
         &lancedb_dir,
@@ -281,7 +290,7 @@ pub async fn drop(cfg: &Config) -> Result<AnnDropReport> {
     )
     .await?;
     store
-        .drop_ann_index(&lancedb_dir, bookrack_ingest::now_rfc3339())
+        .drop_ann_index(&lancedb_dir, bookrack_ops::pipeline::book::now_rfc3339())
         .await
         .context("drop ann index")?;
     Ok(AnnDropReport::brute_force())
@@ -327,7 +336,7 @@ pub async fn reset(cfg: &Config, resume: bool) -> Result<VectorsResetReport> {
         "reset",
         cfg.data_dir().to_str(),
     );
-    let outcome = bookrack_ingest::reset::reset_and_rechunk(
+    let outcome = bookrack_ops::pipeline::book::reset::reset_and_rechunk(
         &catalog,
         &corpus,
         &lancedb_dir,
@@ -555,8 +564,10 @@ mod tests {
 
         assert!(
             err.chain().any(|cause| matches!(
-                cause.downcast_ref::<bookrack_ingest::IngestError>(),
-                Some(bookrack_ingest::IngestError::UnknownIntake(9_999_999))
+                cause.downcast_ref::<bookrack_ops::pipeline::book::IngestError>(),
+                Some(bookrack_ops::pipeline::book::IngestError::UnknownIntake(
+                    9_999_999
+                ))
             )),
             "{err:?}",
         );

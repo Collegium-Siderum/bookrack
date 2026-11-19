@@ -117,7 +117,11 @@ pub async fn rebuild(
         base.refine_factor = Some(v);
     }
     store
-        .build_ann_index(&base, &lancedb_dir, bookrack_ingest::now_rfc3339())
+        .build_ann_index(
+            &base,
+            &lancedb_dir,
+            bookrack_ops::pipeline::book::now_rfc3339(),
+        )
         .await
         .context("build papers ann index")?;
     Ok(AnnRebuildReport::from(&base))
@@ -137,7 +141,7 @@ pub async fn drop(cfg: &Config) -> Result<AnnDropReport> {
     )
     .await?;
     store
-        .drop_ann_index(&lancedb_dir, bookrack_ingest::now_rfc3339())
+        .drop_ann_index(&lancedb_dir, bookrack_ops::pipeline::book::now_rfc3339())
         .await
         .context("drop papers ann index")?;
     Ok(AnnDropReport::brute_force())

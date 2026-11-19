@@ -2,7 +2,7 @@
 
 //! Paper-side dryrun: pre-vector simulation of what [`glean_paper`]
 //! would produce, without writing to the catalog, corpus, vector
-//! store, or papers_dir. Peer of [`bookrack_ingest::dryrun`] for the
+//! store, or papers_dir. Peer of [`bookrack_ops::pipeline::book::dryrun`] for the
 //! paper pipeline.
 //!
 //! Each [`dryrun_paper`] call replays EXTRACT (the heavy PDF text-layer

@@ -66,7 +66,7 @@ pub struct AuditData {
     /// Regex source strings paired with `garbage_title_substrings`.
     /// Each pattern is matched case-insensitively against the trimmed
     /// extracted title; the regexes are compiled by the consumer
-    /// (`bookrack-ingest`) once per ingest run and unparseable patterns
+    /// (the book pipeline) once per ingest run and unparseable patterns
     /// are skipped with a warning so a bad overlay never aborts ingest.
     pub garbage_title_regexes: Vec<String>,
     /// Suffix tokens that mark a trailing bracketed segment as a

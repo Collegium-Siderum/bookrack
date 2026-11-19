@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use bookrack_catalog::Catalog;
 use bookrack_config::Config;
 use bookrack_corpus::Corpus;
-use bookrack_ingest::{IngestParams, ingest_book};
+use bookrack_ops::pipeline::book::{IngestParams, ingest_book};
 use eyre::{Context, Result};
 
 use crate::audit_helpers::{load_audit_data, load_audit_profile, load_heading_patterns};

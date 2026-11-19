@@ -328,11 +328,11 @@ impl Pipeline {
 
     /// The stamps this binary would record for the pipeline after a
     /// clean build under `model`/`dim`. The chunking constant differs
-    /// per pipeline: books chunk under `bookrack_ingest`, papers under
+    /// per pipeline: books chunk under `bookrack_ops::pipeline::book`, papers under
     /// `bookrack_glean`.
     pub fn target_stamps(self, model: &str, dim: u32) -> IndexStamps {
         match self {
-            Pipeline::Books => bookrack_ingest::current_index_stamps(model, dim),
+            Pipeline::Books => bookrack_ops::pipeline::book::current_index_stamps(model, dim),
             Pipeline::Papers => bookrack_glean::stamps::current_index_stamps(model, dim),
         }
     }

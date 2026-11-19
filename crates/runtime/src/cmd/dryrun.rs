@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bookrack_config::Config;
-use bookrack_ingest::{
+use bookrack_ops::pipeline::book::{
     DryrunBookReport, DryrunParams, DryrunSummary, collect_files, dryrun_book, summarize,
 };
 use eyre::{Context, Result};

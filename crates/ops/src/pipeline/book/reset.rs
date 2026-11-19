@@ -3,12 +3,12 @@
 //! L2 reset: drop the chunks table and re-derive vectors with the
 //! current embedder model, from the corpus node tree.
 //!
-//! Unlike [`reembed_all`](crate::reembed::reembed_all), which reuses the
+//! Unlike [`reembed_all`](crate::pipeline::book::reembed::reembed_all), which reuses the
 //! chunk text already in the chunks table, `reset_and_rechunk` is the
 //! legitimate path through a model swap — the table is dropped before
 //! being rebuilt at the new vector dimension. The catalog and the corpus
 //! node tree are preserved; chunking re-runs against the existing nodes
-//! via [`plan_book_chunks`](crate::plan_book_chunks).
+//! via [`plan_book_chunks`](crate::pipeline::book::plan_book_chunks).
 //!
 //! The destructive A-D steps (clear stamps, drop chunks table, demote
 //! catalog) run once on a non-`resume` call. The build phase iterates
@@ -30,8 +30,8 @@ use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_vectors::ChunkStore;
 
-use crate::embed_run::embed_book_chunks;
-use crate::{Result, audit_as, maintenance_run_id, plan_book_chunks};
+use crate::pipeline::book::embed_run::embed_book_chunks;
+use crate::pipeline::book::{Result, audit_as, maintenance_run_id, plan_book_chunks};
 use bookrack_text::ChunkParams;
 
 /// What one [`reset_and_rechunk`] call produced.
@@ -198,7 +198,7 @@ mod tests {
     use bookrack_embed::{EmbedError, Embedder, Result as EmbedResult};
     use bookrack_vectors::ChunkReader;
 
-    use crate::{IngestError, IngestParams, ingest_book};
+    use crate::pipeline::book::{IngestError, IngestParams, ingest_book};
 
     /// A fake embedder returning constant-length vectors. The first byte
     /// of every output vector carries `tag`, which tests use to tell

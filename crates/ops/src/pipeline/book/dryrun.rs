@@ -1,6 +1,6 @@
 //! Simulate an ingest up to (but not including) embedding.
 //!
-//! The dryrun drives the same pre-vector code path [`crate::ingest_book`]
+//! The dryrun drives the same pre-vector code path [`crate::pipeline::book::ingest_book`]
 //! uses — `extract` → register → `ingest_structure` → metadata audit →
 //! `plan_book_chunks` — against an in-memory catalog and corpus that are
 //! discarded when the run ends. The product is a [`DryrunBookReport`] per
@@ -27,7 +27,7 @@ use bookrack_metadata::{AuditInput, FilenameBiblio, MetadataReport, audit, parse
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{
+use crate::pipeline::book::{
     ChunkParams, IngestError, METADATA_BODY_SAMPLE_BLOCKS, METADATA_BODY_SAMPLE_CHARS,
     StructureParams, body_sample, build_base_attrs, ingest_structure, plan_book_chunks,
 };
@@ -692,7 +692,7 @@ fn report_fields(report: &MetadataReport) -> Vec<FieldOut> {
         .collect()
 }
 
-fn chunk_stats(plans: &[crate::ChunkPlan]) -> ChunkStatsOut {
+fn chunk_stats(plans: &[crate::pipeline::book::ChunkPlan]) -> ChunkStatsOut {
     if plans.is_empty() {
         return ChunkStatsOut {
             count: 0,
@@ -718,7 +718,7 @@ fn chunk_stats(plans: &[crate::ChunkPlan]) -> ChunkStatsOut {
     }
 }
 
-// Silence the unused-constant warning when callers use this crate without
+// Silence the unused-constant warning when callers use this module without
 // reaching for these. They are referenced from the imports for clarity,
 // but the dryrun consumes them through `body_sample` already.
 const _: usize = METADATA_BODY_SAMPLE_BLOCKS + METADATA_BODY_SAMPLE_CHARS;
@@ -771,10 +771,13 @@ pub struct RuleFallbackOut {
 /// Opens no database and writes nothing. A rule that cannot be read,
 /// does not describe a book, or cannot be cut into units is an error
 /// rather than a report, the same refusal a submission of it meets.
-pub fn dryrun_rule(rule_path: &Path, params: &DryrunParams) -> crate::Result<RuleDryrunReport> {
+pub fn dryrun_rule(
+    rule_path: &Path,
+    params: &DryrunParams,
+) -> crate::pipeline::book::Result<RuleDryrunReport> {
     let rule = bookrack_extract::rule::RuleFile::load(rule_path)?;
     if rule.rule().kind != bookrack_extract::rule::RuleKind::Book {
-        return Err(crate::IngestError::RuleKindNotBook {
+        return Err(crate::pipeline::book::IngestError::RuleKindNotBook {
             rule: rule_path.to_path_buf(),
         });
     }
@@ -970,7 +973,9 @@ mod tests {
         assert!(
             matches!(
                 err,
-                crate::IngestError::Rule(bookrack_extract::rule::RuleError::Parse { .. })
+                crate::pipeline::book::IngestError::Rule(
+                    bookrack_extract::rule::RuleError::Parse { .. }
+                )
             ),
             "{err:?}"
         );

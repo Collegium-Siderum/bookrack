@@ -37,7 +37,7 @@
 //!
 //! ## Dependency direction
 //!
-//! This crate sits below `metadata`, `extract`, and `ingest`: each
+//! This crate sits below `metadata`, `extract`, and `ops`: each
 //! pulls profile values down at the call site. Keeping the type here
 //! avoids `extract` reaching upward into `metadata` for a setting.
 

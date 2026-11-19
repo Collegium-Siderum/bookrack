@@ -4,11 +4,11 @@
 
 use std::path::Path;
 
-use bookrack_ingest::{AuditData, AuditProfile, DryrunParams};
+use crate::pipeline::book::{AuditData, AuditProfile, DryrunParams};
 
 use bookrack_audit_profile::HeadingPatterns;
 
-pub use bookrack_ingest::{RuleCompletenessOut, RuleDryrunReport, RuleFallbackOut};
+pub use crate::pipeline::book::{RuleCompletenessOut, RuleDryrunReport, RuleFallbackOut};
 
 /// Dryrun the book the rule file at `rule` describes, auditing it under
 /// `audit_profile` with `audit_data` and reading headings by
@@ -28,5 +28,5 @@ pub fn dryrun(
         heading_patterns,
         ..DryrunParams::default()
     };
-    Ok(bookrack_ingest::dryrun_rule(rule, &params)?)
+    Ok(crate::pipeline::book::dryrun_rule(rule, &params)?)
 }

@@ -143,6 +143,16 @@ release workflow extracts the matching section verbatim from this file.
   neither CJK nor Latin. It now counts as CJK, so a body written in
   such characters agrees with a CJK language tag and disagrees with a
   Latin one.
+- **Log events of the book pipeline carry a new target, and
+  `ingest.ann_rebuild_floor` a new owner.** The pipeline moved into the
+  `bookrack-ops` crate: its events are now logged under
+  `bookrack_ops::pipeline::book` where they were under
+  `bookrack_ingest`. A `BOOKRACK_LOG` directive that names the old
+  target, such as `bookrack_ingest=debug`, still parses and now matches
+  nothing; write `bookrack_ops=debug`, or
+  `bookrack_ops::pipeline::book=debug` for the book pipeline alone.
+  `bookrack config fixed` reports `ops` as the owner of
+  `ingest.ann_rebuild_floor`; the key and its value are unchanged.
 
 ### Fixed
 

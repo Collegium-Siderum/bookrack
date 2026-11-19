@@ -25,7 +25,7 @@ use bookrack_catalog::{Catalog, Intake};
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_metadata::{AuditData, AuditProfile};
 
-use crate::{
+use crate::pipeline::book::{
     IngestError, Result, audit_as, audit_metric_summary, body_sample, maintenance_run_id, structure,
 };
 use bookrack_extract::envelope::{self, EnvelopeError};
@@ -152,7 +152,7 @@ fn report_for_intake(
     }
 
     let effective = catalog.effective_publication_attrs(intake_id, ItemKind::Book)?;
-    let origins = crate::field_origins(catalog, intake_id)?;
+    let origins = crate::pipeline::book::field_origins(catalog, intake_id)?;
     let toc_stats = structure::toc_stats(&envelope.extraction, &audit_profile.toc_shape);
     let sample = body_sample(&envelope.extraction);
     // A rule row's `original_path` is the rule file, whose name does

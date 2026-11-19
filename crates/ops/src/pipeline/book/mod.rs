@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! ingest: assemble an [`Extraction`] into the persistent data model.
+//! The book pipeline: assemble an [`Extraction`] into the persistent data model.
 //!
 //! This milestone implements STRUCTURE: turning one extraction into a
 //! `corpus.db` node tree — an organizing tree lifted from the table of
@@ -53,7 +53,7 @@ use sha2::{Digest, Sha256};
 use tracing::Instrument;
 
 bookrack_core::fixed_settings! {
-    owner = "ingest";
+    owner = "ops";
     "ingest.ann_rebuild_floor" = embed_run::L2_ABSOLUTE_FLOOR,
         "chunks of accumulated churn below which the ANN index is not rebuilt",
         acts on "how often an ingest pays for an index rebuild";
@@ -3710,10 +3710,10 @@ pub(crate) mod book_pipeline_tests {
         );
 
         std::fs::remove_dir(&canonical).expect("unblock the canonical path");
-        let rebuilt = crate::rebuild::rebuild_from_intakes(
+        let rebuilt = crate::pipeline::book::rebuild::rebuild_from_intakes(
             &mut corpus,
             &catalog,
-            &crate::rebuild::RebuildParams::default(),
+            &crate::pipeline::book::rebuild::RebuildParams::default(),
         )
         .expect("rebuild");
         assert_eq!(rebuilt.missing_envelope, [first.intake_id]);
@@ -3873,10 +3873,10 @@ pub(crate) mod book_pipeline_tests {
                 .exists(),
             "no envelope may describe a tree that was never built"
         );
-        let rebuilt = crate::rebuild::rebuild_from_intakes(
+        let rebuilt = crate::pipeline::book::rebuild::rebuild_from_intakes(
             &mut corpus,
             &catalog,
-            &crate::rebuild::RebuildParams {
+            &crate::pipeline::book::rebuild::RebuildParams {
                 dry_run: true,
                 ..Default::default()
             },
@@ -4056,17 +4056,17 @@ pub(crate) mod book_pipeline_tests {
         let (first, stale) =
             ingest_then_mark_stale(&file, dir.path(), &mut corpus, &mut catalog).await;
 
-        let rebuilt = crate::rebuild::rebuild_from_intakes(
+        let rebuilt = crate::pipeline::book::rebuild::rebuild_from_intakes(
             &mut corpus,
             &catalog,
-            &crate::rebuild::RebuildParams {
+            &crate::pipeline::book::rebuild::RebuildParams {
                 stale_only: true,
                 ..Default::default()
             },
         )
         .expect("rebuild");
         assert_eq!(rebuilt.rebuilt, [first.intake_id]);
-        let reembedded = crate::reembed::reembed_all(
+        let reembedded = crate::pipeline::book::reembed::reembed_all(
             &catalog,
             &corpus,
             dir.path(),

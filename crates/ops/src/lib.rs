@@ -24,6 +24,7 @@
 //! this [`Ops`] was built with.
 
 pub mod dto;
+pub mod pipeline;
 pub mod reads;
 pub(crate) mod recorder;
 pub mod registry;
@@ -39,8 +40,8 @@ use bookrack_embed::Embedder;
 use bookrack_query::{Library, QueryError};
 use bookrack_rerank::RerankClient;
 
+pub use crate::pipeline::book::{AuditData, AuditProfile};
 pub use bookrack_extract::pdfium_pin::PDFIUM_RELEASE_TAG;
-pub use bookrack_ingest::{AuditData, AuditProfile};
 pub use bookrack_metadata::paper::{
     ALL_BUILT_IN_NAMES as PAPER_AUDIT_BUILT_IN_NAMES, PROFILE_DEFAULT as PAPER_PROFILE_DEFAULT,
     PROFILE_STRICT as PAPER_PROFILE_STRICT, PROFILE_TRUST_SOURCE as PAPER_PROFILE_TRUST_SOURCE,
@@ -414,7 +415,7 @@ impl<E: Embedder> Ops<E> {
 
     /// Borrow the warm embedder, if this `Ops` was built with a library.
     /// Used by the registry-level ingest wrapper, which feeds the
-    /// embedder into [`bookrack_ingest::ingest_book`].
+    /// embedder into [`crate::pipeline::book::ingest_book`].
     pub(crate) fn embedder(&self) -> Option<&E> {
         self.library.as_ref().map(Library::embedder)
     }

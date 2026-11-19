@@ -897,31 +897,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bookrack-ingest"
-version = "0.15.0-dev"
-dependencies = [
- "bookrack-audit-profile",
- "bookrack-catalog",
- "bookrack-config",
- "bookrack-core",
- "bookrack-corpus",
- "bookrack-embed",
- "bookrack-extract",
- "bookrack-metadata",
- "bookrack-text",
- "bookrack-vectors",
- "chrono",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "bookrack-mcp"
 version = "0.15.0-dev"
 dependencies = [
@@ -997,7 +972,6 @@ dependencies = [
  "bookrack-embed",
  "bookrack-extract",
  "bookrack-glean",
- "bookrack-ingest",
  "bookrack-metadata",
  "bookrack-obs",
  "bookrack-query",
@@ -1005,10 +979,14 @@ dependencies = [
  "bookrack-rerank",
  "bookrack-search",
  "bookrack-session",
+ "bookrack-text",
  "bookrack-vectors",
+ "chrono",
  "eyre",
+ "regex",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1025,7 +1003,7 @@ dependencies = [
  "bookrack-corpus",
  "bookrack-embed",
  "bookrack-extract",
- "bookrack-ingest",
+ "bookrack-ops",
  "bookrack-search",
  "bookrack-text",
  "bookrack-vectors",
@@ -1080,7 +1058,6 @@ dependencies = [
  "bookrack-extract",
  "bookrack-glean",
  "bookrack-index-profile",
- "bookrack-ingest",
  "bookrack-metadata",
  "bookrack-obs",
  "bookrack-ops",
@@ -1118,7 +1095,7 @@ dependencies = [
  "bookrack-corpus",
  "bookrack-embed",
  "bookrack-extract",
- "bookrack-ingest",
+ "bookrack-ops",
  "bookrack-vectors",
  "serde",
  "serde_json",

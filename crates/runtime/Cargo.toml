@@ -21,7 +21,6 @@ bookrack-index-profile = { path = "../index-profile" }
 # the PDF adapter that consumes the library.
 bookrack-extract = { path = "../extract" }
 bookrack-glean = { path = "../glean" }
-bookrack-ingest = { path = "../ingest" }
 bookrack-metadata = { path = "../metadata" }
 bookrack-obs = { path = "../obs" }
 bookrack-ops = { path = "../ops" }

@@ -51,9 +51,13 @@
 #               file name has no such floor);
 #        verb   the words ingest and glean exchanged, kind words kept or
 #               swapped.
-#      A site written as a file covers every function in it. The check
-#      reads names only: a copy with an asymmetric name is registered
-#      by hand.
+#      A site written as a file covers every function in it. A name
+#      defined in several files is covered site by site: each site of
+#      one name must share an entry, or a `site` line of the list below,
+#      with at least one site of the other name, and the same the other
+#      way round. A site line that matches no pair fails as stale. The
+#      check reads names only: a copy with an asymmetric name is
+#      registered by hand.
 #
 # A [[parallel]] entry names every site of one method implemented more
 # than once. Each site's file carries the plain comment line
@@ -87,7 +91,7 @@ base   core config obs session audit-profile index-profile cli-grammar control-c
 pure   extract distill metadata
 store  catalog corpus vectors refs dbkit
 client embed rerank
-inner  ingest glean query search diagnose
+inner  glean query search diagnose
 center ops
 host   runtime
 front  cli mcp
@@ -108,13 +112,14 @@ front  base center host front
 TEXT_CRATE=text
 TEXT_LIBS='^(text-splitter|unicode-normalization|unicode-segmentation|icu_.*)$'
 # Crates whose functions are paired as if they were one crate.
-ONE_GROUP='ingest glean'
+ONE_GROUP='ops glean'
 # Crates the paired-name check does not read.
 UNPAIRED='test-support'
 # Pairs that differ only by kind and are not parallel implementations:
 # accessors that return one kind's path or build one kind's id, and a
-# stage only one kind has. `fn <crate> <name> <name>`, or
-# `file <path> <path>`.
+# stage only one kind has. `fn <crate> <name> <name>`,
+# `file <path> <path>`, or `site <path>::<name> <path>::<name>` for one
+# pair of definitions and no other of the same names.
 LEGITIMATE='
 fn config books_dir papers_dir
 fn config catalog_db papers_catalog_db
@@ -127,6 +132,7 @@ fn ops lancedb_dir papers_lancedb_dir
 fn core book paper
 fn cli-grammar book_intake_id paper_intake_id
 file crates/extract/src/pdf.rs crates/extract/src/pdf_paper.rs
+site crates/ops/src/registry.rs::reaudit_paper crates/ops/src/pipeline/book/reaudit.rs::reaudit_book
 '
 REASONS='dependency-direction stamp-isolation compile-boundary wire-pin external-constraint transitional'
 export TIERS ALLOWED ONE_GROUP UNPAIRED LEGITIMATE
@@ -651,6 +657,12 @@ production $(cat "$tmp/paired.sources") |
       for (id in ids) if (((id, fa) in site || (id, fa "::" a) in site) && ((id, fb) in site || (id, fb "::" b) in site)) return 1
       return 0
     }
+    # Whether the definitions fa::a and fb::b are an accepted pair.
+    function accepted(fa, a, fb, b) {
+      if ((fa "::" a, fb "::" b) in fine_site) { hit[fine_site[fa "::" a, fb "::" b]] = 1; return 1 }
+      if (crate_of(fa) == crate_of(fb) && (crate_of(fa), a, b) in fine) return 1
+      return covered(fa, a, fb, b)
+    }
     BEGIN {
       other["book"] = "paper papers"; other["books"] = "papers paper"
       other["paper"] = "book books"; other["papers"] = "books book"
@@ -659,8 +671,15 @@ production $(cat "$tmp/paired.sources") |
       m = split(ENVIRON["LEGITIMATE"], rows, "\n")
       for (i = 1; i <= m; i++) {
         k = split(rows[i], f, " ")
-        if (k == 4) { fine[f[2], f[3], f[4]] = 1; fine[f[2], f[4], f[3]] = 1 }
-        if (k == 3) { fine_file[f[2], f[3]] = 1; fine_file[f[3], f[2]] = 1 }
+        if (k == 0) continue
+        if (f[1] == "fn" && k == 4) { fine[f[2], f[3], f[4]] = 1; fine[f[2], f[4], f[3]] = 1 }
+        else if (f[1] == "file" && k == 3) { fine_file[f[2], f[3]] = 1; fine_file[f[3], f[2]] = 1 }
+        else if (f[1] == "site" && k == 3 && f[2] ~ /\.rs::[A-Za-z0-9_]+$/ && f[3] ~ /\.rs::[A-Za-z0-9_]+$/) {
+          fine_site[f[2], f[3]] = rows[i]; fine_site[f[3], f[2]] = rows[i]; site_rows[rows[i]] = 1
+        } else {
+          print "STRUCTURE: cannot read the legitimate-pair line \"" rows[i] "\""
+          bad = 1
+        }
       }
       while ((getline line < sites) > 0) { split(line, f, "\t"); ids[f[1]] = 1; site[f[1], f[2]] = 1 }
       while ((getline line < sources) > 0) {
@@ -690,10 +709,16 @@ production $(cat "$tmp/paired.sources") |
             if (!((g, b) in files) || (g, b, a) in judged) continue
             judged[g, a, b] = 1
             ka = split(files[g, a], fa, " "); kb = split(files[g, b], fb, " ")
-            for (x = 1; x <= ka; x++) for (y = 1; y <= kb; y++) {
-              if (crate_of(fa[x]) == crate_of(fb[y]) && (crate_of(fa[x]), a, b) in fine) continue
-              if (covered(fa[x], a, fb[y], b)) continue
-              print "STRUCTURE: " fa[x] "::" a " and " fb[y] "::" b " differ only by kind; no [[parallel]] entry covers both"
+            for (x in met_a) delete met_a[x]
+            for (y in met_b) delete met_b[y]
+            for (x = 1; x <= ka; x++) for (y = 1; y <= kb; y++)
+              if (accepted(fa[x], a, fb[y], b)) { met_a[x] = 1; met_b[y] = 1 }
+            for (x = 1; x <= ka; x++) if (!(x in met_a)) {
+              print "STRUCTURE: " fa[x] "::" a " differs only by kind from " b "; no [[parallel]] entry covers it with a site of " b
+              bad = 1
+            }
+            for (y = 1; y <= kb; y++) if (!(y in met_b)) {
+              print "STRUCTURE: " fb[y] "::" b " differs only by kind from " a "; no [[parallel]] entry covers it with a site of " a
               bad = 1
             }
           }
@@ -716,6 +741,10 @@ production $(cat "$tmp/paired.sources") |
             bad = 1
           }
         }
+      }
+      for (r in site_rows) if (!(r in hit)) {
+        print "STRUCTURE: stale legitimate-pair line \"" r "\": no pair of definitions matches it -- delete it"
+        bad = 1
       }
       exit bad
     }

@@ -69,8 +69,8 @@ pub fn show_metadata_audit<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<
 pub fn show_metadata_report<E: Embedder>(
     ops: &Ops<E>,
     intake_id: i64,
-    audit_data: &bookrack_ingest::AuditData,
-    audit_profile: &bookrack_ingest::AuditProfile,
+    audit_data: &crate::pipeline::book::AuditData,
+    audit_profile: &crate::pipeline::book::AuditProfile,
 ) -> Result<MetadataAuditReport> {
     record_call_sync!(
         ops,
@@ -80,14 +80,14 @@ pub fn show_metadata_report<E: Embedder>(
             let Some(catalog) = open_book_catalog(ops)? else {
                 return Err(OpsError::IntakeNotFound { intake_id });
             };
-            let report = bookrack_ingest::reaudit::build_report(
+            let report = crate::pipeline::book::reaudit::build_report(
                 &catalog,
                 intake_id,
                 audit_data,
                 audit_profile,
             )
             .map_err(|e| match e {
-                bookrack_ingest::IngestError::UnknownIntake(intake_id) => {
+                crate::pipeline::book::IngestError::UnknownIntake(intake_id) => {
                     OpsError::IntakeNotFound { intake_id }
                 }
                 other => OpsError::Other(eyre::Report::new(other)),
