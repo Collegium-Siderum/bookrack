@@ -17,7 +17,6 @@ bookrack-diagnose = { path = "../diagnose" }
 bookrack-distill = { path = "../distill" }
 bookrack-embed = { path = "../embed" }
 bookrack-extract = { path = "../extract" }
-bookrack-glean = { path = "../glean" }
 bookrack-metadata = { path = "../metadata" }
 bookrack-obs = { path = "../obs" }
 bookrack-query = { path = "../query" }

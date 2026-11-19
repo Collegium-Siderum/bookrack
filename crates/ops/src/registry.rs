@@ -20,11 +20,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use crate::pipeline::book::{IngestParams, IngestReport, OnEmbedBatch, RuleIngestParams};
+use crate::pipeline::paper::{GleanParams, GleanReport};
 use bookrack_catalog::{Catalog, RunHandle, RunLock};
 use bookrack_config::Config;
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
-use bookrack_glean::{GleanParams, GleanReport};
 use eyre::WrapErr;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -465,7 +465,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
     /// per-library glean mutex for the duration of the call, opens
     /// fresh [`Catalog`] and [`Corpus`] handles from the library's
     /// configured paper-side paths, then forwards to
-    /// [`bookrack_glean::glean_paper`] with the paper-side warm
+    /// [`crate::pipeline::paper::glean_paper`] with the paper-side warm
     /// embedder. After a successful run the paper-side [`Library`]
     /// rebinds its store from disk so the first paper into a previously
     /// empty data dir lights up the read path.
@@ -517,7 +517,7 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
         if let Some(run) = owned_run.as_ref() {
             effective.pipeline_run_id = Some(run.id().to_string());
         }
-        let result = bookrack_glean::glean_paper(
+        let result = crate::pipeline::paper::glean_paper(
             path,
             &mut corpus,
             &mut catalog,
@@ -1015,8 +1015,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use crate::pipeline::book::IngestParams;
+    use crate::pipeline::paper::GleanParams;
     use bookrack_embed::{EmbedError, Embedder};
-    use bookrack_glean::GleanParams;
 
     use bookrack_config::Config;
 

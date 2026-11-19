@@ -1118,7 +1118,7 @@ mod tests {
     /// Build a one-Work-root + one-Paragraph-leaf paper tree in a tempdir,
     /// stamp the optional container / title onto its catalog row, and
     /// append one chunk into a fresh vector store. The structural layout
-    /// matches what [`bookrack_glean::glean_paper`] writes for a paper.
+    /// matches what [`bookrack_ops::pipeline::paper::glean_paper`] writes for a paper.
     async fn paper_fixture(
         intake_id: i64,
         container: Option<&str>,

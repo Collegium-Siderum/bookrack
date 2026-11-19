@@ -2,7 +2,7 @@
 
 //! Paper-side dryrun: pre-vector simulation of what [`glean_paper`]
 //! would produce, without writing to the catalog, corpus, vector
-//! store, or papers_dir. Peer of [`bookrack_ops::pipeline::book::dryrun`] for the
+//! store, or papers_dir. Peer of [`crate::pipeline::book::dryrun`] for the
 //! paper pipeline.
 //!
 //! Each [`dryrun_paper`] call replays EXTRACT (the heavy PDF text-layer
@@ -27,13 +27,13 @@ use serde::{Deserialize, Serialize};
 
 use bookrack_text::{ChunkLeaf, plan_chunks};
 
-use crate::{AbstractStrategy, ChunkParams, identify};
+use crate::pipeline::paper::{AbstractStrategy, ChunkParams, identify};
 
 /// Knobs for one dryrun.
 #[derive(Debug, Clone, Default)]
 pub struct DryrunPaperParams {
     /// Which abstract strategy the IDENTIFY pass uses. Mirrors the
-    /// matching field on [`crate::GleanParams`].
+    /// matching field on [`crate::pipeline::paper::GleanParams`].
     pub abstract_strategy: AbstractStrategy,
     /// CHUNK tuning. The abstract is almost always a single chunk
     /// under the default 1000-character target.
@@ -386,7 +386,7 @@ struct StructurePreview {
     caption_leaves: usize,
 }
 
-/// Mirror the counting half of [`crate::build_structure`]: produce the
+/// Mirror the counting half of [`crate::pipeline::paper::build_structure`]: produce the
 /// node-tree shape STRUCTURE would emit without allocating ids or
 /// inserting any rows. Same orphan-`Heading{2}` promotion rule.
 fn predict_structure(blocks: &[Block], abstract_text: Option<&str>) -> StructurePreview {

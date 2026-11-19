@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Paper-side reembed. Peer of `bookrack_ops::pipeline::book::reembed` for the paper
+//! Paper-side reembed. Peer of `crate::pipeline::book::reembed` for the paper
 //! pipeline: takes the chunk rows currently on disk in `lancedb_papers`,
 //! re-embeds them under the active embedder, and writes the new vectors
 //! back. The corpus node tree is not touched — only the chunks table.
@@ -20,7 +20,7 @@ use bookrack_vectors::ChunkReader;
 
 use bookrack_text::ChunkPlan;
 
-use crate::{GleanError, Result, audit_as, embed_and_write_chunks, new_run_id};
+use crate::pipeline::paper::{GleanError, Result, audit_as, embed_and_write_chunks, new_run_id};
 
 /// A planned per-paper reembed: what would happen if [`reembed_paper`]
 /// ran on this `intake_id`.

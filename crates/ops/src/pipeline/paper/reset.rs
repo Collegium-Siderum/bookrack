@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Paper-side reset+rechunk. Peer of `bookrack_ops::pipeline::book::reset` for the
+//! Paper-side reset+rechunk. Peer of `crate::pipeline::book::reset` for the
 //! paper pipeline: drops the chunks table, demotes every `Embedded`
 //! paper intake to `Extracted`, then re-chunks the abstract leaf of
 //! each one under the current [`bookrack_text::CHUNK_VERSION`] and re-embeds it under
@@ -20,7 +20,7 @@ use bookrack_vectors::ChunkStore;
 
 use bookrack_text::{ChunkLeaf, plan_chunks};
 
-use crate::{ChunkParams, Result, audit_as, embed_and_write_chunks, new_run_id};
+use crate::pipeline::paper::{ChunkParams, Result, audit_as, embed_and_write_chunks, new_run_id};
 
 /// What one [`reset_and_rechunk`] call produced.
 #[derive(Debug, Clone, Default)]
@@ -178,7 +178,7 @@ mod tests {
     use bookrack_embed::{EmbedError, Result as EmbedResult};
     use bookrack_vectors::ChunkReader;
 
-    use crate::{GleanError, build_structure};
+    use crate::pipeline::paper::{GleanError, build_structure};
 
     /// A fake embedder returning constant vectors of `dim` length whose
     /// second slot carries `generation`, so tests can tell rewrites

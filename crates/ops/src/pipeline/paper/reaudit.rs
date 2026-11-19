@@ -37,8 +37,8 @@ use bookrack_metadata::paper::{
     csl_type_token,
 };
 
-use crate::audit::paper_report_to_audit_row;
-use crate::{GleanError, Result, audit_as, paper_body_sample};
+use crate::pipeline::paper::audit::paper_report_to_audit_row;
+use crate::pipeline::paper::{GleanError, Result, audit_as, paper_body_sample};
 
 /// What one [`reaudit_paper`] call computed and stored.
 #[derive(Debug, Clone)]
@@ -225,9 +225,8 @@ fn report_for_intake(
 }
 
 /// One run id ties every audit row from a maintenance operation
-/// together. The `glean-{op}-` prefix distinguishes paper-side
-/// reaudit rows from ingest's `ingest-{op}-` prefix when a mixed log
-/// is inspected.
+/// together. The `glean-{op}-` prefix marks the row as a paper-side
+/// maintenance run when a mixed log is inspected.
 ///
 /// This is `item_pipeline_audit`'s own namespace, not the
 /// `pipeline_runs` registry: a per-item reaudit recomputes one

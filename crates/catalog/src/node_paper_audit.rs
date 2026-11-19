@@ -18,7 +18,7 @@
 //!
 //! Column shape: eight header columns, nine `grade_<field>` columns
 //! holding one of `missing` / `weak` / `medium` / `strong`, and one
-//! `flag_<token>` boolean per [`bookrack-glean`]'s `PaperFlag` enum
+//! `flag_<token>` boolean per `bookrack-metadata`'s `PaperFlag` enum
 //! token. Booleans are stored as `INTEGER NOT NULL DEFAULT 0` so a
 //! flag absent from a report writes as `0` and a `SUM(flag_*)` over
 //! the table answers per-flag frequency directly.
@@ -195,7 +195,7 @@ pub const GRADE_COLUMNS: &[(&str, &str)] = &[
 ];
 
 /// One row about to be written to `node_paper_audit`. Built from a
-/// `PaperReport` in `bookrack-glean`; the catalog crate keeps the type
+/// `PaperReport` in the paper pipeline; the catalog crate keeps the type
 /// transport-only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewNodePaperAudit {

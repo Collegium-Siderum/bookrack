@@ -1,18 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! bookrack-glean: the paper-side pipeline.
+//! The paper pipeline.
 //!
-//! A peer of `bookrack-ingest` for the books pipeline. The two share a
-//! source-file extractor (`bookrack-extract`) and a storage stack
-//! (corpus + catalog + vector store) but otherwise stay on separate
-//! crates so a change in one cannot quietly reach the other. Five
-//! stages match the books pipeline at a high level — extract, register,
-//! identify (the glean-specific addition), structure, chunk and embed —
-//! but each stage runs paper-shaped logic against paper-shaped state
+//! A peer of [`crate::pipeline::book`] for the books pipeline. The two
+//! share a source-file extractor (`bookrack-extract`) and a storage
+//! stack (corpus + catalog + vector store). Five stages match the books
+//! pipeline at a high level — extract, register, identify (the
+//! glean-specific addition), structure, chunk and embed — but each
+//! stage runs paper-shaped logic against paper-shaped state
 //! (papers_corpus, papers_catalog, lancedb_papers, papers store).
-//!
-//! The crate has no `bookrack-ingest` dependency. That is enforced
-//! mechanically by the dependency graph, not just discipline.
 
 use std::path::Path;
 use std::time::Instant;
@@ -239,7 +235,7 @@ impl bookrack_core::Explain for GleanError {
     }
 }
 
-/// Convenience alias for the crate's fallible operations.
+/// Convenience alias for the pipeline's fallible operations.
 pub type Result<T> = std::result::Result<T, GleanError>;
 
 /// Glean one paper end to end. The whole-file SHA-256 keys the intake;

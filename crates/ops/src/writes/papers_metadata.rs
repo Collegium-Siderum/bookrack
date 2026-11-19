@@ -380,14 +380,14 @@ pub fn reaudit_paper_metadata<E: Embedder>(
     let args = serde_json::json!({ "intake_id": req.intake_id });
     record_call_sync!(ops, "papers.metadata.reaudit", args, {
         let catalog = open_paper_catalog_for_write(ops)?;
-        let outcome = bookrack_glean::reaudit::reaudit_paper(
+        let outcome = crate::pipeline::paper::reaudit::reaudit_paper(
             &catalog,
             req.intake_id,
             audit_profile,
             audit_data,
         )
         .map_err(|e| match e {
-            bookrack_glean::GleanError::UnknownIntake(intake_id) => {
+            crate::pipeline::paper::GleanError::UnknownIntake(intake_id) => {
                 OpsError::IntakeNotFound { intake_id }
             }
             other => OpsError::Other(eyre::Report::new(other)),

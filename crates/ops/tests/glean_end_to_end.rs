@@ -15,7 +15,7 @@ use bookrack_core::{ItemKind, NodeType, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, Result as EmbedResult};
 use bookrack_extract::EXTRACTOR_VERSION;
-use bookrack_glean::{GleanParams, glean_paper};
+use bookrack_ops::pipeline::paper::{GleanParams, glean_paper};
 use bookrack_vectors::ChunkReader;
 
 /// A constant-vector embedder. The pipeline calls `embed_batch`
@@ -353,17 +353,17 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
         .expect("stale extractor_version stamp");
     // The stale-only sweeps re-derive from what is already stored, so
     // neither of them refreshes the stamp.
-    let rebuilt = bookrack_glean::rebuild::rebuild_from_intakes(
+    let rebuilt = bookrack_ops::pipeline::paper::rebuild::rebuild_from_intakes(
         &mut corpus,
         &catalog,
-        &bookrack_glean::rebuild::RebuildParams {
+        &bookrack_ops::pipeline::paper::rebuild::RebuildParams {
             stale_only: true,
             ..Default::default()
         },
     )
     .expect("stale-only rebuild");
     assert_eq!(rebuilt.rebuilt, [report.intake_id]);
-    let reembedded = bookrack_glean::reembed::reembed_all(
+    let reembedded = bookrack_ops::pipeline::paper::reembed::reembed_all(
         &catalog,
         &mut corpus,
         &lancedb_dir,

@@ -862,30 +862,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bookrack-glean"
-version = "0.15.0-dev"
-dependencies = [
- "bookrack-audit-profile",
- "bookrack-catalog",
- "bookrack-config",
- "bookrack-core",
- "bookrack-corpus",
- "bookrack-embed",
- "bookrack-extract",
- "bookrack-metadata",
- "bookrack-text",
- "bookrack-vectors",
- "chrono",
- "regex",
- "serde",
- "sha2",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "bookrack-index-profile"
 version = "0.15.0-dev"
 dependencies = [
@@ -971,7 +947,6 @@ dependencies = [
  "bookrack-distill",
  "bookrack-embed",
  "bookrack-extract",
- "bookrack-glean",
  "bookrack-metadata",
  "bookrack-obs",
  "bookrack-query",
@@ -1056,7 +1031,6 @@ dependencies = [
  "bookrack-diagnose",
  "bookrack-embed",
  "bookrack-extract",
- "bookrack-glean",
  "bookrack-index-profile",
  "bookrack-metadata",
  "bookrack-obs",

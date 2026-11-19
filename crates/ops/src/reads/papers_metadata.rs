@@ -54,14 +54,14 @@ pub fn show_paper_metadata_report<E: Embedder>(
             let Some(catalog) = open_papers_catalog(ops)? else {
                 return Err(OpsError::IntakeNotFound { intake_id });
             };
-            let report = bookrack_glean::reaudit::build_report(
+            let report = crate::pipeline::paper::reaudit::build_report(
                 &catalog,
                 intake_id,
                 audit_profile,
                 audit_data,
             )
             .map_err(|e| match e {
-                bookrack_glean::GleanError::UnknownIntake(intake_id) => {
+                crate::pipeline::paper::GleanError::UnknownIntake(intake_id) => {
                     OpsError::IntakeNotFound { intake_id }
                 }
                 other => OpsError::Other(eyre::Report::new(other)),

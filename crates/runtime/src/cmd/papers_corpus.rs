@@ -26,23 +26,22 @@ pub fn plan_rebuild(
     cfg: &Config,
     paper: Option<i64>,
     stale_only: bool,
-) -> Result<bookrack_glean::rebuild::RebuildReport> {
+) -> Result<bookrack_ops::pipeline::paper::rebuild::RebuildReport> {
     let Some(catalog) = Catalog::open(&cfg.papers_catalog_db()).context("open papers catalog")?
     else {
         return match paper {
-            Some(id) => {
-                Err(bookrack_glean::GleanError::UnknownIntake(id)).context("plan papers rebuild")
-            }
-            None => Ok(bookrack_glean::rebuild::RebuildReport::default()),
+            Some(id) => Err(bookrack_ops::pipeline::paper::GleanError::UnknownIntake(id))
+                .context("plan papers rebuild"),
+            None => Ok(bookrack_ops::pipeline::paper::rebuild::RebuildReport::default()),
         };
     };
-    let params = bookrack_glean::rebuild::RebuildParams {
+    let params = bookrack_ops::pipeline::paper::rebuild::RebuildParams {
         only: paper,
         stale_only,
         dry_run: true,
         ..Default::default()
     };
-    bookrack_glean::rebuild::classify_rebuild_targets(&catalog, &params)
+    bookrack_ops::pipeline::paper::rebuild::classify_rebuild_targets(&catalog, &params)
         .context("plan papers rebuild")
 }
 
@@ -52,7 +51,7 @@ pub fn plan_rebuild(
 /// [`crate::cmd::corpus::ExecuteRebuildOutcome`].
 #[derive(Debug, Clone, Default)]
 pub struct ExecutePapersRebuildOutcome {
-    pub report: bookrack_glean::rebuild::RebuildReport,
+    pub report: bookrack_ops::pipeline::paper::rebuild::RebuildReport,
     /// `Some(true)` if `stamp_index_from_existing_chunks` wrote
     /// stamps; `Some(false)` if the chunks table was empty so no
     /// stamping happened; `None` when `include_vectors` took
@@ -88,10 +87,10 @@ pub async fn execute_rebuild_from_plan(
     let catalog = Catalog::open_for_write(&cfg.papers_catalog_db(), &cfg.backup_dir())
         .context("open papers catalog")?;
 
-    let report = bookrack_glean::rebuild::rebuild_from_intakes(
+    let report = bookrack_ops::pipeline::paper::rebuild::rebuild_from_intakes(
         &mut corpus,
         &catalog,
-        &bookrack_glean::rebuild::RebuildParams {
+        &bookrack_ops::pipeline::paper::rebuild::RebuildParams {
             only_ids: Some(pinned_ids),
             dry_run: false,
             ..Default::default()
@@ -111,7 +110,7 @@ pub async fn execute_rebuild_from_plan(
         let lancedb_dir = cfg.papers_lancedb_dir();
         let embed_cfg = crate::profile::effective_embed_config(cfg)?;
         let embedder_client = embedder(cfg, &embed_cfg)?;
-        let reembed = bookrack_glean::reembed::reembed_all(
+        let reembed = bookrack_ops::pipeline::paper::reembed::reembed_all(
             &catalog,
             &mut corpus,
             &lancedb_dir,
@@ -131,7 +130,7 @@ pub async fn execute_rebuild_from_plan(
     } else {
         let lancedb_dir = cfg.papers_lancedb_dir();
         let embed_cfg = crate::profile::effective_embed_config(cfg)?;
-        let stamped = bookrack_glean::rebuild::stamp_index_from_existing_chunks(
+        let stamped = bookrack_ops::pipeline::paper::rebuild::stamp_index_from_existing_chunks(
             &corpus,
             &lancedb_dir,
             &embed_cfg.model,
@@ -193,8 +192,10 @@ mod tests {
 
         assert!(
             err.chain().any(|cause| matches!(
-                cause.downcast_ref::<bookrack_glean::GleanError>(),
-                Some(bookrack_glean::GleanError::UnknownIntake(9_999_999))
+                cause.downcast_ref::<bookrack_ops::pipeline::paper::GleanError>(),
+                Some(bookrack_ops::pipeline::paper::GleanError::UnknownIntake(
+                    9_999_999
+                ))
             )),
             "{err:?}",
         );

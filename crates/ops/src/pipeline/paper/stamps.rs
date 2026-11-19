@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Paper-side index stamp reconciliation. Peer of
-//! `bookrack_ops::pipeline::book::current_index_stamps` for the paper pipeline. The
+//! `crate::pipeline::book::current_index_stamps` for the paper pipeline. The
 //! runtime layer composes [`current_index_stamps`] with a `Corpus` open
 //! against `papers_corpus.db` to write the stamps after an embedder
 //! swap; see `runtime::cmd::papers_stamps`.

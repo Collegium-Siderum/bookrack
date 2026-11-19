@@ -2,7 +2,7 @@
 
 //! `bookrack papers dryrun` — paper-side pre-vector simulation. Peer
 //! of [`crate::cmd::dryrun`] for the paper pipeline; writes a JSONL of
-//! [`bookrack_glean::dryrun::DryrunPaperReport`] plus a summary
+//! [`bookrack_ops::pipeline::paper::dryrun::DryrunPaperReport`] plus a summary
 //! sidecar under `<data_root>/dryruns/`.
 
 // Parallel implementation: runtime-cmd-dryrun.
@@ -12,7 +12,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use bookrack_config::Config;
-use bookrack_glean::dryrun::{
+use bookrack_ops::pipeline::paper::dryrun::{
     DryrunPaperParams, DryrunPaperReport, DryrunPaperSummary, PAPER_EXTENSIONS, collect_files,
     dryrun_paper, summarize,
 };

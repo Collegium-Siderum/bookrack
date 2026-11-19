@@ -37,10 +37,10 @@ use bookrack_config::{
 use bookrack_core::Problem;
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
-use bookrack_glean::GleanParams;
 use bookrack_obs::WorkerGuard;
 use bookrack_obs::stream::LogStreamHandle;
 use bookrack_ops::pipeline::book::IngestParams;
+use bookrack_ops::pipeline::paper::GleanParams;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{JobTemplates, LibraryHandle, LibraryRegistry, MountGuard};
 use bookrack_ops::{Caller, Ops, PapersPaths};

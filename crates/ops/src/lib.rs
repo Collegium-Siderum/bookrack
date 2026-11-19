@@ -350,7 +350,7 @@ impl<E: Embedder> Ops<E> {
     /// Borrow the warm paper-side embedder, or [`None`] when no
     /// papers backend was attached. The registry-level glean wrapper
     /// pulls the embedder from here and forwards it to
-    /// [`bookrack_glean::glean_paper`].
+    /// [`crate::pipeline::paper::glean_paper`].
     pub(crate) fn papers_embedder(&self) -> Option<&E> {
         self.papers_library.as_ref().map(Library::embedder)
     }

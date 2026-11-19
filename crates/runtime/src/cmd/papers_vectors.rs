@@ -187,7 +187,7 @@ pub async fn reset(cfg: &Config, resume: bool) -> Result<VectorsResetReport> {
         "papers_reset",
         cfg.data_dir().to_str(),
     );
-    let outcome = bookrack_glean::reset::reset_and_rechunk(
+    let outcome = bookrack_ops::pipeline::paper::reset::reset_and_rechunk(
         &catalog,
         &mut corpus,
         &lancedb_dir,
@@ -219,20 +219,25 @@ pub async fn plan_reembed(
     cfg: &Config,
     paper: Option<i64>,
     stale_only: bool,
-) -> Result<Vec<bookrack_glean::reembed::ReembedPlan>> {
+) -> Result<Vec<bookrack_ops::pipeline::paper::reembed::ReembedPlan>> {
     let lancedb_dir = cfg.papers_lancedb_dir();
     let Some(catalog) = Catalog::open(&cfg.papers_catalog_db()).context("open papers catalog")?
     else {
         return match paper {
-            Some(id) => {
-                Err(bookrack_glean::GleanError::UnknownIntake(id)).context("plan papers reembed")
-            }
+            Some(id) => Err(bookrack_ops::pipeline::paper::GleanError::UnknownIntake(id))
+                .context("plan papers reembed"),
             None => Ok(Vec::new()),
         };
     };
-    bookrack_glean::reembed::plan_reembed(&catalog, &lancedb_dir, paper, None, stale_only)
-        .await
-        .context("plan papers reembed")
+    bookrack_ops::pipeline::paper::reembed::plan_reembed(
+        &catalog,
+        &lancedb_dir,
+        paper,
+        None,
+        stale_only,
+    )
+    .await
+    .context("plan papers reembed")
 }
 
 /// Execute a papers reembed against the exact pinned set computed by
@@ -242,7 +247,7 @@ pub async fn plan_reembed(
 pub async fn execute_reembed_from_plan(
     cfg: &Config,
     pinned_ids: Vec<i64>,
-) -> Result<bookrack_glean::reembed::ReembedReport> {
+) -> Result<bookrack_ops::pipeline::paper::reembed::ReembedReport> {
     let lancedb_dir = cfg.papers_lancedb_dir();
     let catalog = Catalog::open_for_write(&cfg.papers_catalog_db(), &cfg.backup_dir())
         .context("open papers catalog")?;
@@ -256,7 +261,7 @@ pub async fn execute_reembed_from_plan(
         "papers_reembed",
         cfg.data_dir().to_str(),
     );
-    let result = bookrack_glean::reembed::reembed_all(
+    let result = bookrack_ops::pipeline::paper::reembed::reembed_all(
         &catalog,
         &mut corpus,
         &lancedb_dir,
@@ -403,8 +408,10 @@ mod tests {
 
         assert!(
             err.chain().any(|cause| matches!(
-                cause.downcast_ref::<bookrack_glean::GleanError>(),
-                Some(bookrack_glean::GleanError::UnknownIntake(9_999_999))
+                cause.downcast_ref::<bookrack_ops::pipeline::paper::GleanError>(),
+                Some(bookrack_ops::pipeline::paper::GleanError::UnknownIntake(
+                    9_999_999
+                ))
             )),
             "{err:?}",
         );

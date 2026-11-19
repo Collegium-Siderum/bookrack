@@ -31,7 +31,7 @@ use bookrack_extract::{Biblio, Block, BlockKind, Extraction, extract_paper_abstr
 use bookrack_metadata::paper::looks_like_pdf_date;
 use regex::Regex;
 
-use crate::AbstractStrategy;
+use crate::pipeline::paper::AbstractStrategy;
 
 // ─── DOI ─────────────────────────────────────────────────────────────
 

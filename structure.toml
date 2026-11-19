@@ -67,12 +67,6 @@ exit = "ops supplies the context radius and the embedding client type"
 
 [[edge]]
 from = "runtime"
-to = "glean"
-reason = "transitional"
-exit = "the ingest and glean pipelines live in ops"
-
-[[edge]]
-from = "runtime"
 to = "catalog"
 reason = "transitional"
 exit = "command bodies live in ops, and store facts are read through ops"
@@ -165,6 +159,7 @@ exit = "reference reads and writes go through ops and the write session; ops sup
 
 [[file]]
 paths = [
+  "crates/runtime/src/audit_helpers.rs",
   "crates/runtime/src/cmd/corpus.rs",
   "crates/runtime/src/cmd/diagnose.rs",
   "crates/runtime/src/cmd/dryrun.rs",
@@ -181,6 +176,7 @@ paths = [
   "crates/runtime/src/cmd/stamps.rs",
   "crates/runtime/src/cmd/vectors.rs",
   "crates/runtime/src/cmd/verify.rs",
+  "crates/runtime/src/pipeline_run_helpers.rs",
 ]
 reason = "transitional"
 exit = "command bodies live in ops"
@@ -199,19 +195,10 @@ exit = "handlers call ops methods and map ops errors only"
 
 [[file]]
 paths = [
-  "crates/runtime/src/audit_helpers.rs",
   "crates/runtime/src/daemon.rs",
-  "crates/runtime/src/pipeline_run_helpers.rs",
-  "crates/runtime/src/profile.rs",
-  "crates/runtime/src/queue.rs",
-]
-reason = "transitional"
-exit = "the ingest and glean pipelines live in ops"
-
-[[file]]
-paths = [
   "crates/runtime/src/doctor.rs",
   "crates/runtime/src/open_runs.rs",
+  "crates/runtime/src/profile.rs",
   "crates/runtime/src/wizard/runner.rs",
 ]
 reason = "transitional"
@@ -220,6 +207,7 @@ exit = "store facts are read through ops"
 [[file]]
 paths = [
   "crates/runtime/src/pdfium_install.rs",
+  "crates/runtime/src/queue.rs",
 ]
 reason = "transitional"
 exit = "ops re-exports the PDFium pin and the envelope reader"
@@ -266,11 +254,11 @@ site = "crates/cli/src/distill_cmd.rs::write_distill_audit"
 access = "write"
 
 [[write_door]]
-site = "crates/glean/src/lib.rs::embed_and_write_chunks"
+site = "crates/ops/src/pipeline/paper/mod.rs::embed_and_write_chunks"
 access = "write"
 
 [[write_door]]
-site = "crates/glean/src/reset.rs::reset_and_rechunk"
+site = "crates/ops/src/pipeline/paper/reset.rs::reset_and_rechunk"
 access = "write"
 
 [[write_door]]
@@ -808,7 +796,7 @@ id = "pipeline-reembed"
 summary = "re-embedding, one module per pipeline"
 sites = [
   "crates/ops/src/pipeline/book/reembed.rs",
-  "crates/glean/src/reembed.rs",
+  "crates/ops/src/pipeline/paper/reembed.rs",
 ]
 reason = "transitional"
 agreement = "unverified"
@@ -819,7 +807,7 @@ id = "pipeline-reaudit"
 summary = "metadata re-audit, one module per pipeline"
 sites = [
   "crates/ops/src/pipeline/book/reaudit.rs",
-  "crates/glean/src/reaudit.rs",
+  "crates/ops/src/pipeline/paper/reaudit.rs",
 ]
 reason = "transitional"
 detail = "the book side writes the rollup only; the paper side also writes the node_paper_audit projection; the profile and data arguments come in opposite order"
@@ -831,7 +819,7 @@ id = "pipeline-dryrun"
 summary = "dry run, one module per pipeline"
 sites = [
   "crates/ops/src/pipeline/book/dryrun.rs",
-  "crates/glean/src/dryrun.rs",
+  "crates/ops/src/pipeline/paper/dryrun.rs",
 ]
 reason = "transitional"
 detail = "the book side runs the real path on in-memory stores; the paper side predicts the structure statically and runs no audit"
@@ -843,7 +831,7 @@ id = "pipeline-body-sample"
 summary = "body sample handed to the metadata audit"
 sites = [
   "crates/ops/src/pipeline/book/mod.rs::body_sample",
-  "crates/glean/src/lib.rs::paper_body_sample",
+  "crates/ops/src/pipeline/paper/mod.rs::paper_body_sample",
 ]
 reason = "transitional"
 agreement = "unverified"
@@ -854,7 +842,7 @@ id = "pipeline-entry"
 summary = "pipeline entry point, one per kind"
 sites = [
   "crates/ops/src/pipeline/book/mod.rs::ingest_book",
-  "crates/glean/src/lib.rs::glean_paper",
+  "crates/ops/src/pipeline/paper/mod.rs::glean_paper",
 ]
 reason = "transitional"
 detail = "the book side embeds in batches with progress, optimizes, and builds the index, and its no-op check compares the chunk and normalize stamps; the paper side embeds in one batch and does none of that"
@@ -866,7 +854,7 @@ id = "pipeline-reset"
 summary = "vector reset, one module per pipeline"
 sites = [
   "crates/ops/src/pipeline/book/reset.rs",
-  "crates/glean/src/reset.rs",
+  "crates/ops/src/pipeline/paper/reset.rs",
 ]
 reason = "transitional"
 detail = "the destructive part differs only in the kind; each side derives the chunks to re-embed from its own kind's tree"
@@ -878,7 +866,7 @@ id = "pipeline-rebuild"
 summary = "corpus rebuild from envelopes, one module per pipeline"
 sites = [
   "crates/ops/src/pipeline/book/rebuild.rs",
-  "crates/glean/src/rebuild.rs",
+  "crates/ops/src/pipeline/paper/rebuild.rs",
 ]
 reason = "transitional"
 agreement = "unverified"
@@ -889,8 +877,8 @@ id = "pipeline-stamps"
 summary = "the index stamps this build writes"
 sites = [
   "crates/ops/src/pipeline/book/mod.rs::current_index_stamps",
-  "crates/glean/src/stamps.rs::current_index_stamps",
-  "crates/glean/src/rebuild.rs::stamp_index_from_existing_chunks",
+  "crates/ops/src/pipeline/paper/stamps.rs::current_index_stamps",
+  "crates/ops/src/pipeline/paper/rebuild.rs::stamp_index_from_existing_chunks",
 ]
 reason = "transitional"
 agreement = "unverified"
@@ -901,7 +889,7 @@ id = "pipeline-embed-write"
 summary = "embedding a plan and writing its vectors"
 sites = [
   "crates/ops/src/pipeline/book/embed_run.rs",
-  "crates/glean/src/lib.rs::embed_and_write_chunks",
+  "crates/ops/src/pipeline/paper/mod.rs::embed_and_write_chunks",
 ]
 reason = "transitional"
 detail = "the book side embeds in batches, halves a batch on overload, reports progress, optimizes, and builds the index; the paper side sends one batch and does none of that"
@@ -913,7 +901,7 @@ id = "pipeline-noop"
 summary = "deciding that a known file needs no rerun"
 sites = [
   "crates/ops/src/pipeline/book/mod.rs::on_file",
-  "crates/glean/src/lib.rs::noop_if_up_to_date",
+  "crates/ops/src/pipeline/paper/mod.rs::noop_if_up_to_date",
 ]
 reason = "transitional"
 detail = "the book side compares the chunk and normalize stamps in the corpus; the paper side compares the extractor version and the embed model only"
@@ -926,8 +914,8 @@ summary = "run ids built from a prefix and the clock"
 sites = [
   "crates/ops/src/pipeline/book/mod.rs::new_run_id",
   "crates/ops/src/pipeline/book/mod.rs::maintenance_run_id",
-  "crates/glean/src/lib.rs::new_run_id",
-  "crates/glean/src/reaudit.rs::maintenance_run_id",
+  "crates/ops/src/pipeline/paper/mod.rs::new_run_id",
+  "crates/ops/src/pipeline/paper/reaudit.rs::maintenance_run_id",
 ]
 reason = "transitional"
 agreement = "unverified"
@@ -1043,7 +1031,7 @@ sites = [
   "crates/cli/src/util.rs::collect_pdf_files",
   "crates/runtime/src/queue.rs::collect_supported_files",
   "crates/ops/src/pipeline/book/dryrun.rs::collect_files",
-  "crates/glean/src/dryrun.rs::collect_files",
+  "crates/ops/src/pipeline/paper/dryrun.rs::collect_files",
 ]
 reason = "transitional"
 detail = "the accepted extensions differ: .pdf only on the client, every supported type in the daemon, and a list of its own in each dry run"
@@ -1196,7 +1184,7 @@ summary = "SHA-256 as lowercase hex, whole or cut short"
 sites = [
   "crates/ops/src/pipeline/book/structure.rs::sha256_hex",
   "crates/ops/src/pipeline/book/mod.rs::sha256_hex",
-  "crates/glean/src/lib.rs::sha256_hex",
+  "crates/ops/src/pipeline/paper/mod.rs::sha256_hex",
   "crates/audit-profile/src/fingerprint.rs::digest_hex",
   "crates/diagnose/src/scrub.rs::sha8",
   "crates/test-support/src/tool/sig.rs::sha256_bytes",

@@ -91,7 +91,7 @@ base   core config obs session audit-profile index-profile cli-grammar control-c
 pure   extract distill metadata
 store  catalog corpus vectors refs dbkit
 client embed rerank
-inner  glean query search diagnose
+inner  query search diagnose
 center ops
 host   runtime
 front  cli mcp
@@ -112,7 +112,7 @@ front  base center host front
 TEXT_CRATE=text
 TEXT_LIBS='^(text-splitter|unicode-normalization|unicode-segmentation|icu_.*)$'
 # Crates whose functions are paired as if they were one crate.
-ONE_GROUP='ops glean'
+ONE_GROUP=''
 # Crates the paired-name check does not read.
 UNPAIRED='test-support'
 # Pairs that differ only by kind and are not parallel implementations:

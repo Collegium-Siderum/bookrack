@@ -3,3 +3,4 @@
 //! The pipelines that turn a source file into a stored item.
 
 pub mod book;
+pub mod paper;

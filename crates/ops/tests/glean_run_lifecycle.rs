@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use bookrack_catalog::Catalog;
 use bookrack_core::ItemKind;
 use bookrack_embed::{Embedder, Result as EmbedResult};
-use bookrack_glean::GleanParams;
+use bookrack_ops::pipeline::paper::GleanParams;
 use bookrack_ops::registry::LibraryHandle;
 use bookrack_ops::{Caller, Ops, PapersPaths};
 use bookrack_query::Library;
@@ -34,8 +34,7 @@ impl Embedder for Fake {
 }
 
 fn fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../glean/tests/fixtures/pdf/synthetic_paper_en.pdf")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pdf/synthetic_paper_en.pdf")
 }
 
 fn pdfium_available() -> bool {
