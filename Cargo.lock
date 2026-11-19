@@ -877,6 +877,7 @@ dependencies = [
  "bookrack-corpus",
  "bookrack-embed",
  "bookrack-extract",
+ "bookrack-metadata",
  "bookrack-text",
  "bookrack-vectors",
  "chrono",
@@ -886,7 +887,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "toml",
  "tracing",
 ]
 
@@ -964,6 +964,7 @@ dependencies = [
  "bookrack-core",
  "bookrack-extract",
  "bookrack-text",
+ "regex",
  "serde",
  "tempfile",
  "toml",
@@ -999,6 +1000,7 @@ dependencies = [
  "bookrack-extract",
  "bookrack-glean",
  "bookrack-ingest",
+ "bookrack-metadata",
  "bookrack-query",
  "bookrack-refs",
  "bookrack-rerank",

@@ -17,7 +17,6 @@
 use std::path::Path;
 use std::time::Instant;
 
-use crate::audit::projection::csl_type_token;
 use bookrack_catalog::{
     ActorKind, Catalog, IntakeStatus, NewContributor, NewIntake, NewItemPipelineAudit,
     NewItemState, NewPublicationAttrs, STATUS_PENDING,
@@ -29,6 +28,9 @@ use bookrack_embed::Embedder;
 use bookrack_extract::{
     Block, BlockKind, Contributor, ContributorRole, ExtractOutcome, envelope_filename,
     write_envelope,
+};
+use bookrack_metadata::paper::{
+    PaperAuditData, PaperAuditInput, PaperAuditProfile, PaperVerdict, audit_paper, csl_type_token,
 };
 use bookrack_text::{
     CHUNK_VERSION, ChunkLeaf, ChunkPlan, NORMALIZE_VERSION, norm_text_sha256, plan_chunks,
@@ -115,11 +117,11 @@ pub struct GleanParams {
     pub heading_patterns: bookrack_audit_profile::HeadingPatterns,
     /// Paper-shape metadata audit profile. Drives the per-field
     /// grading the glean pipeline runs after `write_biblio`.
-    pub paper_audit_profile: audit::PaperAuditProfile,
+    pub paper_audit_profile: PaperAuditProfile,
     /// Runtime data lists the paper audit consults (venue whitelist,
     /// placeholder titles, watermark tokens, sentinel contributor
     /// names).
-    pub paper_audit_data: audit::PaperAuditData,
+    pub paper_audit_data: PaperAuditData,
     /// The `pipeline_runs.pipeline_run_id` that groups this glean
     /// invocation. `None` means the caller did not open a run; the
     /// resulting `node_paper_audit` row reads back with NULL
@@ -139,8 +141,8 @@ impl Default for GleanParams {
             keep_source_pdf: true,
             extract_profile: bookrack_audit_profile::AuditProfile::default_profile(),
             heading_patterns: bookrack_audit_profile::HeadingPatterns::default_patterns(),
-            paper_audit_profile: audit::PaperAuditProfile::default_profile(),
-            paper_audit_data: audit::PaperAuditData::default_data(),
+            paper_audit_profile: PaperAuditProfile::default_profile(),
+            paper_audit_data: PaperAuditData::default_data(),
             pipeline_run_id: None,
         }
     }
@@ -1280,8 +1282,8 @@ fn run_paper_audit_substep(
     provenance: &bookrack_extract::Provenance,
     blocks: &[Block],
     file: &Path,
-    profile: &audit::PaperAuditProfile,
-    data: &audit::PaperAuditData,
+    profile: &PaperAuditProfile,
+    data: &PaperAuditData,
     run_id: &str,
     source_sha: &str,
     started: Instant,
@@ -1333,14 +1335,14 @@ fn run_paper_audit_substep(
     };
     let body_sample = paper_body_sample(blocks);
     let source_stem = file.file_stem().and_then(|s| s.to_str());
-    let input = audit::PaperAuditInput {
+    let input = PaperAuditInput {
         biblio,
         provenance,
         effective: &effective,
         body_sample: &body_sample,
         source_stem,
     };
-    let report = audit::audit_paper(&input, profile, data);
+    let report = audit_paper(&input, profile, data);
     let confidence = report.confidence.as_token().to_string();
     let verdict = report.verdict.as_token().to_string();
     if let Err(e) = catalog.update_audit_rollup(intake_id, ItemKind::Paper, &confidence, &verdict) {
@@ -1369,8 +1371,8 @@ fn run_paper_audit_substep(
         }
     }
     let outcome = match report.verdict {
-        audit::PaperVerdict::Clean => "ok",
-        audit::PaperVerdict::NeedsWork => "partial",
+        PaperVerdict::Clean => "ok",
+        PaperVerdict::NeedsWork => "partial",
     };
     let metric = format!(
         r#"{{"verdict":"{}","confidence":"{}","fields":{}}}"#,
@@ -1897,7 +1899,7 @@ mod tests {
     }
 
     /// Run the paper audit substep on a fixed synthetic extraction.
-    fn run_paper_audit_once(catalog: &Catalog, intake_id: i64, profile: &audit::PaperAuditProfile) {
+    fn run_paper_audit_once(catalog: &Catalog, intake_id: i64, profile: &PaperAuditProfile) {
         let biblio = bookrack_extract::Biblio {
             title: Some("Synthetic Findings in Test Spaces".to_string()),
             year: Some(2020),
@@ -1926,7 +1928,7 @@ mod tests {
             &blocks,
             Path::new("synthetic-findings.pdf"),
             profile,
-            &audit::PaperAuditData::default_data(),
+            &PaperAuditData::default_data(),
             "run-1",
             "deadbeef",
             Instant::now(),
@@ -1942,8 +1944,8 @@ mod tests {
     #[test]
     fn a_rerun_of_the_paper_audit_substep_keeps_a_reviewed_verdict() {
         let profiles = [
-            audit::PaperAuditProfile::default_profile(),
-            audit::PaperAuditProfile::trust_source(),
+            PaperAuditProfile::default_profile(),
+            PaperAuditProfile::trust_source(),
         ];
         for profile in &profiles {
             for status in REVIEWED_STATUSES {
@@ -2004,16 +2006,8 @@ mod tests {
     #[test]
     fn a_rerun_of_the_paper_audit_substep_restamps_a_pending_review() {
         let (catalog, intake_id) = paper_catalog();
-        run_paper_audit_once(
-            &catalog,
-            intake_id,
-            &audit::PaperAuditProfile::default_profile(),
-        );
-        run_paper_audit_once(
-            &catalog,
-            intake_id,
-            &audit::PaperAuditProfile::trust_source(),
-        );
+        run_paper_audit_once(&catalog, intake_id, &PaperAuditProfile::default_profile());
+        run_paper_audit_once(&catalog, intake_id, &PaperAuditProfile::trust_source());
 
         let review = catalog
             .review(intake_id, ItemKind::Paper)

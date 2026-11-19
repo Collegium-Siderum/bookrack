@@ -38,8 +38,12 @@ use bookrack_embed::Embedder;
 use bookrack_query::{Library, QueryError};
 use bookrack_rerank::RerankClient;
 
-pub use bookrack_glean::audit::{PaperAuditData, PaperAuditProfile};
 pub use bookrack_ingest::{AuditData, AuditProfile};
+pub use bookrack_metadata::paper::{
+    ALL_BUILT_IN_NAMES as PAPER_AUDIT_BUILT_IN_NAMES, PROFILE_DEFAULT as PAPER_PROFILE_DEFAULT,
+    PROFILE_STRICT as PAPER_PROFILE_STRICT, PROFILE_TRUST_SOURCE as PAPER_PROFILE_TRUST_SOURCE,
+    PaperAuditData, PaperAuditProfile,
+};
 pub use bookrack_query::{Citation, SearchOptions};
 pub use dto::audit::Caller;
 pub use recorder::with_caller_override;

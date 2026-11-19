@@ -245,7 +245,7 @@ impl PaperMetadataAuditReport {
     pub fn build(
         intake_id: i64,
         profile: &str,
-        report: &bookrack_glean::audit::PaperReport,
+        report: &bookrack_metadata::paper::PaperReport,
         overrides: &[bookrack_catalog::NodeOverride],
         stored: Option<&bookrack_catalog::NodePaperAudit>,
         review_status: Option<String>,
@@ -279,7 +279,7 @@ impl PaperMetadataAuditReport {
                 .collect(),
             csl_type: report
                 .csl_type
-                .map(|t| bookrack_glean::audit::csl_type_token(t).to_string()),
+                .map(|t| bookrack_metadata::paper::csl_type_token(t).to_string()),
             verdict: report.verdict.as_token().to_string(),
             confidence: report.confidence.as_token().to_string(),
             stored_verdict: stored.map(|s| s.verdict.clone()),

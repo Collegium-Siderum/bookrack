@@ -481,7 +481,7 @@ pub fn show_paper_metadata_report(
     let handle = resolve(ctx, p.library.as_deref())?;
     crate::audit_helpers::require_known_profile(
         p.audit_profile.as_deref(),
-        bookrack_glean::audit::profile::ALL_BUILT_IN_NAMES,
+        bookrack_ops::PAPER_AUDIT_BUILT_IN_NAMES,
     )
     .map_err(super::input_err)?;
     // The overlay lives under the target library's data root, so the

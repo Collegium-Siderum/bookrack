@@ -553,8 +553,8 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
     pub async fn reaudit_paper(
         &self,
         intake_id: i64,
-        profile: &bookrack_glean::audit::PaperAuditProfile,
-        data: &bookrack_glean::audit::PaperAuditData,
+        profile: &bookrack_metadata::paper::PaperAuditProfile,
+        data: &bookrack_metadata::paper::PaperAuditData,
     ) -> std::result::Result<crate::dto::writes::ReauditOutcome, OpsError> {
         let _guard = self.glean_lock.lock().await;
         crate::writes::papers_metadata::reaudit_paper_metadata(

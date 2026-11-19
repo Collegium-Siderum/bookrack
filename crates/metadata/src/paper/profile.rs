@@ -40,7 +40,7 @@ pub struct PaperAuditProfile {
     pub name: String,
     /// Master switch. When false the audit substep is skipped: the
     /// pipeline still writes a `pending` review row but produces no
-    /// [`crate::audit::PaperReport`] and writes no audit-derived
+    /// [`crate::paper::PaperReport`] and writes no audit-derived
     /// columns.
     pub audit_enabled: bool,
     pub identifier: IdentifierToggles,

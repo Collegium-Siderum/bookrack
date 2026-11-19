@@ -226,9 +226,8 @@ fn seed_audited_paper(data_root: &std::path::Path) -> Result<i64> {
         Biblio, Block, BlockKind, Contributor, ContributorRole, CslType, Extraction, Provenance,
         TextLayerQuality, Toc,
     };
-    use bookrack_glean::audit::{
-        PaperAuditData, PaperAuditProfile, paper_report_to_audit_row, signals,
-    };
+    use bookrack_glean::audit::paper_report_to_audit_row;
+    use bookrack_metadata::paper::{PaperAuditData, PaperAuditProfile, signals};
 
     let biblio = Biblio {
         title: Some("Synthetic Findings in Test Spaces".to_string()),

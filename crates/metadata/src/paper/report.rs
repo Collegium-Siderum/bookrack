@@ -83,7 +83,7 @@ impl PaperConfidence {
 
 /// A signal the audit emitted while grading a paper. Variants are
 /// closed — paper-shape only — so a change to the book audit's
-/// `Flag` enum cannot reach glean.
+/// `Flag` enum cannot reach the paper audit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaperFlag {
     // ── identifier format / checksum ──────────────────────────────
@@ -111,12 +111,12 @@ pub enum PaperFlag {
     /// as absent, so it grades as plain `Missing`.
     Voided,
     /// The field's value matches an entry in
-    /// [`crate::audit::PaperAuditData::placeholder_titles`].
+    /// [`crate::paper::PaperAuditData::placeholder_titles`].
     PlaceholderValue,
     /// The field's value equals the source filename's stem.
     EqualsFilename,
     /// The field's value contains a watermark token from
-    /// [`crate::audit::PaperAuditData::watermark_tokens`].
+    /// [`crate::paper::PaperAuditData::watermark_tokens`].
     SourceWatermark,
     /// The field reads as a pure numeric string with no alphabetic
     /// content — usually a stray identifier substring. Reserved: no
@@ -145,10 +145,10 @@ pub enum PaperFlag {
 
     // ── paper-shape signals ───────────────────────────────────────
     /// Abstract is shorter than
-    /// [`crate::audit::profile::AbstractToggles::min_chars`].
+    /// [`crate::paper::profile::AbstractToggles::min_chars`].
     AbstractTooShort,
     /// Container title is not in
-    /// [`crate::audit::PaperAuditData::venue_whitelist`].
+    /// [`crate::paper::PaperAuditData::venue_whitelist`].
     VenueNotInList,
     /// Contributor list is empty.
     AuthorListEmpty,
@@ -400,6 +400,25 @@ fn json_flag_array(flags: &[PaperFlag]) -> String {
     }
     out.push(']');
     out
+}
+
+/// Map a [`CslType`] to its CSL string, the form the `csl_type`
+/// column and `node_publication_attrs` both store.
+///
+/// The audit row and the attrs write are its two callers, and a
+/// second spelling of this mapping is how the column and the matrix
+/// behind a verdict would drift apart. A read surface rendering the
+/// same value goes through here for the same reason.
+pub fn csl_type_token(t: CslType) -> &'static str {
+    match t {
+        CslType::ArticleJournal => "article-journal",
+        CslType::PaperConference => "paper-conference",
+        CslType::Book => "book",
+        CslType::Chapter => "chapter",
+        CslType::Thesis => "thesis",
+        CslType::Report => "report",
+        CslType::Webpage => "webpage",
+    }
 }
 
 #[cfg(test)]

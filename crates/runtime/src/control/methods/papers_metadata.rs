@@ -113,7 +113,7 @@ pub async fn reaudit(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         .map_err(registry_err)?;
     require_known_profile(
         parsed.audit_profile.as_deref(),
-        bookrack_glean::audit::profile::ALL_BUILT_IN_NAMES,
+        bookrack_ops::PAPER_AUDIT_BUILT_IN_NAMES,
     )
     .map_err(input_err)?;
     let library_name = handle.name().to_string();

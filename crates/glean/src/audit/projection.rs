@@ -21,30 +21,7 @@
 //!   blocking the audit row.
 
 use bookrack_catalog::{FLAG_COLUMNS, GRADE_COLUMNS, NewNodePaperAudit};
-use bookrack_extract::CslType;
-
-use super::profile::PaperAuditProfile;
-use super::report::{PaperFieldGrade, PaperFlag, PaperReport};
-
-/// Map a [`CslType`] to its CSL string, the form the `csl_type`
-/// column and `node_publication_attrs` both store.
-///
-/// It lives beside the projection because the row and the attrs write
-/// are its two callers, and a second spelling of this mapping is how
-/// the column and the matrix behind a verdict would drift apart. A
-/// read surface rendering the same value goes through here for the
-/// same reason.
-pub fn csl_type_token(t: CslType) -> &'static str {
-    match t {
-        CslType::ArticleJournal => "article-journal",
-        CslType::PaperConference => "paper-conference",
-        CslType::Book => "book",
-        CslType::Chapter => "chapter",
-        CslType::Thesis => "thesis",
-        CslType::Report => "report",
-        CslType::Webpage => "webpage",
-    }
-}
+use bookrack_metadata::paper::{PaperAuditProfile, PaperFieldGrade, PaperFlag, PaperReport};
 
 /// Build one [`NewNodePaperAudit`] row from a [`PaperReport`].
 #[allow(clippy::too_many_arguments)]
@@ -130,7 +107,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::audit::report::{PaperConfidence, PaperFieldReport, PaperVerdict};
+    use bookrack_extract::CslType;
+    use bookrack_metadata::paper::{PaperConfidence, PaperFieldReport, PaperVerdict};
 
     fn report_with_one_field(field: &'static str, grade: PaperFieldGrade) -> PaperReport {
         let mut fields = BTreeMap::new();
@@ -212,8 +190,7 @@ mod tests {
             Biblio, Contributor, ContributorRole, Provenance, TextLayerQuality,
         };
 
-        use crate::audit::data::PaperAuditData;
-        use crate::audit::signals::{PaperAuditInput, audit_paper};
+        use bookrack_metadata::paper::{PaperAuditData, PaperAuditInput, audit_paper};
 
         let mut catalog = Catalog::open_in_memory().expect("catalog");
         let intake = catalog

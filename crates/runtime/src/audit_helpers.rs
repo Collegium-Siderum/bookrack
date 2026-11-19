@@ -6,11 +6,11 @@
 //! to start.
 
 use bookrack_config::Config;
-use bookrack_glean::audit::{
-    PROFILE_DEFAULT as PAPER_PROFILE_DEFAULT, PROFILE_STRICT as PAPER_PROFILE_STRICT,
-    PROFILE_TRUST_SOURCE as PAPER_PROFILE_TRUST_SOURCE, PaperAuditData, PaperAuditProfile,
-};
 use bookrack_metadata::AuditData;
+use bookrack_ops::{
+    PAPER_PROFILE_DEFAULT, PAPER_PROFILE_STRICT, PAPER_PROFILE_TRUST_SOURCE, PaperAuditData,
+    PaperAuditProfile,
+};
 
 use crate::cmd::input_error::CmdInputError;
 
@@ -22,7 +22,7 @@ use crate::cmd::input_error::CmdInputError;
 ///
 /// The built-in set is a parameter, not a constant this function
 /// picks. The book side is `bookrack_audit_profile::ALL_BUILT_IN_NAMES`
-/// and the paper side `bookrack_glean::audit::profile::ALL_BUILT_IN_NAMES`;
+/// and the paper side `bookrack_ops::PAPER_AUDIT_BUILT_IN_NAMES`;
 /// the two hold the same three names today but are separate constants,
 /// and a function that chose one of them would start rejecting legal
 /// names on the other side the day it grows a profile — silently, with

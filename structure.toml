@@ -1004,27 +1004,16 @@ agreement = "pinned"
 pin = "scripts/dep-stamp-check.sh"
 
 [[parallel]]
-id = "pdf-date-pattern"
-summary = "the pattern for a PDF date string"
-sites = [
-  "crates/glean/src/identify.rs::D_DATE_RE",
-  "crates/glean/src/audit/signals.rs::PDF_DATE_RE",
-]
-reason = "transitional"
-agreement = "unverified"
-exit = "the audit signals move out of glean and one pattern remains"
-
-[[parallel]]
 id = "audit-judgement"
 summary = "audit signals over metadata fields: script share, language tags, timestamps"
 sites = [
   "crates/metadata/src/signals.rs",
-  "crates/glean/src/audit/signals.rs",
+  "crates/metadata/src/paper/signals.rs",
 ]
 reason = "transitional"
 detail = "timestamp detection differs: one side accepts a T or a colon, the other a colon only"
 agreement = "divergent"
-exit = "metadata scores both kinds"
+exit = "one script-share, one language-tag, and one timestamp signal judge both kinds"
 
 [[parallel]]
 id = "audit-overlay-load"
@@ -1033,8 +1022,8 @@ sites = [
   "crates/audit-profile/src/lib.rs::AuditProfile",
   "crates/audit-profile/src/data.rs::AuditData",
   "crates/audit-profile/src/headings.rs::HeadingPatterns",
-  "crates/glean/src/audit/profile.rs::PaperAuditProfile",
-  "crates/glean/src/audit/data.rs::PaperAuditData",
+  "crates/metadata/src/paper/profile.rs::PaperAuditProfile",
+  "crates/metadata/src/paper/data.rs::PaperAuditData",
 ]
 reason = "transitional"
 detail = "the book-side data loader drops blank tokens; the paper-side one keeps them"

@@ -82,7 +82,7 @@ fn effective_csl_type(input: &PaperAuditInput) -> Option<CslType> {
 /// [`CslType`]'s own serde representation, which is the CSL strings
 /// verbatim. Reusing it rather than hand-writing a match keeps this
 /// the exact inverse of
-/// [`super::projection::csl_type_token`].
+/// [`super::report::csl_type_token`].
 fn parse_csl_type(raw: &str) -> Option<CslType> {
     use serde::Deserialize as _;
     use serde::de::IntoDeserializer as _;
@@ -208,7 +208,7 @@ fn grade_year(
     }
     if y.pdf_likely_file_date
         && let Some(raw) = input.biblio.year_raw.as_deref()
-        && PDF_DATE_RE.is_match(raw)
+        && looks_like_pdf_date(raw)
     {
         report.weaken_to(PaperFieldGrade::Weak, PaperFlag::PdfYearLikelyFileDate);
     }
@@ -629,9 +629,14 @@ static ARXIV_OLD_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-z][a-z\-]*(?:\.[A-Z]{2})?/\d{7}$").expect("arXiv old-form regex")
 });
 
-// Parallel implementation: pdf-date-pattern.
 static PDF_DATE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^D:[0-9]{8,}").expect("PDF date regex"));
+
+/// Whether `raw` is a PDF date string: `D:` followed by at least
+/// eight digits, the form a document's creation date takes.
+pub fn looks_like_pdf_date(raw: &str) -> bool {
+    PDF_DATE_RE.is_match(raw)
+}
 
 #[cfg(test)]
 mod csl_type_tests {
@@ -640,9 +645,9 @@ mod csl_type_tests {
     use bookrack_core::ItemKind;
     use bookrack_extract::{ContributorRole, TextLayerQuality};
 
-    use crate::audit::data::PaperAuditData;
-    use crate::audit::profile::PaperAuditProfile;
-    use crate::audit::report::PaperFieldGrade;
+    use crate::paper::data::PaperAuditData;
+    use crate::paper::profile::PaperAuditProfile;
+    use crate::paper::report::PaperFieldGrade;
 
     /// A paper extracted as `article-journal` with everything that
     /// type requires — title, author, year, container_title, doi —
@@ -795,7 +800,7 @@ mod csl_type_tests {
         assert_eq!(report.verdict, PaperVerdict::Clean);
     }
 
-    /// Every token the projection writes parses back to the variant
+    /// Every token [`crate::paper::csl_type_token`] writes parses back to the variant
     /// it came from. The two directions live in different modules, so
     /// nothing but this test stops them drifting.
     #[test]
@@ -809,7 +814,7 @@ mod csl_type_tests {
             CslType::Report,
             CslType::Webpage,
         ] {
-            let token = crate::audit::projection::csl_type_token(t);
+            let token = crate::paper::csl_type_token(t);
             assert_eq!(parse_csl_type(token), Some(t), "token {token}");
         }
     }

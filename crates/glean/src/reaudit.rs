@@ -32,11 +32,12 @@ use bookrack_catalog::{Catalog, Intake};
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_extract::envelope::{self, EnvelopeError};
 
-use crate::audit::projection::csl_type_token;
-use crate::audit::{
+use bookrack_metadata::paper::{
     PaperAuditData, PaperAuditInput, PaperAuditProfile, PaperReport, PaperVerdict, audit_paper,
-    paper_report_to_audit_row,
+    csl_type_token,
 };
+
+use crate::audit::paper_report_to_audit_row;
 use crate::{GleanError, Result, audit_as, paper_body_sample};
 
 /// What one [`reaudit_paper`] call computed and stored.

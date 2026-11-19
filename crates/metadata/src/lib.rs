@@ -18,6 +18,7 @@
 //! its output as they see fit.
 
 mod filename;
+pub mod paper;
 pub mod publishers;
 mod report;
 mod signals;

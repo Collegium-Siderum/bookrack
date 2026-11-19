@@ -28,6 +28,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use bookrack_extract::{Biblio, Block, BlockKind, Extraction, extract_paper_abstract};
+use bookrack_metadata::paper::looks_like_pdf_date;
 use regex::Regex;
 
 use crate::AbstractStrategy;
@@ -150,10 +151,6 @@ static VENUE_CUE_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// entry that swallowed the cue word.
 // setting: internal -- part of the venue heuristic; moving it needs recalibration
 const MAX_VENUE_CHARS: usize = 120;
-
-// Parallel implementation: pdf-date-pattern.
-static D_DATE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^D:[0-9]{8,}").expect("PDF date regex"));
 
 /// Year embedded in a DOI suffix between slashes, hyphens, or dots
 /// (`10.5555/s0000-2024-0000`, `10.5555/jnl-2025-0001`,
@@ -287,7 +284,7 @@ pub fn detect_year(
     {
         return Some(y);
     }
-    let raw_is_creationdate = biblio_year_raw.is_some_and(|s| D_DATE_RE.is_match(s));
+    let raw_is_creationdate = biblio_year_raw.is_some_and(looks_like_pdf_date);
     if raw_is_creationdate {
         return None;
     }

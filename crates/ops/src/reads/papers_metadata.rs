@@ -43,8 +43,8 @@ use crate::recorder::record_call_sync;
 pub fn show_paper_metadata_report<E: Embedder>(
     ops: &Ops<E>,
     intake_id: i64,
-    audit_data: &bookrack_glean::audit::PaperAuditData,
-    audit_profile: &bookrack_glean::audit::PaperAuditProfile,
+    audit_data: &bookrack_metadata::paper::PaperAuditData,
+    audit_profile: &bookrack_metadata::paper::PaperAuditProfile,
 ) -> Result<PaperMetadataAuditReport> {
     record_call_sync!(
         ops,

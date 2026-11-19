@@ -374,8 +374,8 @@ pub fn remove_paper_contributor<E: Embedder>(
 pub fn reaudit_paper_metadata<E: Embedder>(
     ops: &Ops<E>,
     req: PaperReauditRequest,
-    audit_data: &bookrack_glean::audit::PaperAuditData,
-    audit_profile: &bookrack_glean::audit::PaperAuditProfile,
+    audit_data: &bookrack_metadata::paper::PaperAuditData,
+    audit_profile: &bookrack_metadata::paper::PaperAuditProfile,
 ) -> Result<ReauditOutcome> {
     let args = serde_json::json!({ "intake_id": req.intake_id });
     record_call_sync!(ops, "papers.metadata.reaudit", args, {

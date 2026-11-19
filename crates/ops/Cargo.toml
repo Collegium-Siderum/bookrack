@@ -15,6 +15,7 @@ bookrack-distill = { path = "../distill" }
 bookrack-embed = { path = "../embed" }
 bookrack-glean = { path = "../glean" }
 bookrack-ingest = { path = "../ingest" }
+bookrack-metadata = { path = "../metadata" }
 bookrack-query = { path = "../query" }
 bookrack-refs = { path = "../refs" }
 bookrack-rerank = { path = "../rerank" }
