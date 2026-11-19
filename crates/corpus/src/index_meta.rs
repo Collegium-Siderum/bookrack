@@ -69,6 +69,22 @@ pub struct IndexStamps {
     pub normalize_version: u32,
 }
 
+/// The build parameters of an index that are known before any vector
+/// exists: [`IndexStamps`] without the vector width.
+///
+/// A caller that has not yet asked the embedder for a vector assembles
+/// one and passes it to [`Corpus::precheck_index_stamps`], which answers
+/// with the width the index recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexIdentity {
+    /// The embedding model the chunks are embedded with.
+    pub embed_model: String,
+    /// The chunking-behaviour version the chunks are planned with.
+    pub chunk_version: u32,
+    /// The normalization version the content hashes are derived with.
+    pub normalize_version: u32,
+}
+
 impl Corpus {
     /// Read an `index_meta` scalar, or `None` if the key is unset.
     pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
@@ -138,21 +154,23 @@ impl Corpus {
         Ok(())
     }
 
-    /// Compare the recorded stamps to `expected`. `Ok(true)` when the index
-    /// is fully stamped and every value matches, `Ok(false)` when it is not
-    /// stamped at all, and [`CorpusError::IndexStampMismatch`] when it is
-    /// stamped but a value differs. The presence of [`EMBED_MODEL_KEY`] is
-    /// the sentinel for "stamped", since the four keys are written as a set.
-    fn check_index_stamps(&self, expected: &IndexStamps) -> Result<bool> {
+    /// Compare the recorded model and algorithm versions to `expected`
+    /// and report the recorded vector width, writing nothing.
+    ///
+    /// `Ok(None)` on an index that is not stamped at all. `Ok(Some(dim))`
+    /// on a stamped one whose model, chunk version, and normalize version
+    /// all match, where `dim` is the width the index recorded. The first
+    /// of those three that differs fails with
+    /// [`CorpusError::IndexStampMismatch`], and so does a recorded width
+    /// that is missing or not a positive integer.
+    ///
+    /// The presence of [`EMBED_MODEL_KEY`] is the sentinel for "stamped",
+    /// since the four keys are written as a set.
+    pub fn precheck_index_stamps(&self, expected: &IndexIdentity) -> Result<Option<u32>> {
         let Some(model) = self.meta_get(EMBED_MODEL_KEY)? else {
-            return Ok(false);
+            return Ok(None);
         };
         expect_stamp(EMBED_MODEL_KEY, model, &expected.embed_model)?;
-        expect_stamp(
-            VECTOR_DIM_KEY,
-            self.meta_get(VECTOR_DIM_KEY)?.unwrap_or_default(),
-            &expected.vector_dim.to_string(),
-        )?;
         expect_stamp(
             CHUNK_VERSION_KEY,
             self.meta_get(CHUNK_VERSION_KEY)?.unwrap_or_default(),
@@ -162,6 +180,37 @@ impl Corpus {
             NORMALIZE_VERSION_KEY,
             self.meta_get(NORMALIZE_VERSION_KEY)?.unwrap_or_default(),
             &expected.normalize_version.to_string(),
+        )?;
+        let recorded = self.meta_get(VECTOR_DIM_KEY)?.unwrap_or_default();
+        match recorded.parse::<u32>() {
+            Ok(dim) if dim > 0 => Ok(Some(dim)),
+            _ => Err(CorpusError::IndexStampMismatch {
+                key: VECTOR_DIM_KEY,
+                found: recorded,
+                expected: "a positive integer".to_string(),
+            }),
+        }
+    }
+
+    /// Compare the recorded stamps to `expected`. `Ok(true)` when the index
+    /// is fully stamped and every value matches, `Ok(false)` when it is not
+    /// stamped at all, and [`CorpusError::IndexStampMismatch`] when it is
+    /// stamped but a value differs. The model and the two algorithm
+    /// versions are compared by [`Self::precheck_index_stamps`], and the
+    /// vector width after them.
+    fn check_index_stamps(&self, expected: &IndexStamps) -> Result<bool> {
+        let identity = IndexIdentity {
+            embed_model: expected.embed_model.clone(),
+            chunk_version: expected.chunk_version,
+            normalize_version: expected.normalize_version,
+        };
+        let Some(recorded_dim) = self.precheck_index_stamps(&identity)? else {
+            return Ok(false);
+        };
+        expect_stamp(
+            VECTOR_DIM_KEY,
+            recorded_dim.to_string(),
+            &expected.vector_dim.to_string(),
         )?;
         Ok(true)
     }
@@ -346,6 +395,191 @@ mod tests {
             err,
             CorpusError::IndexStampMismatch { key, .. } if key == NORMALIZE_VERSION_KEY
         ));
+    }
+
+    fn identity() -> IndexIdentity {
+        IndexIdentity {
+            embed_model: "qwen3-embedding:0.6b".to_string(),
+            chunk_version: 1,
+            normalize_version: 1,
+        }
+    }
+
+    /// Every `index_meta` row, in key order.
+    fn meta_rows(corpus: &Corpus) -> Vec<(String, String)> {
+        let mut stmt = corpus
+            .conn
+            .prepare("SELECT key, value FROM index_meta ORDER BY key")
+            .expect("prepare");
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("rows")
+    }
+
+    #[test]
+    fn precheck_on_an_unstamped_index_reports_no_dimension() {
+        let corpus = Corpus::open_in_memory().expect("open");
+        assert_eq!(corpus.precheck_index_stamps(&identity()).expect("ok"), None);
+    }
+
+    #[test]
+    fn precheck_reports_the_recorded_dimension_when_the_identity_matches() {
+        let corpus = Corpus::open_in_memory().expect("open");
+        let recorded = IndexStamps {
+            vector_dim: 768,
+            ..stamps()
+        };
+        corpus.reconcile_index_stamps(&recorded).expect("stamp");
+        assert_eq!(
+            corpus.precheck_index_stamps(&identity()).expect("ok"),
+            Some(768)
+        );
+    }
+
+    #[test]
+    fn precheck_rejects_a_changed_model() {
+        let corpus = Corpus::open_in_memory().expect("open");
+        corpus.reconcile_index_stamps(&stamps()).expect("stamp");
+        let other = IndexIdentity {
+            embed_model: "different-model".to_string(),
+            ..identity()
+        };
+        let err = corpus
+            .precheck_index_stamps(&other)
+            .expect_err("must reject");
+        assert!(matches!(
+            err,
+            CorpusError::IndexStampMismatch { key, .. } if key == EMBED_MODEL_KEY
+        ));
+    }
+
+    #[test]
+    fn precheck_rejects_a_changed_chunk_version() {
+        let corpus = Corpus::open_in_memory().expect("open");
+        corpus.reconcile_index_stamps(&stamps()).expect("stamp");
+        let other = IndexIdentity {
+            chunk_version: 2,
+            ..identity()
+        };
+        let err = corpus
+            .precheck_index_stamps(&other)
+            .expect_err("must reject");
+        assert!(matches!(
+            err,
+            CorpusError::IndexStampMismatch { key, .. } if key == CHUNK_VERSION_KEY
+        ));
+    }
+
+    #[test]
+    fn precheck_rejects_a_changed_normalize_version() {
+        let corpus = Corpus::open_in_memory().expect("open");
+        corpus.reconcile_index_stamps(&stamps()).expect("stamp");
+        let other = IndexIdentity {
+            normalize_version: 2,
+            ..identity()
+        };
+        let err = corpus
+            .precheck_index_stamps(&other)
+            .expect_err("must reject");
+        assert!(matches!(
+            err,
+            CorpusError::IndexStampMismatch { key, .. } if key == NORMALIZE_VERSION_KEY
+        ));
+    }
+
+    /// The error a precheck gives once the recorded width is `value`,
+    /// or once the key is gone when `value` is `None`.
+    fn precheck_error_with_recorded_dim(value: Option<&str>) -> CorpusError {
+        let corpus = Corpus::open_in_memory().expect("open");
+        corpus.reconcile_index_stamps(&stamps()).expect("stamp");
+        match value {
+            Some(value) => corpus.meta_set(VECTOR_DIM_KEY, value).expect("set"),
+            None => {
+                corpus
+                    .conn
+                    .execute("DELETE FROM index_meta WHERE key = ?1", [VECTOR_DIM_KEY])
+                    .expect("delete");
+            }
+        }
+        corpus
+            .precheck_index_stamps(&identity())
+            .expect_err("an unreadable width must be rejected")
+    }
+
+    #[test]
+    fn precheck_rejects_a_recorded_dimension_of_zero() {
+        let err = precheck_error_with_recorded_dim(Some("0"));
+        assert!(matches!(
+            err,
+            CorpusError::IndexStampMismatch { key, ref found, .. }
+                if key == VECTOR_DIM_KEY && found == "0"
+        ));
+    }
+
+    #[test]
+    fn precheck_rejects_a_recorded_dimension_that_is_not_a_number() {
+        let err = precheck_error_with_recorded_dim(Some("wide"));
+        assert!(matches!(
+            err,
+            CorpusError::IndexStampMismatch { key, ref found, .. }
+                if key == VECTOR_DIM_KEY && found == "wide"
+        ));
+    }
+
+    #[test]
+    fn precheck_rejects_a_missing_recorded_dimension() {
+        let err = precheck_error_with_recorded_dim(None);
+        assert!(matches!(
+            err,
+            CorpusError::IndexStampMismatch { key, .. } if key == VECTOR_DIM_KEY
+        ));
+    }
+
+    #[test]
+    fn precheck_writes_nothing_on_a_stamped_index() {
+        let corpus = Corpus::open_in_memory().expect("open");
+        corpus.reconcile_index_stamps(&stamps()).expect("stamp");
+        let before = meta_rows(&corpus);
+        assert_eq!(
+            corpus.precheck_index_stamps(&identity()).expect("ok"),
+            Some(1024)
+        );
+        assert_eq!(meta_rows(&corpus), before);
+    }
+
+    #[test]
+    fn a_changed_chunk_version_is_named_ahead_of_a_changed_dimension() {
+        let corpus = Corpus::open_in_memory().expect("open");
+        corpus.reconcile_index_stamps(&stamps()).expect("stamp");
+        let both = IndexStamps {
+            vector_dim: 768,
+            chunk_version: 2,
+            ..stamps()
+        };
+        let err = corpus
+            .reconcile_index_stamps(&both)
+            .expect_err("must reject");
+        assert!(
+            matches!(
+                err,
+                CorpusError::IndexStampMismatch { key, .. } if key == CHUNK_VERSION_KEY
+            ),
+            "{err:?}"
+        );
+        let err = corpus
+            .precheck_index_stamps(&IndexIdentity {
+                chunk_version: 2,
+                ..identity()
+            })
+            .expect_err("must reject");
+        assert!(
+            matches!(
+                err,
+                CorpusError::IndexStampMismatch { key, .. } if key == CHUNK_VERSION_KEY
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]

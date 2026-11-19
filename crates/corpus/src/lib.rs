@@ -26,7 +26,8 @@ mod resolve;
 pub use bookrack_core::{NodeId, NodeType, PartitionIdx, Scope};
 pub use db::{Corpus, SCHEMA_VERSION};
 pub use index_meta::{
-    CHUNK_VERSION_KEY, EMBED_MODEL_KEY, IndexStamps, NORMALIZE_VERSION_KEY, VECTOR_DIM_KEY,
+    CHUNK_VERSION_KEY, EMBED_MODEL_KEY, IndexIdentity, IndexStamps, NORMALIZE_VERSION_KEY,
+    VECTOR_DIM_KEY,
 };
 pub use node::{NewNode, Node, TocQuery, TocStats};
 pub use partition::Partition;

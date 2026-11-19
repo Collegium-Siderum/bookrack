@@ -2,7 +2,7 @@
 
 //! The index stamps this build writes, for both pipelines.
 
-use bookrack_corpus::IndexStamps;
+use bookrack_corpus::{IndexIdentity, IndexStamps};
 use bookrack_text::{CHUNK_VERSION, NORMALIZE_VERSION};
 
 /// The index stamps this binary builds an index with.
@@ -14,9 +14,20 @@ use bookrack_text::{CHUNK_VERSION, NORMALIZE_VERSION};
 /// query facade both compare against the [`IndexStamps`] this returns,
 /// for a book store and a papers store alike.
 pub fn current_index_stamps(embed_model: impl Into<String>, vector_dim: u32) -> IndexStamps {
+    let identity = current_index_identity(embed_model);
     IndexStamps {
-        embed_model: embed_model.into(),
+        embed_model: identity.embed_model,
         vector_dim,
+        chunk_version: identity.chunk_version,
+        normalize_version: identity.normalize_version,
+    }
+}
+
+/// The part of [`current_index_stamps`] known before any vector exists:
+/// the configured model and this binary's two algorithm versions.
+pub fn current_index_identity(embed_model: impl Into<String>) -> IndexIdentity {
+    IndexIdentity {
+        embed_model: embed_model.into(),
         chunk_version: CHUNK_VERSION,
         normalize_version: NORMALIZE_VERSION,
     }
@@ -36,5 +47,13 @@ mod tests {
         // here and be acknowledged by updating the pinned numbers.
         assert_eq!(stamps.chunk_version, 1);
         assert_eq!(stamps.normalize_version, 1);
+    }
+
+    #[test]
+    fn current_index_identity_carries_the_pinned_chunk_and_normalize_versions() {
+        let identity = current_index_identity("qwen3-embedding:0.6b");
+        assert_eq!(identity.embed_model, "qwen3-embedding:0.6b");
+        assert_eq!(identity.chunk_version, 1);
+        assert_eq!(identity.normalize_version, 1);
     }
 }
