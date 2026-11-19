@@ -185,8 +185,14 @@ async fn a_paper_is_not_a_noop_after_the_chunk_version_moves() {
         .expect("restamp chunk version");
     let meta_path = fx.lancedb_dir.join("vectors_meta.json");
     let meta_before = std::fs::read(&meta_path).expect("the first glean wrote vectors_meta.json");
+    let calls_before = fx.embedder.calls();
 
     let second = fx.glean().await;
+    assert_eq!(
+        fx.embedder.calls(),
+        calls_before,
+        "the stamp gate refuses before the embedder is asked for anything",
+    );
     assert!(
         !matches!(&second, Ok(report) if report.no_op),
         "a paper chunked under another chunk version was reported unchanged: {second:?}",

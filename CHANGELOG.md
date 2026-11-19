@@ -171,6 +171,15 @@ release workflow extracts the matching section verbatim from this file.
   carries the `embed` stage for a paper job as it does for a book job,
   when the paper has chunks to embed; a paper in which no abstract was
   found, and a job that ends as a no-op, report `processing` only.
+- **An ingest refused for mismatched index stamps no longer contacts
+  the embedding backend first.** A book or paper whose embedding model,
+  chunk version, or normalize version differs from the store's is
+  refused before any embedding request is sent; it used to send one
+  request and then refuse. A vector width that differs from the store's
+  is refused before anything is stamped or deleted: against a store
+  whose table was built at another width, the run used to clear the
+  item's stored rows before it failed. The errors and their codes are
+  unchanged.
 - **A write refused for mismatched index stamps no longer deletes
   `vectors_meta.json`.** An ingest whose embedding model, vector width,
   chunk version, or normalize version differs from the store's is

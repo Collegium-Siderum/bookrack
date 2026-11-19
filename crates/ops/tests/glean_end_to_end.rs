@@ -18,9 +18,8 @@ use bookrack_extract::EXTRACTOR_VERSION;
 use bookrack_ops::pipeline::paper::{GleanParams, glean_paper};
 use bookrack_vectors::ChunkReader;
 
-/// A constant-vector embedder. The pipeline calls `embed_batch`
-/// twice: once for the dimension probe and once for the abstract
-/// chunks; the same `dim`-length vector serves both.
+/// A constant-vector embedder: every text it is sent gets the same
+/// `dim`-length vector.
 struct Fake {
     dim: usize,
 }

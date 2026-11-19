@@ -2735,6 +2735,38 @@ pub(crate) mod book_pipeline_tests {
         }
     }
 
+    /// A constant-vector embedder that records every text it is sent,
+    /// one list per request.
+    pub(crate) struct Counting {
+        dim: usize,
+        requests: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+
+    impl Counting {
+        pub(crate) fn new(dim: usize) -> Counting {
+            Counting {
+                dim,
+                requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        /// The number of requests received.
+        pub(crate) fn calls(&self) -> usize {
+            self.requests.lock().expect("requests").len()
+        }
+    }
+
+    impl Embedder for Counting {
+        fn embed_batch(
+            &self,
+            texts: &[String],
+        ) -> impl Future<Output = EmbedResult<Vec<Vec<f32>>>> + Send {
+            self.requests.lock().expect("requests").push(texts.to_vec());
+            let (dim, n) = (self.dim, texts.len());
+            async move { Ok(vec![vec![0.25f32; dim]; n]) }
+        }
+    }
+
     /// A fake embedder that always fails, forcing the EMBED stage to fail.
     pub(crate) struct Offline;
 
@@ -3897,6 +3929,55 @@ pub(crate) mod book_pipeline_tests {
                 assert!(report.chunks_written > 0, "{case}: {report:?}");
             }
         }
+    }
+
+    /// A book resubmitted to a library stamped under another chunk
+    /// version is refused at the embed stage before the embedder is
+    /// asked for anything.
+    #[tokio::test]
+    async fn a_book_refused_for_a_stamp_mismatch_sends_no_embed_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("first ingest");
+        corpus
+            .meta_set(
+                bookrack_corpus::CHUNK_VERSION_KEY,
+                &(bookrack_text::CHUNK_VERSION + 1).to_string(),
+            )
+            .expect("chunk version");
+
+        let embedder = Counting::new(8);
+        let err = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &embedder,
+            &IngestParams::default(),
+        )
+        .await
+        .expect_err("the stamp gate must refuse the rerun");
+        assert!(
+            matches!(
+                err,
+                IngestError::Corpus(bookrack_corpus::CorpusError::IndexStampMismatch { .. })
+            ),
+            "{err:?}"
+        );
+        assert_eq!(embedder.calls(), 0, "the refusal precedes any request");
     }
 
     #[tokio::test]
@@ -5772,14 +5853,13 @@ pub(crate) mod book_pipeline_tests {
         let mut catalog = Catalog::open_in_memory().expect("catalog");
 
         // First run: fails after the first batch commits. The embed
-        // stage opens with a one-call dimension probe and then issues
-        // one `embed_batch` per chunk batch; failing after the second
-        // call lets the probe succeed and the first real batch commit,
-        // then the second batch fails before its append runs.
+        // stage issues one `embed_batch` per chunk batch; failing after
+        // the first call lets the first batch commit, then the second
+        // batch fails before its append runs.
         let partial = PartiallyFailing {
             dim: 8,
             calls: std::sync::atomic::AtomicUsize::new(0),
-            fail_after_calls: 2,
+            fail_after_calls: 1,
         };
         let err = ingest_book(
             &file,
