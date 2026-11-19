@@ -902,4 +902,261 @@ mod tests {
         assert!(ticker.should_emit(now));
         assert!(ticker.should_emit(now));
     }
+
+    /// A fake whose vectors are empty.
+    struct Hollow;
+
+    impl Embedder for Hollow {
+        fn embed_batch(
+            &self,
+            texts: &[String],
+        ) -> impl Future<Output = EmbedResult<Vec<Vec<f32>>>> + Send {
+            let n = texts.len();
+            async move { Ok(vec![Vec::new(); n]) }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_probe_answered_with_an_empty_vector_is_refused() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let err = embed_chunks(
+            &[plan(1, "prose")],
+            &Hollow,
+            &corpus,
+            dir.path(),
+            &EmbedConfig::default(),
+        )
+        .await
+        .expect_err("a zero-width vector fixes no dimension");
+        assert!(matches!(err, EmbedStageError::EmptyEmbedding), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn the_report_counts_batches_and_the_characters_embedded() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, "prose")).collect();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let cfg = EmbedConfig {
+            batch_max_chunks: 1,
+            ..EmbedConfig::default()
+        };
+        let report = embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
+            .await
+            .expect("embed");
+        assert_eq!(
+            report,
+            EmbedRunReport {
+                chunks_written: 3,
+                batches: 3,
+                shrink_events: 0,
+                total_chars: 15,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn churn_exactly_at_the_threshold_triggers_retrain() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // Threshold = max(2 * 2, 20_000) = 20_000; five rows on top of
+        // 19_995 land exactly on it.
+        let seed = bookrack_vectors::AnnConfig::default_for(AnnKind::IvfFlat).to_meta(
+            "2026-06-03T00:00:00Z".to_string(),
+            2,
+            L2_ABSOLUTE_FLOOR - 5,
+            bookrack_vectors::DEFAULT_INDEX_NAME.to_string(),
+        );
+        bookrack_vectors::meta::store(dir.path(), &seed).expect("seed meta");
+
+        let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some text")).collect();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        embed_chunks(
+            &plans,
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &EmbedConfig::default(),
+        )
+        .await
+        .expect("embed");
+        let meta = bookrack_vectors::meta::load(dir.path())
+            .expect("load meta")
+            .expect("meta present");
+        assert_eq!(meta.churn_since_rebuild, 0, "the index was retrained");
+        assert_eq!(meta.built_at_chunk_count, 5);
+    }
+
+    #[test]
+    fn now_rfc3339_is_a_utc_timestamp_at_second_precision() {
+        let now = now_rfc3339();
+        assert_eq!(now.len(), "2024-06-05T07:40:00Z".len(), "{now}");
+        assert!(now.ends_with('Z'), "{now}");
+        chrono::DateTime::parse_from_rfc3339(&now).expect("an RFC 3339 timestamp");
+    }
+
+    /// Plans whose texts have the given character counts.
+    fn plans_of(lens: &[usize]) -> Vec<ChunkPlan> {
+        lens.iter()
+            .enumerate()
+            .map(|(i, len)| plan(i as i64 + 1, &"x".repeat(*len)))
+            .collect()
+    }
+
+    fn batching(batch_char_budget: usize, batch_max_chunks: usize) -> EmbedConfig {
+        EmbedConfig {
+            batch_char_budget,
+            batch_max_chunks,
+            ..EmbedConfig::default()
+        }
+    }
+
+    #[test]
+    fn a_batch_fills_to_the_character_budget_and_not_past_it() {
+        // Three chunks of two fill a budget of six exactly.
+        assert_eq!(
+            greedy_batch_end(&plans_of(&[2, 2, 2]), 0, &batching(6, 99)),
+            3
+        );
+        // Three and four overrun it by one: the second chunk waits.
+        assert_eq!(greedy_batch_end(&plans_of(&[3, 4]), 0, &batching(6, 99)), 1);
+        // The budget counts from the batch's own start.
+        assert_eq!(
+            greedy_batch_end(&plans_of(&[5, 3, 3, 3]), 1, &batching(6, 99)),
+            3
+        );
+    }
+
+    #[test]
+    fn a_chunk_over_the_budget_is_a_batch_of_its_own() {
+        assert_eq!(
+            greedy_batch_end(&plans_of(&[10, 1]), 0, &batching(5, 99)),
+            1
+        );
+        assert_eq!(
+            greedy_batch_end(&plans_of(&[1, 10, 1]), 1, &batching(5, 99)),
+            2
+        );
+    }
+
+    #[test]
+    fn a_batch_stops_at_the_chunk_cap() {
+        assert_eq!(
+            greedy_batch_end(&plans_of(&[1, 1, 1, 1]), 0, &batching(99, 2)),
+            2
+        );
+        assert_eq!(
+            greedy_batch_end(&plans_of(&[1, 1, 1, 1]), 2, &batching(99, 3)),
+            4
+        );
+    }
+
+    #[tokio::test]
+    async fn every_halving_is_counted_as_one_shrink_event() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // One batch of four against a server that takes one chunk at a
+        // time: four halves to two and two, and each two halves again.
+        let plans: Vec<ChunkPlan> = (1..=4).map(|i| plan(i, "x")).collect();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let report = embed_chunks(
+            &plans,
+            &Overloading {
+                dim: 4,
+                max_batch: 1,
+            },
+            &corpus,
+            dir.path(),
+            &EmbedConfig::default(),
+        )
+        .await
+        .expect("embed");
+        assert_eq!(report.chunks_written, 4);
+        assert_eq!(report.batches, 1);
+        assert_eq!(report.shrink_events, 3);
+    }
+
+    /// A fake that answers the dimension probe and fails every request
+    /// after it, counting the requests it receives.
+    struct FailingAfterProbe {
+        overloaded: bool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FailingAfterProbe {
+        fn new(overloaded: bool) -> Self {
+            FailingAfterProbe {
+                overloaded,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Embedder for FailingAfterProbe {
+        fn embed_batch(
+            &self,
+            texts: &[String],
+        ) -> impl Future<Output = EmbedResult<Vec<Vec<f32>>>> + Send {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let n = texts.len();
+            let overloaded = self.overloaded;
+            async move {
+                if call == 0 {
+                    Ok(vec![vec![0.5f32; 4]; n])
+                } else if overloaded {
+                    Err(EmbedError::Overloaded {
+                        status: 503,
+                        body: String::new(),
+                    })
+                } else {
+                    Err(EmbedError::Unreachable("refused".to_string()))
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_overloaded_single_chunk_fails_without_another_request() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let embedder = FailingAfterProbe::new(true);
+        let err = embed_chunks(
+            &[plan(1, "prose")],
+            &embedder,
+            &corpus,
+            dir.path(),
+            &EmbedConfig::default(),
+        )
+        .await
+        .expect_err("one chunk cannot be halved");
+        assert!(
+            matches!(err, EmbedStageError::Embed(EmbedError::Overloaded { .. })),
+            "{err:?}"
+        );
+        assert_eq!(embedder.calls(), 2, "the probe, then the one batch");
+    }
+
+    #[tokio::test]
+    async fn a_failure_that_is_not_overload_does_not_shrink_the_batch() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let plans: Vec<ChunkPlan> = (1..=4).map(|i| plan(i, "x")).collect();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let embedder = FailingAfterProbe::new(false);
+        let err = embed_chunks(
+            &plans,
+            &embedder,
+            &corpus,
+            dir.path(),
+            &EmbedConfig::default(),
+        )
+        .await
+        .expect_err("an unreachable server fails the run");
+        assert!(
+            matches!(err, EmbedStageError::Embed(EmbedError::Unreachable(_))),
+            "{err:?}"
+        );
+        assert_eq!(embedder.calls(), 2, "the probe, then the one batch");
+    }
 }
