@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use bookrack_test_support::bookrack_bin;
 use bookrack_test_support::tool::exec::{DaemonStart, ExecOpts};
-use bookrack_test_support::tool::release::RELEASE_RECORD;
+use bookrack_test_support::tool::release::{RELEASE_RECORD, ScratchRoot};
 use bookrack_test_support::tool::{
     Class, CreateHooks, CreateOpts, Marker, Outcome, Preset, Record, STAGE_PATHS, STAGE_PRESET,
     Session, SessionOpts, Source, sig,
@@ -189,7 +189,7 @@ fn modes(root: &Path) -> Vec<(PathBuf, u32)> {
 
 #[tokio::test]
 async fn a_frozen_golden_imports_and_passes_acceptance() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = ScratchRoot::new();
     let a = root.path().join("a");
     drop(build_rich(&a, &root.path().join("ws-a")).await);
     let a = freeze(&a).await;
@@ -297,7 +297,7 @@ async fn a_frozen_golden_imports_and_passes_acceptance() {
 
 #[tokio::test]
 async fn a_tampered_release_golden_is_refused() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = ScratchRoot::new();
     let a = root.path().join("a");
     drop(build_rich(&a, &root.path().join("ws-a")).await);
     let a = freeze(&a).await;
@@ -338,7 +338,7 @@ async fn a_tampered_release_golden_is_refused() {
 
 #[tokio::test]
 async fn a_target_path_that_needs_escaping_is_refused() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = ScratchRoot::new();
     let a = root.path().join("a");
     drop(build_rich(&a, &root.path().join("ws-a")).await);
     let a = freeze(&a).await;
@@ -368,7 +368,7 @@ async fn a_target_path_that_needs_escaping_is_refused() {
 
 #[tokio::test]
 async fn an_old_path_outside_the_rewrite_set_is_refused() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = ScratchRoot::new();
     let a = root.path().join("a");
     drop(build_rich(&a, &root.path().join("ws-a")).await);
     let a_canonical = a.canonicalize().unwrap();
@@ -408,7 +408,7 @@ async fn an_old_path_outside_the_rewrite_set_is_refused() {
 
 #[tokio::test]
 async fn overlapping_paths_are_refused_before_anything_moves() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = ScratchRoot::new();
     let a = root.path().join("a");
     drop(build_rich(&a, &root.path().join("ws-a")).await);
     let a = freeze(&a).await;
@@ -448,7 +448,7 @@ async fn overlapping_paths_are_refused_before_anything_moves() {
 
 #[tokio::test]
 async fn a_source_that_changes_during_the_copy_is_refused() {
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = ScratchRoot::new();
     let a = root.path().join("a");
     drop(build_rich(&a, &root.path().join("ws-a")).await);
     let a = freeze(&a).await;

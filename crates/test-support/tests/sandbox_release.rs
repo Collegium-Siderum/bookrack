@@ -19,6 +19,7 @@ use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
 use bookrack_test_support::tool::build::BuildHooks;
+use bookrack_test_support::tool::release::ScratchRoot;
 use bookrack_test_support::tool::{
     CreateOpts, Preset, STAGE_BINARY, STAGE_PATHS, STAGE_PRESET, Session, SessionOpts, Source,
 };
@@ -59,12 +60,12 @@ fn knobs_script_with(knobs_arm: &str) -> String {
 }
 
 struct Place {
-    root: tempfile::TempDir,
+    root: ScratchRoot,
 }
 
 impl Place {
     fn new() -> Place {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = ScratchRoot::new();
         std::fs::create_dir(root.path().join("ws")).expect("ws");
         Place { root }
     }

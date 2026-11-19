@@ -212,6 +212,52 @@ pub fn set_writable(root: &Path, writable: bool) -> io::Result<()> {
     chmod(root, &meta, writable)
 }
 
+/// A tempdir that may hold a frozen sandbox.
+///
+/// Dropping it restores the owner write bit on everything under it and
+/// then removes the tree. A plain [`tempfile::TempDir`] leaves a frozen
+/// `golden/` behind: removing an entry needs write permission on its
+/// directory, and that drop discards the failure. This one panics when
+/// the tree cannot be removed, unless the thread is already unwinding.
+pub struct ScratchRoot {
+    dir: Option<tempfile::TempDir>,
+}
+
+impl ScratchRoot {
+    /// A fresh, empty tempdir.
+    ///
+    /// Panics when the directory cannot be created.
+    pub fn new() -> ScratchRoot {
+        ScratchRoot {
+            dir: Some(tempfile::tempdir().expect("tempdir")),
+        }
+    }
+
+    /// The directory's path.
+    pub fn path(&self) -> &Path {
+        self.dir.as_ref().expect("present until drop").path()
+    }
+}
+
+impl Default for ScratchRoot {
+    fn default() -> ScratchRoot {
+        ScratchRoot::new()
+    }
+}
+
+impl Drop for ScratchRoot {
+    fn drop(&mut self) {
+        let Some(dir) = self.dir.take() else { return };
+        let path = dir.path().to_path_buf();
+        let removed = set_writable(&path, true).and_then(|()| dir.close());
+        if let Err(err) = removed
+            && !std::thread::panicking()
+        {
+            panic!("cannot remove scratch root {}: {err}", path.display());
+        }
+    }
+}
+
 fn chmod(path: &Path, meta: &std::fs::Metadata, writable: bool) -> io::Result<()> {
     let mode = meta.permissions().mode();
     let next = if writable {
@@ -699,6 +745,17 @@ mod tests {
             all.dedup();
             all
         });
+    }
+
+    #[test]
+    fn a_scratch_root_holding_a_read_only_tree_is_removed_on_drop() {
+        let root = ScratchRoot::new();
+        let path = root.path().to_path_buf();
+        std::fs::create_dir_all(path.join("golden/inner")).expect("tree");
+        std::fs::write(path.join("golden/inner/file"), b"x").expect("file");
+        set_writable(&path.join("golden"), false).expect("freeze");
+        drop(root);
+        assert!(!path.exists(), "{} survived the drop", path.display());
     }
 
     #[test]
