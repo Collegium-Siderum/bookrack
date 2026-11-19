@@ -5672,8 +5672,8 @@ pub(crate) mod book_pipeline_tests {
             Praesent in feugiat orci. Sed at facilisis nibh, vitae \
             interdum justo. Integer sit amet sapien at velit semper \
             iaculis. Vivamus ut dictum lectus, in vehicula ipsum.\n\n";
-        for _ in 0..220 {
-            file.write_all(paragraph.as_bytes())
+        for i in 0..220 {
+            file.write_all(format!("Paragraph {i}. {paragraph}").as_bytes())
                 .expect("write paragraph");
         }
         file.sync_all().expect("flush huge.txt");
@@ -5698,6 +5698,20 @@ pub(crate) mod book_pipeline_tests {
             "expected more chunks than one batch fits ({}), got {}",
             batch_max_chunks,
             report.chunks_written,
+        );
+        let rows = catalog
+            .pipeline_audit_for_book(report.book_root_id.get())
+            .expect("audit");
+        let embed_row = rows
+            .iter()
+            .find(|r| r.stage == "embed")
+            .expect("an embed audit row");
+        let metric: serde_json::Value =
+            serde_json::from_str(embed_row.metric_summary.as_deref().expect("embed metrics"))
+                .expect("metrics are JSON");
+        assert!(
+            metric["batches"].as_u64().expect("a batch count") > 1,
+            "the chunks must reach the embedder in more than one batch: {metric}",
         );
         assert!(!report.no_op);
         assert!(report.prose_leaves > 1);
@@ -5748,8 +5762,9 @@ pub(crate) mod book_pipeline_tests {
             tincidunt arcu, vitae fringilla magna libero non risus. \
             Mauris consectetur, libero sit amet faucibus aliquam, justo \
             sapien viverra urna, eget pharetra purus risus a augue.\n\n";
-        for _ in 0..220 {
-            f.write_all(paragraph.as_bytes()).expect("write paragraph");
+        for i in 0..220 {
+            f.write_all(format!("Paragraph {i}. {paragraph}").as_bytes())
+                .expect("write paragraph");
         }
         f.sync_all().expect("flush");
 

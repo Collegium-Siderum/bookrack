@@ -421,6 +421,12 @@ mod tests {
         }
     }
 
+    /// A one-character text that differs for each `offset` from 1 to 26.
+    fn letter(offset: i64) -> String {
+        let step = u8::try_from(offset - 1).expect("an offset from 1 to 26");
+        char::from(b'a' + step).to_string()
+    }
+
     /// A fake embedder returning constant `dim`-length vectors.
     struct Fake {
         dim: usize,
@@ -468,7 +474,9 @@ mod tests {
     #[tokio::test]
     async fn embeds_every_chunk_and_writes_one_row_each() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some prose text")).collect();
+        let plans: Vec<ChunkPlan> = (1..=5)
+            .map(|i| plan(i, &format!("some prose text {i}")))
+            .collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         let report = embed_chunks(
             &plans,
@@ -493,7 +501,9 @@ mod tests {
     #[tokio::test]
     async fn each_written_batch_is_reported_ending_at_the_plan_count() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some prose text")).collect();
+        let plans: Vec<ChunkPlan> = (1..=5)
+            .map(|i| plan(i, &format!("some prose text {i}")))
+            .collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         let cfg = EmbedConfig {
             batch_max_chunks: 2,
@@ -555,7 +565,9 @@ mod tests {
     #[tokio::test]
     async fn cold_start_writes_a_scaled_ivf_flat_meta_after_first_book() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some text")).collect();
+        let plans: Vec<ChunkPlan> = (1..=5)
+            .map(|i| plan(i, &format!("some text {i}")))
+            .collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         embed_chunks(
             &plans,
@@ -590,7 +602,9 @@ mod tests {
         );
         bookrack_vectors::meta::store(dir.path(), &seed).expect("seed meta");
 
-        let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some text")).collect();
+        let plans: Vec<ChunkPlan> = (1..=5)
+            .map(|i| plan(i, &format!("some text {i}")))
+            .collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         embed_chunks(
             &plans,
@@ -623,7 +637,9 @@ mod tests {
         );
         bookrack_vectors::meta::store(dir.path(), &seed).expect("seed meta");
 
-        let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some text")).collect();
+        let plans: Vec<ChunkPlan> = (1..=5)
+            .map(|i| plan(i, &format!("some text {i}")))
+            .collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         embed_chunks(
             &plans,
@@ -655,7 +671,9 @@ mod tests {
         );
         bookrack_vectors::meta::store(dir.path(), &seed).expect("seed meta");
 
-        let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some text")).collect();
+        let plans: Vec<ChunkPlan> = (1..=5)
+            .map(|i| plan(i, &format!("some text {i}")))
+            .collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         embed_chunks(
             &plans,
@@ -689,7 +707,9 @@ mod tests {
             );
         bookrack_vectors::meta::store(dir.path(), &seed).expect("seed meta");
 
-        let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some text")).collect();
+        let plans: Vec<ChunkPlan> = (1..=5)
+            .map(|i| plan(i, &format!("some text {i}")))
+            .collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         embed_chunks(
             &plans,
@@ -719,7 +739,7 @@ mod tests {
             );
         bookrack_vectors::meta::store(dir.path(), &seed).expect("seed meta");
 
-        let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, "text")).collect();
+        let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, &format!("text {i}"))).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         let cfg = EmbedConfig::default();
         embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
@@ -739,7 +759,7 @@ mod tests {
     #[tokio::test]
     async fn a_refused_write_leaves_vectors_meta_as_it_was() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, "prose")).collect();
+        let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, &format!("prose {i}"))).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         let first = EmbedConfig {
             model: "model-a".to_string(),
@@ -794,7 +814,7 @@ mod tests {
     #[tokio::test]
     async fn re_embedding_replaces_rather_than_duplicates() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, "text")).collect();
+        let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, &format!("text {i}"))).collect();
         let cfg = EmbedConfig::default();
         let corpus = Corpus::open_in_memory().expect("corpus");
         embed_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
@@ -817,7 +837,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         // Many small chunks in one greedy batch; the embedder refuses any
         // batch above two, forcing repeated halving down to that size.
-        let plans: Vec<ChunkPlan> = (1..=8).map(|i| plan(i, "x")).collect();
+        let plans: Vec<ChunkPlan> = (1..=8).map(|i| plan(i, &letter(i))).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         let report = embed_chunks(
             &plans,
@@ -840,7 +860,7 @@ mod tests {
     #[tokio::test]
     async fn a_run_stamps_the_index_and_then_refuses_a_different_model() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, "prose")).collect();
+        let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, &format!("prose {i}"))).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         let first = EmbedConfig {
             model: "model-a".to_string(),
@@ -935,7 +955,8 @@ mod tests {
     #[tokio::test]
     async fn the_report_counts_batches_and_the_characters_embedded() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, "prose")).collect();
+        // Three distinct texts of five characters each.
+        let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, &format!("pros{i}"))).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         let cfg = EmbedConfig {
             batch_max_chunks: 1,
@@ -968,7 +989,9 @@ mod tests {
         );
         bookrack_vectors::meta::store(dir.path(), &seed).expect("seed meta");
 
-        let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some text")).collect();
+        let plans: Vec<ChunkPlan> = (1..=5)
+            .map(|i| plan(i, &format!("some text {i}")))
+            .collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         embed_chunks(
             &plans,
@@ -1055,7 +1078,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         // One batch of four against a server that takes one chunk at a
         // time: four halves to two and two, and each two halves again.
-        let plans: Vec<ChunkPlan> = (1..=4).map(|i| plan(i, "x")).collect();
+        let plans: Vec<ChunkPlan> = (1..=4).map(|i| plan(i, &letter(i))).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         let report = embed_chunks(
             &plans,
@@ -1141,7 +1164,7 @@ mod tests {
     #[tokio::test]
     async fn a_failure_that_is_not_overload_does_not_shrink_the_batch() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let plans: Vec<ChunkPlan> = (1..=4).map(|i| plan(i, "x")).collect();
+        let plans: Vec<ChunkPlan> = (1..=4).map(|i| plan(i, &letter(i))).collect();
         let corpus = Corpus::open_in_memory().expect("corpus");
         let embedder = FailingAfterProbe::new(false);
         let err = embed_chunks(
