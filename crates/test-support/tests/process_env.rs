@@ -77,8 +77,12 @@ fn the_platform_default_registry_sits_at_the_platform_conventional_path() {
 #[test]
 fn the_process_sandbox_asks_for_a_kernel_assigned_mcp_port() {
     process_env(ProcessEnv::daemon());
+    let daemon = bookrack_config::DaemonConfig::resolve(
+        &bookrack_config::EnvSnapshot::capture(),
+        &bookrack_config::DaemonFlags::default(),
+    );
     assert_eq!(
-        bookrack_config::McpConfig::from_env().addr,
+        daemon.mcp.expect("an address resolves").addr,
         "127.0.0.1:0",
         "an in-process daemon must not contend for the default port",
     );

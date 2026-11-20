@@ -72,10 +72,7 @@ async fn registry_glean_records_a_pipeline_run_on_the_paper_catalog() {
 
     // The handle's configuration and its stores are the same
     // library's: paths come off one `Config` over this root.
-    let cfg = std::sync::Arc::new(bookrack_config::Config::new(
-        dir.path().to_path_buf(),
-        "http://127.0.0.1:11434".to_string(),
-    ));
+    let cfg = std::sync::Arc::new(bookrack_config::Config::new(dir.path().to_path_buf()));
     let ops = Ops::catalog_only(
         cfg.corpus_db(),
         cfg.catalog_db(),

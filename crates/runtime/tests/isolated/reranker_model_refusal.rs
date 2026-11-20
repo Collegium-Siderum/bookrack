@@ -6,13 +6,13 @@
 //! The managed installer downloads only the pinned models, so a tag with
 //! no pin is never fixed by `doctor --install-reranker`; the refusal has
 //! to point at the two routes that do serve it — an explicit model file,
-//! or an operator-run server behind `reranker.url`.
+//! or an operator-run server behind `BOOKRACK_RERANKER_URL`.
 
 #![cfg(unix)]
 
 use bookrack_config::{
-    Config, DEFAULT_EMBED_MODEL, LibraryKind, ManifestIdentitySeed, RERANKER_MODEL_ENV,
-    set_manifest_index_profile,
+    Config, DEFAULT_EMBED_MODEL, DaemonConfig, DaemonFlags, EnvSnapshot, LibraryKind,
+    ManifestIdentitySeed, RERANKER_MODEL_ENV, set_manifest_index_profile,
 };
 use bookrack_index_profile::USER_PROFILE_DIR_NAME;
 use bookrack_runtime::rerank_supervisor::{RerankerModelRefusal, RerankerModelState};
@@ -71,14 +71,19 @@ async fn an_unpinned_reranker_model_is_not_sent_to_the_installer() {
         },
     )
     .expect("declare the profile");
-    let cfg = Config::new(root.path().to_path_buf(), "http://127.0.0.1:9".to_string());
+    let cfg = Config::new(root.path().to_path_buf());
     let runtime_dir = tempfile::tempdir().expect("tempdir");
 
-    let err =
-        bookrack_runtime::rerank_supervisor::bring_up_reranker(&cfg, runtime_dir.path(), None)
-            .await
-            .map(|_| ())
-            .expect_err("a reranker model nothing can provide must refuse bring-up");
+    let daemon = DaemonConfig::resolve(&EnvSnapshot::capture(), &DaemonFlags::default());
+    let err = bookrack_runtime::rerank_supervisor::bring_up_reranker(
+        &cfg,
+        &daemon,
+        runtime_dir.path(),
+        None,
+    )
+    .await
+    .map(|_| ())
+    .expect_err("a reranker model nothing can provide must refuse bring-up");
     let refusal = err
         .downcast_ref::<RerankerModelRefusal>()
         .unwrap_or_else(|| panic!("a typed refusal the CLI can render: {err:#}"));
@@ -95,5 +100,5 @@ async fn an_unpinned_reranker_model_is_not_sent_to_the_installer() {
         "the installer cannot provide an unpinned model: {text}"
     );
     assert!(text.contains(RERANKER_MODEL_ENV), "{text}");
-    assert!(text.contains("reranker.url"), "{text}");
+    assert!(text.contains(bookrack_config::RERANKER_URL_ENV), "{text}");
 }

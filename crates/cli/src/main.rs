@@ -839,9 +839,8 @@ pub(crate) enum LibrariesAction {
     Config {
         /// Registry name whose config is read or edited.
         name: String,
-        /// `KEY=VALUE` pairs to set. Accepted keys: `ollama_url`,
-        /// `index_profile`, `search.top_k`, `search.weak_threshold`,
-        /// `reranker.url`, `reranker.ctx`, `reranker.threads`.
+        /// `KEY=VALUE` pairs to set. Accepted keys: `index_profile`,
+        /// `search.top_k`, `search.weak_threshold`.
         #[arg(value_parser = parse_key_val, value_name = "KEY=VALUE")]
         sets: Vec<(String, String)>,
         /// Key to remove from the file; accepts the same keys.
@@ -1759,9 +1758,9 @@ mod tests {
             "config",
             "prod",
             "search.top_k=7",
-            "ollama_url=http://host:11434",
+            "index_profile=fast-local",
             "--unset",
-            "reranker.url",
+            "ollama_url",
             "--unset",
             "search.weak_threshold",
         ])
@@ -1775,13 +1774,13 @@ mod tests {
                     sets,
                     vec![
                         ("search.top_k".to_string(), "7".to_string()),
-                        ("ollama_url".to_string(), "http://host:11434".to_string()),
+                        ("index_profile".to_string(), "fast-local".to_string()),
                     ]
                 );
                 assert_eq!(
                     unset,
                     vec![
-                        "reranker.url".to_string(),
+                        "ollama_url".to_string(),
                         "search.weak_threshold".to_string()
                     ]
                 );
@@ -1809,9 +1808,9 @@ mod tests {
     #[test]
     fn libraries_config_rejects_a_pair_without_equals() {
         for argv in [
-            vec!["bookrack", "libraries", "config", "prod", "ollama_url"],
+            vec!["bookrack", "libraries", "config", "prod", "search.top_k"],
             vec!["bookrack", "libraries", "config", "prod", "=value"],
-            vec!["bookrack", "libraries", "config", "prod", "ollama_url="],
+            vec!["bookrack", "libraries", "config", "prod", "search.top_k="],
         ] {
             let Err(err) = Cli::try_parse_from(argv.iter().copied()) else {
                 panic!("a malformed pair must error: {argv:?}");
@@ -2422,7 +2421,7 @@ mod tests {
         // open corpus.db either (that would write tables into a store
         // verify is supposed to only read).
         let tmp = tempfile::tempdir().expect("tempdir");
-        let cfg = Config::new(tmp.path().to_path_buf(), "http://localhost:0".to_string());
+        let cfg = Config::new(tmp.path().to_path_buf());
         let report = bookrack_runtime::cmd::verify::build_verify_report(&cfg);
         assert!(report.not_initialised);
         assert!(!report.books.catalog_schema_ok);
@@ -2507,7 +2506,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let data_dir = tmp.path().to_path_buf();
         std::fs::create_dir_all(data_dir.join("logs")).unwrap();
-        let cfg = Config::new(data_dir, "http://localhost:0/".to_string());
+        let cfg = Config::new(data_dir);
         let out = tmp.path().join("custom.tar.gz");
         bookrack_runtime::cmd::diagnose::run(&cfg, Some(out.clone()), 7, false).expect("collect");
         assert!(out.exists());

@@ -133,7 +133,6 @@ async fn a_routed_method_honours_the_key_the_registry_declares() -> Result<()> {
     let runtime_root = tempfile::tempdir()?;
 
     let mut opts = RuntimeOpts::headless(None, Some("alpha".to_string()));
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
     let runtime = DaemonRuntime::start(opts).await?;
     let sock = runtime.control_sock.path.clone();

@@ -34,7 +34,8 @@ use bookrack_config::reranker_model_pin::{
     RerankerModelLocation, locate_reranker_model, reranker_model_pin,
 };
 use bookrack_config::{
-    Config, DEFAULT_RERANKER_CTX, RERANKER_MODEL_ENV, RERANKER_SERVER_BATCH_SIZE, RerankerConfig,
+    Config, DEFAULT_RERANKER_CTX, DaemonConfig, RERANKER_MODEL_ENV, RERANKER_SERVER_BATCH_SIZE,
+    RERANKER_URL_ENV, RerankerConfig,
 };
 use bookrack_core::{Explain, Problem};
 use bookrack_index_profile::{RerankerKind, RerankerSpec};
@@ -397,7 +398,7 @@ pub(crate) fn disagreement_problem(
 ///
 /// Dispatch on the deployment mode: no backend at all when the
 /// profile enables no reranker stage; a single hard `/health` probe
-/// when `reranker.url` (or its env override) names an operator-run
+/// when [`RERANKER_URL_ENV`] names an operator-run
 /// server — the operator owns that process, so nothing is spawned and
 /// no supervisor exists; otherwise the artifacts are located and a
 /// supervised llama-server is spawned and held to readiness. Either
@@ -409,6 +410,7 @@ pub(crate) fn disagreement_problem(
 /// mounted library is one the whole set resolves to.
 pub async fn bring_up_reranker(
     cfg: &Config,
+    daemon: &DaemonConfig,
     runtime_dir: &Path,
     on_state: Option<StateCallback>,
 ) -> eyre::Result<Option<RerankerRuntime>> {
@@ -421,7 +423,7 @@ pub async fn bring_up_reranker(
     if spec.kind == RerankerKind::None {
         return Ok(None);
     }
-    let reranker_cfg = RerankerConfig::resolve(cfg.root_config());
+    let reranker_cfg = daemon.reranker.clone();
     bring_up_backend(
         &effective.profile.name,
         spec.model.as_deref(),
@@ -508,7 +510,7 @@ impl Explain for RerankerModelState {
             ))
             .hint(format!(
                 "Point {RERANKER_MODEL_ENV} at its GGUF file, or serve it and set \
-                         reranker.url."
+                         {RERANKER_URL_ENV}."
             )),
         }
     }
@@ -570,7 +572,7 @@ async fn bring_up_backend(
             }),
             not_ready => bail!(
                 "the rerank server at {url} is not ready ({detail}); profile '{profile}' \
-                 promises a reranker stage. Fix the server behind reranker.url, or switch \
+                 promises a reranker stage. Fix the server behind {RERANKER_URL_ENV}, or switch \
                  to a profile without a reranker stage.",
                 detail = match &not_ready {
                     ServerHealth::Starting => "still loading its model".to_string(),
@@ -599,10 +601,7 @@ async fn bring_up_backend(
                  is installed; run `bookrack doctor --install-reranker`"
             )
         })?;
-        let mut config = RerankSupervisorConfig::new(bin, model);
-        config.ctx = reranker_cfg.ctx.or(config.ctx);
-        config.threads = reranker_cfg.threads;
-        config.pid_file = Some(runtime_dir.join(LLAMA_SERVER_PID_FILENAME));
+        let config = supervised_config(bin, model, &reranker_cfg, runtime_dir);
         let supervisor = RerankSupervisor::start(config, on_state)
             .await
             .context("bring up the supervised llama-server")?;
@@ -612,6 +611,23 @@ async fn bring_up_backend(
             stage,
         })
     }
+}
+
+/// The supervised server's configuration: the located artifacts, the
+/// context size and thread count the daemon resolved, and the pid file
+/// under the runtime directory. An unset context size keeps the
+/// supervisor's own default.
+fn supervised_config(
+    bin: PathBuf,
+    model: PathBuf,
+    reranker_cfg: &RerankerConfig,
+    runtime_dir: &Path,
+) -> RerankSupervisorConfig {
+    let mut config = RerankSupervisorConfig::new(bin, model);
+    config.ctx = reranker_cfg.ctx.or(config.ctx);
+    config.threads = reranker_cfg.threads;
+    config.pid_file = Some(runtime_dir.join(LLAMA_SERVER_PID_FILENAME));
+    config
 }
 
 /// Build the search ops' stage: the rerank client pointed at the
@@ -1031,7 +1047,7 @@ mod tests {
 
     /// The pinned deployment argument set: pair-sized batches, GPU
     /// offload, slot-similarity reuse off, and a workload-sized
-    /// default context that an operator `reranker.ctx` override
+    /// default context that the operator's context-size variable
     /// replaces.
     #[test]
     fn server_args_pin_the_deployment_set() {
@@ -1049,6 +1065,42 @@ mod tests {
         assert!(has_pair(&config, "-c", "8192"));
         config.ctx = Some(4096);
         assert!(has_pair(&config, "-c", "4096"));
+    }
+
+    #[test]
+    fn the_supervised_server_takes_ctx_and_threads_from_the_daemon_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let args_of = |reranker: &RerankerConfig| -> Vec<String> {
+            let config = supervised_config(
+                PathBuf::from("llama-server"),
+                PathBuf::from("model.gguf"),
+                reranker,
+                dir.path(),
+            );
+            server_args(&config, 8080)
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        };
+        let pair = |args: &[String], name: &str| -> Option<String> {
+            args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone())
+        };
+
+        let daemon = crate::cmd::test_fixtures::daemon_from([
+            (bookrack_config::RERANKER_CTX_ENV, "4096"),
+            (bookrack_config::RERANKER_THREADS_ENV, "3"),
+        ]);
+        let set = args_of(&daemon.reranker);
+        assert_eq!(pair(&set, "-c").as_deref(), Some("4096"));
+        assert_eq!(pair(&set, "--threads").as_deref(), Some("3"));
+
+        let bare = args_of(&crate::cmd::test_fixtures::test_daemon().reranker);
+        assert_eq!(
+            pair(&bare, "-c"),
+            Some(DEFAULT_RERANKER_CTX.to_string()),
+            "an unset context keeps the working-set size"
+        );
+        assert_eq!(pair(&bare, "--threads"), None, "the server chooses");
     }
 
     fn recorded_pid(config: &RerankSupervisorConfig) -> u32 {
@@ -1352,7 +1404,7 @@ mod tests {
         .unwrap_err();
         let text = err.to_string();
         assert!(text.contains("quality"), "{text}");
-        assert!(text.contains("reranker.url"), "{text}");
+        assert!(text.contains(RERANKER_URL_ENV), "{text}");
     }
 
     #[tokio::test]

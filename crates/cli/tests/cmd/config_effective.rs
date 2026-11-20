@@ -546,3 +546,70 @@ async fn the_retired_section_is_present_when_empty() -> Result<()> {
     );
     Ok(())
 }
+
+/// A library's search preferences are its own: under one environment
+/// two libraries report their own values, and a variable an earlier
+/// release read for them moves neither.
+#[tokio::test]
+async fn two_libraries_keep_their_own_top_k_under_one_environment() -> Result<()> {
+    let sandbox = Sandbox::new();
+    let a = sandbox.data_root("a");
+    let b = sandbox.data_root("b");
+    sandbox.write_registry_entries(None, &[("a", &a), ("b", &b)]);
+    std::fs::write(a.join("config.toml"), "[search]\ntop_k = 2\n")?;
+    let env = [("BOOKRACK_SEARCH_TOP_K", "9")];
+
+    for (library, value, layer) in [("a", "2", "file"), ("b", "5", "default")] {
+        let out = run(&sandbox, &["--library", library, "--json"], &env).await?;
+        let report = report(&out)?;
+        let top_k = row(&report, "search.top_k").expect("search.top_k row");
+        assert_eq!(top_k["value"], value, "library {library}: {top_k}");
+        assert_eq!(top_k["layer"], layer, "library {library}: {top_k}");
+        let sites: Vec<&str> = top_k["chain"]
+            .as_array()
+            .expect("chain")
+            .iter()
+            .filter_map(|site| site["layer"].as_str())
+            .collect();
+        assert_eq!(sites, ["file", "default"], "library {library}: {top_k}");
+    }
+    Ok(())
+}
+
+/// The Ollama endpoint is the machine's. A value a library's
+/// `config.toml` still carries is reported as a retired key and
+/// resolves nothing.
+#[tokio::test]
+async fn a_retired_ollama_url_in_config_toml_is_not_used() -> Result<()> {
+    let sandbox = Sandbox::new();
+    let root = sandbox.data_root("main");
+    std::fs::write(
+        root.join("config.toml"),
+        "ollama_url = \"http://library-host:1\"\n",
+    )?;
+    let data_dir = root.display().to_string();
+
+    let out = run(&sandbox, &["--data-dir", &data_dir, "--json"], &[]).await?;
+    let report = report(&out)?;
+    let url = row(&report, "ollama_url").expect("ollama_url row");
+    assert_eq!(
+        url["value"], "http://localhost:11434",
+        "the library's file moved the machine's endpoint: {url}"
+    );
+    assert_eq!(url["layer"], "default", "{url}");
+    assert_eq!(url["reach"], "machine", "{url}");
+    assert_eq!(url["read_at"], "before_resolution", "{url}");
+    assert!(url.get("scope_instance").is_none(), "{url}");
+    assert!(
+        !url.to_string().contains("library-host"),
+        "the file's value is reported nowhere on the row: {url}"
+    );
+    let notices: Vec<&str> = report["config_notices"]
+        .as_array()
+        .expect("config_notices")
+        .iter()
+        .filter_map(|notice| notice["key"].as_str())
+        .collect();
+    assert_eq!(notices, ["ollama_url"], "{report}");
+    Ok(())
+}

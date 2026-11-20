@@ -38,9 +38,12 @@ impl From<IndexStamps> for StampsReconcileReport {
 
 /// Probe the live embedder for its vector width and write this build's
 /// index stamps onto the book corpus. Returns the stamps written.
-pub async fn reconcile(cfg: &Config) -> Result<StampsReconcileReport> {
-    let embed_cfg = crate::profile::effective_embed_config(cfg)?;
-    let embedder = embedder(cfg, &embed_cfg)?;
+pub async fn reconcile(
+    cfg: &Config,
+    daemon: &bookrack_config::DaemonConfig,
+) -> Result<StampsReconcileReport> {
+    let embed_cfg = crate::profile::effective_embed_config(cfg, daemon)?;
+    let embedder = embedder(&embed_cfg)?;
     // Probe the embedder once for its current vector dimension. The
     // probe is the only network call this command makes; the corpus
     // write happens locally.
@@ -75,13 +78,15 @@ mod tests {
     #[tokio::test]
     async fn reconcile_reports_the_stamps_it_wrote() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let cfg = Config::new(
-            dir.path().to_path_buf(),
-            EmbedStub::shared().url().to_string(),
-        );
+        let cfg = Config::new(dir.path().to_path_buf());
         Corpus::open_for_write(&cfg.corpus_db()).expect("seed corpus");
 
-        let report = reconcile(&cfg).await.expect("reconcile");
+        let report = reconcile(
+            &cfg,
+            &crate::cmd::test_fixtures::daemon_at(EmbedStub::shared().url()),
+        )
+        .await
+        .expect("reconcile");
 
         assert_eq!(report.vector_dim as usize, EmbedStub::DIMENSION);
         let corpus = Corpus::open_for_write(&cfg.corpus_db()).expect("reopen corpus");

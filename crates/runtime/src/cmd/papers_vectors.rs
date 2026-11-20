@@ -164,7 +164,11 @@ pub async fn drop(cfg: &Config) -> Result<AnnDropReport> {
 ///
 /// A failure of the reset pass itself carries [`ResetInterrupted`]; a
 /// failure while setting it up does not.
-pub async fn reset(cfg: &Config, resume: bool) -> Result<VectorsResetReport> {
+pub async fn reset(
+    cfg: &Config,
+    daemon: &bookrack_config::DaemonConfig,
+    resume: bool,
+) -> Result<VectorsResetReport> {
     if resume && !has_extracted_intakes(cfg)? {
         return Ok(VectorsResetReport {
             resumed: true,
@@ -172,8 +176,8 @@ pub async fn reset(cfg: &Config, resume: bool) -> Result<VectorsResetReport> {
         });
     }
 
-    let (embed_cfg, declaration) = crate::profile::effective_embed_declaration(cfg)?;
-    let embedder_client = embedder(cfg, &embed_cfg)?;
+    let (embed_cfg, declaration) = crate::profile::effective_embed_declaration(cfg, daemon)?;
+    let embedder_client = embedder(&embed_cfg)?;
     refuse_dimension_mismatch(&embedder_client, &embed_cfg.model, declaration.as_ref()).await?;
 
     let lancedb_dir = cfg.papers_lancedb_dir();
@@ -246,6 +250,7 @@ pub async fn plan_reembed(
 /// the call aborts without writing.
 pub async fn execute_reembed_from_plan(
     cfg: &Config,
+    daemon: &bookrack_config::DaemonConfig,
     pinned_ids: Vec<i64>,
 ) -> Result<bookrack_ops::pipeline::paper::reembed::ReembedReport> {
     let lancedb_dir = cfg.papers_lancedb_dir();
@@ -253,8 +258,8 @@ pub async fn execute_reembed_from_plan(
         .context("open papers catalog")?;
     let mut corpus =
         Corpus::open_for_write(&cfg.papers_corpus_db()).context("open papers corpus")?;
-    let embed_cfg = crate::profile::effective_embed_config(cfg)?;
-    let embedder_client = embedder(cfg, &embed_cfg)?;
+    let embed_cfg = crate::profile::effective_embed_config(cfg, daemon)?;
+    let embedder_client = embedder(&embed_cfg)?;
     let run = open_run(
         &catalog,
         &cfg.papers_catalog_db(),
@@ -283,10 +288,7 @@ mod tests {
 
     fn temp_cfg() -> (tempfile::TempDir, Config) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let cfg = Config::new(
-            dir.path().to_path_buf(),
-            "http://localhost:11434".to_string(),
-        );
+        let cfg = Config::new(dir.path().to_path_buf());
         // `drop` names this module's command function, so the seed
         // handles are released by falling out of the statement.
         Catalog::open_for_write_unbacked(&cfg.papers_catalog_db()).expect("seed paper catalog");
@@ -311,7 +313,7 @@ mod tests {
     async fn reset_registers_and_closes_one_run_on_the_paper_catalog() {
         let (_tmp, cfg) = temp_cfg();
 
-        let report = reset(&cfg, false)
+        let report = reset(&cfg, &crate::cmd::test_fixtures::test_daemon(), false)
             .await
             .expect("reset succeeds on an empty library");
 
@@ -338,7 +340,9 @@ mod tests {
     async fn a_resume_with_nothing_to_resume_reports_zero_and_registers_nothing() {
         let (_tmp, cfg) = temp_cfg();
 
-        let report = reset(&cfg, true).await.expect("resume");
+        let report = reset(&cfg, &crate::cmd::test_fixtures::test_daemon(), true)
+            .await
+            .expect("resume");
 
         assert_eq!(
             report,
@@ -360,7 +364,7 @@ mod tests {
         assert!(plan.is_empty(), "an empty library plans no work");
         assert!(runs(&cfg).is_empty(), "the plan leg registers nothing");
 
-        execute_reembed_from_plan(&cfg, Vec::new())
+        execute_reembed_from_plan(&cfg, &crate::cmd::test_fixtures::test_daemon(), Vec::new())
             .await
             .expect("execute");
 
@@ -487,7 +491,9 @@ mod tests {
     async fn a_resume_on_an_empty_root_reports_zero_and_creates_no_store() {
         let (tmp, cfg) = empty_cfg();
 
-        let report = reset(&cfg, true).await.expect("resume on an empty root");
+        let report = reset(&cfg, &crate::cmd::test_fixtures::test_daemon(), true)
+            .await
+            .expect("resume on an empty root");
 
         assert_eq!(
             report,
@@ -507,7 +513,7 @@ mod tests {
     async fn a_reset_refused_on_dimension_creates_no_store() {
         let stub = bookrack_test_support::EmbedStub::start();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let cfg = Config::new(tmp.path().to_path_buf(), stub.url().to_string());
+        let cfg = Config::new(tmp.path().to_path_buf());
         bookrack_config::set_manifest_index_profile(
             tmp.path(),
             Some(bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT),
@@ -520,9 +526,13 @@ mod tests {
         )
         .expect("write a manifest declaring a built-in profile");
 
-        let err = reset(&cfg, false)
-            .await
-            .expect_err("the stub's width is not the profile's");
+        let err = reset(
+            &cfg,
+            &crate::cmd::test_fixtures::daemon_at(stub.url()),
+            false,
+        )
+        .await
+        .expect_err("the stub's width is not the profile's");
 
         assert!(
             err.chain().any(|cause| matches!(

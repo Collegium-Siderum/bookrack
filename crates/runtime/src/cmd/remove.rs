@@ -408,10 +408,7 @@ mod tests {
 
     fn temp_cfg() -> (tempfile::TempDir, Config) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let cfg = Config::new(
-            dir.path().to_path_buf(),
-            "http://localhost:11434".to_string(),
-        );
+        let cfg = Config::new(dir.path().to_path_buf());
         (dir, cfg)
     }
 

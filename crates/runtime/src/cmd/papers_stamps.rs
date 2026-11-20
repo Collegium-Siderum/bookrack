@@ -16,9 +16,12 @@ use crate::embed_helpers::embedder;
 /// Probe the live embedder for its vector width and write the paper
 /// pipeline's index stamps onto `papers_corpus.db`. Returns the stamps
 /// written.
-pub async fn reconcile(cfg: &Config) -> Result<StampsReconcileReport> {
-    let embed_cfg = crate::profile::effective_embed_config(cfg)?;
-    let embedder = embedder(cfg, &embed_cfg)?;
+pub async fn reconcile(
+    cfg: &Config,
+    daemon: &bookrack_config::DaemonConfig,
+) -> Result<StampsReconcileReport> {
+    let embed_cfg = crate::profile::effective_embed_config(cfg, daemon)?;
+    let embedder = embedder(&embed_cfg)?;
     let probe = embedder
         .embed_batch(&[bookrack_embed::DIMENSION_PROBE_TEXT.to_string()])
         .await
@@ -49,13 +52,15 @@ mod tests {
     #[tokio::test]
     async fn reconcile_reports_the_stamps_it_wrote_on_the_paper_corpus() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let cfg = Config::new(
-            dir.path().to_path_buf(),
-            EmbedStub::shared().url().to_string(),
-        );
+        let cfg = Config::new(dir.path().to_path_buf());
         Corpus::open_for_write(&cfg.papers_corpus_db()).expect("seed paper corpus");
 
-        let report = reconcile(&cfg).await.expect("reconcile");
+        let report = reconcile(
+            &cfg,
+            &crate::cmd::test_fixtures::daemon_at(EmbedStub::shared().url()),
+        )
+        .await
+        .expect("reconcile");
 
         assert_eq!(report.vector_dim as usize, EmbedStub::DIMENSION);
         let corpus = Corpus::open_for_write(&cfg.papers_corpus_db()).expect("reopen paper corpus");

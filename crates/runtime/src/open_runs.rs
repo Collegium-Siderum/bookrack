@@ -320,7 +320,7 @@ mod tests {
     use bookrack_catalog::{RunLock, run_lock_path};
 
     fn cfg_at(root: &Path) -> Config {
-        Config::new(root.to_path_buf(), "http://127.0.0.1:11434".to_string())
+        Config::new(root.to_path_buf())
     }
 
     /// Leave behind the record a killed process leaves: the file

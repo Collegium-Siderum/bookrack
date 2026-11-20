@@ -112,7 +112,7 @@ impl Fixture {
         // real store instead of reporting a missing one.
         drop(Corpus::open_for_write(&data_dir.join("corpus.db")).unwrap());
 
-        let cfg = Config::new(data_dir, "http://localhost:0/".to_string());
+        let cfg = Config::new(data_dir);
         Fixture { _tmp: tmp, cfg }
     }
 }
@@ -589,7 +589,7 @@ fn collect_with_an_empty_logs_dir_still_succeeds() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_path_buf();
     // Note: no logs/ directory and no catalog.db.
-    let cfg = Config::new(data_dir, "http://localhost:0/".to_string());
+    let cfg = Config::new(data_dir);
     let opts = Options {
         now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
         ..Options::default()

@@ -45,7 +45,6 @@ async fn set_default_flips_the_registry_and_the_in_memory_pointer() -> Result<()
     let runtime_root = tempfile::tempdir()?;
 
     let mut opts = RuntimeOpts::headless(None, Some("alpha".to_string()));
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
     let runtime = DaemonRuntime::start(opts).await?;
 

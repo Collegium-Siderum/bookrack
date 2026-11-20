@@ -66,8 +66,9 @@ pub fn run(selection: &bookrack_config::LibrarySelection, action: RetrievalActio
             // The threshold is the target library's own: `cfg` already
             // resolved `<data_root>/config.toml` under the env layer, so
             // the advisory reports the same value a query would use.
-            let weak =
-                bookrack_config::SearchConfig::resolve(cfg.root_config()).weak_distance_threshold;
+            let weak = bookrack_config::LibraryConfig::resolve(cfg.root_config(), None)
+                .search
+                .weak_distance_threshold;
             println!("{}", render_retrieval_show(&call, &hits, weak));
         }
     }

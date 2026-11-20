@@ -75,6 +75,7 @@ pub struct ReembedSummary {
 /// outcome before any store is opened.
 pub async fn execute_rebuild_from_plan(
     cfg: &Config,
+    daemon: &bookrack_config::DaemonConfig,
     pinned_ids: Vec<i64>,
     include_vectors: bool,
 ) -> Result<ExecuteRebuildOutcome> {
@@ -106,8 +107,8 @@ pub async fn execute_rebuild_from_plan(
 
     if include_vectors {
         let lancedb_dir = cfg.lancedb_dir();
-        let embed_cfg = crate::profile::effective_embed_config(cfg)?;
-        let embedder_client = embedder(cfg, &embed_cfg)?;
+        let embed_cfg = crate::profile::effective_embed_config(cfg, daemon)?;
+        let embedder_client = embedder(&embed_cfg)?;
         let reembed = bookrack_ops::pipeline::book::reembed::reembed_all(
             &catalog,
             &corpus,
@@ -131,7 +132,7 @@ pub async fn execute_rebuild_from_plan(
         });
     } else {
         let lancedb_dir = cfg.lancedb_dir();
-        let embed_cfg = crate::profile::effective_embed_config(cfg)?;
+        let embed_cfg = crate::profile::effective_embed_config(cfg, daemon)?;
         let stamped = bookrack_ops::pipeline::book::rebuild::stamp_index_from_existing_chunks(
             &corpus,
             &lancedb_dir,
@@ -212,9 +213,14 @@ mod tests {
     async fn executing_an_empty_plan_on_an_empty_root_creates_no_store() {
         let (tmp, cfg) = temp_cfg();
 
-        let outcome = execute_rebuild_from_plan(&cfg, Vec::new(), false)
-            .await
-            .expect("an empty plan executes");
+        let outcome = execute_rebuild_from_plan(
+            &cfg,
+            &crate::cmd::test_fixtures::test_daemon(),
+            Vec::new(),
+            false,
+        )
+        .await
+        .expect("an empty plan executes");
 
         assert!(outcome.report.rebuilt.is_empty(), "{outcome:?}");
         assert!(

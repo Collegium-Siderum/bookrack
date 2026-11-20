@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use bookrack_config::{Config, LibrarySelection};
+use bookrack_config::{Config, DaemonConfig, LibrarySelection};
 use bookrack_core::Problem;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry, MountGuard, RegistryError};
@@ -147,6 +147,7 @@ pub struct Mounter {
     registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     rerank_stage: Option<RerankStage>,
     caller: Caller,
+    daemon_config: Arc<DaemonConfig>,
 }
 
 impl Mounter {
@@ -155,11 +156,13 @@ impl Mounter {
         registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
         rerank_stage: Option<RerankStage>,
         caller: Caller,
+        daemon_config: Arc<DaemonConfig>,
     ) -> Mounter {
         Mounter {
             registry,
             rerank_stage,
             caller,
+            daemon_config,
         }
     }
 
@@ -212,11 +215,12 @@ impl Mounter {
         // disagreement refuses the mount rather than restarting a
         // backend the serving libraries did not ask to have restarted.
         self.agree_on_reranker(name, &cfg)?;
-        crate::backend_probe::preflight_embed_backends(&mounts).await?;
+        crate::backend_probe::preflight_embed_backends(&mounts, &self.daemon_config).await?;
 
         let guard = self.lock_root(name, &cfg)?;
         let handle = crate::daemon::build_library_handle(
             cfg,
+            &self.daemon_config,
             name,
             self.rerank_stage.as_ref(),
             self.caller.clone(),
@@ -444,10 +448,7 @@ mod tests {
             dir.join("backup"),
             Caller::cli(),
         );
-        let cfg = Arc::new(Config::new(
-            dir.to_path_buf(),
-            "http://127.0.0.1:11434".to_string(),
-        ));
+        let cfg = Arc::new(Config::new(dir.to_path_buf()));
         let lock =
             RootLock::acquire(dir, std::process::id(), "daemon").expect("take the root lock");
         let guard: MountGuard = Arc::new(lock);
@@ -487,7 +488,12 @@ mod tests {
         let only = tempfile::tempdir().expect("tempdir");
         let registry = LibraryRegistry::from_handles([locked_handle("only", only.path())], None)
             .expect("one library");
-        let mounter = Mounter::new(Arc::clone(&registry), None, Caller::cli());
+        let mounter = Mounter::new(
+            Arc::clone(&registry),
+            None,
+            Caller::cli(),
+            Arc::new(crate::cmd::test_fixtures::test_daemon()),
+        );
         let facts = UnmountFacts {
             primary: None,
             queued_jobs: 0,

@@ -166,7 +166,6 @@ async fn a_job_targeting_a_library_runs_under_that_librarys_parameters() -> Resu
     let beta_root = sandbox.data_root("beta-root");
 
     let mut opts = bookrack_runtime::RuntimeOpts::headless(None, Some("alpha".to_string()));
-    opts.no_mcp = true;
     opts.spawn_queue_worker = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
     let runtime = bookrack_runtime::DaemonRuntime::start(opts).await?;
@@ -260,7 +259,6 @@ async fn the_status_card_reports_the_named_librarys_identity() -> Result<()> {
     let beta_root = sandbox.data_root("beta-root");
 
     let mut opts = bookrack_runtime::RuntimeOpts::headless(None, Some("alpha".to_string()));
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
     let runtime = bookrack_runtime::DaemonRuntime::start(opts).await?;
     let sock = runtime.control_sock.path.clone();
@@ -326,7 +324,6 @@ async fn a_write_method_acts_on_the_library_its_parameter_names() -> Result<()> 
     let beta_root = sandbox.data_root("beta-root");
 
     let mut opts = bookrack_runtime::RuntimeOpts::headless(None, Some("alpha".to_string()));
-    opts.no_mcp = true;
     // `dryrun` is queue-bound; a headless daemon without a worker
     // short-circuits it before the handler runs.
     opts.spawn_queue_worker = true;
@@ -403,7 +400,6 @@ async fn a_write_announces_the_library_it_changed() -> Result<()> {
     let _ = sandbox.data_root("beta-root");
 
     let mut opts = bookrack_runtime::RuntimeOpts::headless(None, Some("alpha".to_string()));
-    opts.no_mcp = true;
     opts.spawn_queue_worker = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
     let runtime = bookrack_runtime::DaemonRuntime::start(opts).await?;

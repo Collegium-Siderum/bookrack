@@ -338,7 +338,6 @@ async fn a_live_daemon_refuses_the_offline_repair_as_operator_input() {
     let runtime_root = tempfile::tempdir().expect("runtime root");
 
     let mut opts = RuntimeOpts::headless(Some(data_root.path().into()), None);
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.path().into());
     let runtime = DaemonRuntime::start(opts).await.expect("daemon starts");
     let shutdown_tx = runtime.shutdown_tx.clone();

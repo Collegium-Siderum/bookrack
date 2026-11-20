@@ -34,7 +34,7 @@ use tokio::sync::broadcast;
 /// into the OS temp dir and are never created or opened.
 fn stub_registry() -> Arc<LibraryRegistry<OllamaEmbedClient>> {
     let root = std::env::temp_dir().join("bookrack-mcp-identity-stub");
-    let cfg = Arc::new(Config::new(root, "http://127.0.0.1:1".to_string()));
+    let cfg = Arc::new(Config::new(root));
     let ops = Ops::<OllamaEmbedClient>::catalog_only(
         cfg.corpus_db(),
         cfg.catalog_db(),

@@ -75,7 +75,6 @@ fn contents(root: &Path) -> Vec<String> {
 
 fn headless(name: &str, runtime_root: &Path) -> RuntimeOpts {
     let mut opts = RuntimeOpts::headless(None, Some(name.to_string()));
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.to_path_buf());
     opts
 }

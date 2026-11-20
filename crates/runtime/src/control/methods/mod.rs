@@ -132,6 +132,8 @@ pub struct MethodContext {
     pub shutdown_tx: broadcast::Sender<()>,
     /// Which daemon this is; reported by `daemon.version` and `status`.
     pub identity: DaemonIdentity,
+    /// The process-level configuration the daemon was started with.
+    pub daemon_config: Arc<bookrack_config::DaemonConfig>,
     pub selection: LibrarySelection,
     /// Name of the primary (bring-up-selected) library. A single-value
     /// snapshot consumed by the `status` card and the `library.changed`
@@ -869,6 +871,13 @@ pub(crate) fn test_method_context(
             control_sock: None,
             started_at: "2026-01-01T00:00:00Z".to_string(),
         },
+        daemon_config: Arc::new(bookrack_config::DaemonConfig::resolve(
+            &bookrack_config::EnvSnapshot::default(),
+            &bookrack_config::DaemonFlags {
+                no_mcp: true,
+                ..bookrack_config::DaemonFlags::default()
+            },
+        )),
         selection: LibrarySelection::default(),
         library_name: library_name.unwrap_or("default").to_string(),
         auto_registered: Vec::new(),
@@ -902,10 +911,7 @@ pub(crate) fn test_library_handle(
         dir.join("backup"),
         Caller::cli(),
     );
-    let cfg = Arc::new(Config::new(
-        dir.to_path_buf(),
-        "http://127.0.0.1:11434".to_string(),
-    ));
+    let cfg = Arc::new(Config::new(dir.to_path_buf()));
     LibraryHandle::new(name, cfg, ops)
 }
 

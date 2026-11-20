@@ -163,8 +163,9 @@ async fn reembed_execute_from_plan(
         .map_err(plan_lookup_err)?;
     let plan: RegisteredReembedPlan = serde_json::from_slice(&payload)
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("decode plan payload: {e}")))?;
+    let daemon = std::sync::Arc::clone(&ctx.daemon_config);
     run_write(ctx, handle.name(), move || async move {
-        let report = vectors::execute_reembed_from_plan(&cfg, plan.pinned_ids)
+        let report = vectors::execute_reembed_from_plan(&cfg, &daemon, plan.pinned_ids)
             .await
             .map_err(|e| handler_err("vectors.reembed", e))?;
         let chunks_written: usize = report
@@ -201,8 +202,9 @@ pub async fn reset(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
         .get(parsed.library.as_deref())
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
+    let daemon = std::sync::Arc::clone(&ctx.daemon_config);
     run_write(ctx, handle.name(), move || async move {
-        let report = vectors::reset(&cfg, parsed.resume)
+        let report = vectors::reset(&cfg, &daemon, parsed.resume)
             .await
             .map_err(|e| reset_err("vectors.reset", e))?;
         ok_reply(&report)

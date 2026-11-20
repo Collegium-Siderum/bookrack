@@ -4,16 +4,37 @@
 
 use std::path::Path;
 
-use bookrack_config::Config;
+use bookrack_config::{Config, DaemonConfig, DaemonFlags, EnvSnapshot, OLLAMA_URL_ENV};
 
 /// A `Config` over a fresh, empty data root.
 pub(crate) fn temp_cfg() -> (tempfile::TempDir, Config) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let cfg = Config::new(
-        dir.path().to_path_buf(),
-        "http://localhost:11434".to_string(),
-    );
+    let cfg = Config::new(dir.path().to_path_buf());
     (dir, cfg)
+}
+
+/// A process-level configuration whose embed endpoint is `ollama_url`
+/// and that serves no MCP listener, resolved from nothing else.
+pub(crate) fn daemon_at(ollama_url: &str) -> DaemonConfig {
+    daemon_from([(OLLAMA_URL_ENV, ollama_url)])
+}
+
+/// A process-level configuration resolved from exactly `pairs`, serving
+/// no MCP listener.
+pub(crate) fn daemon_from<const N: usize>(pairs: [(&str, &str); N]) -> DaemonConfig {
+    DaemonConfig::resolve(
+        &EnvSnapshot::from_pairs(pairs),
+        &DaemonFlags {
+            no_mcp: true,
+            ..DaemonFlags::default()
+        },
+    )
+}
+
+/// [`daemon_at`] an endpoint nothing listens on, for a test that must
+/// not reach a backend.
+pub(crate) fn test_daemon() -> DaemonConfig {
+    daemon_at(bookrack_config::UNROUTED_OLLAMA_URL)
 }
 
 /// The stores sitting directly under `root`, sorted: every `*.db` file

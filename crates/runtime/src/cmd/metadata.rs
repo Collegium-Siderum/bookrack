@@ -97,11 +97,12 @@ impl From<&EmbedRunReport> for ResumeCounts {
 /// after its own argument checks. Returns what the write did.
 pub async fn run_write(
     cfg: &Config,
+    daemon: &bookrack_config::DaemonConfig,
     action: WriteMetadataAction,
     profile_name: Option<&str>,
 ) -> Result<MetadataWriteReport> {
     if let WriteMetadataAction::Advance { book } = action {
-        let report = advance(cfg, book, profile_name).await?;
+        let report = advance(cfg, daemon, book, profile_name).await?;
         return Ok(MetadataWriteReport::Advanced {
             book,
             resumed: true,
@@ -174,7 +175,9 @@ pub async fn run_write(
         WriteMetadataAction::Approve { book, reason } => {
             let outcome = approve(&ops, book, reason.as_deref())?;
             let resume = if book_is_parked_at_metadata(cfg, book)? {
-                Some(ResumeCounts::from(&advance(cfg, book, profile_name).await?))
+                Some(ResumeCounts::from(
+                    &advance(cfg, daemon, book, profile_name).await?,
+                ))
             } else {
                 None
             };
@@ -434,8 +437,13 @@ fn reject(ops: &Ops<OllamaEmbedClient>, book: i64, reason: &str) -> Result<Write
     }
 }
 
-async fn advance(cfg: &Config, book: i64, profile_name: Option<&str>) -> Result<EmbedRunReport> {
-    let embed_cfg = crate::profile::effective_embed_config(cfg)?;
+async fn advance(
+    cfg: &Config,
+    daemon: &bookrack_config::DaemonConfig,
+    book: i64,
+    profile_name: Option<&str>,
+) -> Result<EmbedRunReport> {
+    let embed_cfg = crate::profile::effective_embed_config(cfg, daemon)?;
     let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open corpus")?;
     let mut catalog =
         Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
@@ -471,7 +479,7 @@ async fn advance(cfg: &Config, book: i64, profile_name: Option<&str>) -> Result<
         audit_profile,
         ..Default::default()
     };
-    let embedder = embedder(cfg, &params.embed)?;
+    let embedder = embedder(&params.embed)?;
 
     let report = resume_from_chunk(
         &mut corpus,
@@ -527,17 +535,14 @@ mod tests {
     fn library_with_book() -> (tempfile::TempDir, Config, i64) {
         let dir = tempfile::tempdir().expect("tempdir");
         let book = seed_intake(dir.path(), "sha-report");
-        let cfg = Config::new(
-            dir.path().to_path_buf(),
-            "http://127.0.0.1:11434".to_string(),
-        );
+        let cfg = Config::new(dir.path().to_path_buf());
         (dir, cfg, book)
     }
 
     /// Run one write through the cmd entry point and return its report
     /// as the control plane serializes it.
     async fn report(cfg: &Config, action: WriteMetadataAction) -> serde_json::Value {
-        let report = run_write(cfg, action, None)
+        let report = run_write(cfg, &crate::cmd::test_fixtures::test_daemon(), action, None)
             .await
             .expect("the write succeeds");
         serde_json::to_value(report).expect("the report serializes")
@@ -785,6 +790,7 @@ mod tests {
 
         let err = run_write(
             &cfg,
+            &crate::cmd::test_fixtures::test_daemon(),
             WriteMetadataAction::Set {
                 book: 1,
                 field: "no_such_field".to_string(),

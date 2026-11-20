@@ -176,7 +176,6 @@ async fn an_unnamed_submit_lands_on_the_registry_default() -> Result<()> {
 
     // `alpha` is the registry default; come up under `beta`.
     let mut opts = RuntimeOpts::headless(None, Some("beta".to_string()));
-    opts.no_mcp = true;
     opts.spawn_queue_worker = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
     let runtime = DaemonRuntime::start(opts).await?;
@@ -274,7 +273,6 @@ async fn a_submit_naming_an_unknown_library_is_refused_before_enqueueing() -> Re
     let f = fixtures(fixture_dir.path())?;
 
     let mut opts = RuntimeOpts::headless(None, Some("alpha".to_string()));
-    opts.no_mcp = true;
     opts.spawn_queue_worker = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
     let runtime = DaemonRuntime::start(opts).await?;

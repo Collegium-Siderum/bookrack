@@ -19,17 +19,18 @@ use crate::render;
 
 pub async fn run(
     cfg: &Config,
+    daemon: &bookrack_config::DaemonConfig,
     path: &Path,
     recursive: bool,
     hold_for_metadata: bool,
     force: bool,
     profile_name: Option<&str>,
 ) -> Result<()> {
-    let embed_cfg = crate::profile::effective_embed_config(cfg)?;
+    let embed_cfg = crate::profile::effective_embed_config(cfg, daemon)?;
     let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open corpus")?;
     let mut catalog =
         Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
-    let embedder = embedder(cfg, &embed_cfg)?;
+    let embedder = embedder(&embed_cfg)?;
     let audit_data = load_audit_data(cfg);
     let audit_profile = load_audit_profile(cfg, profile_name);
     let heading_patterns = load_heading_patterns(cfg);

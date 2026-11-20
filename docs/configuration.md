@@ -183,52 +183,49 @@ manifest, the registry, and the built-in defaults — use
 `bookrack config effective`, which reports the value each knob
 resolves to and the layer it came from.
 
-Operational knobs resolve `environment variable > <data_root>/config.toml
-> hardcoded default`. That chain covers this machine's operational
-preferences only; a library's embed model is not one of them — it is the
-index profile's fact, and nothing overrides it. The file accepts these
-keys:
+The file holds the preferences that travel with the library, and
+resolves `<data_root>/config.toml > hardcoded default`. No environment
+variable overrides it: what a process was started under describes the
+machine, not the library. The file accepts these keys:
 
 ```toml
-ollama_url = "http://localhost:11434"
-
 [search]
 top_k          = 5      # passages a query returns
 weak_threshold = 0.5    # cosine distance at or above which a hit is
                         # weak; `retrieval show` flags a call whose every
                         # recorded hit sits there
-
-[reranker]
-url     = "http://localhost:8080"  # probe an operator-run server instead
-                                   # of supervising one
-ctx     = 8192          # -c for the supervised server; 8192 is also the
-                        # default, sized to the rerank working set
-threads = 4             # --threads; unset leaves the server's own choice
 ```
 
 Every field is optional. Edit the file by hand, or through the offline
 `bookrack libraries config <name> KEY=VALUE ...` verb (with `--unset
-KEY` to clear one); nested keys are spelled `search.top_k`,
-`reranker.ctx`, and so on. An edit does not reach a running daemon until
-it restarts.
+KEY` to clear one); the keys are spelled `search.top_k` and
+`search.weak_threshold`. An edit does not reach a running daemon until
+it re-opens the library.
+
+Where the backends are and how they are run is the machine's, set in
+the daemon's environment: `BOOKRACK_OLLAMA_URL` for the Ollama
+endpoint, `BOOKRACK_RERANKER_URL` for an operator-run rerank server,
+and `BOOKRACK_RERANKER_CTX` / `BOOKRACK_RERANKER_THREADS` for the one
+the daemon supervises. A library's embed model is neither: it is the
+index profile's fact, and nothing overrides it.
 
 `index_profile` is accepted by the same verb, but written to the
 library's manifest rather than to this file, because it is a property of
 the library rather than of this machine. See [Retrieval
 profiles](#retrieval-profiles-index-profile).
 
-Four keys are **retired**. Two of them belong to the library rather than
-to this machine: `embed_model` is declared by the library's index
-profile, and `index_profile` as a *file* field is superseded by the
-manifest. The other two belong to the process rather than to a library:
-`mcp_addr` and `log_directive` are resolved before any data root is
-known — the log subscriber is installed and the listen address is chosen
-by the binary that then goes looking for a library, so a value sitting
-inside a library could never have been read. Their homes are
-`BOOKRACK_MCP_ADDR` (or `bookrack run --mcp-addr`) and `BOOKRACK_LOG` /
-`BOOKRACK_LOG_CONSOLE`; both variables are alive and unchanged.
+Eight keys are **retired**. Two belong to the library but live
+elsewhere: `embed_model` is declared by the library's index profile,
+and `index_profile` as a *file* field is superseded by the manifest. Two
+belong to the process: `mcp_addr` and `log_directive` are resolved
+before any data root is known, and their homes are `BOOKRACK_MCP_ADDR`
+(or `bookrack run --mcp-addr`) and `BOOKRACK_LOG` /
+`BOOKRACK_LOG_CONSOLE`. Four belong to the machine: `ollama_url`,
+`reranker.url`, `reranker.ctx`, and `reranker.threads` describe the
+backends a daemon reaches, and are set through the four variables named
+above.
 
-A file still carrying any of the four still loads: the key resolves to
+A file still carrying any of the eight still loads: the key resolves to
 nothing, and is reported instead of refused. So is a key this build does
 not know — one another build wrote, or a typo. The file belongs to the
 library, and every build that opens the library has to be able to read
@@ -237,7 +234,13 @@ it. `bookrack doctor` shows the ignored keys in its `config.toml` row,
 `libraries config <name>` annotates each as it prints the file.
 `libraries config <name> --unset <key>` deletes a retired key; an unknown one is edited out by
 hand, since the verb refuses to write or delete a key it does not know.
-A known key holding a value of the wrong type is still an error. See
+A known key holding a value of the wrong type is still an error.
+
+A retired `ollama_url` or `reranker.url` is weighed against the endpoint
+the daemon resolved. Naming the same one, it is a line to delete and the
+`config.toml` row stays `OK`; naming another, the row warns and states
+both, because the library used to reach a different backend than the
+one now in use. See
 [Declaring the embed model through an index
 profile](UPGRADE.md#declaring-the-embed-model-through-an-index-profile)
 and [Retiring the process-level keys from
@@ -259,8 +262,9 @@ and when it is read. Use it to find out what can be configured;
 
 Every environment variable bookrack reads is documented, with its
 default, in [`.env.example`](../.env.example): the data-root and
-registry selectors, the Ollama endpoint, the embed-batch and search
-knobs, the PDFium library directory, and the log filters. Copy that file to `.env` and fill in what you
+registry selectors, the Ollama endpoint, the embed-batch knobs, the
+reranker deployment, the PDFium library directory, and the log filters.
+Copy that file to `.env` and fill in what you
 need. That file and `config knobs` cannot drift apart: a test compares
 the two in both directions, so a knob with no stanza and a stanza with
 no knob are both build failures.
@@ -329,9 +333,8 @@ sited at the file, and a line the real environment got to first is
 shown as a layer that offered a value and lost. It lost at load time,
 so it stays lost — a variable that is set but blank, or set to text the
 knob cannot parse, offers nothing itself and still does not hand the
-file's line its chance back. The value in that case comes from
-`config.toml` or the built-in default, and the table shows the file's
-line beneath it. This holds for the data root as well, on both halves:
+file's line its chance back. The value in that case comes from the
+built-in default, and the table shows the file's line beneath it. This holds for the data root as well, on both halves:
 a `BOOKRACK_DATA_DIR` written into `.env` wins rung 3 of the ladder
 above and is credited to the file, and one the real environment already
 carried leaves the file's line reported as a layer that lost. Both

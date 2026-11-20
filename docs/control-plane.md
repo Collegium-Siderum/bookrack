@@ -1511,8 +1511,8 @@ the tool description says which one it ran.
   PDFium file check, Ollama probe, smoke ingest+search, finalize.
   The trait's `Result` is the only abort path — the runner does
   not auto-retry. Finalize is three writes: skeleton directories,
-  `<data_root>/config.toml`, and a merge into the platform-default
-  registry. `bookrack init` keeps its exact
+  the library's identity manifest, and a merge into the
+  platform-default registry. `bookrack init` keeps its exact
   flag set and terminal transcript; `crates/cli/src/init.rs` is a
   thin shim that pairs `CliWizardDriver` with the runner.
 - **GUI shell (first slice)** — `crates/app` ships a Tauri 2 shell

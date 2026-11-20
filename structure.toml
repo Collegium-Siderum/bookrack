@@ -1120,10 +1120,9 @@ sites = [
   "crates/extract/src/envelope.rs::write_envelope",
   "crates/vectors/src/meta.rs::store",
   "crates/test-support/src/tool/mod.rs::write_atomic",
-  "crates/runtime/src/wizard/runner.rs::write_root_config",
 ]
 reason = "transitional"
-detail = "none syncs the directory; the sandbox tool flushes without syncing the file; the wizard writes the root config in place"
+detail = "none syncs the directory; the sandbox tool flushes without syncing the file"
 agreement = "divergent"
 exit = "core holds one atomic write that also syncs the directory"
 

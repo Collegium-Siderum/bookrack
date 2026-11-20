@@ -417,7 +417,7 @@ mod tests {
         upsert_library_entry(&registry_path, "source-lib", &entry).expect("register source");
 
         let target = dir.path().join("copy");
-        let cfg = Config::new(source.clone(), "http://localhost:11434".to_string());
+        let cfg = Config::new(source.clone());
         fork(
             &cfg,
             "copy",
@@ -459,7 +459,7 @@ mod tests {
         upsert_library_entry(&registry_path, "taken", &entry).expect("register source");
         let occupied = dir.path().join("occupied");
         touch(&occupied.join("someone-was-here"), b"x");
-        let cfg = Config::new(source.clone(), "http://localhost:11434".to_string());
+        let cfg = Config::new(source.clone());
 
         let cases: [(&str, &str, PathBuf); 5] = [
             ("empty name", "  ", dir.path().join("fresh")),
@@ -512,7 +512,7 @@ mod tests {
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir(&source, &link).expect("symlink");
 
-        let cfg = Config::new(source.clone(), "http://localhost:11434".to_string());
+        let cfg = Config::new(source.clone());
         let err = validate_inputs(&cfg, "clone", &link, &dir.path().join("registry.toml"))
             .expect_err("symlink to source must be rejected");
         assert!(
@@ -530,7 +530,7 @@ mod tests {
         std::fs::create_dir_all(&source).expect("source");
         let loopy = source.join("..").join("source");
 
-        let cfg = Config::new(source.clone(), "http://localhost:11434".to_string());
+        let cfg = Config::new(source.clone());
         let err = validate_inputs(&cfg, "clone", &loopy, &dir.path().join("registry.toml"))
             .expect_err("dotdot loop must be rejected");
         assert!(
@@ -549,7 +549,7 @@ mod tests {
         std::fs::create_dir_all(&source).expect("source");
         let target = dir.path().join("clone");
 
-        let cfg = Config::new(source.clone(), "http://localhost:11434".to_string());
+        let cfg = Config::new(source.clone());
         validate_inputs(&cfg, "clone", &target, &dir.path().join("registry.toml"))
             .expect("sibling target accepted");
     }

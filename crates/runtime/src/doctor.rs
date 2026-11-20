@@ -37,10 +37,11 @@ use std::sync::Arc;
 
 use bookrack_catalog::Catalog;
 use bookrack_config::{
-    Config, ConfigError, ConfigNotice, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, LibraryEntry,
-    LibraryIdentification, LibrarySelection, ManifestError, ProfileRefDrift, ProfileRefOrigin,
-    ResolutionSource, ShadowedDefault, default_registry_path, effective_profile_reference,
-    list_libraries, load_manifest, locate_pdfium, pdfium_library_filename, profile_reference_drift,
+    Config, ConfigError, ConfigNotice, DEFAULT_EMBED_MODEL, DaemonConfig, DaemonFlags, EnvSnapshot,
+    LibraryEntry, LibraryIdentification, LibrarySelection, ManifestError, ProfileRefDrift,
+    ProfileRefOrigin, ResolutionSource, ShadowedDefault, default_registry_path,
+    effective_profile_reference, list_libraries, load_manifest, locate_pdfium,
+    pdfium_library_filename, profile_reference_drift,
 };
 use bookrack_core::bytes_human;
 use bookrack_corpus::IndexStamps;
@@ -172,10 +173,16 @@ pub enum Reporter<'a> {
 /// Build a [`Report`] for the given selection, gathered in-process.
 /// Pure over its inputs in the sense that every observation is fresh —
 /// there is no in-process cache to invalidate between successive calls.
+///
+/// The process-level values — the backends, the MCP address, the state
+/// directory — are the ones a daemon started from this environment
+/// would resolve.
 pub async fn gather(selection: &LibrarySelection, runtime_dir: Option<&Path>) -> Report {
+    let daemon = DaemonConfig::resolve(&EnvSnapshot::capture(), &DaemonFlags::default());
     gather_with(
         // root identity: read-only; the report probes and writes nothing
         Config::resolve(selection).map(Arc::new),
+        &daemon,
         Reporter::InProcess { runtime_dir },
     )
     .await
@@ -187,8 +194,11 @@ pub async fn gather(selection: &LibrarySelection, runtime_dir: Option<&Path>) ->
 /// about that library and not about whatever a fresh resolve would
 /// find; the in-process path resolves the selection and passes the
 /// outcome, failure included, so a broken configuration is a row.
+/// `daemon` is the process-level configuration the report is about: a
+/// daemon passes the one it was started with.
 pub async fn gather_with(
     resolved: Result<Arc<Config>, ConfigError>,
+    daemon: &DaemonConfig,
     reporter: Reporter<'_>,
 ) -> Report {
     let mut rows = Vec::new();
@@ -206,24 +216,23 @@ pub async fn gather_with(
     push_pdfium_row(&mut rows);
     push_fd_limit_row(&mut rows);
     if let Some(cfg) = &cfg {
-        push_root_config_row(&mut rows, cfg.config_notices());
-        push_retired_variables_row(&mut rows, &bookrack_config::retired_seen_in_process());
+        push_root_config_row(&mut rows, cfg.config_notices(), daemon);
+        push_retired_variables_row(&mut rows, daemon.retired_seen());
         push_store_rows(&mut rows, cfg);
         push_open_runs_row(&mut rows, cfg);
         push_disk_free_row(&mut rows, cfg);
     }
-    push_daemon_state_rows(&mut rows);
+    push_daemon_state_rows(&mut rows, daemon);
     // One resolution feeds both registry-backed sections, so they can
     // never disagree about what the registry says.
     // root identity: registry
     let registry = probe_registry(list_libraries());
     push_registry_consistency_rows(&mut rows, &registry);
     push_index_profile_coherence_rows(&mut rows, &registry);
-    let ollama_url = ollama_url_for_probe(cfg.as_deref());
     let embed_model = embed_model_for_probe(cfg.as_deref());
-    push_ollama_rows(&mut rows, &ollama_url, &embed_model).await;
-    push_reranker_rows(&mut rows, cfg.as_deref(), rerank_supervisor).await;
-    push_mcp_endpoint_row(&mut rows, served_mcp_addr).await;
+    push_ollama_rows(&mut rows, &daemon.ollama_url, &embed_model).await;
+    push_reranker_rows(&mut rows, cfg.as_deref(), daemon, rerank_supervisor).await;
+    push_mcp_endpoint_row(&mut rows, served_mcp_addr, daemon).await;
 
     Report { rows }
 }
@@ -648,8 +657,8 @@ fn session_lock_holder(runtime_dir: Option<&Path>) -> Result<Option<u32>, String
 /// rows above covers them. A snapshot that cannot be parsed is a
 /// failure the daemon would otherwise report only at its next start,
 /// which is exactly when an operator is least equipped to read it.
-fn push_daemon_state_rows(rows: &mut Vec<Row>) {
-    let dir = match bookrack_config::daemon_state_dir() {
+fn push_daemon_state_rows(rows: &mut Vec<Row>, daemon: &DaemonConfig) {
+    let dir = match daemon.require_daemon_state_dir() {
         Ok(dir) => dir,
         Err(e) => {
             rows.push(Row {
@@ -880,24 +889,81 @@ impl Door {
     }
 }
 
+/// What a retired endpoint key in a library's `config.toml` held,
+/// against what the daemon resolved for the same endpoint.
+///
+/// `Some(true)` when the two agree, so deleting the line changes
+/// nothing; `Some(false)` when the library used to name another
+/// endpoint than the one now in use; `None` for every other notice.
+pub(crate) fn retired_endpoint_agrees(
+    notice: &ConfigNotice,
+    daemon: &DaemonConfig,
+) -> Option<bool> {
+    let ConfigNotice::Retired { key, value, .. } = notice else {
+        return None;
+    };
+    match key.as_str() {
+        "ollama_url" => Some(value.trim() == daemon.ollama_url),
+        "reranker.url" => Some(daemon.reranker.url.as_deref() == Some(value.trim())),
+        _ => None,
+    }
+}
+
+/// The endpoint the daemon resolved for a retired endpoint key, worded
+/// for a sentence.
+pub(crate) fn daemon_endpoint_for(key: &str, daemon: &DaemonConfig) -> String {
+    match key {
+        "reranker.url" => daemon
+            .reranker
+            .url
+            .clone()
+            .unwrap_or_else(|| "a server it supervises itself".to_string()),
+        _ => daemon.ollama_url.clone(),
+    }
+}
+
 /// The `config.toml` row: the keys the library's file carries that
 /// this build does not resolve. Always present, so a clean file reads
 /// as checked.
-fn push_root_config_row(rows: &mut Vec<Row>, notices: &[ConfigNotice]) {
-    let status = if notices.is_empty() {
-        Status::Ok { note: None }
-    } else {
-        let each: Vec<String> = notices
-            .iter()
-            .map(|notice| match notice {
-                ConfigNotice::Retired { key, help, .. } => format!("`{key}` is retired: {help}"),
-                ConfigNotice::Unknown { key } => {
+///
+/// A retired endpoint key that names the endpoint `daemon` resolved
+/// anyway is a line to delete and nothing more, so it alone leaves the
+/// row at OK. One that names a different endpoint is a warning that
+/// states both: the library used to reach another backend.
+fn push_root_config_row(rows: &mut Vec<Row>, notices: &[ConfigNotice], daemon: &DaemonConfig) {
+    let mut warns = false;
+    let each: Vec<String> = notices
+        .iter()
+        .map(
+            |notice| match (notice, retired_endpoint_agrees(notice, daemon)) {
+                (ConfigNotice::Retired { key, help, .. }, Some(true)) => {
+                    format!("`{key}` is retired and names the endpoint already in use: {help}")
+                }
+                (ConfigNotice::Retired { key, help, value }, Some(false)) => {
+                    warns = true;
+                    format!(
+                        "`{key}` is retired: the file says {value}, the daemon uses {}; {help}",
+                        daemon_endpoint_for(key, daemon)
+                    )
+                }
+                (ConfigNotice::Retired { key, help, .. }, None) => {
+                    warns = true;
+                    format!("`{key}` is retired: {help}")
+                }
+                (ConfigNotice::Unknown { key }, _) => {
+                    warns = true;
                     format!("`{key}` is not a key this build reads")
                 }
-            })
-            .collect();
+            },
+        )
+        .collect();
+    let status = if warns {
         Status::Warn {
             note: each.join("; "),
+        }
+    } else {
+        Status::Ok {
+            note: (!each.is_empty()).then(|| each.join("; ")),
         }
     };
     let value = match notices.len() {
@@ -1592,11 +1658,6 @@ fn short(id: &str) -> &str {
     id.split('-').next().unwrap_or(id)
 }
 
-fn ollama_url_for_probe(cfg: Option<&Config>) -> String {
-    cfg.map(|c| c.ollama_url().to_string())
-        .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string())
-}
-
 /// The embed model the Ollama probe should look for, by the resolution
 /// chain the daemon applies: the effective index profile, best-effort,
 /// then the default. Profile resolution failures fall through silently —
@@ -1619,6 +1680,7 @@ fn embed_model_for_probe(cfg: Option<&Config>) -> String {
 async fn push_reranker_rows(
     rows: &mut Vec<Row>,
     cfg: Option<&Config>,
+    daemon: &DaemonConfig,
     supervisor: Option<&crate::rerank_supervisor::RerankSupervisor>,
 ) {
     let Some(cfg) = cfg else {
@@ -1632,8 +1694,7 @@ async fn push_reranker_rows(
     if spec.kind == bookrack_index_profile::RerankerKind::None {
         return;
     }
-    let reranker_cfg = bookrack_config::RerankerConfig::resolve(cfg.root_config());
-    if let Some(url) = &reranker_cfg.url {
+    if let Some(url) = &daemon.reranker.url {
         let health = bookrack_rerank::probe_health(url).await;
         rows.push(url_backend_row(url, &health));
         return;
@@ -1709,8 +1770,9 @@ fn reranker_model_row(
             },
         ),
         RerankerModelState::Unpinned { .. } => missing(format!(
-            "no pinned download; point {} at its GGUF file, or serve it and set reranker.url",
-            bookrack_config::RERANKER_MODEL_ENV
+            "no pinned download; point {} at its GGUF file, or serve it and set {}",
+            bookrack_config::RERANKER_MODEL_ENV,
+            bookrack_config::RERANKER_URL_ENV
         )),
     }
 }
@@ -1763,13 +1825,19 @@ fn not_running_backend_row() -> Row {
 fn url_backend_row(url: &str, health: &bookrack_rerank::ServerHealth) -> Row {
     let status = match health {
         bookrack_rerank::ServerHealth::Ready => Status::Ok {
-            note: Some("operator-run (reranker.url)".to_string()),
+            note: Some(format!(
+                "operator-run ({})",
+                bookrack_config::RERANKER_URL_ENV
+            )),
         },
         bookrack_rerank::ServerHealth::Starting => Status::Warn {
             note: "still loading its model".to_string(),
         },
         bookrack_rerank::ServerHealth::Unreachable(detail) => Status::Fail {
-            note: format!("{detail} -- fix the server behind reranker.url or unset it"),
+            note: format!(
+                "{detail} -- fix the server behind {} or unset it",
+                bookrack_config::RERANKER_URL_ENV
+            ),
         },
     };
     Row {
@@ -1787,10 +1855,16 @@ fn url_backend_row(url: &str, health: &bookrack_rerank::ServerHealth) -> Row {
 /// operator's question is whether the address a daemon would take is
 /// free, and the answer is worth having before the start rather than
 /// after it.
-async fn push_mcp_endpoint_row(rows: &mut Vec<Row>, served: Option<&str>) {
+async fn push_mcp_endpoint_row(rows: &mut Vec<Row>, served: Option<&str>, daemon: &DaemonConfig) {
     let (addr, serving) = match served {
         Some(addr) => (addr.to_string(), true),
-        None => (bookrack_config::McpConfig::from_env().addr, false),
+        None => (
+            daemon
+                .mcp
+                .as_ref()
+                .map_or_else(|| "disabled".to_string(), |mcp| mcp.addr.clone()),
+            false,
+        ),
     };
     // A session running without the surface has no address to probe,
     // and no failure to report either: `--no-mcp` asked for this.
@@ -2144,8 +2218,9 @@ mod tests {
 
     #[test]
     fn the_config_toml_row_warns_and_names_every_ignored_key() {
+        let daemon = crate::cmd::test_fixtures::test_daemon();
         let mut rows = Vec::new();
-        push_root_config_row(&mut rows, &[]);
+        push_root_config_row(&mut rows, &[], &daemon);
         assert_eq!(rows[0].label, "config.toml");
         assert!(matches!(rows[0].status, Status::Ok { .. }), "{:?}", rows[0]);
 
@@ -2162,6 +2237,7 @@ mod tests {
                     value: "debug".to_string(),
                 },
             ],
+            &daemon,
         );
         assert_eq!(rows[0].value, "2 keys ignored");
         let Status::Warn { note } = &rows[0].status else {
@@ -2170,6 +2246,60 @@ mod tests {
         assert!(note.contains("`colour`"), "{note}");
         assert!(note.contains("`log_directive` is retired"), "{note}");
         assert!(note.contains("set BOOKRACK_LOG"), "{note}");
+    }
+
+    /// A retired endpoint key is weighed against what the daemon
+    /// resolved: naming the same endpoint it is a line to delete, and
+    /// naming another it is a warning that states both.
+    #[test]
+    fn a_retired_endpoint_key_warns_only_when_it_names_another_endpoint() {
+        let daemon = crate::cmd::test_fixtures::daemon_at("http://in-use:1");
+        let retired = |key: &str, value: &str| ConfigNotice::Retired {
+            key: key.to_string(),
+            help: "drop the line",
+            value: value.to_string(),
+        };
+
+        let mut rows = Vec::new();
+        push_root_config_row(
+            &mut rows,
+            &[retired("ollama_url", "http://in-use:1")],
+            &daemon,
+        );
+        let Status::Ok { note: Some(note) } = &rows[0].status else {
+            panic!("the same endpoint is not a warning: {:?}", rows[0]);
+        };
+        assert!(note.contains("already in use"), "{note}");
+        assert_eq!(rows[0].value, "1 key ignored");
+
+        let mut rows = Vec::new();
+        push_root_config_row(
+            &mut rows,
+            &[retired("ollama_url", "http://elsewhere:2")],
+            &daemon,
+        );
+        let Status::Warn { note } = &rows[0].status else {
+            panic!("another endpoint is a warning: {:?}", rows[0]);
+        };
+        assert!(note.contains("http://elsewhere:2"), "{note}");
+        assert!(note.contains("http://in-use:1"), "{note}");
+
+        // The daemon supervises its own rerank server, and the file
+        // named an operator-run one.
+        let mut rows = Vec::new();
+        push_root_config_row(
+            &mut rows,
+            &[retired("reranker.url", "http://rerank:3")],
+            &daemon,
+        );
+        let Status::Warn { note } = &rows[0].status else {
+            panic!(
+                "a rerank server the daemon does not use is a warning: {:?}",
+                rows[0]
+            );
+        };
+        assert!(note.contains("http://rerank:3"), "{note}");
+        assert!(note.contains("supervises itself"), "{note}");
     }
 
     #[test]
@@ -2280,7 +2410,7 @@ mod tests {
             &ServerHealth::Unreachable("connection refused".to_string()),
         );
         assert!(
-            matches!(&dead.status, Status::Fail { note } if note.contains("reranker.url")),
+            matches!(&dead.status, Status::Fail { note } if note.contains(bookrack_config::RERANKER_URL_ENV)),
             "{dead:?}"
         );
     }
@@ -2430,10 +2560,7 @@ mod tests {
         // was checked and found healthy. The set is the config's path
         // accessors; nothing under the root may be silently skipped.
         let root = tempfile::tempdir().expect("tempdir");
-        let cfg = Config::new(
-            root.path().to_path_buf(),
-            "http://127.0.0.1:11434".to_string(),
-        );
+        let cfg = Config::new(root.path().to_path_buf());
         let mut rows = Vec::new();
         push_store_rows(&mut rows, &cfg);
 
@@ -2541,10 +2668,7 @@ mod tests {
         // ignore the section; omitting them loses the distinction
         // between "checked, absent" and "not checked".
         let root = tempfile::tempdir().expect("tempdir");
-        let cfg = Config::new(
-            root.path().to_path_buf(),
-            "http://127.0.0.1:11434".to_string(),
-        );
+        let cfg = Config::new(root.path().to_path_buf());
         let mut rows = Vec::new();
         push_store_rows(&mut rows, &cfg);
 
@@ -2570,10 +2694,7 @@ mod tests {
         // by the same reasoning `verify`'s pinning test records, so the
         // contract is about `.db` files.
         let root = tempfile::tempdir().expect("tempdir");
-        let cfg = Config::new(
-            root.path().to_path_buf(),
-            "http://127.0.0.1:11434".to_string(),
-        );
+        let cfg = Config::new(root.path().to_path_buf());
         let mut rows = Vec::new();
         push_store_rows(&mut rows, &cfg);
 
@@ -2591,10 +2712,7 @@ mod tests {
         // open -- the state that stops the daemon coming up -- drew a
         // plain OK row naming its path.
         let root = tempfile::tempdir().expect("tempdir");
-        let cfg = Config::new(
-            root.path().to_path_buf(),
-            "http://127.0.0.1:11434".to_string(),
-        );
+        let cfg = Config::new(root.path().to_path_buf());
         std::fs::write(cfg.corpus_db(), b"this is not a database").expect("write a broken store");
 
         let mut rows = Vec::new();
@@ -2615,10 +2733,7 @@ mod tests {
         // Content that is ingested but not indexed answers no search,
         // and nothing else in the report says so.
         let root = tempfile::tempdir().expect("tempdir");
-        let cfg = Config::new(
-            root.path().to_path_buf(),
-            "http://127.0.0.1:11434".to_string(),
-        );
+        let cfg = Config::new(root.path().to_path_buf());
         drop(
             bookrack_corpus::Corpus::open_for_write(&cfg.corpus_db())
                 .expect("create the book corpus"),
@@ -2774,10 +2889,7 @@ mod tests {
         // next ingest": the store rows say a database is there, not
         // that it can grow.
         let root = tempfile::tempdir().expect("tempdir");
-        let cfg = Config::new(
-            root.path().to_path_buf(),
-            "http://127.0.0.1:11434".to_string(),
-        );
+        let cfg = Config::new(root.path().to_path_buf());
         let mut rows = Vec::new();
         push_disk_free_row(&mut rows, &cfg);
 

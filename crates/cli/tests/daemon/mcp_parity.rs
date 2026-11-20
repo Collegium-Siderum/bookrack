@@ -28,7 +28,6 @@ fn build_opts_with_queue_worker(
     spawn_queue_worker: bool,
 ) -> RuntimeOpts {
     let mut opts = RuntimeOpts::headless(Some(data_dir), None);
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_dir);
     opts.spawn_queue_worker = spawn_queue_worker;
     opts.mcp_tools = bookrack_mcp::list_tools();

@@ -426,10 +426,7 @@ mod tests {
     #[test]
     fn a_catalog_that_would_need_migrating_is_left_untouched() {
         let dir = tempdir().expect("tempdir");
-        let cfg = Config::new(
-            dir.path().to_path_buf(),
-            "http://localhost:11434".to_string(),
-        );
+        let cfg = Config::new(dir.path().to_path_buf());
         fs::write(cfg.catalog_db(), b"").expect("seed an uninitialised catalog.db");
         let input = dir.path().join("no-books");
         fs::create_dir_all(&input).expect("create input dir");

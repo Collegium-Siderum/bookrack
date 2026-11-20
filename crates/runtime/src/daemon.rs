@@ -21,7 +21,6 @@
 //! the shared `broadcast::Sender<()>`.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -31,8 +30,9 @@ use chrono::{DateTime, Utc};
 
 use bookrack_catalog::Catalog;
 use bookrack_config::{
-    Config, EmbedConfig, LibraryEntry, LibraryIdentification, LibrarySelection, LogConfig,
-    McpConfig, ResolutionSource, RootIdentity, SearchConfig,
+    Config, ConfigNotice, ConsoleDefault, DaemonConfig, DaemonFlags, EmbedConfig, EnvSnapshot,
+    LibraryConfig, LibraryEntry, LibraryIdentification, LibrarySelection, ResolutionSource,
+    RootIdentity,
 };
 use bookrack_core::queue::QueueState;
 use bookrack_core::{DaemonIdentity, Problem};
@@ -80,21 +80,17 @@ pub struct RuntimeOpts {
     /// Override the runtime directory. Falls back to `BOOKRACK_RUNTIME_DIR`
     /// or the platform default.
     pub runtime_dir: Option<PathBuf>,
-    /// Override the MCP listener address; falls back to [`McpConfig::from_env`].
-    pub mcp_addr: Option<SocketAddr>,
-    /// Skip binding the MCP listener. The daemon still acquires the
-    /// tty lock and opens the registry.
-    pub no_mcp: bool,
+    /// The process-level configuration, resolved by the host before the
+    /// daemon starts: backends, pacing, the MCP listener (absent when
+    /// the daemon serves none), log directives, the state directory.
+    /// The daemon reads no environment for these itself.
+    pub daemon_config: DaemonConfig,
     /// Spawn the persistent ingest queue worker. `false` leaves the
     /// queue state inert, exposed as zero counts; the [`headless`]
     /// preset and in-process hosts use it.
     ///
     /// [`headless`]: RuntimeOpts::headless
     pub spawn_queue_worker: bool,
-    /// Observability layer configuration. The daemon-REPL profile uses
-    /// [`LogConfig::from_env`]; the headless profile uses
-    /// [`LogConfig::for_headless_daemon`].
-    pub log_config: LogConfig,
     /// [`Caller`] baked into the shared [`Ops`]: the attribution for
     /// writes that arrive without a task-scope override, i.e. through
     /// the control socket. Tool calls arriving over MCP are attributed
@@ -111,17 +107,36 @@ pub struct RuntimeOpts {
 }
 
 impl RuntimeOpts {
-    /// Preset with no REPL and no queue worker: env-derived MCP
-    /// address, console layer mirroring the file directive. For
-    /// in-process hosts and tests.
+    /// Preset with no REPL, no queue worker and no MCP listener, the
+    /// console layer mirroring the file directive, resolved from the
+    /// process environment. For in-process hosts and tests.
     pub fn headless(data_dir: Option<PathBuf>, library: Option<String>) -> Self {
+        Self::headless_with_flags(
+            data_dir,
+            library,
+            DaemonFlags {
+                no_mcp: true,
+                ..DaemonFlags::default()
+            },
+        )
+    }
+
+    /// [`headless`](Self::headless) with the MCP flags the caller
+    /// gives; the console layer still mirrors the file directive.
+    pub fn headless_with_flags(
+        data_dir: Option<PathBuf>,
+        library: Option<String>,
+        flags: DaemonFlags,
+    ) -> Self {
+        let flags = DaemonFlags {
+            console: ConsoleDefault::MirrorFile,
+            ..flags
+        };
         Self {
             selection: LibrarySelection { data_dir, library },
             runtime_dir: None,
-            mcp_addr: None,
-            no_mcp: false,
+            daemon_config: DaemonConfig::resolve(&EnvSnapshot::capture(), &flags),
             spawn_queue_worker: false,
-            log_config: LogConfig::for_headless_daemon(),
             caller: Caller::cli(),
             mcp_tools: Vec::new(),
         }
@@ -134,6 +149,8 @@ impl RuntimeOpts {
 /// broadcast shutdown channel, and the on-disk queue state.
 pub struct DaemonRuntime {
     pub cfg: Arc<Config>,
+    /// The process-level configuration this daemon was started with.
+    pub daemon_config: Arc<DaemonConfig>,
     pub registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     pub info_context: LibraryInfoContext,
     pub log_stream: LogStreamHandle,
@@ -247,7 +264,8 @@ impl DaemonRuntime {
         // from its own working directory.
         let runtime_dir = bookrack_session::normalize_runtime_dir(&runtime_dir)?;
 
-        for var in bookrack_config::retired_seen_in_process() {
+        let daemon_config = Arc::new(opts.daemon_config);
+        for var in daemon_config.retired_seen() {
             tracing::warn!(
                 variable = var.name,
                 help = var.help,
@@ -259,15 +277,7 @@ impl DaemonRuntime {
         //    file records a complete session record from the instant
         //    it exists. This is the *intended* address; step 3c
         //    replaces it with the one the listener actually bound.
-        let mcp_addr = if opts.no_mcp {
-            None
-        } else {
-            Some(
-                opts.mcp_addr
-                    .map(|a| a.to_string())
-                    .unwrap_or_else(|| McpConfig::from_env().addr),
-            )
-        };
+        let mcp_addr = daemon_config.mcp.as_ref().map(|mcp| mcp.addr.clone());
         let lock_path = runtime_dir.join(tty_lock_name());
         let mcp_intent = mcp_addr.clone().unwrap_or_else(|| "disabled".to_string());
 
@@ -540,8 +550,10 @@ impl DaemonRuntime {
         // span libraries: the log stream (below) and the queue
         // snapshot (step 11). Resolved once, before the subscriber
         // needs its `logs/` subdirectory.
-        let daemon_state_dir =
-            bookrack_config::daemon_state_dir().context("resolve the daemon state directory")?;
+        let daemon_state_dir = daemon_config
+            .require_daemon_state_dir()
+            .context("resolve the daemon state directory")?
+            .to_path_buf();
         std::fs::create_dir_all(&daemon_state_dir).with_context(|| {
             format!(
                 "create daemon state directory {}",
@@ -549,7 +561,7 @@ impl DaemonRuntime {
             )
         })?;
         let (obs_guard, log_stream) =
-            bookrack_obs::init(&daemon_state_dir.join("logs"), &opts.log_config);
+            bookrack_obs::init(&daemon_state_dir.join("logs"), &daemon_config.log);
         // The guard owns the non-blocking writer's background thread;
         // drop flushes buffered lines and joins the thread. Bind it
         // to `DaemonRuntime` so a `?` between here and the final
@@ -591,9 +603,7 @@ impl DaemonRuntime {
         //    alone: each handle resolves its own configuration in step
         //    6, and a primary whose profile does not resolve is skipped
         //    in 5a like any other candidate rather than refused here.
-        let embed_model = crate::profile::effective_embed_config(&cfg)
-            .map(|embed| embed.model)
-            .unwrap_or_default();
+        let embed_model = crate::profile::effective_embed_model(&cfg).unwrap_or_default();
 
         // 5a. Every candidate's embed configuration and backend, before
         //     anything expensive starts. Step 6 opens each library, and
@@ -612,7 +622,7 @@ impl DaemonRuntime {
         //     the operator waits through.
         let mut kept = Vec::with_capacity(candidates.len());
         for candidate in candidates {
-            match crate::profile::effective_embed_config(&candidate.cfg) {
+            match crate::profile::effective_embed_model(&candidate.cfg) {
                 Ok(_) => kept.push(candidate),
                 Err(err) => {
                     let err = err.wrap_err(format!(
@@ -633,7 +643,8 @@ impl DaemonRuntime {
             .iter()
             .map(|candidate| (candidate.name.clone(), Arc::clone(&candidate.cfg)))
             .collect();
-        let backend_problems = crate::backend_probe::embed_backend_problems(&mounts).await;
+        let backend_problems =
+            crate::backend_probe::embed_backend_problems(&mounts, &daemon_config).await;
         let mut candidates = Vec::with_capacity(kept.len());
         for candidate in kept {
             match backend_problems
@@ -742,6 +753,7 @@ impl DaemonRuntime {
         let events_for_rerank = event_stream.clone();
         let reranker = crate::rerank_supervisor::bring_up_reranker(
             &reference_cfg,
+            &daemon_config,
             &runtime_dir,
             Some(Arc::new(move |state: &SupervisorState| {
                 if let Some(active) = rerank_degraded_transition(state) {
@@ -767,6 +779,7 @@ impl DaemonRuntime {
             } = candidate;
             match build_library_handle(
                 Arc::clone(&lib_cfg),
+                &daemon_config,
                 &name,
                 reranker.as_ref().map(|r| &r.stage),
                 opts.caller.clone(),
@@ -829,7 +842,8 @@ impl DaemonRuntime {
         );
 
         // 9. LibraryInfoContext
-        let info_context = library_info_context(&cfg, &embed_model, &mcp_label);
+        let info_context =
+            library_info_context(&cfg, &daemon_config.ollama_url, &embed_model, &mcp_label);
 
         // 10. broadcast::channel; signal_task::spawn
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(8);
@@ -1109,6 +1123,7 @@ impl DaemonRuntime {
             write_guard: Arc::clone(&write_guard),
             shutdown_tx: shutdown_tx.clone(),
             identity: identity.clone(),
+            daemon_config: Arc::clone(&daemon_config),
             selection: selection_for_doctor,
             library_name: library_name.clone(),
             auto_registered,
@@ -1123,6 +1138,7 @@ impl DaemonRuntime {
                 Arc::clone(&registry),
                 reranker.as_ref().map(|r| r.stage.clone()),
                 opts.caller.clone(),
+                Arc::clone(&daemon_config),
             ))),
         };
 
@@ -1157,6 +1173,7 @@ impl DaemonRuntime {
 
         Ok(Self {
             cfg,
+            daemon_config,
             registry,
             info_context,
             log_stream,
@@ -1424,6 +1441,7 @@ impl Candidate {
 /// report an error.
 pub(crate) async fn build_library_handle(
     cfg_arc: Arc<Config>,
+    daemon: &DaemonConfig,
     name: &str,
     reranker_stage: Option<&bookrack_ops::RerankStage>,
     caller: Caller,
@@ -1431,22 +1449,43 @@ pub(crate) async fn build_library_handle(
 ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>> {
     let cfg = cfg_arc.as_ref();
     for notice in cfg.config_notices() {
-        tracing::warn!(
-            library = name,
-            key = notice.key(),
-            kind = notice.kind(),
-            help = notice.help(),
-            "config.toml carries a key this build ignores"
-        );
+        match crate::doctor::retired_endpoint_agrees(notice, daemon) {
+            Some(true) => tracing::info!(
+                library = name,
+                key = notice.key(),
+                help = notice.help(),
+                "config.toml carries a retired key naming the endpoint already in use"
+            ),
+            Some(false) => {
+                let ConfigNotice::Retired { value, .. } = notice else {
+                    continue;
+                };
+                tracing::warn!(
+                    library = name,
+                    key = notice.key(),
+                    file = value.as_str(),
+                    daemon = crate::doctor::daemon_endpoint_for(notice.key(), daemon),
+                    help = notice.help(),
+                    "config.toml names another endpoint than the daemon uses; the key is retired and ignored"
+                );
+            }
+            None => tracing::warn!(
+                library = name,
+                key = notice.key(),
+                kind = notice.kind(),
+                help = notice.help(),
+                "config.toml carries a key this build ignores"
+            ),
+        }
     }
     // The embed model resolves per library from the index profile,
     // else the built-in default; an undefined or unloadable profile
     // refuses the handle with the repair spelled out, rather than
     // embedding under a combination the operator never declared.
-    let embed_cfg = crate::profile::effective_embed_config(cfg)
+    let embed_cfg = crate::profile::effective_embed_config(cfg, daemon)
         .context("resolve effective embed configuration")?;
     let embedder = OllamaEmbedClient::new(
-        cfg.ollama_url(),
+        &embed_cfg.ollama_url,
         &embed_cfg.model,
         embed_cfg.request_timeout,
         embed_cfg.max_retries,
@@ -1480,7 +1519,7 @@ pub(crate) async fn build_library_handle(
     // Library::open — books + papers. Papers warms unconditionally so
     // the first glean into an empty data dir lights up the read path
     // the same way the book side does.
-    let search_cfg = SearchConfig::resolve(cfg.root_config());
+    let search_cfg = LibraryConfig::resolve(cfg.root_config(), Some(&embed_cfg.model)).search;
     let library = Library::open(
         cfg.corpus_db(),
         cfg.catalog_db(),
@@ -1492,7 +1531,7 @@ pub(crate) async fn build_library_handle(
     .await
     .context("open query library")?;
     let papers_embedder = OllamaEmbedClient::new(
-        cfg.ollama_url(),
+        &embed_cfg.ollama_url,
         &embed_cfg.model,
         embed_cfg.request_timeout,
         embed_cfg.max_retries,
@@ -1657,8 +1696,14 @@ fn build_glean_params_template(cfg: &Config, embed_cfg: &EmbedConfig) -> GleanPa
 /// builds the card's identity from that library rather than from a
 /// bring-up snapshot of the selected one. `mcp_addr` is the exception
 /// and is passed in: the listener is a property of the process, not of
-/// any library it serves.
-pub fn library_info_context(cfg: &Config, embed_model: &str, mcp_addr: &str) -> LibraryInfoContext {
+/// any library it serves. So is `ollama_url`: the endpoint is the
+/// machine's.
+pub fn library_info_context(
+    cfg: &Config,
+    ollama_url: &str,
+    embed_model: &str,
+    mcp_addr: &str,
+) -> LibraryInfoContext {
     LibraryInfoContext {
         data_dir: cfg.data_dir().display().to_string(),
         library_name: cfg.library().map(str::to_string),
@@ -1675,7 +1720,7 @@ pub fn library_info_context(cfg: &Config, embed_model: &str, mcp_addr: &str) -> 
             .library_identification()
             .and_then(library_identification_label)
             .map(str::to_string),
-        ollama_url: cfg.ollama_url().to_string(),
+        ollama_url: ollama_url.to_string(),
         embed_model_configured: embed_model.to_string(),
         mcp_addr: mcp_addr.to_string(),
     }
@@ -1686,15 +1731,19 @@ pub fn library_info_context(cfg: &Config, embed_model: &str, mcp_addr: &str) -> 
 /// model taken from the library's effective index profile. Every front
 /// end serving `library.info` for a selected library builds the card's
 /// identity through this one function, so the identity and the counts
-/// on one card always describe the same root. `mcp_addr` is the
-/// process-wide listener address and is passed in from the bring-up
+/// on one card always describe the same root. `ollama_url` and
+/// `mcp_addr` are process-wide and are passed in from the bring-up
 /// snapshot.
 ///
 /// Fails when the library's index profile does not resolve; the error
 /// classifies as caller input through the control-plane error map.
-pub fn library_info_context_for(cfg: &Config, mcp_addr: &str) -> Result<LibraryInfoContext> {
-    let embed = crate::profile::effective_embed_config(cfg)?;
-    Ok(library_info_context(cfg, &embed.model, mcp_addr))
+pub fn library_info_context_for(
+    cfg: &Config,
+    ollama_url: &str,
+    mcp_addr: &str,
+) -> Result<LibraryInfoContext> {
+    let model = crate::profile::effective_embed_model(cfg)?;
+    Ok(library_info_context(cfg, ollama_url, &model, mcp_addr))
 }
 
 /// Map [`ResolutionSource`] onto the operator-visible label woven into

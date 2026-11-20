@@ -30,7 +30,6 @@ pub fn build_opts(
     spawn_queue_worker: bool,
 ) -> RuntimeOpts {
     let mut opts = RuntimeOpts::headless(Some(data_dir), None);
-    opts.no_mcp = true;
     opts.spawn_queue_worker = spawn_queue_worker;
     opts.runtime_dir = Some(runtime_dir);
     opts

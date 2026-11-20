@@ -281,14 +281,6 @@ impl WizardDriver for CliWizardDriver {
             "      Created {} (sources, books, logs, audit-rules)",
             summary.data_root.display()
         ));
-        if summary.config_kept {
-            console.line(&format!(
-                "      Kept existing {}",
-                summary.config_path.display()
-            ));
-        } else {
-            console.line(&format!("      Wrote {}", summary.config_path.display()));
-        }
         if summary.manifest_kept {
             console.line(&format!(
                 "      Kept existing {}",
@@ -661,8 +653,6 @@ mod tests {
     fn finalize_summary() -> FinalizeSummary {
         let root = PathBuf::from("/data/library");
         FinalizeSummary {
-            config_path: root.join("config.toml"),
-            config_kept: false,
             manifest_path: root.join("bookrack.toml"),
             manifest_kept: false,
             registry: Some(PathBuf::from("/data/registry.toml")),

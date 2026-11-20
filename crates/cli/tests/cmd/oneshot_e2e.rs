@@ -595,7 +595,7 @@ async fn libraries_config_set_index_profile_declares_into_the_manifest() -> Resu
     // second key is an unrelated preference the sweep must not touch.
     std::fs::write(
         data_dir.path().join("config.toml"),
-        "index_profile = \"qwen3-0.6b-default\"\nollama_url = \"http://127.0.0.1:11434\"\n",
+        "index_profile = \"qwen3-0.6b-default\"\n\n[search]\ntop_k = 9\n",
     )?;
 
     let output = tokio::process::Command::from(
@@ -643,7 +643,7 @@ async fn libraries_config_set_index_profile_declares_into_the_manifest() -> Resu
         "the superseded config.toml declaration should be swept: {config_written}",
     );
     assert!(
-        config_written.contains("ollama_url"),
+        config_written.contains("top_k = 9"),
         "sweeping must not disturb other keys: {config_written}",
     );
 
@@ -1775,7 +1775,7 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
     // A hand-written comment the edit must not clobber.
     std::fs::write(
         root.path().join("config.toml"),
-        "# operator note: leave this here\nollama_url = \"http://old:11434\"\n",
+        "# operator note: leave this here\n[search]\ntop_k = 3\n",
     )?;
 
     let output = tokio::process::Command::from(
@@ -1784,7 +1784,7 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
             .without_data_dir()
             .build(),
     )
-    .args(["libraries", "config", "prod", "ollama_url=http://new:11434"])
+    .args(["libraries", "config", "prod", "search.top_k=8"])
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
@@ -1816,7 +1816,7 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
         "the hand-written comment was clobbered: {written}",
     );
     assert!(
-        written.contains("http://new:11434") && !written.contains("http://old:11434"),
+        written.contains("top_k = 8") && !written.contains("top_k = 3"),
         "the key was not updated: {written}",
     );
 
@@ -1836,8 +1836,7 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
     assert_eq!(dump.status.code(), Some(0));
     let dump_out = String::from_utf8_lossy(&dump.stdout);
     assert!(
-        dump_out.contains("# operator note: leave this here")
-            && dump_out.contains("http://new:11434"),
+        dump_out.contains("# operator note: leave this here") && dump_out.contains("top_k = 8"),
         "the dump should print the whole file: {dump_out}",
     );
     Ok(())
@@ -1910,7 +1909,7 @@ async fn a_root_config_with_a_retired_key_is_reported_until_the_line_goes() -> R
     )?;
     std::fs::write(
         root.path().join("config.toml"),
-        "ollama_url = \"http://127.0.0.1:11434\"\nembed_model = \"qwen3-embedding:0.6b\"\n",
+        "embed_model = \"qwen3-embedding:0.6b\"\n\n[search]\ntop_k = 9\n",
     )?;
 
     let doctor = || async {
@@ -1970,7 +1969,7 @@ async fn a_root_config_with_a_retired_key_is_reported_until_the_line_goes() -> R
     let written = std::fs::read_to_string(root.path().join("config.toml"))?;
     assert!(!written.contains("embed_model"), "{written}");
     assert!(
-        written.contains("ollama_url"),
+        written.contains("top_k = 9"),
         "the rest of the file survives: {written}"
     );
 
@@ -2023,8 +2022,7 @@ async fn a_root_config_with_a_process_level_key_is_reported_and_annotated() -> R
     )?;
     std::fs::write(
         root.path().join("config.toml"),
-        "ollama_url = \"http://127.0.0.1:11434\"\nmcp_addr = \"127.0.0.1:9999\"\n\
-         log_directive = \"debug\"\n",
+        "mcp_addr = \"127.0.0.1:9999\"\nlog_directive = \"debug\"\n\n[search]\ntop_k = 9\n",
     )?;
 
     let doctor = tokio::process::Command::from(
@@ -2115,7 +2113,7 @@ async fn a_root_config_with_a_process_level_key_is_reported_and_annotated() -> R
     assert!(!written.contains("mcp_addr"), "{written}");
     assert!(!written.contains("log_directive"), "{written}");
     assert!(
-        written.contains("ollama_url"),
+        written.contains("top_k = 9"),
         "the rest of the file survives: {written}"
     );
 

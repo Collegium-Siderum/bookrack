@@ -148,20 +148,31 @@ async fn every_knob_names_at_least_one_place_it_can_be_set() -> Result<()> {
         );
     }
 
-    // The file-only reranker knobs are the case a variable-keyed
+    // The library's own preferences are the case a variable-keyed
     // inventory would lose: they have no variable at all, and dropping
     // them would leave `config.toml` keys undocumented by the one
     // surface that claims to list every knob.
-    let ctx = knob(&inventory, "reranker.ctx").expect("no reranker.ctx entry");
+    let top_k = knob(&inventory, "search.top_k").expect("no search.top_k entry");
     assert!(
-        ctx["variable"].is_null(),
-        "reranker.ctx has no variable: {ctx}"
+        top_k["variable"].is_null(),
+        "search.top_k has no variable: {top_k}"
     );
+    assert!(
+        top_k["settable_at"]
+            .as_array()
+            .is_some_and(|sites| sites.iter().any(|s| s["layer"] == "file")),
+        "search.top_k must still name the file that sets it: {top_k}"
+    );
+
+    // The supervised rerank server's context size is the machine's: a
+    // variable sets it and no library file does.
+    let ctx = knob(&inventory, "reranker.ctx").expect("no reranker.ctx entry");
+    assert_eq!(ctx["variable"], "BOOKRACK_RERANKER_CTX", "{ctx}");
     assert!(
         ctx["settable_at"]
             .as_array()
-            .is_some_and(|sites| sites.iter().any(|s| s["layer"] == "file")),
-        "reranker.ctx must still name the file that sets it: {ctx}"
+            .is_some_and(|sites| sites.iter().all(|s| s["layer"] != "file")),
+        "reranker.ctx still names a library file: {ctx}"
     );
 
     Ok(())

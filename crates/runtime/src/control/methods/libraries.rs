@@ -344,6 +344,7 @@ mod tests {
             Arc::clone(&ctx.registry),
             None,
             Caller::cli(),
+            Arc::clone(&ctx.daemon_config),
         )));
         ctx
     }

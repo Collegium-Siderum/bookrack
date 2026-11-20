@@ -120,7 +120,6 @@ async fn a_single_mount_is_served_under_its_own_declaration() -> Result<()> {
     let runtime_root = tempfile::tempdir()?;
 
     let mut opts = RuntimeOpts::headless(Some(sandbox.data_root("solo-root")), None);
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
 
     let runtime = DaemonRuntime::start(opts).await?;
@@ -154,7 +153,6 @@ async fn a_library_disagreeing_on_the_reranker_is_skipped_with_both_named() -> R
     let runtime_root = tempfile::tempdir()?;
 
     let mut opts = RuntimeOpts::headless(None, Some("alpha".to_string()));
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
 
     let runtime = DaemonRuntime::start(opts).await?;

@@ -10,6 +10,10 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **`BOOKRACK_RERANKER_CTX` and `BOOKRACK_RERANKER_THREADS`** set the
+  context size and thread count of the rerank server the daemon
+  supervises. Each takes a positive integer; anything else reads as
+  unset.
 - **A daemon reports its identity on every surface that names it.**
   `daemon.version`, `daemon.status`, the `daemon.version` event
   snapshot, and the MCP `session.info` tool carry the same six fields
@@ -55,6 +59,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **Where the backends are is the machine's setting; a library's
+  search preferences are its own.** The Ollama endpoint and the
+  reranker deployment are resolved once, from the daemon's environment,
+  and are the same for every library it serves. `search.top_k` and
+  `search.weak_threshold` are read from the library's `config.toml`
+  alone. In `config knobs` and `config effective`, `ollama_url` and
+  `reranker.url` now have reach `machine`, `reranker.ctx` and
+  `reranker.threads` reach `process`, and all four no longer carry a
+  `scope_instance`; these four and the four `embed.*` pacing rows are
+  `read_at: before_resolution`; none of them lists a `file` layer, and
+  the two `search.*` rows list no environment layer. `libraries config`
+  accepts `search.top_k`, `search.weak_threshold`, and `index_profile`,
+  and no longer notes that a variable overrides a value it wrote.
+- **`bookrack init` writes no `config.toml`.** The file's one key was
+  `ollama_url`. A new library has none and runs on the defaults.
 - **The registry and a library's manifest keep what another build
   wrote.** A `kind` this build does not know used to make the whole
   registry unreadable, and the manifest of that library with it; it is
@@ -236,6 +255,29 @@ release workflow extracts the matching section verbatim from this file.
   store's `vectors_meta.json` on the way out, dropping the index
   declaration and churn count of a table that was left in place. The
   file is now removed only with the table itself.
+
+### Deprecated
+
+- **A library's `config.toml` no longer sets the Ollama endpoint.**
+  A library whose file names another Ollama than the daemon's
+  environment does is embedded through the daemon's from this release
+  on; if nothing answers there, the library is skipped at start. `init`
+  wrote `ollama_url` into every library it created, so most files carry
+  the key: `bookrack doctor` reports it in the `config.toml` row, as a
+  line to delete when it names the endpoint already in use and as a
+  warning stating both addresses when it does not. Set
+  `BOOKRACK_OLLAMA_URL` for the daemon, then `bookrack libraries config
+  <name> --unset ollama_url`.
+- **`reranker.url`, `reranker.ctx`, and `reranker.threads` are retired
+  from `config.toml`**, and reported the same way. Their homes are
+  `BOOKRACK_RERANKER_URL`, `BOOKRACK_RERANKER_CTX`, and
+  `BOOKRACK_RERANKER_THREADS`.
+- **`BOOKRACK_SEARCH_TOP_K` and `BOOKRACK_SEARCH_WEAK_THRESHOLD` are
+  retired.** A set one is ignored and listed under `retired_variables`.
+  Set the value per library with `bookrack libraries config <name>
+  search.top_k=<n>` or `search.weak_threshold=<x>`.
+- The retired keys and variables stay recognised, with their notices,
+  for this release, and are dropped from the tables in the next.
 
 ### Fixed
 

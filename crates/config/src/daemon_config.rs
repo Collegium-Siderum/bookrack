@@ -8,7 +8,7 @@ use bookrack_core::knob::KnobOrigin;
 
 use crate::{
     ConfigError, DEFAULT_OLLAMA_URL, EmbedConfig, EnvSnapshot, LogConfig, McpConfig,
-    RerankerConfig, RetiredVariable, RootConfig,
+    RerankerConfig, RetiredVariable,
 };
 
 /// What the console log layer falls back to when its own variable is
@@ -67,13 +67,16 @@ impl DaemonConfig {
     pub fn resolve(env: &EnvSnapshot, flags: &DaemonFlags) -> DaemonConfig {
         let get = |name: &str| env.get(name);
         let dotenv = env.dotenv();
-        let no_file = RootConfig::default();
-
-        let ollama_url = crate::ollama_url_knob(get(crate::OLLAMA_URL_ENV), dotenv, &no_file);
+        let ollama_url = crate::ollama_url_knob(get(crate::OLLAMA_URL_ENV), dotenv);
         let state_dir = crate::daemon_state_dir_knob(get(crate::DAEMON_STATE_DIR_ENV), dotenv);
-        let (embed_pacing, embed_rows) = EmbedConfig::resolve_with_origins_from(get, dotenv, None);
-        let (reranker, reranker_rows) =
-            RerankerConfig::resolve_with_origins_from(get, dotenv, &no_file);
+        let (mut embed_pacing, embed_rows) =
+            EmbedConfig::resolve_with_origins_from(get, dotenv, None);
+        let ollama_url_value = ollama_url
+            .value
+            .clone()
+            .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
+        embed_pacing.ollama_url = ollama_url_value.clone();
+        let (reranker, reranker_rows) = RerankerConfig::resolve_with_origins_from(get, dotenv);
         let (mcp, mcp_rows) = McpConfig::resolve_with_flags_from(get, dotenv, Some(flags));
         let (log, log_rows) = LogConfig::resolve_with_origins_from(get, dotenv, flags.console);
 
@@ -88,9 +91,7 @@ impl DaemonConfig {
         origins.extend(log_rows);
 
         DaemonConfig {
-            ollama_url: ollama_url
-                .value
-                .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string()),
+            ollama_url: ollama_url_value,
             reranker,
             mcp: (!flags.no_mcp).then_some(mcp),
             log,
@@ -102,8 +103,8 @@ impl DaemonConfig {
     }
 
     /// The embedding configuration for a library whose vectors are
-    /// built with `model`: the model from the library, the pacing from
-    /// this machine.
+    /// built with `model`: the model from the library, the endpoint and
+    /// the pacing from this machine.
     pub fn embed_config(&self, model: &str) -> EmbedConfig {
         EmbedConfig {
             model: model.to_string(),
@@ -143,8 +144,8 @@ mod tests {
     use super::*;
     use crate::{
         DAEMON_STATE_DIR_ENV, DEFAULT_LOG_CONSOLE, EMBED_BATCH_MAX_CHUNKS_ENV, LOG_CONSOLE_ENV,
-        LOG_ENV, LibraryConfig, MCP_ADDR_ENV, OLLAMA_URL_ENV, RERANKER_URL_ENV, RootSearchConfig,
-        SEARCH_TOP_K_ENV,
+        LOG_ENV, LibraryConfig, MCP_ADDR_ENV, OLLAMA_URL_ENV, RERANKER_CTX_ENV,
+        RERANKER_THREADS_ENV, RERANKER_URL_ENV, RootConfig, RootSearchConfig,
     };
 
     fn row<'a>(cfg: &'a DaemonConfig, key: &str) -> &'a KnobOrigin {
@@ -162,7 +163,9 @@ mod tests {
             (MCP_ADDR_ENV, "127.0.0.1:9"),
             (LOG_ENV, "debug"),
             (DAEMON_STATE_DIR_ENV, "/state"),
-            (SEARCH_TOP_K_ENV, "9"),
+            (RERANKER_CTX_ENV, "4096"),
+            (RERANKER_THREADS_ENV, "3"),
+            ("BOOKRACK_SEARCH_TOP_K", "9"),
         ])
     }
 
@@ -199,6 +202,7 @@ mod tests {
             );
             let embed = cfg.embed_config("some-model");
             assert_eq!(embed.model, "some-model");
+            assert_eq!(embed.ollama_url, cfg.ollama_url);
             assert_eq!(
                 value("embed.batch_char_budget"),
                 Some(embed.batch_char_budget.to_string())
@@ -223,6 +227,8 @@ mod tests {
         assert_eq!(busy.ollama_url, "http://embed-host:1");
         assert_eq!(busy.embed_config("m").batch_max_chunks, 7);
         assert_eq!(busy.daemon_state_dir(), Some(Path::new("/state")));
+        assert_eq!(busy.reranker.ctx, Some(4096));
+        assert_eq!(busy.reranker.threads, Some(3));
     }
 
     #[test]
@@ -232,7 +238,6 @@ mod tests {
                 top_k: Some(3),
                 weak_threshold: None,
             }),
-            ..RootConfig::default()
         };
         // Two processes started under different environments resolve
         // different daemon values and the same library values.

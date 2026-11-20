@@ -50,7 +50,6 @@ fn world() -> &'static Roots {
 
 async fn start(runtime_root: &Path) -> Result<DaemonRuntime> {
     let mut opts = RuntimeOpts::headless(None, Some("alpha".to_string()));
-    opts.no_mcp = true;
     opts.spawn_queue_worker = true;
     opts.runtime_dir = Some(runtime_root.to_path_buf());
     DaemonRuntime::start(opts).await

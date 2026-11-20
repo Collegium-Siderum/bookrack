@@ -55,7 +55,6 @@ fn register_beta(sandbox: &Sandbox, alpha: &Path, beta: &Path) {
 
 async fn start(runtime_root: &Path) -> Result<DaemonRuntime> {
     let mut opts = RuntimeOpts::headless(None, Some("alpha".to_string()));
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.to_path_buf());
     DaemonRuntime::start(opts).await
 }
@@ -307,7 +306,6 @@ async fn unmount_refuses_a_library_with_queued_work() -> Result<()> {
         &[("alpha", alpha.as_path()), ("beta", beta.as_path())],
     );
     let mut opts = RuntimeOpts::headless(None, Some("alpha".to_string()));
-    opts.no_mcp = true;
     opts.spawn_queue_worker = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
     let runtime = DaemonRuntime::start(opts).await?;
@@ -405,7 +403,6 @@ async fn unmount_takes_the_default_but_refuses_the_primary() -> Result<()> {
         &[("alpha", alpha.as_path()), ("beta", beta.as_path())],
     );
     let mut opts = RuntimeOpts::headless(None, Some("beta".to_string()));
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
     let runtime = DaemonRuntime::start(opts).await?;
     assert_eq!(
@@ -490,7 +487,6 @@ async fn unmount_refuses_the_path_selected_root_the_daemon_came_up_under() -> Re
     let anonymous = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let mut opts = RuntimeOpts::headless(Some(anonymous.path().to_path_buf()), None);
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
     let runtime = DaemonRuntime::start(opts).await?;
     assert_eq!(

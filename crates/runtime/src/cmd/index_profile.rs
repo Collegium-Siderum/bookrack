@@ -18,7 +18,8 @@
 use std::path::{Path, PathBuf};
 
 use bookrack_config::{
-    Config, EmbedConfig, LibraryEntry, LibraryKind, LibrarySelection, list_libraries, load_manifest,
+    Config, LibraryConfig, LibraryEntry, LibraryKind, LibrarySelection, list_libraries,
+    load_manifest,
 };
 use bookrack_index_profile::{
     Advice, Finding, IndexProfile, ProfileOrigin, RerankerKind, Severity, builtin_toml, has_errors,
@@ -292,7 +293,8 @@ fn current(selection: &LibrarySelection, json: bool) -> Result<()> {
     let drift = effective.as_ref().map_or(&[][..], |e| e.drift.as_slice());
 
     let profile_model = resolved.as_ref().map(|(p, _, _)| p.embed.model.as_str());
-    let effective_model = EmbedConfig::resolve(profile_model).model;
+    let effective_model =
+        LibraryConfig::resolve(target.config().root_config(), profile_model).embed_model;
     let stamps = pipeline_stamps(target.data_dir(), resolved.as_ref().map(|(p, _, _)| *p));
     // Consistency is a property of the whole library: every pipeline
     // that could be compared agreed. `None` when none could be.
@@ -875,7 +877,8 @@ pub fn advice_line(advice: &Advice) -> String {
         ),
         Advice::UnlistedReranker { model } => format!(
             "note: reranker model '{model}' is not in the model registry and has no pinned \
-             download; serve it through reranker.url, or set {} to its GGUF file",
+             download; serve it and set {}, or set {} to its GGUF file",
+            bookrack_config::RERANKER_URL_ENV,
             bookrack_config::RERANKER_MODEL_ENV
         ),
         Advice::CrossFamilyPair {

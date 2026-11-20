@@ -26,9 +26,14 @@ use eyre::Result;
 use serde_json::Value;
 
 fn opts_serving_mcp(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
-    let mut opts = RuntimeOpts::headless(Some(data_dir), None);
-    opts.no_mcp = false;
-    opts.mcp_addr = Some("127.0.0.1:0".parse().expect("address parses"));
+    let mut opts = RuntimeOpts::headless_with_flags(
+        Some(data_dir),
+        None,
+        bookrack_config::DaemonFlags {
+            mcp_addr: Some("127.0.0.1:0".to_string()),
+            ..bookrack_config::DaemonFlags::default()
+        },
+    );
     opts.runtime_dir = Some(runtime_dir);
     opts
 }

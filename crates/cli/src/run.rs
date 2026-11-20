@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use bookrack_cli::error::BookrackCliError;
-use bookrack_config::{LibrarySelection, LogConfig};
+use bookrack_config::{DaemonConfig, DaemonFlags, EnvSnapshot, LibrarySelection};
 use bookrack_core::Explain;
 use bookrack_ops::Caller;
 use bookrack_ops::registry::UnmountedLibrary;
@@ -54,8 +54,8 @@ fn not_mounted_lines(unmounted: &[UnmountedLibrary]) -> Option<String> {
 pub struct RunOpts {
     /// Library selection forwarded to [`Config::resolve`].
     pub selection: LibrarySelection,
-    /// Override the MCP listener address; falls back to
-    /// [`bookrack_config::McpConfig::from_env`].
+    /// Override the MCP listener address; falls back to the variable,
+    /// then the compiled-in default.
     pub mcp_addr: Option<SocketAddr>,
     /// Skip binding the MCP listener. The daemon still acquires the
     /// TTY lock and opens the registry; useful for development and for
@@ -74,13 +74,22 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
         .context("resolve BOOKRACK_RUNTIME_DIR")?;
     let lock_path = runtime_dir.join(bookrack_session::tty_lock_name());
 
+    // The process-level configuration is resolved here, once, before
+    // the daemon takes the session lock: the environment and these
+    // flags are everything that can set it.
+    let daemon_config = DaemonConfig::resolve(
+        &EnvSnapshot::capture(),
+        &DaemonFlags {
+            mcp_addr: opts.mcp_addr.map(|addr| addr.to_string()),
+            no_mcp: opts.no_mcp,
+            ..DaemonFlags::default()
+        },
+    );
     let runtime_opts = RuntimeOpts {
         selection: opts.selection,
         runtime_dir: opts.runtime_dir,
-        mcp_addr: opts.mcp_addr,
-        no_mcp: opts.no_mcp,
+        daemon_config,
         spawn_queue_worker: true,
-        log_config: LogConfig::from_env(),
         caller: Caller::cli(),
         mcp_tools: bookrack_mcp::list_tools(),
     };

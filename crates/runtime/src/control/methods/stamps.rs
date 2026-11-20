@@ -37,8 +37,9 @@ pub async fn reconcile(params: &Option<Value>, ctx: &MethodContext) -> Result<Va
         .get(parsed.library.as_deref())
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
+    let daemon = std::sync::Arc::clone(&ctx.daemon_config);
     run_write(ctx, handle.name(), move || async move {
-        let report = stamps::reconcile(&cfg)
+        let report = stamps::reconcile(&cfg, &daemon)
             .await
             .map_err(|e| handler_err("stamps.reconcile", e))?;
         ok_reply(&report)

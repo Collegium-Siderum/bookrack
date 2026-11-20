@@ -125,7 +125,6 @@ fn repair_catalog(root: &Path) {
 
 async fn start(library: &str, runtime_root: &Path, worker: bool) -> Result<DaemonRuntime> {
     let mut opts = RuntimeOpts::headless(None, Some(library.to_string()));
-    opts.no_mcp = true;
     opts.spawn_queue_worker = worker;
     opts.runtime_dir = Some(runtime_root.to_path_buf());
     DaemonRuntime::start(opts).await
@@ -1449,7 +1448,6 @@ async fn a_root_selected_by_path_is_not_told_to_remove_default() -> Result<()> {
     let runtime_root = tempfile::tempdir()?;
 
     let mut opts = RuntimeOpts::headless(Some(root.clone()), None);
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
     let err = match DaemonRuntime::start(opts).await {
         Ok(runtime) => {

@@ -2,7 +2,7 @@
 
 //! End-to-end coverage for the `retrieval show` weak-recall advisory:
 //! the threshold it judges against comes from the target library's own
-//! `config.toml`, under the environment layer.
+//! `config.toml`, and from nowhere else.
 //!
 //! The whole chain is offline — `retrieval` needs no daemon, no
 //! embedder, and no vector store — so the test seeds one sidecar row
@@ -91,15 +91,40 @@ fn retrieval_show_reads_the_weak_threshold_from_the_target_library() -> Result<(
         "0.62 is at or above a 0.5 threshold: {strict}"
     );
 
-    // The environment layer still wins over the file, which is the
-    // documented precedence for this knob.
-    let overridden = bookrack_cmd!(&sandbox)
+    Ok(())
+}
+
+/// The threshold is the library's own: a variable an earlier release
+/// read cannot move it, and the report says the variable is retired.
+#[test]
+fn the_environment_cannot_move_a_library_threshold() -> Result<()> {
+    let sandbox = Sandbox::new();
+    let root = tempfile::tempdir()?;
+    let call_id = {
+        let catalog = Catalog::open_for_write_unbacked(&root.path().join("catalog.db"))?;
+        catalog.record_tool_call_with_retrieval(
+            &NewMcpToolCall::new("mcp", "library.search", "ok"),
+            Some(&NewRetrievalCall {
+                fingerprint: "deadbeefcafef00d".to_string(),
+                top_k: 10,
+                query_text: Some("what is a monad".to_string()),
+                hits: vec![("p-alpha".to_string(), 0.62)],
+            }),
+        )?
+    };
+    std::fs::write(
+        root.path().join("config.toml"),
+        "[search]\nweak_threshold = 0.5\n",
+    )?;
+    let data_dir = root.path().display().to_string();
+
+    let shown = bookrack_cmd!(&sandbox)
         .without_data_dir()
         .extra_env("BOOKRACK_SEARCH_WEAK_THRESHOLD", "0.9")
         .build()
         .args([
             "--data-dir",
-            &root.path().display().to_string(),
+            &data_dir,
             "retrieval",
             "show",
             &call_id.to_string(),
@@ -108,10 +133,28 @@ fn retrieval_show_reads_the_weak_threshold_from_the_target_library() -> Result<(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()?;
-    let text = String::from_utf8_lossy(&overridden.stdout);
+    let text = String::from_utf8_lossy(&shown.stdout);
     assert!(
-        !text.contains("weak recall:"),
-        "the env override should lift the threshold back above the hit: {text}"
+        text.contains("weak recall:") && text.contains("0.5000"),
+        "the variable moved a threshold the library's file sets: {text}"
     );
+
+    let effective = bookrack_cmd!(&sandbox)
+        .without_data_dir()
+        .extra_env("BOOKRACK_SEARCH_WEAK_THRESHOLD", "0.9")
+        .build()
+        .args(["--data-dir", &data_dir, "--json", "config", "effective"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    let report: serde_json::Value = serde_json::from_slice(&effective.stdout)?;
+    let retired: Vec<&str> = report["retired_variables"]
+        .as_array()
+        .expect("retired_variables is an array")
+        .iter()
+        .filter_map(|var| var["key"].as_str())
+        .collect();
+    assert_eq!(retired, ["BOOKRACK_SEARCH_WEAK_THRESHOLD"], "{report}");
     Ok(())
 }

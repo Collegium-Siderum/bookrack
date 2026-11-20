@@ -130,11 +130,16 @@ async fn run_execute_from_plan(
         .map_err(plan_lookup_err)?;
     let plan: RegisteredPapersRebuildPlan = serde_json::from_slice(&payload)
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("decode plan payload: {e}")))?;
+    let daemon = std::sync::Arc::clone(&ctx.daemon_config);
     run_write(ctx, handle.name(), move || async move {
-        let outcome =
-            papers_corpus::execute_rebuild_from_plan(&cfg, plan.pinned_ids, plan.include_vectors)
-                .await
-                .map_err(|e| handler_err("papers.corpus_rebuild", e))?;
+        let outcome = papers_corpus::execute_rebuild_from_plan(
+            &cfg,
+            &daemon,
+            plan.pinned_ids,
+            plan.include_vectors,
+        )
+        .await
+        .map_err(|e| handler_err("papers.corpus_rebuild", e))?;
         Ok(serialize_execute_outcome(&outcome))
     })
     .await

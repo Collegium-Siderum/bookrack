@@ -106,8 +106,13 @@ pub struct PreflightRefusal {
 /// bring-up fail on library six anyway.
 pub async fn preflight_embed_backends(
     mounts: &[(String, std::sync::Arc<bookrack_config::Config>)],
+    daemon: &bookrack_config::DaemonConfig,
 ) -> Result<(), PreflightRefusal> {
-    match embed_backend_problems(mounts).await.into_iter().next() {
+    match embed_backend_problems(mounts, daemon)
+        .await
+        .into_iter()
+        .next()
+    {
         Some((library, problem)) => Err(PreflightRefusal { library, problem }),
         None => Ok(()),
     }
@@ -119,17 +124,18 @@ pub async fn preflight_embed_backends(
 /// a bring-up that skips the unusable ones skips them all.
 pub async fn embed_backend_problems(
     mounts: &[(String, std::sync::Arc<bookrack_config::Config>)],
+    daemon: &bookrack_config::DaemonConfig,
 ) -> Vec<(String, Problem)> {
     let mut judged: Vec<((String, String), Option<Problem>)> = Vec::new();
     let mut problems = Vec::new();
     for (name, cfg) in mounts {
-        let embed = match crate::profile::effective_embed_config(cfg) {
+        let embed = match crate::profile::effective_embed_config(cfg, daemon) {
             Ok(embed) => embed,
             // Resolution failures are not this check's business; the
             // step that owns them reports them with its own wording.
             Err(_) => continue,
         };
-        let pair = (cfg.ollama_url().to_string(), embed.model.clone());
+        let pair = (embed.ollama_url.clone(), embed.model.clone());
         let verdict = match judged.iter().find(|(seen, _)| *seen == pair) {
             Some((_, verdict)) => verdict.clone(),
             None => {

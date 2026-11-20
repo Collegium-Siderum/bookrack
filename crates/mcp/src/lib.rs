@@ -1741,10 +1741,11 @@ impl BookrackServer {
         // The card's identity comes from the library the handle names,
         // not from the bring-up snapshot: the counts below are this
         // handle's, and the two halves of one card describe one root.
-        // The MCP address is a property of the process and is carried
-        // over from the snapshot.
+        // The Ollama endpoint and the MCP address are properties of the
+        // process and are carried over from the snapshot.
         let ctx = bookrack_runtime::daemon::library_info_context_for(
             handle.cfg(),
+            &self.info_context.ollama_url,
             &self.info_context.mcp_addr,
         )
         .map_err(|e| report_to_mcp("library.info", e))?;

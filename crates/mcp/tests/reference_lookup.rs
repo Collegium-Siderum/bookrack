@@ -155,6 +155,10 @@ impl Fixture {
             write_guard: Arc::new(tokio::sync::Mutex::new(())),
             shutdown_tx: self.shutdown_tx.clone(),
             identity: test_identity(),
+            daemon_config: Arc::new(bookrack_config::DaemonConfig::resolve(
+                &bookrack_config::EnvSnapshot::default(),
+                &bookrack_config::DaemonFlags::default(),
+            )),
             selection: LibrarySelection::default(),
             library_name: "with".to_string(),
             auto_registered: Vec::new(),

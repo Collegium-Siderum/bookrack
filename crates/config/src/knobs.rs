@@ -11,23 +11,26 @@
 
 use bookrack_core::knob::{DotenvSupply, KnobOrigin, Layer};
 
-use crate::{Config, EmbedConfig, LogConfig, McpConfig, RerankerConfig, RootConfig, SearchConfig};
+use crate::{Config, EmbedConfig, LibraryConfig, LogConfig, McpConfig, RerankerConfig, RootConfig};
 
 /// Every knob `bookrack-config` resolves, with the layer that supplied
-/// each value.
+/// each value, as this process's environment resolves them.
 ///
 /// `root` is `None` when the data root could not be resolved: the
 /// library-scoped rows then report their file layer as offering
 /// nothing, and the machine- and process-scoped rows are unaffected —
 /// they never depended on a root.
 ///
-/// The `embed.model` row reports the compiled-in default, because the
-/// index profile that may override it resolves outside this crate. A
-/// caller holding the resolved profile reports that layer itself; see
-/// [`effective_profile_reference`](crate::effective_profile_reference),
-/// which produces a row of the same shape.
-pub fn knob_origins(root: Option<&Config>) -> Vec<KnobOrigin> {
-    knob_origins_from(|key| std::env::var(key).ok(), crate::dotenv_supply(), root)
+/// `profile_model` is the embed model the library's index profile
+/// declares, which resolves outside this crate; `None` leaves the
+/// `embed.model` row at the compiled-in default.
+pub fn knob_origins(root: Option<&Config>, profile_model: Option<&str>) -> Vec<KnobOrigin> {
+    knob_origins_from(
+        |key| std::env::var(key).ok(),
+        crate::dotenv_supply(),
+        root,
+        profile_model,
+    )
 }
 
 /// Every knob this crate resolves, as it stands on a machine where
@@ -46,7 +49,7 @@ pub fn knob_origins(root: Option<&Config>) -> Vec<KnobOrigin> {
 /// which is the value a reader is asking after — the point of such a
 /// row is that its default is derived rather than fixed.
 pub fn knob_catalog() -> Vec<KnobOrigin> {
-    knob_origins_from(|_| None, None, None)
+    knob_origins_from(|_| None, None, None, None)
 }
 
 /// Pure form of [`knob_origins`], factored out so a test can drive the
@@ -56,24 +59,44 @@ pub fn knob_catalog() -> Vec<KnobOrigin> {
 /// record decides which layer is credited for a value, so a caller
 /// describing a hypothetical environment must be able to say there was
 /// no file.
+///
+/// The environment reaches the machine- and process-scoped rows only.
+/// The library-scoped ones are resolved from `root` and
+/// `profile_model` by [`LibraryConfig`], which takes no environment.
 fn knob_origins_from(
     get: impl Fn(&str) -> Option<String>,
     dotenv: Option<DotenvSupply<'_>>,
     root: Option<&Config>,
+    profile_model: Option<&str>,
 ) -> Vec<KnobOrigin> {
     let root_config = root.map_or_else(RootConfig::default, |c| c.root_config.clone());
+    let library = LibraryConfig::resolve(&root_config, profile_model);
 
     let mut rows = vec![
         crate::no_dotenv_knob(get(crate::NO_DOTENV_ENV)),
         crate::registry_knob(get(crate::REGISTRY_ENV), dotenv),
         data_dir_row(&get, dotenv, root),
-        crate::ollama_url_knob(get(crate::OLLAMA_URL_ENV), dotenv, &root_config),
+        crate::ollama_url_knob(get(crate::OLLAMA_URL_ENV), dotenv),
         backup_dir_row(&get, dotenv, root),
         crate::daemon_state_dir_knob(get(crate::DAEMON_STATE_DIR_ENV), dotenv),
     ];
-    rows.extend(EmbedConfig::resolve_with_origins_from(&get, dotenv, None).1);
-    rows.extend(SearchConfig::resolve_with_origins_from(&get, dotenv, &root_config).1);
-    rows.extend(RerankerConfig::resolve_with_origins_from(&get, dotenv, &root_config).1);
+    let pacing = EmbedConfig::resolve_with_origins_from(&get, dotenv, None).1;
+    rows.extend(
+        library
+            .origins()
+            .iter()
+            .filter(|row| row.key == "embed.model")
+            .cloned(),
+    );
+    rows.extend(pacing.into_iter().filter(|row| row.key != "embed.model"));
+    rows.extend(
+        library
+            .origins()
+            .iter()
+            .filter(|row| row.key != "embed.model")
+            .cloned(),
+    );
+    rows.extend(RerankerConfig::resolve_with_origins_from(&get, dotenv).1);
     rows.extend(McpConfig::resolve_with_origins_from(&get, dotenv).1);
     rows.extend(LogConfig::resolve_with_origins_from(&get, dotenv, crate::ConsoleDefault::Quiet).1);
     rows
@@ -266,9 +289,16 @@ fn backup_dir_row(
 mod tests {
     use super::*;
 
-    use crate::{
-        DEFAULT_SEARCH_TOP_K, RootConfig, RootSearchConfig, SEARCH_TOP_K_ENV, SearchConfig,
-    };
+    use crate::{DEFAULT_SEARCH_TOP_K, RootConfig, RootSearchConfig, SearchConfig};
+
+    /// A variable with a compiled-in default beneath it, used wherever
+    /// a test needs some environment-backed knob and not a particular
+    /// one.
+    const PROBE_ENV: &str = crate::EMBED_BATCH_MAX_CHUNKS_ENV;
+    /// The row [`PROBE_ENV`] moves.
+    const PROBE_KEY: &str = "embed.batch_max_chunks";
+    /// What that row reports with nothing set.
+    const PROBE_DEFAULT: &str = "64";
     use bookrack_core::knob::Standing;
     use std::path::PathBuf;
 
@@ -285,7 +315,6 @@ mod tests {
                 top_k: Some(top_k),
                 weak_threshold: None,
             }),
-            ..RootConfig::default()
         }
     }
 
@@ -296,22 +325,13 @@ mod tests {
     }
 
     #[test]
-    fn the_env_layer_eclipses_the_file_layer() {
-        let root = root_with_top_k(5);
-        let (_, rows) =
-            SearchConfig::resolve_with_origins_from(only(SEARCH_TOP_K_ENV, "9"), None, &root);
+    fn the_file_layer_eclipses_the_default() {
+        let root = root_with_top_k(7);
+        let (_, rows) = SearchConfig::resolve_with_origins_from(&root);
         let top_k = row(&rows, "search.top_k");
 
-        assert_eq!(top_k.layer, Layer::Environment);
-        assert_eq!(top_k.value.as_deref(), Some("9"));
-        assert!(
-            top_k
-                .shadowed
-                .iter()
-                .any(|s| s.layer == Layer::File && s.site == "search.top_k" && s.value == "5"),
-            "file layer missing from shadowed: {:?}",
-            top_k.shadowed
-        );
+        assert_eq!(top_k.layer, Layer::File);
+        assert_eq!(top_k.value.as_deref(), Some("7"));
         assert!(
             top_k
                 .shadowed
@@ -322,15 +342,83 @@ mod tests {
         );
     }
 
+    /// The same for a knob the environment backs: the variable wins and
+    /// the compiled-in default is recorded as what it eclipsed.
+    #[test]
+    fn the_env_layer_eclipses_the_default() {
+        let rows = knob_origins_from(only(PROBE_ENV, "9"), None, None, None);
+        let probe = row(&rows, PROBE_KEY);
+
+        assert_eq!(probe.layer, Layer::Environment);
+        assert_eq!(probe.value.as_deref(), Some("9"));
+        assert!(
+            probe
+                .shadowed
+                .iter()
+                .any(|s| s.layer == Layer::Default && s.value == PROBE_DEFAULT),
+            "default layer missing from shadowed: {:?}",
+            probe.shadowed
+        );
+    }
+
+    /// Every row a daemon resolves for itself is settled before any
+    /// library is looked at, and none of them belongs to a library.
+    #[test]
+    fn the_daemon_rows_are_read_before_resolution_and_reach_no_library() {
+        let rows = knob_catalog();
+        for key in [
+            "ollama_url",
+            "embed.batch_char_budget",
+            "embed.batch_max_chunks",
+            "embed.batch_min_char_budget",
+            "embed.progress_interval_secs",
+            "reranker.url",
+            "reranker.ctx",
+            "reranker.threads",
+            "mcp.addr",
+            "log.directive",
+            "log.console_level",
+        ] {
+            let row = row(&rows, key);
+            assert_eq!(
+                row.read_at,
+                bookrack_core::knob::ReadAt::BeforeResolution,
+                "{key}"
+            );
+            assert_ne!(row.reach, bookrack_core::knob::KnobReach::Library, "{key}");
+            assert!(
+                row.chain.iter().all(|site| site.layer != Layer::File),
+                "{key} lists a library file among its layers"
+            );
+        }
+    }
+
+    /// No variable reaches a library-scoped row: with every name
+    /// answering, those rows resolve as they do with none.
+    #[test]
+    fn no_variable_moves_a_library_scoped_row() {
+        let quiet = knob_origins_from(|_| None, None, None, None);
+        let loud = knob_origins_from(|_| Some("9".to_string()), None, None, None);
+        for key in ["search.top_k", "search.weak_threshold", "embed.model"] {
+            assert_eq!(row(&quiet, key), row(&loud, key), "{key}");
+            assert!(
+                row(&loud, key)
+                    .chain
+                    .iter()
+                    .all(|site| site.layer != Layer::Environment && site.layer != Layer::Dotenv),
+                "{key} still lists an environment layer"
+            );
+        }
+    }
+
     /// The mechanical form of the invariant that the table is a
     /// by-product of resolution: the struct the resolver returns and
     /// the row it reports must carry the same value, because the struct
     /// field is read off the row.
     #[test]
     fn the_table_agrees_with_the_struct_it_explains() {
-        let root = root_with_top_k(5);
-        let (cfg, rows) =
-            SearchConfig::resolve_with_origins_from(only(SEARCH_TOP_K_ENV, "9"), None, &root);
+        let root = root_with_top_k(7);
+        let (cfg, rows) = SearchConfig::resolve_with_origins_from(&root);
 
         assert_eq!(
             Some(cfg.top_k.to_string()),
@@ -351,7 +439,7 @@ mod tests {
             .iter()
             .chain(crate::SITE_ENV_CONSTANTS);
         for name in names {
-            let rows = knob_origins_from(only(name, "7"), None, None);
+            let rows = knob_origins_from(only(name, "7"), None, None, None);
             let winner = rows
                 .iter()
                 .find(|r| r.layer == Layer::Environment && r.value.is_some())
@@ -454,8 +542,8 @@ mod tests {
     /// them, so the loader's record is the only thing that can tell.
     #[test]
     fn a_key_the_dotenv_file_supplied_reports_the_dotenv_layer() {
-        let load = dotenv_load("/sandbox/.env", &[SEARCH_TOP_K_ENV]);
-        let layers = layers_for(&load, SEARCH_TOP_K_ENV, Some("9".to_string()));
+        let load = dotenv_load("/sandbox/.env", &[PROBE_ENV]);
+        let layers = layers_for(&load, PROBE_ENV, Some("9".to_string()));
 
         assert_eq!(layers.len(), 2, "{layers:?}");
         assert_eq!(layers[0].layer, Layer::Environment);
@@ -470,7 +558,7 @@ mod tests {
     #[test]
     fn a_key_the_real_environment_carried_stays_on_the_environment_layer() {
         let load = dotenv_load("/sandbox/.env", &["SOMETHING_ELSE"]);
-        let layers = layers_for(&load, SEARCH_TOP_K_ENV, Some("9".to_string()));
+        let layers = layers_for(&load, PROBE_ENV, Some("9".to_string()));
 
         assert_eq!(layers.len(), 1, "{layers:?}");
         assert_eq!(layers[0].layer, Layer::Environment);
@@ -489,13 +577,13 @@ mod tests {
     #[test]
     fn a_key_is_never_offered_by_both_the_environment_and_the_dotenv_layer() {
         let cases = [
-            dotenv_load("/sandbox/.env", &[SEARCH_TOP_K_ENV]),
+            dotenv_load("/sandbox/.env", &[PROBE_ENV]),
             dotenv_load("/sandbox/.env", &[]),
-            dotenv_eclipsed("/sandbox/.env", SEARCH_TOP_K_ENV, "7"),
+            dotenv_eclipsed("/sandbox/.env", PROBE_ENV, "7"),
         ];
         for load in cases {
             for raw in [None, Some("9".to_string())] {
-                let layers = layers_for(&load, SEARCH_TOP_K_ENV, raw.clone());
+                let layers = layers_for(&load, PROBE_ENV, raw.clone());
                 let offering = layers
                     .iter()
                     .filter(|c| c.value.is_some() && c.standing == Standing::Bidding)
@@ -517,8 +605,8 @@ mod tests {
     /// was already being ignored.
     #[test]
     fn a_dotenv_line_the_environment_beat_is_reported_as_shadowed() {
-        let load = dotenv_eclipsed("/sandbox/.env", SEARCH_TOP_K_ENV, "7");
-        let layers = layers_for(&load, SEARCH_TOP_K_ENV, Some("9".to_string()));
+        let load = dotenv_eclipsed("/sandbox/.env", PROBE_ENV, "7");
+        let layers = layers_for(&load, PROBE_ENV, Some("9".to_string()));
 
         assert_eq!(layers.len(), 2, "{layers:?}");
         assert_eq!(layers[0].layer, Layer::Environment);
@@ -575,7 +663,7 @@ mod tests {
     /// in only one of them would mean that stopped being true.
     #[test]
     fn the_catalog_and_the_report_cover_the_same_knobs() {
-        let reported: Vec<String> = knob_origins_from(|_| None, None, None)
+        let reported: Vec<String> = knob_origins_from(|_| None, None, None, None)
             .into_iter()
             .map(|r| r.key)
             .collect();
@@ -642,9 +730,9 @@ mod tests {
     /// defaults on a machine that does have a `.env`.
     #[test]
     fn the_rows_report_the_dotenv_record_they_were_given() {
-        let load = dotenv_eclipsed("/sandbox/.env", SEARCH_TOP_K_ENV, "7");
-        let carried = knob_origins_from(only(SEARCH_TOP_K_ENV, "9"), Some(load.supply()), None);
-        let top_k = row(&carried, "search.top_k");
+        let load = dotenv_eclipsed("/sandbox/.env", PROBE_ENV, "7");
+        let carried = knob_origins_from(only(PROBE_ENV, "9"), Some(load.supply()), None, None);
+        let top_k = row(&carried, PROBE_KEY);
         assert!(
             top_k
                 .shadowed
@@ -654,7 +742,7 @@ mod tests {
             top_k.shadowed
         );
 
-        let none = knob_origins_from(only(SEARCH_TOP_K_ENV, "9"), None, None);
+        let none = knob_origins_from(only(PROBE_ENV, "9"), None, None, None);
         let drawn: Vec<(&str, &str)> = none
             .iter()
             .flat_map(|r| {
@@ -699,7 +787,7 @@ mod tests {
         // fall out of the row unnoticed.
         let resolved = root_resolved_by(crate::ResolutionSource::DataDirFlag, "/sandbox/root");
         for root in [None, Some(&resolved)] {
-            let rows = knob_origins_from(|_| None, None, root);
+            let rows = knob_origins_from(|_| None, None, root, None);
             let sited: Vec<&str> = rows
                 .iter()
                 .flat_map(|r| r.chain.iter().map(|s| s.site.as_str()))
@@ -744,7 +832,6 @@ mod tests {
     fn root_resolved_by(source: crate::ResolutionSource, dir: &str) -> Config {
         Config {
             data_dir: PathBuf::from(dir),
-            ollama_url: crate::DEFAULT_OLLAMA_URL.to_string(),
             library: None,
             source,
             root_config: RootConfig::default(),
@@ -771,6 +858,7 @@ mod tests {
             only(crate::DATA_DIR_ENV, "/sandbox/root"),
             Some(load.supply()),
             Some(&root),
+            None,
         );
         let data_dir = row(&rows, "data_dir");
 
@@ -803,6 +891,7 @@ mod tests {
             only(crate::DATA_DIR_ENV, "/sandbox/from-shell"),
             Some(load.supply()),
             Some(&root),
+            None,
         );
         let data_dir = row(&rows, "data_dir");
 
@@ -831,6 +920,7 @@ mod tests {
             only(crate::DATA_DIR_ENV, "  "),
             Some(load.supply()),
             Some(&root),
+            None,
         );
         let data_dir = row(&rows, "data_dir");
 
@@ -861,6 +951,7 @@ mod tests {
             only(crate::DATA_DIR_ENV, "/sandbox/from-shell"),
             Some(load.supply()),
             Some(&root),
+            None,
         );
         let data_dir = row(&rows, "data_dir");
 
@@ -890,6 +981,7 @@ mod tests {
                 only(crate::DATA_DIR_ENV, "/sandbox/from-shell"),
                 None,
                 Some(&root),
+                None,
             );
             let data_dir = row(&rows, "data_dir");
 
@@ -919,6 +1011,7 @@ mod tests {
             only(crate::DATA_DIR_ENV, "/sandbox/from-file"),
             Some(load.supply()),
             Some(&root),
+            None,
         );
         let data_dir = row(&rows, "data_dir");
 
@@ -940,7 +1033,7 @@ mod tests {
     #[test]
     fn a_blank_data_root_variable_a_flag_outranked_adds_no_layer() {
         let root = root_resolved_by(crate::ResolutionSource::DataDirFlag, "/sandbox/flag");
-        let rows = knob_origins_from(only(crate::DATA_DIR_ENV, "  "), None, Some(&root));
+        let rows = knob_origins_from(only(crate::DATA_DIR_ENV, "  "), None, Some(&root), None);
         let data_dir = row(&rows, "data_dir");
 
         assert_eq!(data_dir.layer, Layer::Flag);
@@ -961,6 +1054,7 @@ mod tests {
         let rows = knob_origins_from(
             only(crate::DATA_DIR_ENV, "/sandbox/nope"),
             Some(load.supply()),
+            None,
             None,
         );
         let data_dir = row(&rows, "data_dir");
@@ -1047,7 +1141,7 @@ mod tests {
     /// a rung above it.
     #[test]
     fn the_mcp_address_row_names_the_flag_that_overrides_it() {
-        let rows = knob_origins_from(|_| None, None, None);
+        let rows = knob_origins_from(|_| None, None, None, None);
         let addr = row(&rows, "mcp.addr");
 
         let flag = addr
@@ -1079,7 +1173,7 @@ mod tests {
     /// resolution failed, which is the case that command exists for.
     #[test]
     fn the_unrooted_backup_dir_row_names_the_layer_that_backstops_it() {
-        let rows = knob_origins_from(|_| None, None, None);
+        let rows = knob_origins_from(|_| None, None, None, None);
         let unrooted = row(&rows, "backup_dir");
 
         let site = unrooted
@@ -1169,13 +1263,13 @@ mod tests {
         for name in names {
             for raw in ["", "   ", "not-a-number", "7"] {
                 let get = only(name, raw);
-                let without = knob_origins_from(&get, None, None);
+                let without = knob_origins_from(&get, None, None, None);
                 let loads = [
                     dotenv_eclipsed("/sandbox/.env", name, "13"),
                     dotenv_load("/sandbox/.env", &[name]),
                 ];
                 for load in &loads {
-                    let with = knob_origins_from(&get, Some(load.supply()), None);
+                    let with = knob_origins_from(&get, Some(load.supply()), None, None);
                     assert_eq!(with.len(), without.len(), "the two tables differ in length");
                     for (reported, resolved) in with.iter().zip(&without) {
                         assert_eq!(
@@ -1208,13 +1302,13 @@ mod tests {
     /// value and still leave them editing a line already ignored.
     #[test]
     fn a_blanked_variable_the_file_also_names_reports_the_file_line_as_lost() {
-        let load = dotenv_eclipsed("/sandbox/.env", SEARCH_TOP_K_ENV, "7");
-        let rows = knob_origins_from(only(SEARCH_TOP_K_ENV, ""), Some(load.supply()), None);
-        let top_k = row(&rows, "search.top_k");
+        let load = dotenv_eclipsed("/sandbox/.env", PROBE_ENV, "7");
+        let rows = knob_origins_from(only(PROBE_ENV, ""), Some(load.supply()), None, None);
+        let top_k = row(&rows, PROBE_KEY);
 
         assert_eq!(
             top_k.value.as_deref(),
-            Some(DEFAULT_SEARCH_TOP_K.to_string().as_str()),
+            Some(PROBE_DEFAULT),
             "the blanked variable let the file's discarded line win"
         );
         assert_eq!(top_k.layer, Layer::Default);
@@ -1232,18 +1326,15 @@ mod tests {
     /// neither win nor appear as shadowed.
     #[test]
     fn a_blank_env_value_does_not_win() {
-        let root = root_with_top_k(5);
-        let (cfg, rows) =
-            SearchConfig::resolve_with_origins_from(only(SEARCH_TOP_K_ENV, "   "), None, &root);
-        let top_k = row(&rows, "search.top_k");
+        let rows = knob_origins_from(only(PROBE_ENV, "   "), None, None, None);
+        let probe = row(&rows, PROBE_KEY);
 
-        assert_eq!(top_k.layer, Layer::File);
-        assert_eq!(top_k.value.as_deref(), Some("5"));
-        assert_eq!(cfg.top_k, 5);
+        assert_eq!(probe.layer, Layer::Default);
+        assert_eq!(probe.value.as_deref(), Some(PROBE_DEFAULT));
         assert!(
-            !top_k.shadowed.iter().any(|s| s.layer == Layer::Environment),
+            !probe.shadowed.iter().any(|s| s.layer == Layer::Environment),
             "a blank env value was recorded as shadowed: {:?}",
-            top_k.shadowed
+            probe.shadowed
         );
     }
 }

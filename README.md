@@ -75,8 +75,8 @@ are still being hardened for production use.
 
    `init` is a five-step wizard: it picks a data root, checks the
    PDFium library, probes Ollama, runs an end-to-end smoke test
-   against a tempdir, then writes `<data_root>/config.toml` and a
-   pointer in your platform's config directory, so any later
+   against a tempdir, then writes the library's identity manifest
+   and a pointer in your platform's config directory, so any later
    `bookrack` command finds the same data root without a `--data-dir`
    flag. The pointer records where the data lives; it does not put
    `bookrack` on your `PATH`. Keep invoking it by path, or add its

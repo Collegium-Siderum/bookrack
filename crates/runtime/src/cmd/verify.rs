@@ -246,7 +246,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     fn config_for(data_dir: &Path) -> Config {
-        Config::new(data_dir.to_path_buf(), "http://localhost:11434".to_string())
+        Config::new(data_dir.to_path_buf())
     }
 
     /// Database files under `dir`. Sidecar `-shm` / `-wal` files are

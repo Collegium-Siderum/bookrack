@@ -60,7 +60,6 @@ async fn the_named_library_reaches_doctor_and_diagnose_through_the_daemon() -> R
     let runtime_root = tempfile::tempdir()?;
 
     let mut opts = RuntimeOpts::headless(None, Some("alpha".to_string()));
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
     let runtime = DaemonRuntime::start(opts).await?;
     let shutdown_tx = runtime.shutdown_tx.clone();

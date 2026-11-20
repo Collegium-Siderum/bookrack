@@ -67,7 +67,6 @@ async fn every_handler_resolving_a_library_param_refuses_an_unknown_name_alike()
     let runtime_root = tempfile::tempdir()?;
 
     let mut opts = RuntimeOpts::headless(None, Some("alpha".to_string()));
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
     let runtime = DaemonRuntime::start(opts).await?;
     let sock = runtime.control_sock.path.clone();

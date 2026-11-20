@@ -102,6 +102,14 @@ pub const RERANKER_MODEL_ENV: &str = "BOOKRACK_RERANKER_MODEL";
 /// spawning a supervised llama-server to probing the named endpoint.
 pub const RERANKER_URL_ENV: &str = "BOOKRACK_RERANKER_URL";
 
+/// Environment variable setting the `-c` context size of the supervised
+/// rerank server.
+pub const RERANKER_CTX_ENV: &str = "BOOKRACK_RERANKER_CTX";
+
+/// Environment variable setting `--threads` for the supervised rerank
+/// server.
+pub const RERANKER_THREADS_ENV: &str = "BOOKRACK_RERANKER_THREADS";
+
 /// `-b`/`-ub` batch sizes the supervised rerank server is launched with.
 ///
 /// Rerank (`--pooling rank`) requires each query+document pair to fit
@@ -433,7 +441,6 @@ fn should_load_dotenv(get: impl Fn(&str) -> Option<String>) -> bool {
 #[derive(Debug, Clone)]
 pub struct Config {
     data_dir: PathBuf,
-    ollama_url: String,
     library: Option<String>,
     source: ResolutionSource,
     root_config: RootConfig,
@@ -726,7 +733,7 @@ impl Config {
             default_registry.as_ref(),
         );
         let (resolved, deferred) = raise_deferred_registry_failure(selected, registries.failure)?;
-        let mut config = finish(resolved, std::env::var(OLLAMA_URL_ENV).ok())?;
+        let mut config = finish(resolved)?;
         config.unusable_registry = deferred.as_ref().and_then(unusable_registry_record);
         // A path-class resolution can leave a registry `default` set but
         // ineffective. Detecting it here — after the root is chosen —
@@ -753,10 +760,11 @@ impl Config {
         Ok(config)
     }
 
-    pub fn new(data_dir: PathBuf, ollama_url: String) -> Config {
+    /// A configuration for `data_dir` taken as given: no registry is
+    /// consulted and no `config.toml` is read.
+    pub fn new(data_dir: PathBuf) -> Config {
         Config {
             data_dir,
-            ollama_url,
             library: None,
             source: ResolutionSource::Explicit,
             root_config: RootConfig::default(),
@@ -782,11 +790,6 @@ impl Config {
     /// The data root that every other path is derived from.
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
-    }
-
-    /// The Ollama HTTP endpoint for embeddings.
-    pub fn ollama_url(&self) -> &str {
-        &self.ollama_url
     }
 
     /// The registry library name the data root was selected from, when
@@ -1072,13 +1075,11 @@ fn library_entries(registry: &Registry) -> Vec<LibraryEntry> {
 /// `bookrack init` next to the catalog and corpus databases.
 pub const ROOT_CONFIG_NAME: &str = "config.toml";
 
-/// Per-data-root configuration loaded from `<data_root>/config.toml`.
-///
-/// Carries runtime knobs that vary by library: the Ollama endpoint, the
-/// search knobs, and the reranker deployment knobs. Each field is `None`
-/// when the file does not set it; the matching env var (where one
-/// exists) overrides this layer, and the hardcoded default wins when
-/// both are absent. Written by `bookrack init`; safe to edit by hand.
+/// Per-data-root configuration loaded from `<data_root>/config.toml`:
+/// the preferences that travel with a library. Each field is `None`
+/// when the file does not set it, and the compiled-in default then
+/// applies; nothing in the environment overrides this layer. Safe to
+/// edit by hand.
 ///
 /// Only the keys of [`ROOT_CONFIG_KEYS`] have a field. A document may
 /// carry others — a retired key, or one another build wrote —
@@ -1087,19 +1088,12 @@ pub const ROOT_CONFIG_NAME: &str = "config.toml";
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct RootConfig {
-    /// Ollama HTTP endpoint for embeddings.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ollama_url: Option<String>,
     /// Retrieval knobs, under a `[search]` table.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub search: Option<RootSearchConfig>,
-    /// Reranker backend knobs, under a `[reranker]` table.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reranker: Option<RootRerankerConfig>,
 }
 
-/// The `[search]` table of `<data_root>/config.toml`: the persistent
-/// counterpart of the `BOOKRACK_SEARCH_*` env overrides. Fields are
+/// The `[search]` table of `<data_root>/config.toml`. Fields are
 /// optional so a file can pin one knob without freezing the other.
 #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -1110,28 +1104,6 @@ pub struct RootSearchConfig {
     /// Cosine-distance threshold at or above which a hit counts as weak.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub weak_threshold: Option<f32>,
-}
-
-/// The `[reranker]` table of `<data_root>/config.toml`: how the
-/// reranker backend is deployed, as opposed to *which* reranker runs —
-/// that is the index profile's fact. None of this enters a profile or
-/// a stamp, mirroring how `ollama_url` stays outside them.
-#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(default)]
-pub struct RootRerankerConfig {
-    /// Operator-run rerank server URL. Setting it switches the daemon
-    /// from spawning a supervised llama-server to probing this
-    /// endpoint. Overridden by [`RERANKER_URL_ENV`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    /// `-c` context size for the supervised server; falls back to
-    /// [`DEFAULT_RERANKER_CTX`] when unset.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ctx: Option<u32>,
-    /// `--threads` for the supervised server; its own choice when
-    /// unset.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub threads: Option<u32>,
 }
 
 /// Keys a `config.toml` may still carry from an older release but that
@@ -1161,6 +1133,29 @@ const RETIRED_ROOT_CONFIG_KEYS: &[(&str, &str)] = &[
         "log verbosity is a process-level knob, resolved before any data root is known -- \
          set BOOKRACK_LOG (and BOOKRACK_LOG_CONSOLE for the stderr layer), then drop the \
          line (`bookrack libraries config <name> --unset log_directive`)",
+    ),
+    (
+        "ollama_url",
+        "the Ollama endpoint is a machine-level setting now -- set BOOKRACK_OLLAMA_URL for \
+         the daemon, then drop the line (`bookrack libraries config <name> --unset ollama_url`)",
+    ),
+    (
+        "reranker.url",
+        "the rerank server address is a machine-level setting now -- set \
+         BOOKRACK_RERANKER_URL for the daemon, then drop the line \
+         (`bookrack libraries config <name> --unset reranker.url`)",
+    ),
+    (
+        "reranker.ctx",
+        "the supervised rerank server's context size is a process-level knob now -- set \
+         BOOKRACK_RERANKER_CTX for the daemon, then drop the line \
+         (`bookrack libraries config <name> --unset reranker.ctx`)",
+    ),
+    (
+        "reranker.threads",
+        "the supervised rerank server's thread count is a process-level knob now -- set \
+         BOOKRACK_RERANKER_THREADS for the daemon, then drop the line \
+         (`bookrack libraries config <name> --unset reranker.threads`)",
     ),
 ];
 
@@ -1192,6 +1187,17 @@ pub const RETIRED_ENV_VARS: &[RetiredVariable] = &[
     RetiredVariable {
         name: "BOOKRACK_VECTORS_REFINE_FACTOR",
         help: RETIRED_VECTORS_HELP,
+    },
+    RetiredVariable {
+        name: "BOOKRACK_SEARCH_TOP_K",
+        help: "the result count is a library's own preference -- set it per library with \
+               `bookrack libraries config <name> search.top_k=<n>`, then unset the variable",
+    },
+    RetiredVariable {
+        name: "BOOKRACK_SEARCH_WEAK_THRESHOLD",
+        help: "the weak-match threshold is a library's own preference -- set it per library \
+               with `bookrack libraries config <name> search.weak_threshold=<x>`, then unset \
+               the variable",
     },
 ];
 
@@ -1379,54 +1385,13 @@ fn sort_root_config_keys(
     }
 }
 
-/// Render a `<data_root>/config.toml` body for a freshly initialized
-/// library, using the canonical TOML serializer so the URL is escaped
-/// correctly regardless of which characters it carries.
-///
-/// A TOML basic string with the right escapes (`\"`, `\n`, `\\`,
-/// `\u{...}` for U+2028 and friends) round-trips through
-/// [`load_root_config`], which a hand-rolled `format!` does not: a `"`
-/// or a `\n` inside `ollama_url` would break the document.
-///
-/// Only the endpoint is written. The embed model is the index profile's
-/// fact, and `embed_model` is a retired key that resolves to nothing.
-pub fn render_root_config_toml(ollama_url: &str) -> String {
-    let cfg = RootConfig {
-        ollama_url: Some(ollama_url.to_string()),
-        ..RootConfig::default()
-    };
-    let body = toml::to_string(&cfg).expect("RootConfig serialization is infallible");
-    format!("# bookrack root config. Written by `bookrack init`; safe to edit.\n{body}")
-}
-
 /// The keys `bookrack libraries config` accepts, mirroring the fields of
 /// [`RootConfig`]. A `set` of any other key is refused, so a typo is
 /// caught when it is written instead of being ignored on the next load.
 /// A test asserts this list stays in lockstep with the
 /// struct's serialized field names. A dotted key addresses a field in a
 /// nested table (`search.top_k` edits `top_k` under `[search]`).
-pub const ROOT_CONFIG_KEYS: &[&str] = &[
-    "ollama_url",
-    "search.top_k",
-    "search.weak_threshold",
-    "reranker.url",
-    "reranker.ctx",
-    "reranker.threads",
-];
-
-/// Name the environment variable that overrides `key` in the resolution
-/// chain (`env` > `config.toml` > default), or `None` when the key has no
-/// env counterpart. Lets a caller warn that a value it just wrote is
-/// currently shadowed by a set variable.
-pub fn root_config_env_override(key: &str) -> Option<&'static str> {
-    match key {
-        "ollama_url" => Some(OLLAMA_URL_ENV),
-        "search.top_k" => Some(SEARCH_TOP_K_ENV),
-        "search.weak_threshold" => Some(SEARCH_WEAK_THRESHOLD_ENV),
-        "reranker.url" => Some(RERANKER_URL_ENV),
-        _ => None,
-    }
-}
+pub const ROOT_CONFIG_KEYS: &[&str] = &["search.top_k", "search.weak_threshold"];
 
 /// Read `<data_root>/config.toml` verbatim, preserving comments and
 /// layout for a human-readable dump. A missing file resolves to an empty
@@ -1520,9 +1485,7 @@ pub fn set_root_config_values(
     /// numeric knob round-trips as a number rather than a quoted string.
     fn root_config_value_item(key: &str, value: &str) -> toml_edit::Item {
         match key {
-            "search.top_k" | "reranker.ctx" | "reranker.threads" => {
-                toml_edit::value(value.parse::<i64>().expect("validated integer"))
-            }
+            "search.top_k" => toml_edit::value(value.parse::<i64>().expect("validated integer")),
             "search.weak_threshold" => {
                 toml_edit::value(value.parse::<f64>().expect("validated number"))
             }
@@ -1588,10 +1551,8 @@ fn validate_root_config_unset_key(key: &str) -> Result<(), RootConfigSetError> {
     validate_root_config_key(key)
 }
 
-/// Light per-key value check: `ollama_url` and `reranker.url` must carry
-/// a scheme and an authority, `search.top_k`, `reranker.ctx`, and
-/// `reranker.threads` must be positive integers, and
-/// `search.weak_threshold` a finite number.
+/// Light per-key value check: `search.top_k` must be a positive integer
+/// and `search.weak_threshold` a finite number.
 fn validate_root_config_value(key: &str, value: &str) -> Result<(), RootConfigSetError> {
     let invalid = |reason: &str| {
         Err(RootConfigSetError::InvalidValue {
@@ -1600,15 +1561,6 @@ fn validate_root_config_value(key: &str, value: &str) -> Result<(), RootConfigSe
         })
     };
     match key {
-        "ollama_url" => {
-            let Some((scheme, rest)) = value.split_once("://") else {
-                return invalid("expected a URL like 'http://host:port'");
-            };
-            if scheme.is_empty() || rest.is_empty() {
-                return invalid("expected a URL like 'http://host:port'");
-            }
-            Ok(())
-        }
         "search.top_k" => match value.parse::<i64>() {
             Ok(n) if n > 0 => Ok(()),
             _ => invalid("expected a positive integer"),
@@ -1616,19 +1568,6 @@ fn validate_root_config_value(key: &str, value: &str) -> Result<(), RootConfigSe
         "search.weak_threshold" => match value.parse::<f32>() {
             Ok(v) if v.is_finite() => Ok(()),
             _ => invalid("expected a finite number"),
-        },
-        "reranker.url" => {
-            let Some((scheme, rest)) = value.split_once("://") else {
-                return invalid("expected a URL like 'http://host:port'");
-            };
-            if scheme.is_empty() || rest.is_empty() {
-                return invalid("expected a URL like 'http://host:port'");
-            }
-            Ok(())
-        }
-        "reranker.ctx" | "reranker.threads" => match value.parse::<u32>() {
-            Ok(n) if n > 0 => Ok(()),
-            _ => invalid("expected a positive integer"),
         },
         _ => Ok(()),
     }
@@ -1698,18 +1637,12 @@ pub const DEFAULT_LOG_CONSOLE: &str = "error";
 // setting: internal -- the Default rung of `search.top_k`, reported by `config knobs`
 pub const DEFAULT_SEARCH_TOP_K: usize = 5;
 
-/// Environment variable overriding the search result count.
-pub const SEARCH_TOP_K_ENV: &str = "BOOKRACK_SEARCH_TOP_K";
-
 /// Cosine-distance threshold at or above which a hit is treated as a
 /// weak match. Calibrated against the EMBED spike's real corpus: real
 /// monolingual matches sit around 0.25, cross-language matches around
 /// 0.45, and noise / prompt-only embeddings around 0.55 and above.
 // setting: internal -- the Default rung of `search.weak_threshold`, reported by `config knobs`
 pub const DEFAULT_SEARCH_WEAK_THRESHOLD: f32 = 0.5;
-
-/// Environment variable overriding the weak-hit distance threshold.
-pub const SEARCH_WEAK_THRESHOLD_ENV: &str = "BOOKRACK_SEARCH_WEAK_THRESHOLD";
 
 /// Listen address the MCP server binds when [`McpConfig`] is left at its
 /// default. Loopback only: the server is a local query daemon, not a
@@ -1757,9 +1690,9 @@ pub const RESOLVER_ENV_CONSTANTS: &[&str] = &[
     EMBED_BATCH_MAX_CHUNKS_ENV,
     EMBED_BATCH_MIN_CHAR_BUDGET_ENV,
     EMBED_PROGRESS_INTERVAL_ENV,
-    SEARCH_TOP_K_ENV,
-    SEARCH_WEAK_THRESHOLD_ENV,
     RERANKER_URL_ENV,
+    RERANKER_CTX_ENV,
+    RERANKER_THREADS_ENV,
     MCP_ADDR_ENV,
     LOG_ENV,
     LOG_CONSOLE_ENV,
@@ -1778,6 +1711,8 @@ pub const RESOLVER_ENV_CONSTANTS: &[&str] = &[
 /// carries the client and batching parameters, which are stable.
 #[derive(Debug, Clone)]
 pub struct EmbedConfig {
+    /// Ollama HTTP endpoint to embed against.
+    pub ollama_url: String,
     /// Ollama model tag to embed with.
     pub model: String,
     /// Per-request HTTP timeout.
@@ -1802,9 +1737,19 @@ pub struct EmbedConfig {
     pub progress_interval: Duration,
 }
 
+/// The endpoint [`EmbedConfig::default`] carries: a loopback port
+/// nothing listens on.
+pub const UNROUTED_OLLAMA_URL: &str = "http://127.0.0.1:1";
+
 impl Default for EmbedConfig {
+    /// The compiled-in pacing and model, with [`UNROUTED_OLLAMA_URL`]
+    /// as the endpoint. The endpoint is a placeholder, not
+    /// [`DEFAULT_OLLAMA_URL`]: a configuration that reaches a backend
+    /// comes from [`DaemonConfig::embed_config`], which carries the
+    /// resolved one.
     fn default() -> EmbedConfig {
         EmbedConfig {
+            ollama_url: UNROUTED_OLLAMA_URL.to_string(),
             model: DEFAULT_EMBED_MODEL.to_string(),
             request_timeout: Duration::from_secs(120),
             max_retries: 4,
@@ -1819,29 +1764,9 @@ impl Default for EmbedConfig {
 }
 
 impl EmbedConfig {
-    /// Resolve the model from the index profile, falling back to the
-    /// hardcoded default when no profile is in effect. The profile
-    /// resolves outside this crate; `profile_model` is the embed model
-    /// it declares.
-    ///
-    /// The model is a library-level fact — the semantic identity of the
-    /// library's vectors — so nothing process-level sits above the
-    /// profile that declares it. The batching budgets below are the
-    /// opposite kind of knob and stay env-only: they shape how a run is
-    /// paced, not what it produces.
-    ///
-    /// Content-identity parameters (chunk length, overlap, grouping) are
-    /// not configurable at all — they are frozen with `CHUNK_VERSION` so
-    /// a change forces a re-derivation. A malformed or empty env value
-    /// falls back to the default rather than failing.
-    pub fn resolve(profile_model: Option<&str>) -> EmbedConfig {
-        EmbedConfig::resolve_from(|key| std::env::var(key).ok(), profile_model)
-    }
-
-    /// Pure resolution, factored out so it can be tested without mutating
-    /// process-global environment variables. Takes no dotenv record: it
-    /// keeps the values and discards the rows, and the record moves only
-    /// the attribution (see [`NO_DOTENV_RECORD`]).
+    /// Pure resolution of the model and the pacing knobs, for tests
+    /// that need the values alone.
+    #[cfg(test)]
     fn resolve_from(
         get: impl Fn(&str) -> Option<String>,
         profile_model: Option<&str>,
@@ -1849,10 +1774,21 @@ impl EmbedConfig {
         EmbedConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD, profile_model).0
     }
 
+    /// Resolve the model and the pacing knobs, reporting where each
+    /// value came from. The struct's fields are read off the rows, so
+    /// the two cannot disagree; the endpoint is left at the placeholder
+    /// for the caller to fill.
+    ///
+    /// The model is a library-level fact — the semantic identity of the
+    /// library's vectors — so its only layers are the index profile
+    /// that declares it (`profile_model`) and the compiled-in default.
+    /// The batching budgets are the opposite kind of knob and are
+    /// env-only: they shape how a run is paced, not what it produces.
+    /// A malformed or empty env value falls back to the default.
     /// Pure resolution that also reports where each value came from.
     /// The struct's fields are read off the rows, so the two cannot
     /// disagree.
-    fn resolve_with_origins_from(
+    pub(crate) fn resolve_with_origins_from(
         get: impl Fn(&str) -> Option<String>,
         dotenv: Option<DotenvSupply<'_>>,
         profile_model: Option<&str>,
@@ -1904,6 +1840,7 @@ impl EmbedConfig {
         );
 
         let cfg = EmbedConfig {
+            ollama_url: d.ollama_url,
             model: knob_value(&model, d.model),
             request_timeout: d.request_timeout,
             max_retries: d.max_retries,
@@ -1942,7 +1879,7 @@ fn embed_usize_knob(
     resolve_knob(
         key,
         KnobReach::Process,
-        ReadAt::AfterResolution,
+        ReadAt::BeforeResolution,
         env_over(
             dotenv,
             env_name,
@@ -1980,13 +1917,12 @@ impl Default for SearchConfig {
     }
 }
 
-/// Reranker backend deployment knobs, resolved from the environment
-/// and the `[reranker]` table. `url` decides the backend mode: `Some`
-/// means an operator-run server is probed, `None` means the daemon
-/// supervises its own. `ctx` and `threads` only apply to the
-/// supervised mode; `ctx` falls to [`DEFAULT_RERANKER_CTX`] when the
-/// file does not set it, and `threads` stays `None` so the server makes
-/// its own choice.
+/// Reranker backend deployment knobs, resolved from the environment.
+/// `url` decides the backend mode: `Some` means an operator-run server
+/// is probed, `None` means the daemon supervises its own. `ctx` and
+/// `threads` only apply to the supervised mode; `ctx` falls to
+/// [`DEFAULT_RERANKER_CTX`] when unset, and `threads` stays `None` so
+/// the server makes its own choice.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RerankerConfig {
     /// Operator-run rerank server URL, when one is configured.
@@ -1998,66 +1934,68 @@ pub struct RerankerConfig {
 }
 
 impl RerankerConfig {
-    /// Resolve by precedence `env var > config.toml [reranker]`; the
-    /// numeric knobs have no env counterpart. A blank env value falls
-    /// through to the file layer rather than clearing the knob.
-    pub fn resolve(root: &RootConfig) -> RerankerConfig {
-        RerankerConfig::resolve_from(|key| std::env::var(key).ok(), root)
+    /// Pure resolution, for tests that need the values alone.
+    #[cfg(test)]
+    fn resolve_from(get: impl Fn(&str) -> Option<String>) -> RerankerConfig {
+        RerankerConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD).0
     }
 
-    /// Pure resolution, factored out so it can be tested without mutating
-    /// process-global environment variables. Takes no dotenv record, for
-    /// the reason [`EmbedConfig::resolve_from`] gives.
-    fn resolve_from(get: impl Fn(&str) -> Option<String>, root: &RootConfig) -> RerankerConfig {
-        RerankerConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD, root).0
-    }
-
-    /// Pure resolution that also reports where each value came from.
+    /// Resolve the three knobs, reporting where each value came from.
     /// The struct's fields are read off the rows, so the two cannot
     /// disagree.
     ///
-    /// `url` and `threads` have no compiled-in default: unset is a value
-    /// for them, meaning "supervise our own server" and "let the server
-    /// choose". `ctx` does have one — the supervisor sizes the context to
-    /// the rerank working set — so its row reports
-    /// [`DEFAULT_RERANKER_CTX`] rather than leaving three different
-    /// facts looking like one empty cell.
-    fn resolve_with_origins_from(
+    /// Each is read from its variable alone; a blank or, for the two
+    /// numbers, non-positive value reads as unset. `url` and `threads`
+    /// have no compiled-in default: unset is a value for them, meaning
+    /// "supervise our own server" and "let the server choose". `ctx`
+    /// does have one — the supervisor sizes the context to the rerank
+    /// working set — so its row reports [`DEFAULT_RERANKER_CTX`].
+    pub(crate) fn resolve_with_origins_from(
         get: impl Fn(&str) -> Option<String>,
         dotenv: Option<DotenvSupply<'_>>,
-        root: &RootConfig,
     ) -> (RerankerConfig, Vec<KnobOrigin>) {
-        let file = root.reranker.clone().unwrap_or_default();
-
+        let positive = |name: &str| {
+            env_parsed::<u32>(get(name))
+                .filter(|n| *n > 0)
+                .map(|n| n.to_string())
+        };
         let url = resolve_knob(
             "reranker.url",
-            KnobReach::Library,
-            ReadAt::AfterResolution,
+            KnobReach::Machine,
+            ReadAt::BeforeResolution,
             env_over(
                 dotenv,
                 RERANKER_URL_ENV,
                 env_trimmed(get(RERANKER_URL_ENV)),
-                vec![Candidate::of(
-                    Layer::File,
-                    "reranker.url",
-                    env_trimmed(file.url),
-                )],
+                Vec::new(),
             ),
         );
         let ctx = resolve_knob(
             "reranker.ctx",
-            KnobReach::Library,
-            ReadAt::AfterResolution,
-            vec![
-                Candidate::of(Layer::File, "reranker.ctx", file.ctx.map(|v| v.to_string())),
-                Candidate::of(
+            KnobReach::Process,
+            ReadAt::BeforeResolution,
+            env_over(
+                dotenv,
+                RERANKER_CTX_ENV,
+                positive(RERANKER_CTX_ENV),
+                vec![Candidate::of(
                     Layer::Default,
                     BUILT_IN_SITE,
                     Some(DEFAULT_RERANKER_CTX.to_string()),
-                ),
-            ],
+                )],
+            ),
         );
-        let threads = reranker_file_knob("reranker.threads", file.threads);
+        let threads = resolve_knob(
+            "reranker.threads",
+            KnobReach::Process,
+            ReadAt::BeforeResolution,
+            env_over(
+                dotenv,
+                RERANKER_THREADS_ENV,
+                positive(RERANKER_THREADS_ENV),
+                Vec::new(),
+            ),
+        );
 
         let cfg = RerankerConfig {
             url: url.value.clone(),
@@ -2068,93 +2006,48 @@ impl RerankerConfig {
     }
 }
 
-/// The reranker knob the `config.toml` table is the only source for: no
-/// environment variable and no compiled-in default.
-fn reranker_file_knob(key: &str, file: Option<u32>) -> KnobOrigin {
-    resolve_knob(
-        key,
-        KnobReach::Library,
-        ReadAt::AfterResolution,
-        vec![Candidate::of(Layer::File, key, file.map(|v| v.to_string()))],
-    )
-}
-
 impl SearchConfig {
-    /// Resolve from the environment alone, ignoring the per-root config
-    /// layer. Callers that hold a loaded [`RootConfig`] use
-    /// [`SearchConfig::resolve`] instead so the `[search]` table
-    /// participates.
-    pub fn from_env() -> SearchConfig {
-        SearchConfig::resolve_from(|key| std::env::var(key).ok(), &RootConfig::default())
-    }
-
-    /// Resolve each knob by precedence `env var > config.toml [search] >
-    /// hardcoded default`. A malformed or empty env value falls through
-    /// to the file layer rather than failing.
-    pub fn resolve(root: &RootConfig) -> SearchConfig {
-        SearchConfig::resolve_from(|key| std::env::var(key).ok(), root)
-    }
-
-    /// Pure resolution, factored out so it can be tested without mutating
-    /// process-global environment variables. Takes no dotenv record, for
-    /// the reason [`EmbedConfig::resolve_from`] gives.
-    fn resolve_from(get: impl Fn(&str) -> Option<String>, root: &RootConfig) -> SearchConfig {
-        SearchConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD, root).0
-    }
-
-    /// Pure resolution that also reports where each value came from.
-    /// The struct's fields are read off the rows, so the two cannot
-    /// disagree.
-    fn resolve_with_origins_from(
-        get: impl Fn(&str) -> Option<String>,
-        dotenv: Option<DotenvSupply<'_>>,
-        root: &RootConfig,
-    ) -> (SearchConfig, Vec<KnobOrigin>) {
+    /// Resolve each knob by precedence `config.toml [search] >
+    /// hardcoded default`, reporting where each value came from. The
+    /// struct's fields are read off the rows, so the two cannot
+    /// disagree. No environment layer exists: the values are the
+    /// library's own.
+    pub(crate) fn resolve_with_origins_from(root: &RootConfig) -> (SearchConfig, Vec<KnobOrigin>) {
         let file = root.search.clone().unwrap_or_default();
 
         let top_k = resolve_knob(
             "search.top_k",
             KnobReach::Library,
             ReadAt::AfterResolution,
-            env_over(
-                dotenv,
-                SEARCH_TOP_K_ENV,
-                env_parsed::<usize>(get(SEARCH_TOP_K_ENV)).map(|v| v.to_string()),
-                vec![
-                    Candidate::of(
-                        Layer::File,
-                        "search.top_k",
-                        file.top_k.map(|v| v.to_string()),
-                    ),
-                    Candidate::of(
-                        Layer::Default,
-                        BUILT_IN_SITE,
-                        Some(DEFAULT_SEARCH_TOP_K.to_string()),
-                    ),
-                ],
-            ),
+            vec![
+                Candidate::of(
+                    Layer::File,
+                    "search.top_k",
+                    file.top_k.map(|v| v.to_string()),
+                ),
+                Candidate::of(
+                    Layer::Default,
+                    BUILT_IN_SITE,
+                    Some(DEFAULT_SEARCH_TOP_K.to_string()),
+                ),
+            ],
         );
         let weak_threshold = resolve_knob(
             "search.weak_threshold",
             KnobReach::Library,
             ReadAt::AfterResolution,
-            env_over(
-                dotenv,
-                SEARCH_WEAK_THRESHOLD_ENV,
-                env_f32_parsed(get(SEARCH_WEAK_THRESHOLD_ENV)).map(|v| v.to_string()),
-                vec![
-                    Candidate::of(
-                        Layer::File,
-                        "search.weak_threshold",
-                        file.weak_threshold.map(|v| v.to_string()),
-                    ),
-                    Candidate::of(
-                        Layer::Default,
-                        BUILT_IN_SITE,
-                        Some(DEFAULT_SEARCH_WEAK_THRESHOLD.to_string()),
-                    ),
-                ],
-            ),
+            vec![
+                Candidate::of(
+                    Layer::File,
+                    "search.weak_threshold",
+                    file.weak_threshold.map(|v| v.to_string()),
+                ),
+                Candidate::of(
+                    Layer::Default,
+                    BUILT_IN_SITE,
+                    Some(DEFAULT_SEARCH_WEAK_THRESHOLD.to_string()),
+                ),
+            ],
         );
 
         let cfg = SearchConfig {
@@ -2182,15 +2075,8 @@ impl Default for McpConfig {
 }
 
 impl McpConfig {
-    /// Resolve from the environment, falling back to [`DEFAULT_MCP_ADDR`]
-    /// when the override is unset or blank.
-    pub fn from_env() -> McpConfig {
-        McpConfig::resolve_from(|key| std::env::var(key).ok())
-    }
-
-    /// Pure resolution, factored out so it can be tested without mutating
-    /// process-global environment variables. Takes no dotenv record, for
-    /// the reason [`EmbedConfig::resolve_from`] gives.
+    /// Pure resolution, for tests that need the value alone.
+    #[cfg(test)]
     fn resolve_from(get: impl Fn(&str) -> Option<String>) -> McpConfig {
         McpConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD).0
     }
@@ -2201,7 +2087,7 @@ impl McpConfig {
     /// Describes an invocation that carries no flag: the flag rung is
     /// drawn, because the row's chain answers where the knob *can* be
     /// set and the flag outranks the variable, and offers nothing.
-    fn resolve_with_origins_from(
+    pub(crate) fn resolve_with_origins_from(
         get: impl Fn(&str) -> Option<String>,
         dotenv: Option<DotenvSupply<'_>>,
     ) -> (McpConfig, Vec<KnobOrigin>) {
@@ -2293,18 +2179,18 @@ impl Default for LogConfig {
 }
 
 impl LogConfig {
-    /// Resolve from the environment, falling back to [`DEFAULT_LOG`]
-    /// and [`DEFAULT_LOG_CONSOLE`] when the respective overrides are
-    /// unset or blank.
-    pub fn from_env() -> LogConfig {
-        LogConfig::resolve_from(|key| std::env::var(key).ok())
-    }
-
-    /// Pure resolution, factored out so it can be tested without mutating
-    /// process-global environment variables. Takes no dotenv record, for
-    /// the reason [`EmbedConfig::resolve_from`] gives.
+    /// Pure resolution with the quiet console default, for tests that
+    /// need the values alone.
+    #[cfg(test)]
     fn resolve_from(get: impl Fn(&str) -> Option<String>) -> LogConfig {
         LogConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD, ConsoleDefault::Quiet).0
+    }
+
+    /// [`resolve_from`](Self::resolve_from) with the console layer
+    /// mirroring the file directive.
+    #[cfg(test)]
+    fn resolve_headless_from(get: impl Fn(&str) -> Option<String>) -> LogConfig {
+        LogConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD, ConsoleDefault::MirrorFile).0
     }
 
     /// Pure resolution that also reports where each value came from.
@@ -2346,30 +2232,6 @@ impl LogConfig {
             directive: file_directive,
         };
         (cfg, vec![directive, console_level])
-    }
-
-    /// Resolve a [`LogConfig`] with the console layer mirroring the
-    /// file directive: the log config of the runtime's `headless`
-    /// preset, for a daemon whose stderr is the primary log surface.
-    ///
-    /// Behaves like [`from_env`](Self::from_env) for the file directive
-    /// and any explicit [`LOG_CONSOLE_ENV`] override, but when the
-    /// console override is unset it mirrors the file directive instead
-    /// of falling to [`DEFAULT_LOG_CONSOLE`] — so the daemon's full
-    /// telemetry reaches stderr by default.
-    pub fn for_headless_daemon() -> LogConfig {
-        LogConfig::resolve_headless_from(|key| std::env::var(key).ok())
-    }
-
-    /// Pure resolution for [`for_headless_daemon`](Self::for_headless_daemon),
-    /// factored out for testing.
-    fn resolve_headless_from(get: impl Fn(&str) -> Option<String>) -> LogConfig {
-        let directive = env_trimmed(get(LOG_ENV)).unwrap_or_else(|| DEFAULT_LOG.to_string());
-        let console_level = env_trimmed(get(LOG_CONSOLE_ENV)).unwrap_or_else(|| directive.clone());
-        LogConfig {
-            directive,
-            console_level,
-        }
     }
 }
 
@@ -2421,36 +2283,21 @@ fn env_over(
     bookrack_core::knob::env_over(dotenv, name, raw, lower)
 }
 
-/// The Ollama endpoint, by precedence `env var > config.toml > default`.
-///
-/// The only place that order is written down: [`finish`] reads the
-/// value off this row, and [`knob_origins`](crate::knob_origins)
-/// reports the same row.
-pub(crate) fn ollama_url_knob(
-    env: Option<String>,
-    dotenv: Option<DotenvSupply<'_>>,
-    root_config: &RootConfig,
-) -> KnobOrigin {
+/// The Ollama endpoint, by precedence `env var > default`.
+pub(crate) fn ollama_url_knob(env: Option<String>, dotenv: Option<DotenvSupply<'_>>) -> KnobOrigin {
     resolve_knob(
         "ollama_url",
-        KnobReach::Library,
-        ReadAt::DuringResolution,
+        KnobReach::Machine,
+        ReadAt::BeforeResolution,
         env_over(
             dotenv,
             OLLAMA_URL_ENV,
             env_trimmed(env),
-            vec![
-                Candidate::of(
-                    Layer::File,
-                    "ollama_url",
-                    env_trimmed(root_config.ollama_url.clone()),
-                ),
-                Candidate::of(
-                    Layer::Default,
-                    BUILT_IN_SITE,
-                    Some(DEFAULT_OLLAMA_URL.to_string()),
-                ),
-            ],
+            vec![Candidate::of(
+                Layer::Default,
+                BUILT_IN_SITE,
+                Some(DEFAULT_OLLAMA_URL.to_string()),
+            )],
         ),
     )
 }
@@ -2709,12 +2556,6 @@ fn log_knob(
 /// absence of an offer so the layer is not recorded as a losing one.
 fn env_parsed<T: std::str::FromStr>(value: Option<String>) -> Option<T> {
     bookrack_core::knob::parsed(value)
-}
-
-/// [`env_parsed`] for `f32`, additionally rejecting non-finite values
-/// as [`env_f32`] does.
-fn env_f32_parsed(value: Option<String>) -> Option<f32> {
-    env_parsed::<f32>(value).filter(|n| n.is_finite())
 }
 
 /// The value a resolved row settled on, parsed back to the knob's own
@@ -3113,11 +2954,8 @@ pub fn same_root(a: &Path, b: &Path) -> bool {
 /// Validate the chosen root and build a [`Config`]. The root must be an
 /// existing directory; a relative one is joined to the working
 /// directory first, so the lock file, the registry, and every reported
-/// path carry the same absolute form. The Ollama endpoint is resolved
-/// by precedence `env var > <data_root>/config.toml > hardcoded
-/// default`, so a per-library override in the TOML still loses to an
-/// explicit environment variable.
-fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, ConfigError> {
+/// path carry the same absolute form.
+fn finish(resolved: Resolved) -> Result<Config, ConfigError> {
     let Resolved {
         data_dir,
         source,
@@ -3138,13 +2976,8 @@ fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, 
         config: root_config,
         notices: config_notices,
     } = load_root_config(&data_dir)?;
-    let ollama_url = knob_value(
-        &ollama_url_knob(ollama_url_env, NO_DOTENV_RECORD, &root_config),
-        DEFAULT_OLLAMA_URL.to_string(),
-    );
     Ok(Config {
         data_dir,
-        ollama_url,
         library,
         source,
         root_config,
@@ -4271,21 +4104,13 @@ mod tests {
     use super::*;
     use crate::registry::RawRegistryEntry;
 
-    /// A directory guaranteed to exist, for happy-path resolution.
-    fn existing_dir() -> String {
-        std::env::temp_dir().to_string_lossy().into_owned()
-    }
-
     /// The env-only resolution path (empty selection, no registry, no
     /// portable layout, no platform-default registry), exercising
     /// [`select_root`] + [`finish`] without touching the process
     /// environment.
-    fn resolve(
-        data_dir: Option<String>,
-        ollama_url: Option<String>,
-    ) -> Result<Config, ConfigError> {
+    fn resolve(data_dir: Option<String>) -> Result<Config, ConfigError> {
         let root = select_root(&LibrarySelection::default(), data_dir, None, None, None)?;
-        finish(root, ollama_url)
+        finish(root)
     }
 
     /// A two-entry registry with `prod` the default, for selection tests.
@@ -4308,7 +4133,7 @@ mod tests {
             library: None,
         };
         let root = select_root(&selection, None, None, None, None).expect("selects");
-        let cfg = finish(root, None).expect("resolves");
+        let cfg = finish(root).expect("resolves");
         let cwd = std::env::current_dir().expect("cwd");
         assert!(
             cfg.data_dir().is_absolute(),
@@ -4321,13 +4146,10 @@ mod tests {
 
     #[test]
     fn missing_data_dir_is_an_error() {
-        assert!(matches!(
-            resolve(None, None),
-            Err(ConfigError::MissingDataDir)
-        ));
+        assert!(matches!(resolve(None), Err(ConfigError::MissingDataDir)));
         // Whitespace-only counts as unset.
         assert!(matches!(
-            resolve(Some("   ".to_string()), None),
+            resolve(Some("   ".to_string())),
             Err(ConfigError::MissingDataDir)
         ));
     }
@@ -4336,7 +4158,7 @@ mod tests {
     fn nonexistent_data_dir_is_an_error() {
         let bogus = "this_path_does_not_exist_zzz/bookrack".to_string();
         assert!(matches!(
-            resolve(Some(bogus), None),
+            resolve(Some(bogus)),
             Err(ConfigError::DataDirNotFound(_))
         ));
     }
@@ -4957,20 +4779,25 @@ mod tests {
 
     #[test]
     fn ollama_url_defaults_when_unset() {
-        let cfg = resolve(Some(existing_dir()), None).expect("valid data dir");
-        assert_eq!(cfg.ollama_url(), DEFAULT_OLLAMA_URL);
+        let row = ollama_url_knob(None, NO_DOTENV_RECORD);
+        assert_eq!(row.value.as_deref(), Some(DEFAULT_OLLAMA_URL));
+        assert_eq!(row.layer, Layer::Default);
     }
 
     #[test]
     fn ollama_url_is_taken_when_set() {
-        let cfg = resolve(Some(existing_dir()), Some("http://host:9999".to_string()))
-            .expect("valid data dir");
-        assert_eq!(cfg.ollama_url(), "http://host:9999");
+        let row = ollama_url_knob(Some("http://host:9999".to_string()), NO_DOTENV_RECORD);
+        assert_eq!(row.value.as_deref(), Some("http://host:9999"));
+        assert_eq!(row.layer, Layer::Environment);
+        // Only the environment and the default can speak for it: no
+        // library file is among its layers.
+        let layers: Vec<Layer> = row.chain.iter().map(|site| site.layer).collect();
+        assert_eq!(layers, [Layer::Environment, Layer::Default]);
     }
 
     #[test]
     fn explicit_construction_reports_no_library_and_explicit_source() {
-        let cfg = Config::new(PathBuf::from("root"), DEFAULT_OLLAMA_URL.to_string());
+        let cfg = Config::new(PathBuf::from("root"));
         assert_eq!(cfg.library(), None);
         assert_eq!(cfg.source(), ResolutionSource::Explicit);
     }
@@ -4978,7 +4805,7 @@ mod tests {
     #[test]
     fn paths_derive_from_the_data_root() {
         let root = PathBuf::from("root");
-        let cfg = Config::new(root.clone(), DEFAULT_OLLAMA_URL.to_string());
+        let cfg = Config::new(root.clone());
         assert_eq!(cfg.sources_dir(), root.join("sources"));
         assert_eq!(cfg.books_dir(), root.join("books"));
         assert_eq!(cfg.corpus_db(), root.join("corpus.db"));
@@ -5074,6 +4901,9 @@ mod tests {
         assert_eq!(cfg.max_retries, d.max_retries);
         assert_eq!(cfg.backoff_base, d.backoff_base);
         assert_eq!(cfg.channel_capacity, d.channel_capacity);
+        // The endpoint is the caller's to fill, from the machine's
+        // configuration; this resolution leaves the placeholder.
+        assert_eq!(cfg.ollama_url, d.ollama_url);
 
         // The four that do read the environment took the answer, so the
         // reader above is proven to have been consulted at all.
@@ -5081,6 +4911,13 @@ mod tests {
         assert_eq!(cfg.batch_max_chunks, 7);
         assert_eq!(cfg.batch_min_char_budget, 7);
         assert_eq!(cfg.progress_interval, Duration::from_secs(7));
+    }
+
+    #[test]
+    fn the_default_embed_endpoint_is_a_placeholder_nothing_listens_on() {
+        let d = EmbedConfig::default();
+        assert_eq!(d.ollama_url, UNROUTED_OLLAMA_URL);
+        assert_ne!(d.ollama_url, DEFAULT_OLLAMA_URL);
     }
 
     #[test]
@@ -5107,16 +4944,13 @@ mod tests {
             let dir = tempfile::tempdir().expect("tempdir");
             std::fs::write(
                 dir.path().join(ROOT_CONFIG_NAME),
-                format!("ollama_url = \"http://127.0.0.1:11434\"\n{key} = \"{value}\"\n"),
+                format!("{key} = \"{value}\"\n\n[search]\ntop_k = 9\n"),
             )
             .expect("write config");
 
             let loaded = load_root_config(dir.path()).expect("a retired key does not fail a load");
             // The rest of the document still resolves.
-            assert_eq!(
-                loaded.config.ollama_url.as_deref(),
-                Some("http://127.0.0.1:11434")
-            );
+            assert_eq!(loaded.config.search.as_ref().and_then(|s| s.top_k), Some(9));
             let [notice] = loaded.notices.as_slice() else {
                 panic!("expected one notice, got {:?}", loaded.notices);
             };
@@ -5130,18 +4964,9 @@ mod tests {
 
     #[test]
     fn a_root_config_without_retired_keys_still_loads() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            dir.path().join(ROOT_CONFIG_NAME),
-            "ollama_url = \"http://127.0.0.1:11434\"\n",
-        )
-        .expect("write config");
-
+        let dir = root_with_config("[search]\ntop_k = 9\n");
         let loaded = load_root_config(dir.path()).expect("clean config loads");
-        assert_eq!(
-            loaded.config.ollama_url.as_deref(),
-            Some("http://127.0.0.1:11434")
-        );
+        assert_eq!(loaded.config.search.and_then(|s| s.top_k), Some(9));
         assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
     }
 
@@ -5151,10 +4976,7 @@ mod tests {
             let dir = tempfile::tempdir().expect("tempdir");
             std::fs::write(
                 dir.path().join(ROOT_CONFIG_NAME),
-                format!(
-                    "# operator note: keep me\nollama_url = \"http://127.0.0.1:11434\"\n\
-                     {key} = \"stale\"\n"
-                ),
+                format!("{key} = \"stale\"\n\n# operator note: keep me\n[search]\ntop_k = 9\n"),
             )
             .expect("write config");
 
@@ -5180,14 +5002,11 @@ mod tests {
             // Only the retired line goes: the rest of the document, and
             // the comments decorating it, are untouched.
             assert!(text.contains("operator note"), "{text}");
-            assert!(text.contains("ollama_url"), "{text}");
+            assert!(text.contains("top_k = 9"), "{text}");
 
             // And the notice goes with the line.
             let loaded = load_root_config(dir.path()).expect("load after unset");
-            assert_eq!(
-                loaded.config.ollama_url.as_deref(),
-                Some("http://127.0.0.1:11434")
-            );
+            assert_eq!(loaded.config.search.and_then(|s| s.top_k), Some(9));
             assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
         }
     }
@@ -5197,6 +5016,7 @@ mod tests {
         for (key, value, home) in [
             ("mcp_addr", "127.0.0.1:9999", MCP_ADDR_ENV),
             ("log_directive", "debug", LOG_ENV),
+            ("ollama_url", "http://h:1", OLLAMA_URL_ENV),
         ] {
             let dir = root_with_config(&format!("{key} = \"{value}\"\n"));
             let loaded = load_root_config(dir.path()).expect("a retired key does not fail a load");
@@ -5233,10 +5053,7 @@ mod tests {
             // stays available against a file that still carries it.
             std::fs::write(
                 dir.path().join(ROOT_CONFIG_NAME),
-                format!(
-                    "# operator note: keep me\nollama_url = \"http://127.0.0.1:11434\"\n\
-                     {key} = \"{value}\"\n"
-                ),
+                format!("{key} = \"{value}\"\n\n# operator note: keep me\n[search]\ntop_k = 9\n"),
             )
             .expect("write config");
             set_root_config_values(dir.path(), &[], &[key.to_string()])
@@ -5245,52 +5062,29 @@ mod tests {
             let text = std::fs::read_to_string(dir.path().join(ROOT_CONFIG_NAME)).expect("read");
             assert!(!text.contains(key), "{text}");
             assert!(text.contains("operator note"), "{text}");
-            assert!(text.contains("ollama_url"), "{text}");
+            assert!(text.contains("top_k = 9"), "{text}");
             let loaded = load_root_config(dir.path()).expect("load after unset");
-            assert_eq!(
-                loaded.config.ollama_url.as_deref(),
-                Some("http://127.0.0.1:11434")
-            );
+            assert_eq!(loaded.config.search.and_then(|s| s.top_k), Some(9));
             assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
         }
     }
 
     #[test]
-    fn search_config_file_layer_sits_between_env_and_default() {
+    fn search_config_resolves_the_file_over_the_default() {
         let file = RootConfig {
             search: Some(RootSearchConfig {
                 top_k: Some(7),
                 weak_threshold: Some(0.25),
             }),
-            ..RootConfig::default()
         };
-
-        // No env: the [search] table supplies both knobs.
-        let from_file = SearchConfig::resolve_from(|_| None, &file);
+        let (from_file, rows) = SearchConfig::resolve_with_origins_from(&file);
         assert_eq!(from_file.top_k, 7);
         assert!((from_file.weak_distance_threshold - 0.25).abs() < 1e-6);
-
-        // Env set: it wins over the file.
-        let from_env = SearchConfig::resolve_from(
-            |key| match key {
-                SEARCH_TOP_K_ENV => Some("3".to_string()),
-                _ => None,
-            },
-            &file,
-        );
-        assert_eq!(from_env.top_k, 3);
-        assert!((from_env.weak_distance_threshold - 0.25).abs() < 1e-6);
-
-        // A malformed env value falls through to the file, not the
-        // hardcoded default.
-        let bad_env = SearchConfig::resolve_from(
-            |key| match key {
-                SEARCH_TOP_K_ENV => Some("not-a-number".to_string()),
-                _ => None,
-            },
-            &file,
-        );
-        assert_eq!(bad_env.top_k, 7);
+        // The file and the default are the only layers of either row.
+        for row in &rows {
+            let layers: Vec<Layer> = row.chain.iter().map(|site| site.layer).collect();
+            assert_eq!(layers, [Layer::File, Layer::Default], "{}", row.key);
+        }
 
         // A file that pins one knob leaves the other at its default.
         let partial = RootConfig {
@@ -5298,60 +5092,45 @@ mod tests {
                 top_k: Some(9),
                 weak_threshold: None,
             }),
-            ..RootConfig::default()
         };
-        let half = SearchConfig::resolve_from(|_| None, &partial);
+        let half = SearchConfig::resolve_with_origins_from(&partial).0;
         assert_eq!(half.top_k, 9);
         assert_eq!(half.weak_distance_threshold, DEFAULT_SEARCH_WEAK_THRESHOLD);
     }
 
     #[test]
-    fn reranker_config_resolves_env_over_file_and_keeps_knobs_file_only() {
-        // The file's context deliberately differs from
-        // `DEFAULT_RERANKER_CTX`, or the file layer winning and the
-        // default layer winning would produce the same number.
-        let file_ctx = DEFAULT_RERANKER_CTX + 1024;
-        let file = RootConfig {
-            reranker: Some(RootRerankerConfig {
-                url: Some("http://file:1".to_string()),
-                ctx: Some(file_ctx),
+    fn reranker_config_resolves_from_the_environment_alone() {
+        let set = RerankerConfig::resolve_from(|key| match key {
+            RERANKER_URL_ENV => Some(" http://env:2 ".to_string()),
+            RERANKER_CTX_ENV => Some("4096".to_string()),
+            RERANKER_THREADS_ENV => Some("4".to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            set,
+            RerankerConfig {
+                url: Some("http://env:2".to_string()),
+                ctx: Some(4096),
                 threads: Some(4),
-            }),
-            ..RootConfig::default()
-        };
-
-        // No env: the [reranker] table supplies everything.
-        let from_file = RerankerConfig::resolve_from(|_| None, &file);
-        assert_eq!(from_file.url.as_deref(), Some("http://file:1"));
-        assert_eq!(from_file.ctx, Some(file_ctx));
-        assert_eq!(from_file.threads, Some(4));
-
-        // Env set: it wins over the file for the URL; the numeric
-        // knobs have no env counterpart.
-        let from_env = RerankerConfig::resolve_from(
-            |key| match key {
-                RERANKER_URL_ENV => Some("http://env:2".to_string()),
-                _ => None,
-            },
-            &file,
+            }
         );
-        assert_eq!(from_env.url.as_deref(), Some("http://env:2"));
-        assert_eq!(from_env.ctx, Some(file_ctx));
 
-        // A blank env value falls through to the file layer.
-        let blank_env = RerankerConfig::resolve_from(
-            |key| match key {
+        // A blank, unparseable or non-positive value reads as unset.
+        for bad in ["  ", "many", "0", "-1"] {
+            let cfg = RerankerConfig::resolve_from(|key| match key {
                 RERANKER_URL_ENV => Some("  ".to_string()),
+                RERANKER_CTX_ENV | RERANKER_THREADS_ENV => Some(bad.to_string()),
                 _ => None,
-            },
-            &file,
-        );
-        assert_eq!(blank_env.url.as_deref(), Some("http://file:1"));
+            });
+            assert_eq!(cfg.url, None, "{bad:?}");
+            assert_eq!(cfg.ctx, Some(DEFAULT_RERANKER_CTX), "{bad:?}");
+            assert_eq!(cfg.threads, None, "{bad:?}");
+        }
 
         // Nothing set anywhere: no URL means the supervised mode, no
         // thread count means the server chooses, and the context falls
         // to the compiled-in size of the rerank working set.
-        let bare = RerankerConfig::resolve_from(|_| None, &RootConfig::default());
+        let bare = RerankerConfig::resolve_from(|_| None);
         assert_eq!(
             bare,
             RerankerConfig {
@@ -5363,36 +5142,66 @@ mod tests {
     }
 
     #[test]
-    fn set_root_config_writes_typed_reranker_keys_and_rejects_bad_values() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        set_root_config_values(
-            tmp.path(),
-            &[
-                ("reranker.url".to_string(), "http://h:1".to_string()),
-                ("reranker.ctx".to_string(), "8192".to_string()),
-            ],
-            &[],
-        )
-        .expect("set succeeds");
-        let cfg = load_root_config(tmp.path()).expect("round-trips").config;
-        let reranker = cfg.reranker.expect("[reranker] written");
-        assert_eq!(reranker.url.as_deref(), Some("http://h:1"));
-        assert_eq!(reranker.ctx, Some(8192));
+    fn the_reranker_rows_are_the_machines_and_the_processs() {
+        let (_, rows) = RerankerConfig::resolve_with_origins_from(|_| None, NO_DOTENV_RECORD);
+        let reach: Vec<(&str, KnobReach, ReadAt)> = rows
+            .iter()
+            .map(|row| (row.key.as_str(), row.reach, row.read_at))
+            .collect();
+        assert_eq!(
+            reach,
+            [
+                ("reranker.url", KnobReach::Machine, ReadAt::BeforeResolution),
+                ("reranker.ctx", KnobReach::Process, ReadAt::BeforeResolution),
+                (
+                    "reranker.threads",
+                    KnobReach::Process,
+                    ReadAt::BeforeResolution
+                ),
+            ]
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row.chain.iter().all(|site| site.layer != Layer::File)),
+            "{rows:?}"
+        );
+    }
 
-        let err = set_root_config_values(
-            tmp.path(),
-            &[("reranker.threads".to_string(), "zero".to_string())],
-            &[],
-        )
-        .unwrap_err();
-        assert!(matches!(err, RootConfigSetError::InvalidValue { .. }));
-        let err = set_root_config_values(
-            tmp.path(),
-            &[("reranker.url".to_string(), "no-scheme".to_string())],
-            &[],
-        )
-        .unwrap_err();
-        assert!(matches!(err, RootConfigSetError::InvalidValue { .. }));
+    #[test]
+    fn the_retired_machine_keys_cannot_be_set_but_can_be_unset() {
+        let dir = root_with_config(
+            "ollama_url = \"http://h:1\"\n\n[reranker]\nurl = \"http://h:2\"\nctx = 8192\n\
+             threads = 4\n",
+        );
+        let keys = [
+            "ollama_url",
+            "reranker.ctx",
+            "reranker.threads",
+            "reranker.url",
+        ];
+        let loaded = load_root_config(dir.path()).expect("load");
+        let noticed: Vec<(&str, &str)> =
+            loaded.notices.iter().map(|n| (n.kind(), n.key())).collect();
+        assert_eq!(
+            noticed,
+            keys.map(|key| ("retired", key)),
+            "each retired key is named"
+        );
+
+        for key in keys {
+            let err =
+                set_root_config_values(dir.path(), &[(key.to_string(), "1".to_string())], &[])
+                    .expect_err("a retired key cannot be set");
+            assert!(
+                matches!(err, RootConfigSetError::UnknownKey { .. }),
+                "{key}: {err:?}"
+            );
+        }
+        let unsets: Vec<String> = keys.iter().map(|key| key.to_string()).collect();
+        set_root_config_values(dir.path(), &[], &unsets).expect("retired keys can be unset");
+        let loaded = load_root_config(dir.path()).expect("load after unset");
+        assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+        assert_eq!(read_root_config_text(dir.path()).expect("read").trim(), "");
     }
 
     #[test]
@@ -5455,39 +5264,18 @@ mod tests {
     }
 
     #[test]
-    fn search_config_default_and_env_override() {
+    fn search_config_defaults() {
         assert_eq!(SearchConfig::default().top_k, DEFAULT_SEARCH_TOP_K);
         assert_eq!(
             SearchConfig::default().weak_distance_threshold,
             DEFAULT_SEARCH_WEAK_THRESHOLD,
         );
-
-        let cfg = SearchConfig::resolve_from(
-            |key| match key {
-                SEARCH_TOP_K_ENV => Some("10".to_string()),
-                SEARCH_WEAK_THRESHOLD_ENV => Some("0.42".to_string()),
-                _ => None,
-            },
-            &RootConfig::default(),
+        let resolved = SearchConfig::resolve_with_origins_from(&RootConfig::default()).0;
+        assert_eq!(resolved.top_k, DEFAULT_SEARCH_TOP_K);
+        assert_eq!(
+            resolved.weak_distance_threshold,
+            DEFAULT_SEARCH_WEAK_THRESHOLD
         );
-        assert_eq!(cfg.top_k, 10);
-        assert!((cfg.weak_distance_threshold - 0.42).abs() < 1e-6);
-
-        // A blank value falls back to the default.
-        let blank = SearchConfig::resolve_from(|_| Some("  ".to_string()), &RootConfig::default());
-        assert_eq!(blank.top_k, DEFAULT_SEARCH_TOP_K);
-        assert_eq!(blank.weak_distance_threshold, DEFAULT_SEARCH_WEAK_THRESHOLD,);
-
-        // Non-finite values fall back rather than poisoning the
-        // threshold comparison downstream.
-        let bad = SearchConfig::resolve_from(
-            |key| match key {
-                SEARCH_WEAK_THRESHOLD_ENV => Some("nan".to_string()),
-                _ => None,
-            },
-            &RootConfig::default(),
-        );
-        assert_eq!(bad.weak_distance_threshold, DEFAULT_SEARCH_WEAK_THRESHOLD,);
     }
 
     #[test]
@@ -6210,7 +5998,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             tmp.path().join(ROOT_CONFIG_NAME),
-            "# hand-written note\nollama_url = \"http://127.0.0.1:11434\"\n",
+            "# hand-written note\ncolour = \"red\"\n",
         )
         .expect("seed config");
         set_root_config_values(
@@ -6253,7 +6041,7 @@ mod tests {
         assert!(cfg.search.is_none());
         // A scalar key sitting beside the table is untouched by the
         // table's removal.
-        assert_eq!(cfg.ollama_url.as_deref(), Some("http://127.0.0.1:11434"));
+        assert!(text.contains("colour = \"red\""), "{text}");
     }
 
     #[test]
@@ -6279,31 +6067,21 @@ mod tests {
     fn root_config_missing_file_is_default() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let loaded = load_root_config(tmp.path()).expect("missing file resolves to default");
-        assert!(loaded.config.ollama_url.is_none());
         assert!(loaded.config.search.is_none());
-        assert!(loaded.config.reranker.is_none());
         assert!(loaded.notices.is_empty());
     }
 
     #[test]
     fn root_config_parses_known_fields() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            tmp.path().join(ROOT_CONFIG_NAME),
-            "ollama_url = \"http://elsewhere:1234\"\n\
-             \n[search]\ntop_k = 9\n",
-        )
-        .expect("write root config");
+        let tmp = root_with_config("[search]\ntop_k = 9\n");
         let cfg = load_root_config(tmp.path())
             .expect("root config parses")
             .config;
-        assert_eq!(cfg.ollama_url.as_deref(), Some("http://elsewhere:1234"));
         let search = cfg.search.expect("search table present");
         assert_eq!(search.top_k, Some(9));
         // A key the file leaves out stays `None` rather than picking up
         // a default at this layer.
         assert!(search.weak_threshold.is_none());
-        assert!(cfg.reranker.is_none());
     }
 
     #[test]
@@ -6449,7 +6227,7 @@ mod tests {
     }
 
     #[test]
-    fn a_key_in_an_inline_table_can_be_unset() {
+    fn a_retired_key_in_an_inline_table_can_be_unset() {
         let dir = root_with_config("reranker = { url = \"http://x\" }\n");
         set_root_config_values(dir.path(), &[], &["reranker.url".to_string()]).expect("unset");
         let text = std::fs::read_to_string(dir.path().join(ROOT_CONFIG_NAME)).expect("read");
@@ -6464,15 +6242,9 @@ mod tests {
         // rejecting the key at runtime. A nested table flattens to
         // dotted keys, matching the whitelist's addressing scheme.
         let full = RootConfig {
-            ollama_url: Some("http://x:1".to_string()),
             search: Some(RootSearchConfig {
                 top_k: Some(5),
                 weak_threshold: Some(0.5),
-            }),
-            reranker: Some(RootRerankerConfig {
-                url: Some("http://x:1".to_string()),
-                ctx: Some(8192),
-                threads: Some(4),
             }),
         };
         let value = toml::Value::try_from(&full).expect("RootConfig serializes to a table");
@@ -6493,22 +6265,17 @@ mod tests {
 
     #[test]
     fn set_root_config_preserves_comments_and_edits_key() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            tmp.path().join(ROOT_CONFIG_NAME),
-            "# hand-written note\nollama_url = \"http://old:11434\"\n",
-        )
-        .expect("seed config");
+        let tmp = root_with_config("# hand-written note\n[search]\ntop_k = 3 # was 5\n");
         set_root_config_values(
             tmp.path(),
-            &[("ollama_url".to_string(), "http://new:11434".to_string())],
+            &[("search.top_k".to_string(), "8".to_string())],
             &[],
         )
         .expect("set applies");
         let text = read_root_config_text(tmp.path()).expect("read back");
         assert!(text.contains("# hand-written note"));
-        assert!(text.contains("http://new:11434"));
-        assert!(!text.contains("http://old:11434"));
+        assert!(text.contains("top_k = 8"), "{text}");
+        assert!(!text.contains("top_k = 3"), "{text}");
     }
 
     #[test]
@@ -6531,25 +6298,16 @@ mod tests {
         assert!(matches!(
             set_root_config_values(
                 tmp.path(),
-                &[("ollama_url".to_string(), "not-a-url".to_string())],
+                &[("search.top_k".to_string(), "many".to_string())],
                 &[],
             ),
             Err(RootConfigSetError::InvalidValue { .. })
         ));
-        assert!(matches!(
-            set_root_config_values(
-                tmp.path(),
-                &[("reranker.url".to_string(), "not-a-url".to_string())],
-                &[],
-            ),
-            Err(RootConfigSetError::InvalidValue { .. })
-        ));
-        // Well-formed URLs pass.
         set_root_config_values(
             tmp.path(),
             &[
-                ("ollama_url".to_string(), "http://host:11434".to_string()),
-                ("reranker.url".to_string(), "http://host:8080".to_string()),
+                ("search.top_k".to_string(), "8".to_string()),
+                ("search.weak_threshold".to_string(), "0.4".to_string()),
             ],
             &[],
         )
@@ -6561,32 +6319,27 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         set_root_config_values(
             tmp.path(),
-            &[("ollama_url".to_string(), "http://host:11434".to_string())],
+            &[("search.top_k".to_string(), "8".to_string())],
             &[],
         )
         .expect("write from empty");
         let cfg = load_root_config(tmp.path()).expect("reloads").config;
-        assert_eq!(cfg.ollama_url.as_deref(), Some("http://host:11434"));
+        assert_eq!(cfg.search.and_then(|s| s.top_k), Some(8));
     }
 
     #[test]
     fn set_root_config_unset_is_idempotent() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            tmp.path().join(ROOT_CONFIG_NAME),
-            "ollama_url = \"http://host:11434\"\n",
-        )
-        .expect("seed config");
+        let tmp = root_with_config("[search]\ntop_k = 8\n");
         // Unsetting a key the file never set is a no-op, not an error.
-        set_root_config_values(tmp.path(), &[], &["reranker.url".to_string()])
+        set_root_config_values(tmp.path(), &[], &["search.weak_threshold".to_string()])
             .expect("unset absent");
         let cfg = load_root_config(tmp.path()).expect("reloads").config;
-        assert_eq!(cfg.ollama_url.as_deref(), Some("http://host:11434"));
+        assert_eq!(cfg.search.and_then(|s| s.top_k), Some(8));
         // Unsetting a key that is present removes it.
-        set_root_config_values(tmp.path(), &[], &["ollama_url".to_string()])
+        set_root_config_values(tmp.path(), &[], &["search.top_k".to_string()])
             .expect("unset present");
         let cfg = load_root_config(tmp.path()).expect("reloads").config;
-        assert!(cfg.ollama_url.is_none());
+        assert!(cfg.search.is_none());
     }
 
     #[test]
@@ -6597,7 +6350,7 @@ mod tests {
         assert!(matches!(
             set_root_config_values(
                 tmp.path(),
-                &[("ollama_url".to_string(), "http://host:11434".to_string())],
+                &[("search.top_k".to_string(), "8".to_string())],
                 &[],
             ),
             Err(RootConfigSetError::Malformed { .. })
@@ -6605,37 +6358,7 @@ mod tests {
     }
 
     #[test]
-    fn root_config_env_override_maps_each_key() {
-        // Every writable key carries an explicit decision here, so a key
-        // added to ROOT_CONFIG_KEYS without one fails this test rather
-        // than defaulting to "no env counterpart" — which would silently
-        // drop the shadowing warning the CLI prints after a write.
-        let expected: &[(&str, Option<&str>)] = &[
-            ("ollama_url", Some(OLLAMA_URL_ENV)),
-            ("search.top_k", Some(SEARCH_TOP_K_ENV)),
-            ("search.weak_threshold", Some(SEARCH_WEAK_THRESHOLD_ENV)),
-            ("reranker.url", Some(RERANKER_URL_ENV)),
-            // The supervised-server knobs are file-only by design.
-            ("reranker.ctx", None),
-            ("reranker.threads", None),
-        ];
-        let covered: Vec<&str> = expected.iter().map(|(key, _)| *key).collect();
-        assert_eq!(
-            covered.as_slice(),
-            ROOT_CONFIG_KEYS,
-            "every writable key needs an env-counterpart decision, in list order",
-        );
-        for (key, env) in expected {
-            assert_eq!(root_config_env_override(key), *env, "key '{key}'");
-        }
-        // The profile reference is retired from the writable set and has
-        // no env counterpart; an unknown key resolves the same way.
-        assert_eq!(root_config_env_override("index_profile"), None);
-        assert_eq!(root_config_env_override("nope"), None);
-    }
-
-    #[test]
-    fn ollama_url_env_var_beats_root_config_beats_default() {
+    fn a_root_config_ollama_url_does_not_reach_the_resolved_config() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
         std::fs::write(
@@ -6643,15 +6366,19 @@ mod tests {
             "ollama_url = \"http://from-file:5555\"\n",
         )
         .expect("write root config");
-        let env_value = root.to_string_lossy().into_owned();
 
-        // No env var: root config wins over the hardcoded default.
-        let cfg = resolve(Some(env_value.clone()), None).expect("resolve with root config");
-        assert_eq!(cfg.ollama_url(), "http://from-file:5555");
-        // With env var set: env var wins over the root config.
-        let cfg = resolve(Some(env_value), Some("http://from-env:7777".to_string()))
-            .expect("resolve with env override");
-        assert_eq!(cfg.ollama_url(), "http://from-env:7777");
+        let cfg = resolve(Some(root.to_string_lossy().into_owned())).expect("resolve");
+        let [ConfigNotice::Retired { key, value, help }] = cfg.config_notices() else {
+            panic!(
+                "expected one retired notice, got {:?}",
+                cfg.config_notices()
+            );
+        };
+        assert_eq!(key, "ollama_url");
+        // The value is kept for a caller that compares it with the
+        // machine's endpoint; the help names the endpoint's home.
+        assert_eq!(value, "http://from-file:5555");
+        assert!(help.contains(OLLAMA_URL_ENV), "{help}");
     }
 
     /// A path-only entry for the write-path tests that exercise file

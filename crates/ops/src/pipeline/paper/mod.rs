@@ -127,6 +127,9 @@ pub struct GleanParams {
 }
 
 impl Default for GleanParams {
+    /// The compiled-in parameters. `embed` is [`EmbedConfig::default`],
+    /// whose endpoint is a placeholder nothing listens on: a caller
+    /// that reaches a backend supplies the resolved configuration.
     fn default() -> Self {
         Self {
             abstract_strategy: AbstractStrategy::default(),
@@ -1475,7 +1478,7 @@ mod tests {
     fn the_catalog_knows_the_papers_catalog_by_the_name_the_config_gives_it() {
         // The catalog's migration labels existing rows `paper` by this
         // file name; a rename on one side alone would label them `book`.
-        let cfg = bookrack_config::Config::new("root".into(), String::new());
+        let cfg = bookrack_config::Config::new("root".into());
         assert_eq!(
             cfg.papers_catalog_db().file_name(),
             Some(std::ffi::OsStr::new(bookrack_catalog::PAPERS_CATALOG_FILE))

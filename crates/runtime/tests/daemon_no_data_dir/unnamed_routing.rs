@@ -69,7 +69,6 @@ async fn two_libraries_without_a_registry_default_refuse_an_unnamed_call() -> Re
     let runtime_root = tempfile::tempdir()?;
 
     let mut opts = RuntimeOpts::headless(None, Some("beta".to_string()));
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
     let runtime = DaemonRuntime::start(opts).await?;
     assert_eq!(
@@ -139,7 +138,6 @@ async fn a_dangling_default_refuses_unnamed_reads_and_submits() -> Result<()> {
     std::fs::write(&book, "Chapter One\n\nA synthetic ledger.\n")?;
 
     let mut opts = RuntimeOpts::headless(None, Some("beta".to_string()));
-    opts.no_mcp = true;
     opts.spawn_queue_worker = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
     let runtime = DaemonRuntime::start(opts).await?;

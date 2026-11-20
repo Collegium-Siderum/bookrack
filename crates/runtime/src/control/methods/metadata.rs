@@ -16,6 +16,8 @@ use serde_json::Value;
 
 use super::{MethodContext, input_err, ok_reply, run_write};
 use crate::audit_helpers::require_known_profile;
+use std::sync::Arc;
+
 use crate::cmd::metadata::{WriteMetadataAction, run_write as run_metadata};
 use crate::control::error_map::{handler_err, registry_err};
 use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
@@ -287,8 +289,9 @@ async fn run_metadata_action(
 ) -> Result<Value, RpcError> {
     let handle = ctx.registry.get(library).map_err(registry_err)?;
     let cfg = handle.cfg_arc();
+    let daemon = Arc::clone(&ctx.daemon_config);
     run_write(ctx, handle.name(), move || async move {
-        let report = run_metadata(&cfg, action, profile_name.as_deref())
+        let report = run_metadata(&cfg, &daemon, action, profile_name.as_deref())
             .await
             .map_err(|e| handler_err("metadata.write", e))?;
         ok_reply(&report)

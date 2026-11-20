@@ -484,6 +484,9 @@ pub struct IngestParams {
 }
 
 impl Default for IngestParams {
+    /// The compiled-in parameters. `embed` is [`EmbedConfig::default`],
+    /// whose endpoint is a placeholder nothing listens on: a caller
+    /// that reaches a backend supplies the resolved configuration.
     fn default() -> IngestParams {
         IngestParams {
             structure: StructureParams::default(),

@@ -28,7 +28,7 @@ impl LibraryConfig {
     pub fn resolve(root: &RootConfig, profile_model: Option<&str>) -> LibraryConfig {
         let (embed, embed_rows) =
             EmbedConfig::resolve_with_origins_from(|_| None, None, profile_model);
-        let (search, search_rows) = SearchConfig::resolve_with_origins_from(|_| None, None, root);
+        let (search, search_rows) = SearchConfig::resolve_with_origins_from(root);
         let mut origins: Vec<KnobOrigin> = embed_rows
             .into_iter()
             .filter(|row| row.key == "embed.model")
@@ -67,7 +67,6 @@ mod tests {
                 top_k: Some(7),
                 weak_threshold: Some(0.25),
             }),
-            ..RootConfig::default()
         };
         let cfg = LibraryConfig::resolve(&root, Some("profile-model"));
         assert_eq!(

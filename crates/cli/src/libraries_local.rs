@@ -14,8 +14,7 @@ use bookrack_config::{
     ROOT_CONFIG_NAME, RootConfigSetError, ScanOutcome, Signal, add_library, detect_library,
     find_library, load_root_config, mounted_volumes, parse_root_config, read_root_config_text,
     registry_target_path, remove_library, render_manifest_toml, repoint_library,
-    root_config_env_override, scan_for_libraries, set_manifest_index_profile,
-    set_root_config_values, upsert_library_entry,
+    scan_for_libraries, set_manifest_index_profile, set_root_config_values, upsert_library_entry,
 };
 use bookrack_core::Explain;
 use bookrack_runtime::identity_check::{OfflineWriteRefusal, refuse_offline_write_to};
@@ -667,13 +666,6 @@ fn render_config_write(
              reranker) until it restarts"
         );
     }
-    for (key, _) in sets {
-        if let Some(env) = root_config_env_override(key)
-            && std::env::var_os(env).is_some_and(|v| !v.is_empty())
-        {
-            eprintln!("note: {env} is set and overrides this value");
-        }
-    }
     // Narrowed to what a restart is actually still for. Which
     // libraries a daemon serves, and which one is the default, are
     // changed while it runs; a root's own `config.toml` is read when
@@ -968,9 +960,7 @@ mod tests {
 
     #[test]
     fn config_notice_notes_name_each_key_the_file_declares_and_nothing_else() {
-        let notes = config_notice_notes(
-            "ollama_url = \"http://127.0.0.1:11434\"\n  mcp_addr = \"127.0.0.1:9999\"\n",
-        );
+        let notes = config_notice_notes("  mcp_addr = \"127.0.0.1:9999\"\n\n[search]\ntop_k = 9\n");
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(notes[0].contains("`mcp_addr` is retired"), "{notes:?}");
         // The way out travels with the note.
@@ -978,7 +968,7 @@ mod tests {
 
         // A file with no ignored key gets no note, and a commented-out
         // line is not a declaration.
-        assert!(config_notice_notes("ollama_url = \"http://x:1\"\n").is_empty());
+        assert!(config_notice_notes("[search]\ntop_k = 9\n").is_empty());
         assert!(config_notice_notes("# mcp_addr = \"127.0.0.1:9999\"\n").is_empty());
 
         // A key that merely starts with a retired name is its own,

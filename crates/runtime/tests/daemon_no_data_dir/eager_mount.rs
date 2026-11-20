@@ -44,7 +44,6 @@ async fn registry_selection_mounts_every_registered_library() -> Result<()> {
     let runtime_root = tempfile::tempdir()?;
 
     let mut opts = RuntimeOpts::headless(None, Some("alpha".to_string()));
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
 
     let runtime = DaemonRuntime::start(opts).await?;
@@ -94,7 +93,6 @@ async fn status_identity_reports_the_primary_not_the_registry_default() -> Resul
 
     // `alpha` is the registry default; come up under `beta`.
     let mut opts = RuntimeOpts::headless(None, Some("beta".to_string()));
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
 
     let runtime = DaemonRuntime::start(opts).await?;
@@ -147,7 +145,6 @@ async fn status_reports_every_served_library_marking_default_and_primary() -> Re
     let runtime_root = tempfile::tempdir()?;
 
     let mut opts = RuntimeOpts::headless(None, Some("beta".to_string()));
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
 
     let runtime = DaemonRuntime::start(opts).await?;
@@ -227,7 +224,6 @@ async fn every_served_root_is_locked_while_the_daemon_runs() -> Result<()> {
     world();
     let runtime_root = tempfile::tempdir()?;
     let mut opts = RuntimeOpts::headless(None, Some("alpha".to_string()));
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_root.path().to_path_buf());
     let runtime = DaemonRuntime::start(opts).await?;
 

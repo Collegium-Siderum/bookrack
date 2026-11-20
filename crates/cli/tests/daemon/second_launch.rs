@@ -24,7 +24,6 @@ use eyre::Result;
 
 fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
     let mut opts = RuntimeOpts::headless(Some(data_dir), None);
-    opts.no_mcp = true;
     opts.runtime_dir = Some(runtime_dir);
     opts.selection = LibrarySelection {
         data_dir: opts.selection.data_dir,

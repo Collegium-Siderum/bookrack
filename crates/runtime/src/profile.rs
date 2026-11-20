@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 
 use bookrack_config::advice_record::{advice_record_path, record_seen, seen_keys};
 use bookrack_config::{
-    Config, EmbedConfig, effective_profile_reference, list_libraries, load_manifest,
-    profile_reference_drift, registry_profile_ref_in, registry_target_path,
+    Config, DaemonConfig, EmbedConfig, LibraryConfig, effective_profile_reference, list_libraries,
+    load_manifest, profile_reference_drift, registry_profile_ref_in, registry_target_path,
 };
 // The origin and drift types live in `bookrack_config` beside the
 // resolution chain; re-exported so `crate::profile::ProfileRefOrigin`
@@ -147,11 +147,22 @@ fn effective_index_profile_in(
 }
 
 /// The [`EmbedConfig`] for `cfg`'s library: the effective profile's
-/// model, or the hardcoded default when no profile is in effect. Fails
-/// when the profile does not resolve, so a handler cannot embed under a
-/// configuration the daemon would refuse to start with.
-pub fn effective_embed_config(cfg: &Config) -> Result<EmbedConfig> {
-    effective_embed_declaration(cfg).map(|(embed, _)| embed)
+/// model, or the hardcoded default when no profile is in effect, with
+/// the endpoint and pacing `daemon` resolved. Fails when the profile
+/// does not resolve, so a handler cannot embed under a configuration
+/// the daemon would refuse to start with.
+pub fn effective_embed_config(cfg: &Config, daemon: &DaemonConfig) -> Result<EmbedConfig> {
+    effective_embed_declaration(cfg, daemon).map(|(embed, _)| embed)
+}
+
+/// The embed model `cfg`'s library is built with: the effective
+/// profile's, or the hardcoded default when no profile is in effect.
+/// Fails when the profile does not resolve.
+pub fn effective_embed_model(cfg: &Config) -> Result<String> {
+    let manifest_ref = fresh_manifest_profile_ref(cfg);
+    let effective = effective_index_profile_in(cfg, manifest_ref.as_deref())?;
+    let model = effective.as_ref().map(|e| e.profile.embed.model.as_str());
+    Ok(LibraryConfig::resolve(cfg.root_config(), model).embed_model)
 }
 
 /// The embed dimension the effective index profile declares. Carries the
@@ -180,11 +191,13 @@ impl EmbedDeclaration {
 /// built-in default. Reads the manifest once for both.
 pub fn effective_embed_declaration(
     cfg: &Config,
+    daemon: &DaemonConfig,
 ) -> Result<(EmbedConfig, Option<EmbedDeclaration>)> {
     let manifest_ref = fresh_manifest_profile_ref(cfg);
     let effective = effective_index_profile_in(cfg, manifest_ref.as_deref())?;
     let model = effective.as_ref().map(|e| e.profile.embed.model.as_str());
-    let embed = EmbedConfig::resolve(model);
+    let library = LibraryConfig::resolve(cfg.root_config(), model);
+    let embed = daemon.embed_config(&library.embed_model);
     let declaration = effective.map(|e| EmbedDeclaration { profile: e.profile });
     Ok((embed, declaration))
 }
@@ -671,10 +684,7 @@ mod tests {
     #[test]
     fn an_undefined_profile_reference_is_refused_with_the_defined_names() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let cfg = Config::new(
-            dir.path().to_path_buf(),
-            "http://localhost:11434".to_string(),
-        );
+        let cfg = Config::new(dir.path().to_path_buf());
         let err = effective_index_profile_in(&cfg, Some("no-such-profile"))
             .expect_err("an undefined profile reference cannot resolve");
         let refusal = err

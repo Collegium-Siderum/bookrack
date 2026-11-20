@@ -233,7 +233,7 @@ pub const CONTRIBUTORS: &[Contributor] = &[Contributor {
 fn collect_rows(cfg: Option<&Config>) -> Vec<KnobOrigin> {
     let dotenv = bookrack_config::dotenv_load().map(|load| load.supply());
 
-    let mut rows = bookrack_config::knob_origins(cfg);
+    let mut rows = bookrack_config::knob_origins(cfg, None);
     for contributor in KNOB_CONTRIBUTORS.iter().chain(CONTRIBUTORS) {
         rows.extend((contributor.report)(dotenv));
     }

@@ -18,6 +18,7 @@
 
 use std::path::PathBuf;
 
+use bookrack_config::DaemonFlags;
 use bookrack_runtime::mcp_endpoint::McpBindRefusal;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use bookrack_test_support::{ProcessEnv, process_env};
@@ -26,10 +27,15 @@ use tokio::net::{TcpListener, TcpStream};
 
 /// Headless bring-up options that serve MCP at `mcp_addr`.
 fn opts_serving_mcp(data_dir: PathBuf, runtime_dir: PathBuf, mcp_addr: &str) -> RuntimeOpts {
-    let mut opts = RuntimeOpts::headless(Some(data_dir), None);
-    opts.no_mcp = false;
+    let mut opts = RuntimeOpts::headless_with_flags(
+        Some(data_dir),
+        None,
+        DaemonFlags {
+            mcp_addr: Some(mcp_addr.to_string()),
+            ..DaemonFlags::default()
+        },
+    );
     opts.runtime_dir = Some(runtime_dir);
-    opts.mcp_addr = Some(mcp_addr.parse().expect("test address parses"));
     opts
 }
 

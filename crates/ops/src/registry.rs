@@ -1044,10 +1044,7 @@ mod tests {
     /// derived from it rather than written out, so the stores below and
     /// the handle's configuration name the same library.
     fn fake_cfg(root: &str) -> std::sync::Arc<Config> {
-        std::sync::Arc::new(Config::new(
-            PathBuf::from(root),
-            "http://127.0.0.1:11434".to_string(),
-        ))
+        std::sync::Arc::new(Config::new(PathBuf::from(root)))
     }
 
     fn fake_ops(cfg: &Config) -> Ops<FakeEmbedder> {

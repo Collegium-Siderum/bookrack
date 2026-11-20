@@ -8,7 +8,7 @@
 //! anything: the profile's declared `embed.dim` against what the backend
 //! returns.
 
-use bookrack_config::{Config, EmbedConfig};
+use bookrack_config::EmbedConfig;
 use bookrack_embed::{DIMENSION_PROBE_TEXT, Embedder, OllamaEmbedClient};
 use bookrack_index_profile::{Severity, embed_model, validate};
 use eyre::{Context, Result, eyre};
@@ -21,10 +21,11 @@ use crate::profile::EmbedDeclaration;
 /// client's dimension cache, so any other text reaches the backend.
 const DIMENSION_CHECK_TEXT: &str = "dimension check";
 
-/// Build the embedding client from the environment-resolved knobs.
-pub fn embedder(cfg: &Config, embed_cfg: &EmbedConfig) -> Result<OllamaEmbedClient> {
+/// Build the embedding client `embed_cfg` describes: its endpoint, its
+/// model, its retry policy.
+pub fn embedder(embed_cfg: &EmbedConfig) -> Result<OllamaEmbedClient> {
     OllamaEmbedClient::new(
-        cfg.ollama_url(),
+        &embed_cfg.ollama_url,
         &embed_cfg.model,
         embed_cfg.request_timeout,
         embed_cfg.max_retries,
