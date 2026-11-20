@@ -335,6 +335,25 @@ pub fn env_over(
     candidates
 }
 
+/// Trim a raw value, reading whitespace-only as unset.
+pub fn trimmed(value: Option<String>) -> Option<String> {
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Parse a raw value, reading blank and unparseable text as unset, so
+/// a layer holding one is not recorded as a losing layer.
+pub fn parsed<T: std::str::FromStr>(value: Option<String>) -> Option<T> {
+    trimmed(value).and_then(|s| s.parse().ok())
+}
+
+/// Whether a raw value is one of the truth words `1`, `true`, `yes`,
+/// compared without case. Unset and every other text are false.
+pub fn truthy(value: Option<String>) -> bool {
+    trimmed(value).is_some_and(|s| matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
 /// Resolve one knob from its layers, recording what it eclipsed.
 ///
 /// `candidates` are the layers that can speak for this knob, in
@@ -437,6 +456,24 @@ pub fn resolve_knob(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_values_trim_parse_and_read_as_truth_words() {
+        let some = |s: &str| Some(s.to_string());
+        assert_eq!(trimmed(some(" x ")), some("x"));
+        assert_eq!(trimmed(some("   ")), None);
+        assert_eq!(trimmed(None), None);
+        assert_eq!(parsed::<usize>(some(" 7 ")), Some(7));
+        assert_eq!(parsed::<usize>(some("seven")), None);
+        assert_eq!(parsed::<usize>(some("")), None);
+        for word in ["1", "true", " YES "] {
+            assert!(truthy(some(word)), "{word}");
+        }
+        for word in ["0", "no", "maybe", ""] {
+            assert!(!truthy(some(word)), "{word}");
+        }
+        assert!(!truthy(None));
+    }
 
     fn candidate(layer: Layer, site: &str, value: Option<&str>) -> Candidate {
         Candidate::of(layer, site, value.map(str::to_string))

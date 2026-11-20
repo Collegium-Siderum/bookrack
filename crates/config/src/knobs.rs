@@ -75,7 +75,7 @@ fn knob_origins_from(
     rows.extend(SearchConfig::resolve_with_origins_from(&get, dotenv, &root_config).1);
     rows.extend(RerankerConfig::resolve_with_origins_from(&get, dotenv, &root_config).1);
     rows.extend(McpConfig::resolve_with_origins_from(&get, dotenv).1);
-    rows.extend(LogConfig::resolve_with_origins_from(&get, dotenv).1);
+    rows.extend(LogConfig::resolve_with_origins_from(&get, dotenv, crate::ConsoleDefault::Quiet).1);
     rows
 }
 

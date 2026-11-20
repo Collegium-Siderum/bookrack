@@ -22,22 +22,28 @@ use bookrack_core::knob::{
 };
 
 pub mod advice_record;
+mod daemon_config;
 mod detect;
+mod env;
 mod knobs;
+mod library_config;
 pub mod llama_server_pin;
 mod manifest;
 mod profile_ref;
 mod registry;
 pub mod reranker_model_pin;
 
+pub use daemon_config::{ConsoleDefault, DaemonConfig, DaemonFlags};
 pub use detect::{
     DetectError, DetectVerdict, ScanOutcome, Signal, detect_library, mounted_volumes,
     scan_for_libraries,
 };
+pub use env::EnvSnapshot;
 pub use knobs::{
     NATIVE_DEPENDENCY_KNOBS, NativeDependencyKnob, NativeDependencyOrigin, knob_catalog,
     knob_origins, native_dependency_origins,
 };
+pub use library_config::LibraryConfig;
 pub use manifest::{
     LibraryManifest, MANIFEST_FILENAME, MANIFEST_FORMAT, MANIFEST_SCHEMA_VERSION, ManifestError,
     ManifestIdentitySeed, ManifestWriteError, load_manifest, new_manifest, render_manifest_toml,
@@ -2192,30 +2198,54 @@ impl McpConfig {
     /// Pure resolution that also reports where the value came from. The
     /// struct's field is read off the row, so the two cannot disagree.
     ///
-    /// The flag rung offers nothing here and always will: `bookrack run`
-    /// applies `--mcp-addr` itself, over the value this returns, so no
-    /// resolution reachable from this function can see one. It is drawn
-    /// because the row's chain answers where the knob *can* be set, and
-    /// the flag outranks the variable.
+    /// Describes an invocation that carries no flag: the flag rung is
+    /// drawn, because the row's chain answers where the knob *can* be
+    /// set and the flag outranks the variable, and offers nothing.
     fn resolve_with_origins_from(
         get: impl Fn(&str) -> Option<String>,
         dotenv: Option<DotenvSupply<'_>>,
     ) -> (McpConfig, Vec<KnobOrigin>) {
-        let mut candidates = vec![Candidate::of(
-            Layer::Flag,
-            "run --mcp-addr (not this invocation)",
-            None,
-        )];
-        candidates.extend(env_over(
-            dotenv,
-            MCP_ADDR_ENV,
-            env_trimmed(get(MCP_ADDR_ENV)),
-            vec![Candidate::of(
-                Layer::Default,
-                BUILT_IN_SITE,
-                Some(DEFAULT_MCP_ADDR.to_string()),
-            )],
-        ));
+        McpConfig::resolve_with_flags_from(get, dotenv, None)
+    }
+
+    /// [`resolve_with_origins_from`](Self::resolve_with_origins_from)
+    /// with the command line as the top rung. `--mcp-addr` outranks the
+    /// variable. `--no-mcp` is the whole chain: no listener, so the row
+    /// carries no value and names that flag as the reason.
+    pub(crate) fn resolve_with_flags_from(
+        get: impl Fn(&str) -> Option<String>,
+        dotenv: Option<DotenvSupply<'_>>,
+        flags: Option<&DaemonFlags>,
+    ) -> (McpConfig, Vec<KnobOrigin>) {
+        let candidates = match flags {
+            Some(flags) if flags.no_mcp => {
+                vec![Candidate::of(Layer::Flag, "run --no-mcp", None)]
+            }
+            _ => {
+                let flag = match flags {
+                    Some(flags) => Candidate::of(
+                        Layer::Flag,
+                        "run --mcp-addr",
+                        bookrack_core::knob::trimmed(flags.mcp_addr.clone()),
+                    ),
+                    None => {
+                        Candidate::of(Layer::Flag, "run --mcp-addr (not this invocation)", None)
+                    }
+                };
+                let mut candidates = vec![flag];
+                candidates.extend(env_over(
+                    dotenv,
+                    MCP_ADDR_ENV,
+                    env_trimmed(get(MCP_ADDR_ENV)),
+                    vec![Candidate::of(
+                        Layer::Default,
+                        BUILT_IN_SITE,
+                        Some(DEFAULT_MCP_ADDR.to_string()),
+                    )],
+                ));
+                candidates
+            }
+        };
         let addr = resolve_knob(
             "mcp.addr",
             KnobReach::Process,
@@ -2274,33 +2304,46 @@ impl LogConfig {
     /// process-global environment variables. Takes no dotenv record, for
     /// the reason [`EmbedConfig::resolve_from`] gives.
     fn resolve_from(get: impl Fn(&str) -> Option<String>) -> LogConfig {
-        LogConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD).0
+        LogConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD, ConsoleDefault::Quiet).0
     }
 
     /// Pure resolution that also reports where each value came from.
     /// The struct's fields are read off the rows, so the two cannot
     /// disagree.
     ///
-    /// Reports the [`from_env`](Self::from_env) shape. The headless
-    /// variant defaults the console layer to the file directive rather
-    /// than to [`DEFAULT_LOG_CONSOLE`], which is a different layer
-    /// sequence and not what a `config effective` table describes.
-    fn resolve_with_origins_from(
+    /// With [`ConsoleDefault::MirrorFile`] the console layer's lowest
+    /// rung holds the resolved file directive instead of
+    /// [`DEFAULT_LOG_CONSOLE`], and says so in its site.
+    pub(crate) fn resolve_with_origins_from(
         get: impl Fn(&str) -> Option<String>,
         dotenv: Option<DotenvSupply<'_>>,
+        console: ConsoleDefault,
     ) -> (LogConfig, Vec<KnobOrigin>) {
-        let directive = log_knob("log.directive", LOG_ENV, &get, dotenv, DEFAULT_LOG);
+        let directive = log_knob(
+            "log.directive",
+            LOG_ENV,
+            &get,
+            dotenv,
+            BUILT_IN_SITE,
+            DEFAULT_LOG,
+        );
+        let file_directive = knob_value(&directive, DEFAULT_LOG.to_string());
+        let (console_site, console_default) = match console {
+            ConsoleDefault::Quiet => (BUILT_IN_SITE, DEFAULT_LOG_CONSOLE),
+            ConsoleDefault::MirrorFile => ("mirrors log.directive", file_directive.as_str()),
+        };
         let console_level = log_knob(
             "log.console_level",
             LOG_CONSOLE_ENV,
             &get,
             dotenv,
-            DEFAULT_LOG_CONSOLE,
+            console_site,
+            console_default,
         );
 
         let cfg = LogConfig {
-            directive: knob_value(&directive, DEFAULT_LOG.to_string()),
-            console_level: knob_value(&console_level, DEFAULT_LOG_CONSOLE.to_string()),
+            console_level: knob_value(&console_level, console_default.to_string()),
+            directive: file_directive,
         };
         (cfg, vec![directive, console_level])
     }
@@ -2635,12 +2678,13 @@ fn data_dir_candidates(
 }
 
 /// One of the two log filter directives: an environment override over a
-/// compiled-in default, read before any data root is known.
+/// default held at `default_site`, read before any data root is known.
 fn log_knob(
     key: &str,
     env_name: &'static str,
     get: impl Fn(&str) -> Option<String>,
     dotenv: Option<DotenvSupply<'_>>,
+    default_site: &str,
     default: &str,
 ) -> KnobOrigin {
     resolve_knob(
@@ -2653,7 +2697,7 @@ fn log_knob(
             env_trimmed(get(env_name)),
             vec![Candidate::of(
                 Layer::Default,
-                BUILT_IN_SITE,
+                default_site,
                 Some(default.to_string()),
             )],
         ),
@@ -2664,7 +2708,7 @@ fn log_knob(
 /// unset — the same judgement [`env_usize`] makes, expressed as the
 /// absence of an offer so the layer is not recorded as a losing one.
 fn env_parsed<T: std::str::FromStr>(value: Option<String>) -> Option<T> {
-    env_trimmed(value).and_then(|s| s.parse().ok())
+    bookrack_core::knob::parsed(value)
 }
 
 /// [`env_parsed`] for `f32`, additionally rejecting non-finite values
@@ -2689,9 +2733,7 @@ fn knob_value<T: std::str::FromStr>(origin: &KnobOrigin, fallback: T) -> T {
 
 /// Trim an environment value, treating whitespace-only as unset.
 fn env_trimmed(value: Option<String>) -> Option<String> {
-    value
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    bookrack_core::knob::trimmed(value)
 }
 
 /// Outcome of [`select_root`]: the chosen data root paired with the
