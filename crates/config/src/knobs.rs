@@ -11,7 +11,10 @@
 
 use bookrack_core::knob::{DotenvSupply, KnobOrigin, Layer};
 
-use crate::{Config, EmbedConfig, LibraryConfig, LogConfig, McpConfig, RerankerConfig, RootConfig};
+use crate::{
+    Config, EmbedConfig, EnvSnapshot, LibraryConfig, LogConfig, McpConfig, RerankerConfig,
+    RootConfig,
+};
 
 /// Every knob `bookrack-config` resolves, with the layer that supplied
 /// each value, as this process's environment resolves them.
@@ -31,6 +34,38 @@ pub fn knob_origins(root: Option<&Config>, profile_model: Option<&str>) -> Vec<K
         root,
         profile_model,
     )
+}
+
+/// The two rows that decide how a process finds its libraries, as
+/// `env` resolves them: whether `.env` is read, and which registry.
+pub fn selection_origins(env: &EnvSnapshot) -> Vec<KnobOrigin> {
+    vec![
+        crate::no_dotenv_knob(env.get(crate::NO_DOTENV_ENV)),
+        crate::registry_knob(env.get(crate::REGISTRY_ENV), env.dotenv()),
+    ]
+}
+
+/// The rows that are one library's, for the library `cfg` resolved to:
+/// how its root was chosen, where its backups go, the embed model its
+/// index profile declares, and its search preferences. `env` is the
+/// environment of the process serving it, which the first two read.
+pub fn library_origins(
+    env: &EnvSnapshot,
+    cfg: &Config,
+    profile_model: Option<&str>,
+) -> Vec<KnobOrigin> {
+    let get = |name: &str| env.get(name);
+    let mut rows = vec![
+        data_dir_row(get, env.dotenv(), Some(cfg)),
+        backup_dir_row(get, env.dotenv(), Some(cfg)),
+    ];
+    rows.extend(
+        LibraryConfig::resolve(&cfg.root_config, profile_model)
+            .origins()
+            .iter()
+            .cloned(),
+    );
+    rows
 }
 
 /// Every knob this crate resolves, as it stands on a machine where

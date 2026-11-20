@@ -13,7 +13,7 @@
 //! candidates in descending priority and [`resolve_knob`] never
 //! consults a built-in chain.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Which layer supplied a value.
 ///
@@ -21,7 +21,7 @@ use serde::Serialize;
 /// `Ord` is the priority order: a layer that compares less eclipses
 /// every layer that compares greater. Not every knob draws on every
 /// layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Layer {
     /// A command-line flag on this invocation.
@@ -70,7 +70,7 @@ impl Layer {
 }
 
 /// How far a knob's value reaches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KnobReach {
     /// A property of one library; a second library may hold another.
@@ -97,7 +97,7 @@ impl KnobReach {
 }
 
 /// When in a process's life the value is read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadAt {
     /// Before the data root is resolved, so it cannot depend on one.
@@ -187,7 +187,7 @@ impl Candidate {
 }
 
 /// One layer that can speak for a knob, whether or not it did.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnobSite {
     /// The layer.
     pub layer: Layer,
@@ -197,7 +197,7 @@ pub struct KnobSite {
 }
 
 /// A layer that held a value and did not supply the effective one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Shadowed {
     /// The layer holding the losing value.
     pub layer: Layer,
@@ -208,7 +208,7 @@ pub struct Shadowed {
 }
 
 /// One row of the effective-configuration table.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnobOrigin {
     /// The knob's dotted key, e.g. `search.top_k`.
     pub key: String,
@@ -456,6 +456,24 @@ pub fn resolve_knob(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_row_survives_a_round_trip_through_its_wire_form() {
+        let row = resolve_knob(
+            "probe.key",
+            KnobReach::Machine,
+            ReadAt::BeforeResolution,
+            vec![
+                Candidate::of(Layer::Flag, "--probe", None),
+                Candidate::of(Layer::Environment, "PROBE", Some("7".to_string())),
+                Candidate::of(Layer::Default, "built-in", Some("5".to_string())),
+            ],
+        );
+        assert_eq!(row.shadowed.len(), 1, "the default lost: {row:?}");
+        let wire = serde_json::to_string(&row).expect("serialize");
+        let back: KnobOrigin = serde_json::from_str(&wire).expect("deserialize");
+        assert_eq!(back, row);
+    }
 
     #[test]
     fn raw_values_trim_parse_and_read_as_truth_words() {

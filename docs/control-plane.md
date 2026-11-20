@@ -443,6 +443,37 @@ unchanged.
   answers with `version` and `started_at` alone.
 - `daemon.shutdown` — fires the shared shutdown broadcast; the
   response is `null` and is written before the listener stops.
+- `daemon.config` — the configuration the daemon is running under,
+  as it resolved it: `{ identity, dotenv_path, rows,
+  retired_variables, unclaimed_variables, libraries, mounted_at_start,
+  queue_paused }`. Read-only and `unrouted`.
+  - `identity` is the six fields of `daemon.version`.
+  - `rows` are the process- and machine-scoped knobs, one object per
+    knob in the shape `config effective --json` gives its rows: `key`,
+    `value`, `layer`, `site`, `shadowed`, `chain`, `reach`, `read_at`.
+    They are taken once, when the daemon starts, from the environment
+    and flags it was started with, and do not change while it runs.
+  - `libraries` holds one `{ name, data_dir, rows, config_notices }`
+    per mounted library. Its `rows` are the library-scoped knobs —
+    `data_dir`, `backup_dir`, `embed.model`, `search.top_k`,
+    `search.weak_threshold` — as they resolved when the library was
+    mounted: an edit to its `config.toml` shows only after the library
+    is unmounted and mounted again, and an unmounted library is absent.
+    `config_notices` are the keys of that file the daemon ignores, each
+    `{ kind, key, help }`.
+  - `retired_variables` lists the retired variables the daemon's
+    environment carried, each `{ key, source, help }` with `source` one
+    of `environment` and `dotenv`.
+  - `unclaimed_variables` lists the prefixed variables no knob reads,
+    each `{ key, source }`. It is `null` when the host that started the
+    daemon supplied no knob inventory to compare against, which is not
+    the same as an empty list; `bookrack run` supplies one.
+  - `dotenv_path` is the `.env` the daemon loaded, or `null`.
+  - `mounted_at_start` names the libraries mounted when the daemon
+    entered service; compare it with `libraries` for what changed
+    since. `queue_paused` is the worker's pause flag.
+  The `confirm.timeout_secs` knob is absent: it belongs to the calling
+  process, not to the daemon.
 - `daemon.status` — `{ state, queue_pending, queue_running,
   queue_worker_enabled, library, data_dir, served, unmounted,
   auto_registered }`, plus the six identity fields of `daemon.version`
@@ -523,7 +554,7 @@ unchanged.
     each carry one library's data among the process-level rest, so
     both are `routed`.
   - `unrouted` — the method answers about the daemon itself, or about
-    every library at once: `status`, `daemon.status`,
+    every library at once: `status`, `daemon.status`, `daemon.config`,
     `events.snapshot`, `library.list`, `library.set_default`,
     `library.mount`, `library.unmount`. It has
     no key to carry a selection, so a client holding an explicit one

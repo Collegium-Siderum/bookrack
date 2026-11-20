@@ -18,9 +18,10 @@ use super::tripwire::{Finding, Rule, is_within, resolve};
 /// The control-plane methods `rpc call` may name inside a sandbox: the
 /// subset of the methods the daemon's own method table marks `read`
 /// that a sandbox cell has a use for.
-pub const READ_ONLY_RPC: [&str; 11] = [
+pub const READ_ONLY_RPC: [&str; 12] = [
     "daemon.version",
     "daemon.status",
+    "daemon.config",
     "status",
     "daemon.methods",
     "queue.list",

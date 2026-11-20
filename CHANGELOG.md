@@ -10,6 +10,14 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **`daemon.config` reports the configuration a running daemon uses.**
+  A read-only control-plane method returning the process-scoped knob
+  rows as the daemon resolved them at start, the library-scoped rows of
+  each mounted library as resolved when it was mounted, the retired and
+  unread variables its environment carried, the libraries mounted at
+  start, and whether the queue is paused. A library's rows change only
+  when it is unmounted and mounted again. See
+  [control-plane.md](docs/control-plane.md).
 - **`BOOKRACK_RERANKER_CTX` and `BOOKRACK_RERANKER_THREADS`** set the
   context size and thread count of the rerank server the daemon
   supervises. Each takes a positive integer; anything else reads as

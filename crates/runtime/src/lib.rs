@@ -16,6 +16,7 @@ pub mod audit_helpers;
 pub mod auto_register;
 pub mod backend_probe;
 pub mod cmd;
+pub mod config_snapshot;
 pub mod control;
 pub mod daemon;
 pub mod doctor;

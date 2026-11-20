@@ -50,6 +50,12 @@ impl EnvSnapshot {
         }
     }
 
+    /// This snapshot with `name` set to `value`, replacing what it held.
+    pub fn with_var(mut self, name: impl Into<String>, value: impl Into<String>) -> EnvSnapshot {
+        self.vars.insert(name.into(), value.into());
+        self
+    }
+
     /// This snapshot with `load` as its dotenv record. The record moves
     /// which layer a value is credited to, never the value.
     pub fn with_dotenv(mut self, load: DotenvLoad) -> EnvSnapshot {

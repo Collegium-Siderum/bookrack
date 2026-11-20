@@ -155,6 +155,7 @@ impl Fixture {
             write_guard: Arc::new(tokio::sync::Mutex::new(())),
             shutdown_tx: self.shutdown_tx.clone(),
             identity: test_identity(),
+            config_snapshot: Arc::default(),
             daemon_config: Arc::new(bookrack_config::DaemonConfig::resolve(
                 &bookrack_config::EnvSnapshot::default(),
                 &bookrack_config::DaemonFlags::default(),

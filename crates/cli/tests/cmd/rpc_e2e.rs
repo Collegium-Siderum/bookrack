@@ -163,3 +163,78 @@ async fn a_remove_of_an_unknown_book_exits_two_from_the_cli() {
         .await
         .expect("daemon stops on SIGTERM");
 }
+
+/// `daemon.config` answers for the process and for every library it
+/// serves, so it carries no selection: without one the call succeeds
+/// and reports the process rows, and a `--library` flag is refused by
+/// the client rather than sent and left unread.
+#[tokio::test]
+async fn rpc_call_daemon_config_refuses_a_library_flag() {
+    let sandbox = Sandbox::new();
+    let lock_path = sandbox.tty_lock_path();
+    let alpha = sandbox.data_root("alpha-root");
+    sandbox.write_registry_entries(Some("alpha"), &[("alpha", alpha.as_path())]);
+
+    let mut daemon_cmd = Command::from(
+        bookrack_cmd!(&sandbox)
+            .without_data_dir()
+            .ollama_url(EmbedStub::shared().url())
+            .extra_env("BOOKRACK_EMBED_BATCH_MAX_CHUNKS", "7")
+            .extra_env("BOOKRACK_NOT_A_KNOB", "1")
+            .build(),
+    );
+    daemon_cmd.args(["--library", "alpha", "run"]);
+    let daemon = DaemonProcess::spawn(daemon_cmd)
+        .expect("spawn bookrack run")
+        .wait_ready(&lock_path, Duration::from_secs(20))
+        .await
+        .expect("bookrack run did not become ready");
+
+    let plain = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+        .args(["rpc", "call", "daemon.config"])
+        .output()
+        .await
+        .expect("run bookrack rpc call");
+    assert!(
+        plain.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+    let config: serde_json::Value =
+        serde_json::from_slice(&plain.stdout).expect("daemon.config prints JSON");
+    // The daemon's own environment, not this caller's.
+    let chunks = config["rows"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter()
+                .find(|row| row["key"] == "embed.batch_max_chunks")
+        })
+        .expect("embed.batch_max_chunks row");
+    assert_eq!(chunks["value"], "7", "{chunks}");
+    assert_eq!(config["mounted_at_start"], serde_json::json!(["alpha"]));
+    // The binary supplies its inventory, so the section is computed.
+    let unclaimed: Vec<&str> = config["unclaimed_variables"]
+        .as_array()
+        .expect("unclaimed_variables is computed under the binary")
+        .iter()
+        .filter_map(|var| var["key"].as_str())
+        .collect();
+    assert_eq!(unclaimed, ["BOOKRACK_NOT_A_KNOB"], "{config}");
+
+    let flagged = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+        .args(["--library", "alpha", "rpc", "call", "daemon.config"])
+        .output()
+        .await
+        .expect("run bookrack rpc call");
+    let stderr = String::from_utf8_lossy(&flagged.stderr);
+    assert_eq!(flagged.status.code(), Some(2), "stderr={stderr}");
+    assert!(
+        stderr.contains("cannot run this command against library 'alpha'"),
+        "{stderr}"
+    );
+
+    daemon
+        .stop(Duration::from_secs(5))
+        .await
+        .expect("daemon stops on SIGTERM");
+}

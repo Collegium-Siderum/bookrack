@@ -28,6 +28,7 @@ use bookrack_embed::Embedder;
 use eyre::WrapErr;
 use tokio::sync::Mutex as AsyncMutex;
 
+use bookrack_core::knob::KnobOrigin;
 use bookrack_core::{Explain, Problem};
 
 use crate::Ops;
@@ -196,6 +197,7 @@ pub struct LibraryHandle<E: Embedder> {
     name: String,
     cfg: Arc<Config>,
     templates: JobTemplates,
+    config_rows: Vec<KnobOrigin>,
     ops: Arc<Ops<E>>,
     ingest_lock: AsyncMutex<()>,
     glean_lock: AsyncMutex<()>,
@@ -235,13 +237,15 @@ impl<E: Embedder> LibraryHandle<E> {
     }
 
     /// [`LibraryHandle::new`] with the pipeline parameters queue jobs
-    /// for this library start from, and the opaque token that marks
+    /// for this library start from, the rows its configuration was
+    /// resolved to when it was opened, and the opaque token that marks
     /// this library as held for as long as the handle lives.
     pub fn with_templates(
         name: impl Into<String>,
         cfg: Arc<Config>,
         ops: Ops<E>,
         templates: JobTemplates,
+        config_rows: Vec<KnobOrigin>,
         guard: Option<MountGuard>,
     ) -> Arc<LibraryHandle<E>> {
         let handle = LibraryHandle::from_arc(name, cfg, Arc::new(ops));
@@ -252,6 +256,7 @@ impl<E: Embedder> LibraryHandle<E> {
             name: handle.name.clone(),
             cfg: Arc::clone(&handle.cfg),
             templates,
+            config_rows,
             ops: Arc::clone(&handle.ops),
             ingest_lock: AsyncMutex::new(()),
             glean_lock: AsyncMutex::new(()),
@@ -284,6 +289,7 @@ impl<E: Embedder> LibraryHandle<E> {
             name: name.into(),
             cfg,
             templates: JobTemplates::default(),
+            config_rows: Vec::new(),
             ops,
             ingest_lock: AsyncMutex::new(()),
             glean_lock: AsyncMutex::new(()),
@@ -294,6 +300,14 @@ impl<E: Embedder> LibraryHandle<E> {
     /// The short name this library is registered under.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The library-scoped configuration rows as they resolved when
+    /// this handle was built. A snapshot: an edit to the library's
+    /// files shows here only on a handle built after it. Empty on a
+    /// handle whose host recorded none.
+    pub fn config_rows(&self) -> &[KnobOrigin] {
+        &self.config_rows
     }
 
     /// The configuration this library resolves to.
@@ -1384,6 +1398,7 @@ mod tests {
             cfg,
             ops,
             super::JobTemplates::default(),
+            Vec::new(),
             Some(guard),
         );
         (handle, flag)

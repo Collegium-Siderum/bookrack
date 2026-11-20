@@ -41,7 +41,7 @@ pub use detect::{
 pub use env::EnvSnapshot;
 pub use knobs::{
     NATIVE_DEPENDENCY_KNOBS, NativeDependencyKnob, NativeDependencyOrigin, knob_catalog,
-    knob_origins, native_dependency_origins,
+    knob_origins, library_origins, native_dependency_origins, selection_origins,
 };
 pub use library_config::LibraryConfig;
 pub use manifest::{

@@ -57,6 +57,7 @@ pub struct DaemonConfig {
     embed_pacing: EmbedConfig,
     origins: Vec<KnobOrigin>,
     retired: Vec<RetiredVariable>,
+    env: EnvSnapshot,
 }
 
 impl DaemonConfig {
@@ -99,6 +100,7 @@ impl DaemonConfig {
             embed_pacing,
             origins,
             retired: env.retired_seen(),
+            env: env.clone(),
         }
     }
 
@@ -129,6 +131,12 @@ impl DaemonConfig {
     /// every layer that could have supplied it.
     pub fn origins(&self) -> &[KnobOrigin] {
         &self.origins
+    }
+
+    /// The environment this configuration was resolved from, for the
+    /// rows that are resolved later against the same one.
+    pub fn env(&self) -> &EnvSnapshot {
+        &self.env
     }
 
     /// The retired variables the environment carried, each ignored.

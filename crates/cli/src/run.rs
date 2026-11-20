@@ -89,6 +89,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
         selection: opts.selection,
         runtime_dir: opts.runtime_dir,
         daemon_config,
+        claimed_variables: Some(bookrack_cli::config_knobs::claimed_variables()),
         spawn_queue_worker: true,
         caller: Caller::cli(),
         mcp_tools: bookrack_mcp::list_tools(),

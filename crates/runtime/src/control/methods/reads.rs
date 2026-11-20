@@ -74,6 +74,48 @@ pub fn daemon_version_rpc(_params: &Option<Value>, ctx: &MethodContext) -> Resul
     Ok(daemon_version(ctx))
 }
 
+/// `daemon.config`: the configuration this daemon is running under.
+///
+/// The process rows are the snapshot taken at start. The library rows
+/// are read off each mounted handle, so a library shows what its mount
+/// resolved, appears when it is mounted, and disappears when it is
+/// unmounted. The mounted set at start and the queue's pause flag
+/// travel in the same reply, so a caller does not stitch them from
+/// separate calls that may straddle a change.
+pub fn daemon_config(ctx: &MethodContext) -> Value {
+    let snapshot = &ctx.config_snapshot;
+    let libraries: Vec<Value> = ctx
+        .registry
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|summary| ctx.registry.get(Some(&summary.name)).ok())
+        .map(|handle| {
+            json!({
+                "name": handle.name(),
+                "data_dir": handle.cfg().data_dir().display().to_string(),
+                "rows": handle.config_rows(),
+                "config_notices": handle.cfg().config_notices(),
+            })
+        })
+        .collect();
+    json!({
+        "identity": ctx.identity,
+        "dotenv_path": snapshot.dotenv_path,
+        "rows": snapshot.rows,
+        "retired_variables": snapshot.retired_variables,
+        "unclaimed_variables": snapshot.unclaimed_variables,
+        "libraries": libraries,
+        "mounted_at_start": snapshot.mounted_at_start,
+        "queue_paused": ctx.queue_paused.load(std::sync::atomic::Ordering::Relaxed),
+    })
+}
+
+/// Adapter to the uniform dispatch signature.
+pub fn daemon_config_rpc(_params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    Ok(daemon_config(ctx))
+}
+
 pub fn daemon_shutdown(ctx: &MethodContext) -> Value {
     crate::control::events::initiate_shutdown(&ctx.event_stream, &ctx.shutdown_tx);
     Value::Null

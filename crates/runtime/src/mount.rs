@@ -452,7 +452,14 @@ mod tests {
         let lock =
             RootLock::acquire(dir, std::process::id(), "daemon").expect("take the root lock");
         let guard: MountGuard = Arc::new(lock);
-        LibraryHandle::with_templates(name, cfg, ops, JobTemplates::default(), Some(guard))
+        LibraryHandle::with_templates(
+            name,
+            cfg,
+            ops,
+            JobTemplates::default(),
+            Vec::new(),
+            Some(guard),
+        )
     }
 
     /// `Drop` walks the registry's listing. A listing that treated an

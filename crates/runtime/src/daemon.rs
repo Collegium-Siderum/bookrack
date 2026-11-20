@@ -97,6 +97,11 @@ pub struct RuntimeOpts {
     /// per-call to `Caller::mcp()` by the MCP server's dispatch wrap
     /// and never read this value.
     pub caller: Caller,
+    /// Every `BOOKRACK_…` variable some knob of this build reads,
+    /// supplied by a host that links the whole knob inventory.
+    /// `daemon.config` subtracts it from the environment to report the
+    /// variables nothing reads; `None` leaves that section uncomputed.
+    pub claimed_variables: Option<std::collections::BTreeSet<String>>,
     /// MCP tool surface, as published by the live `BookrackServer`.
     /// Empty for entry points that do not bring up the MCP listener;
     /// otherwise populated by the caller from
@@ -136,6 +141,7 @@ impl RuntimeOpts {
             selection: LibrarySelection { data_dir, library },
             runtime_dir: None,
             daemon_config: DaemonConfig::resolve(&EnvSnapshot::capture(), &flags),
+            claimed_variables: None,
             spawn_queue_worker: false,
             caller: Caller::cli(),
             mcp_tools: Vec::new(),
@@ -1124,6 +1130,14 @@ impl DaemonRuntime {
             shutdown_tx: shutdown_tx.clone(),
             identity: identity.clone(),
             daemon_config: Arc::clone(&daemon_config),
+            config_snapshot: Arc::new(crate::config_snapshot::ProcessSnapshot::capture(
+                &daemon_config,
+                opts.claimed_variables.as_ref(),
+                registry
+                    .list()
+                    .map(|mounted| mounted.into_iter().map(|library| library.name).collect())
+                    .unwrap_or_default(),
+            )),
             selection: selection_for_doctor,
             library_name: library_name.clone(),
             auto_registered,
@@ -1482,8 +1496,9 @@ pub(crate) async fn build_library_handle(
     // else the built-in default; an undefined or unloadable profile
     // refuses the handle with the repair spelled out, rather than
     // embedding under a combination the operator never declared.
-    let embed_cfg = crate::profile::effective_embed_config(cfg, daemon)
+    let (embed_cfg, declaration) = crate::profile::effective_embed_declaration(cfg, daemon)
         .context("resolve effective embed configuration")?;
+    let profile_model = declaration.map(|d| d.profile.embed.model);
     let embedder = OllamaEmbedClient::new(
         &embed_cfg.ollama_url,
         &embed_cfg.model,
@@ -1519,7 +1534,7 @@ pub(crate) async fn build_library_handle(
     // Library::open — books + papers. Papers warms unconditionally so
     // the first glean into an empty data dir lights up the read path
     // the same way the book side does.
-    let search_cfg = LibraryConfig::resolve(cfg.root_config(), Some(&embed_cfg.model)).search;
+    let search_cfg = LibraryConfig::resolve(cfg.root_config(), profile_model.as_deref()).search;
     let library = Library::open(
         cfg.corpus_db(),
         cfg.catalog_db(),
@@ -1577,11 +1592,16 @@ pub(crate) async fn build_library_handle(
         ingest: build_queue_params_template(cfg, &embed_cfg),
         glean: build_glean_params_template(cfg, &embed_cfg),
     };
+    // The library's rows as this mount resolved them, kept on the
+    // handle so `daemon.config` reports what is in use rather than what
+    // the files say now.
+    let config_rows = bookrack_config::library_origins(daemon.env(), cfg, profile_model.as_deref());
     Ok(LibraryHandle::with_templates(
         name,
         Arc::clone(&cfg_arc),
         ops,
         templates,
+        config_rows,
         mount_guard,
     ))
 }

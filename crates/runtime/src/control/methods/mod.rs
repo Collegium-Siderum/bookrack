@@ -134,6 +134,9 @@ pub struct MethodContext {
     pub identity: DaemonIdentity,
     /// The process-level configuration the daemon was started with.
     pub daemon_config: Arc<bookrack_config::DaemonConfig>,
+    /// What that configuration resolved to, row by row, as taken at
+    /// start; `daemon.config` reports it.
+    pub config_snapshot: Arc<crate::config_snapshot::ProcessSnapshot>,
     pub selection: LibrarySelection,
     /// Name of the primary (bring-up-selected) library. A single-value
     /// snapshot consumed by the `status` card and the `library.changed`
@@ -345,6 +348,7 @@ methods! {
     write no_queue sidebar process                    "daemon.shutdown",
     read  no_queue sync    unrouted                   "status" => reads::status_rpc,
     read  no_queue sync    unrouted                   "daemon.status" => reads::status_rpc,
+    read  no_queue sync    unrouted                   "daemon.config" => reads::daemon_config_rpc,
     read  no_queue async   routed(reads::DoctorGatherParams)
         "doctor.gather" => reads::doctor_gather_rpc,
     read  no_queue sync    process                    "daemon.methods" => meta::methods_rpc,
@@ -878,6 +882,7 @@ pub(crate) fn test_method_context(
                 ..bookrack_config::DaemonFlags::default()
             },
         )),
+        config_snapshot: Arc::default(),
         selection: LibrarySelection::default(),
         library_name: library_name.unwrap_or("default").to_string(),
         auto_registered: Vec::new(),

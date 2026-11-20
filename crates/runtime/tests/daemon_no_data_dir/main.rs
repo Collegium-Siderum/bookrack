@@ -14,6 +14,7 @@ bookrack_test_support::test_group!(
 );
 
 mod auto_registration;
+mod daemon_config;
 mod dry_run_events;
 mod eager_mount;
 mod identity_manifest_refusal;
