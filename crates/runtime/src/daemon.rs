@@ -1179,17 +1179,18 @@ impl DaemonRuntime {
         })
     }
 
-    /// Block on the shared shutdown broadcast, then drain every
-    /// spawned task with a fixed three-second timeout.
+    /// Block on the shared shutdown broadcast, then drain the control
+    /// accept loop, the MCP task, and the queue worker, each inside
+    /// [`SESSION_TASK_JOIN_TIMEOUT`].
     ///
-    /// `repl_handle` is required because the daemon always has a
-    /// foreground task (the REPL on a TTY, an `std::thread::park` on
-    /// stdin redirection). `mcp_handle` is optional because
-    /// `--no-mcp` skips the listener entirely.
+    /// `foreground_handle` is the caller's own task, the one that keeps
+    /// the entry point alive until shutdown; it is aborted last, not
+    /// joined. `mcp_handle` is optional because `--no-mcp` skips the
+    /// listener entirely.
     pub async fn run_until_shutdown(
         self,
         mcp_handle: Option<JoinHandle<Result<()>>>,
-        repl_handle: JoinHandle<Result<()>>,
+        foreground_handle: JoinHandle<Result<()>>,
     ) -> Result<()> {
         let Self {
             shutdown_rx,
@@ -1220,30 +1221,15 @@ impl DaemonRuntime {
         // publish ahead of the broadcast instead; the repeat is a no-op.
         event_stream.set_stopping();
 
-        match tokio::time::timeout(Duration::from_secs(3), control_accept_handle).await {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(err))) => tracing::warn!(error = %err, "control accept loop returned error"),
-            Ok(Err(err)) => tracing::warn!(error = %err, "control accept loop join failed"),
-            Err(_) => tracing::warn!("control accept loop did not exit within 3s; abandoning"),
-        }
+        join_session_task("control accept loop", control_accept_handle).await;
         control_sock.cleanup();
 
         if let Some(handle) = mcp_handle {
-            match tokio::time::timeout(Duration::from_secs(3), handle).await {
-                Ok(Ok(Ok(()))) => {}
-                Ok(Ok(Err(err))) => tracing::warn!(error = %err, "MCP task returned error"),
-                Ok(Err(err)) => tracing::warn!(error = %err, "MCP task join failed"),
-                Err(_) => tracing::warn!("MCP task did not exit within 3s; abandoning"),
-            }
+            join_session_task("MCP task", handle).await;
         }
 
         if let Some(handle) = queue_worker {
-            match tokio::time::timeout(Duration::from_secs(3), handle).await {
-                Ok(Ok(Ok(()))) => {}
-                Ok(Ok(Err(err))) => tracing::warn!(error = %err, "queue worker returned error"),
-                Ok(Err(err)) => tracing::warn!(error = %err, "queue worker join failed"),
-                Err(_) => tracing::warn!("queue worker did not exit within 3s; abandoning"),
-            }
+            join_session_task("queue worker", handle).await;
         }
 
         // Bounded internally: TERM, the configured grace, then KILL.
@@ -1252,15 +1238,35 @@ impl DaemonRuntime {
         }
 
         signal_handle.abort();
-        // REPL thread may still be blocked on `read_line` if shutdown
-        // came from a signal; abort the join handle and let the OS
-        // reap the blocking worker on process tear-down.
-        repl_handle.abort();
+        // The caller's foreground task may not have seen the broadcast
+        // yet; abort the join handle rather than wait on it.
+        foreground_handle.abort();
 
         if signal_triggered.load(Ordering::SeqCst) {
             std::process::exit(0);
         }
         Ok(())
+    }
+}
+
+/// How long shutdown waits for one session task to end before leaving
+/// it behind.
+// setting: internal -- teardown grace window for session tasks after shutdown is signalled
+const SESSION_TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Wait for the session task `name` to end, inside
+/// [`SESSION_TASK_JOIN_TIMEOUT`]. A task that returns an error, panics,
+/// or outlasts the window is logged under its name and left behind;
+/// shutdown goes on either way.
+async fn join_session_task(name: &'static str, handle: JoinHandle<Result<()>>) {
+    match tokio::time::timeout(SESSION_TASK_JOIN_TIMEOUT, handle).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(err))) => tracing::warn!(error = %err, "{name} returned error"),
+        Ok(Err(err)) => tracing::warn!(error = %err, "{name} join failed"),
+        Err(_) => tracing::warn!(
+            "{name} did not exit within {}s; abandoning",
+            SESSION_TASK_JOIN_TIMEOUT.as_secs()
+        ),
     }
 }
 

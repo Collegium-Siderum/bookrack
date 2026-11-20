@@ -911,7 +911,7 @@ impl BookrackServer {
     /// own, reported by the same tool. `log_stream` is the shared
     /// in-process log fan-out the `session.logs_tail` tool reads its
     /// ring-buffer snapshot from. `queue_state` is the shared snapshot
-    /// of the ingest queue the daemon-REPL drives; a host that spawns
+    /// of the ingest queue the daemon's worker drives; a host that spawns
     /// no queue worker passes an inert default. `shutdown_tx` carries the session-wide graceful-shutdown
     /// signal so the `session.shutdown` tool can ask the daemon to
     /// stop, and `event_stream` is where that tool publishes the
@@ -1842,7 +1842,7 @@ impl BookrackServer {
         respond_with(&SessionLogsTailResult { events, returned })
     }
 
-    /// Snapshot the daemon-REPL's ingest queue: counts by lifecycle
+    /// Snapshot the daemon's ingest queue: counts by lifecycle
     /// state plus the most recent jobs, optionally only those in one
     /// state. The filter applies before the cap, so an early failure in
     /// a long batch stays reachable.
@@ -1922,8 +1922,9 @@ impl BookrackServer {
 
     /// Ask the daemon to perform a graceful shutdown. Publishes the
     /// `stopping` state to control-plane subscribers, then fires the
-    /// session-wide broadcast signal that the signal listener, REPL,
-    /// queue worker, and MCP listener all subscribe to; the daemon's
+    /// session-wide broadcast signal that the signal listener, the
+    /// control-plane socket, the queue worker, and the MCP listener all
+    /// subscribe to; the daemon's
     /// own join logic then closes everything in order.
     ///
     /// The tool returns immediately once the signal is sent — the
@@ -2338,12 +2339,12 @@ impl ServerHandler for BookrackServer {
 /// to its broadcast channel.
 ///
 /// `queue_state` is the shared snapshot of the ingest queue the
-/// daemon-REPL drives; a host that spawns no queue worker passes an
+/// daemon's worker drives; a host that spawns no queue worker passes an
 /// inert default.
 ///
 /// `shutdown_tx` is the session-wide graceful-shutdown broadcaster
-/// that the signal listener, REPL, queue worker, and this listener
-/// all subscribe to. The `session.shutdown` MCP tool fires it, after
+/// that the signal listener, the control-plane socket, the queue
+/// worker, and this listener all subscribe to. The `session.shutdown` MCP tool fires it, after
 /// publishing the `stopping` state on `event_stream`; this function also subscribes through `shutdown_rx` (the
 /// receiver side of the same broadcast) for its own listener loop.
 // Eight separate handles are the natural shape here: each is owned by a
