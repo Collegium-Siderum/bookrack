@@ -503,7 +503,7 @@ impl Explain for RerankerModelState {
             )),
             RerankerModelState::NotInstalled { tag } => {
                 Problem::new(format!("reranker model '{tag}' is not installed"))
-                    .hint("Run `bookrack doctor --install-reranker`.")
+                    .hint("Run `bookrack setup reranker`.")
             }
             RerankerModelState::Unpinned { tag } => Problem::new(format!(
                 "reranker model '{tag}' has no pinned download"
@@ -598,7 +598,7 @@ async fn bring_up_backend(
         let bin = locate_llama_server().path.ok_or_else(|| {
             eyre!(
                 "profile '{profile}' promises a reranker stage but no llama-server binary \
-                 is installed; run `bookrack doctor --install-reranker`"
+                 is installed; run `bookrack setup reranker`"
             )
         })?;
         let config = supervised_config(bin, model, &reranker_cfg, runtime_dir);
@@ -1347,7 +1347,10 @@ mod tests {
         ] {
             let problem = state.explain();
             let hint = problem.data.hint.unwrap_or_default();
-            assert!(!hint.contains("--install-reranker"), "{state:?}: {hint}");
+            assert!(
+                !hint.contains("--install-reranker") && !hint.contains("setup reranker"),
+                "{state:?}: {hint}"
+            );
             assert!(hint.contains(RERANKER_MODEL_ENV), "{state:?}: {hint}");
         }
     }
@@ -1470,7 +1473,7 @@ mod tests {
     }
 
     /// End-to-end against the real pinned artifacts. Skips cleanly on
-    /// hosts (CI among them) where `doctor --install-reranker` has not
+    /// hosts (CI among them) where `setup reranker` has not
     /// run, mirroring how PDF tests skip without a PDFium library.
     #[tokio::test]
     async fn real_llama_server_becomes_ready_and_reranks() {

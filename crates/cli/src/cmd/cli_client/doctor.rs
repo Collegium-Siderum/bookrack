@@ -120,27 +120,10 @@ pub async fn run(
     // so they happen before the report path forks. A running daemon
     // picks the artifacts up on its next start.
     if install_pdfium {
-        let path = bookrack_runtime::pdfium_install::install_pinned_pdfium().await?;
-        if json {
-            println!("{}", install_line("pdfium", &path, true));
-        } else {
-            println!("installed {}", path.display());
-        }
+        bookrack_cli::setup_cmd::install_pdfium(None, json).await?;
     }
     if install_reranker {
-        let outcomes = bookrack_runtime::reranker_install::install_reranker().await?;
-        for outcome in outcomes {
-            if json {
-                println!(
-                    "{}",
-                    install_line("reranker", &outcome.path, outcome.downloaded)
-                );
-            } else if outcome.downloaded {
-                println!("installed {}", outcome.path.display());
-            } else {
-                println!("{} already installed", outcome.path.display());
-            }
-        }
+        bookrack_cli::setup_cmd::install_reranker(json).await?;
     }
     // Envelope rename is also a host-level filesystem walk; it runs
     // before the report path forks so the operator gets a self-
@@ -186,30 +169,5 @@ pub async fn run(
             Err(_) => bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await,
         },
         Err(_) => bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await,
-    }
-}
-
-/// One line of `--json` output per installed artifact, printed ahead
-/// of the report: which install produced it, where it landed, and
-/// whether this run downloaded it or found it in place.
-fn install_line(install: &str, path: &Path, downloaded: bool) -> Value {
-    serde_json::json!({
-        "install": install,
-        "path": path.display().to_string(),
-        "downloaded": downloaded,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn install_line_names_the_install_its_path_and_whether_it_downloaded() {
-        let line = install_line("reranker", Path::new("/managed/model.gguf"), false);
-        assert_eq!(line["install"], "reranker");
-        assert_eq!(line["path"], "/managed/model.gguf");
-        assert_eq!(line["downloaded"], false);
-        assert_eq!(line.as_object().map(|o| o.len()), Some(3));
     }
 }

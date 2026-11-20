@@ -1167,8 +1167,8 @@ sites = [
   "crates/runtime/src/reranker_install.rs::install_pinned_reranker_model",
 ]
 reason = "transitional"
-detail = "the PDFium installer downloads every time; the reranker installers first look at what is installed"
-agreement = "divergent"
+detail = "each looks at what is installed first; the PDFium installer holds the archive in memory and extracts one member, the reranker installers stage the download on disk"
+agreement = "unverified"
 exit = "one fetch-and-verify function serves every installer"
 
 [[parallel]]

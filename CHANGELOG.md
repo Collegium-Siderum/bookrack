@@ -10,6 +10,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **`bookrack setup` installs the native components this build
+  manages.** `bookrack setup pdfium` and `bookrack setup reranker`
+  download, verify, and place the pinned PDFium library and the pinned
+  llama-server and reranker model; `bookrack setup` alone lists each
+  component and whether it is installed (`--json` for a machine-readable
+  listing). `setup pdfium` downloads nothing when the library is already
+  installed. `setup pdfium --from <ARCHIVE>` installs from a local copy
+  of the pinned release archive, for a host with no network: the archive
+  passes the same checksum, and one that fails it is refused with
+  nothing written. The command needs no library and no daemon.
 - **`daemon.config` reports the configuration a running daemon uses.**
   A read-only control-plane method returning the process-scoped knob
   rows as the daemon resolved them at start, the library-scoped rows of
@@ -281,6 +291,12 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Deprecated
 
+- **`bookrack doctor --install-pdfium` and `--install-reranker`** are
+  replaced by `bookrack setup pdfium` and `bookrack setup reranker`.
+  Each still runs the same install before the report, and prints a
+  warning naming its replacement; both are removed in the next minor
+  release. Every message that pointed at one of them now points at
+  `setup`.
 - **A library's `config.toml` no longer sets the Ollama endpoint.**
   A library whose file names another Ollama than the daemon's
   environment does is embedded through the daemon's from this release

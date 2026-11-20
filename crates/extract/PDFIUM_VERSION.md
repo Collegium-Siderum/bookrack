@@ -69,7 +69,7 @@ The adapter searches a chain of directories, first hit wins:
    layout, where the library ships next to the binaries).
 3. The per-user managed directory of the pinned build
    (`<platform data dir>/bookrack/pdfium/<release tag>/`, one directory
-   per pinned build), which `bookrack doctor --install-pdfium` and the
+   per pinned build), which `bookrack setup pdfium` and the
    first-run wizard's download offer populate with that build.
 
 `src/pdfium_pin.rs` carries the values in the tables above as

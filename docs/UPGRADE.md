@@ -23,7 +23,7 @@ directory, and an MCP client holds a URL — so none of them move.
    through its read-only door, so nothing is migrated by the check, and
    it reports which PDFium library will be used: the one the archive
    bundles beside the executable is searched before the per-user copy
-   `doctor --install-pdfium` manages, so an older managed copy does not
+   `setup pdfium` manages, so an older managed copy does not
    shadow it.
 4. Start it: `bookrack run`. The first open of each catalog migrates it
    forward, after taking the snapshot described under *Downgrading*.
@@ -49,7 +49,7 @@ directory it searched.
 - **The per-user managed copy.** Each build installs into, and
   searches, a directory named for its own PDFium release under the
   platform data directory — `bookrack/pdfium/chromium/8125/` for this
-  one. Run `bookrack doctor --install-pdfium` from the new build: it
+  one. Run `bookrack setup pdfium` from the new build: it
   installs beside the previous build's copy instead of replacing it, so
   a binary of the previous build still on the machine keeps loading its
   own. Builds before 0.14.0 installed the library file directly into
@@ -60,7 +60,7 @@ directory it searched.
   searched: point it at a directory holding the pinned build. Unsetting
   it sends the search to the executable's directory and then to the
   managed copy, so make sure one of those holds the pinned build first,
-  running `doctor --install-pdfium` if neither does.
+  running `setup pdfium` if neither does.
 
 Restart the daemon afterwards. Once a load has failed, a running daemon
 does not try again.

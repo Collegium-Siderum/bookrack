@@ -80,7 +80,7 @@ The `llama-server` executable:
    release-archive layout).
 3. The per-user managed directory
    (`<platform data dir>/bookrack/llama-server/<tag>/`), which
-   `bookrack doctor --install-reranker` populates.
+   `bookrack setup reranker` populates.
 
 The model file:
 

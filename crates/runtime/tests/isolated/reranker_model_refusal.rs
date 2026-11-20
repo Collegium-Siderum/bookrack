@@ -4,7 +4,7 @@
 //! provide is refused at bring-up with a way out that works.
 //!
 //! The managed installer downloads only the pinned models, so a tag with
-//! no pin is never fixed by `doctor --install-reranker`; the refusal has
+//! no pin is never fixed by `setup reranker`; the refusal has
 //! to point at the two routes that do serve it — an explicit model file,
 //! or an operator-run server behind `BOOKRACK_RERANKER_URL`.
 
@@ -96,7 +96,7 @@ async fn an_unpinned_reranker_model_is_not_sent_to_the_installer() {
     assert_eq!(refusal.profile, PROFILE);
     let text = format!("{err:#}");
     assert!(
-        !text.contains("--install-reranker"),
+        !text.contains("--install-reranker") && !text.contains("setup reranker"),
         "the installer cannot provide an unpinned model: {text}"
     );
     assert!(text.contains(RERANKER_MODEL_ENV), "{text}");

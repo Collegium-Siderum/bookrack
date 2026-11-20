@@ -42,6 +42,7 @@ use crate::{Command, LibrariesAction};
 pub(crate) fn resolves_root_locally(command: &Command) -> bool {
     match command {
         Command::Init { .. }
+        | Command::Setup { .. }
         | Command::Run { .. }
         | Command::AuditProfile { .. }
         | Command::Distill { .. }

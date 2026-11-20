@@ -8,7 +8,7 @@
 //! directories — the last stops in the respective search chains, so
 //! every later run finds them without any configuration. Network
 //! access happens only here, behind an explicit operator action
-//! (`bookrack doctor --install-reranker`); no query path ever
+//! (`bookrack setup reranker`); no query path ever
 //! downloads anything.
 //!
 //! Two departures from the PDFium installer this module is patterned

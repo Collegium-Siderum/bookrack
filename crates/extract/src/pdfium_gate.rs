@@ -117,7 +117,7 @@ fn classify(failure: &LoadFailure) -> Unavailable {
     }
     Unavailable::Broken(format!(
         "{message}; this build binds PDFium `{PDFIUM_RELEASE_TAG}`. \
-         Run `bookrack doctor --install-pdfium` and leave {env} unset, \
+         Run `bookrack setup pdfium` and leave {env} unset, \
          or point it at a directory holding that build",
         message = failure.message,
         env = bookrack_config::PDFIUM_LIB_ENV,
@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn a_library_that_is_not_found_is_absent() {
         let report = "PDFium library libpdfium.so not found; searched: /one, /two. \
-                      Run `bookrack doctor --install-pdfium`";
+                      Run `bookrack setup pdfium`";
         let outcome = classify(&LoadFailure {
             found: false,
             message: report.to_string(),

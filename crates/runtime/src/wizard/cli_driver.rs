@@ -190,7 +190,7 @@ impl WizardDriver for CliWizardDriver {
             }
         }
         console.line(
-            "            Run `bookrack doctor --install-pdfium` later, or set \
+            "            Run `bookrack setup pdfium` later, or set \
              BOOKRACK_PDFIUM_LIB. PDF ingest will fail until the library is \
              present; EPUB and TXT still work.",
         );
@@ -208,7 +208,7 @@ impl WizardDriver for CliWizardDriver {
             PdfiumInstallOutcome::Failed(reason) => {
                 console.warn(&format!("      WARN: PDFium install failed: {reason}"));
                 console.warn(
-                    "            Run `bookrack doctor --install-pdfium` to retry. \
+                    "            Run `bookrack setup pdfium` to retry. \
                      PDF ingest will fail until the library is present; EPUB \
                      and TXT still work.",
                 );
@@ -778,7 +778,7 @@ mod tests {
         assert_eq!(choice, PdfiumChoice::Continue);
         assert_eq!(script.answers_left(), 0, "the question was asked once");
         assert_eq!(
-            script.times_rendered("doctor --install-pdfium"),
+            script.times_rendered("setup pdfium"),
             1,
             "the later remedy is named: {:?}",
             script.captured()
@@ -845,7 +845,7 @@ mod tests {
             script.captured()
         );
         assert_eq!(
-            script.times_rendered("doctor --install-pdfium"),
+            script.times_rendered("setup pdfium"),
             1,
             "the retry command is named: {:?}",
             script.captured()

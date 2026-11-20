@@ -437,7 +437,7 @@ fn missing_library_message(probed: &[std::path::PathBuf]) -> String {
         .join(", ");
     format!(
         "PDFium library {filename} not found; searched: {searched}. \
-         Run `bookrack doctor --install-pdfium` to download the pinned build, \
+         Run `bookrack setup pdfium` to download the pinned build, \
          or set {env} to a directory containing it.",
         filename = bookrack_config::pdfium_library_filename(),
         env = bookrack_config::PDFIUM_LIB_ENV,

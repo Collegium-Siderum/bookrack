@@ -76,8 +76,8 @@ pub struct RerankerModelLocation {
 /// surfaces as a miss instead of being papered over by a fallback. The
 /// operator vouches for an explicit path, so no checksum applies to it
 /// — and it wins for every tag, which is the point of an escape hatch.
-/// When unset, the per-user managed directory that `bookrack doctor
-/// --install-reranker` populates is checked. There is no
+/// When unset, the per-user managed directory that `bookrack setup
+/// reranker` populates is checked. There is no
 /// executable-adjacent stop: model weights do not ship in release
 /// archives.
 pub fn locate_reranker_model(tag: &str) -> RerankerModelLocation {

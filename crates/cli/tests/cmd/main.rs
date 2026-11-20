@@ -51,6 +51,7 @@ mod run_ready_line;
 mod sandbox_release;
 mod sandbox_rich;
 mod sandbox_session;
+mod setup_cmd;
 mod show_reference;
 mod source_scan;
 mod status_card_identity;

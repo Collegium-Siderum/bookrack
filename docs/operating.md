@@ -618,18 +618,31 @@ Each row is
 on it. Pass `--json` for a machine-readable report suitable for a bug
 attachment.
 
-Five maintenance sub-commands cover one-off repairs; `--dry-run`
-computes the plan for the last three without touching disk:
+The native components a doctor row may report missing are installed
+by `bookrack setup`, which needs no library and no daemon:
 
-- `bookrack doctor --install-pdfium` downloads the pinned PDFium
-  build, verifies its SHA-256, and unpacks it into the per-user
-  managed directory the loader searches.
-- `bookrack doctor --install-reranker` does the same for the pinned
-  reranker artifacts — the `llama-server` binary and the cross-encoder
-  model — which only a profile with a reranker stage needs. The model
-  alone is a ~610 MiB download; the row that asks for it names the size,
-  and `bookrack config fixed` reports the free-space floor the disk row
+- `bookrack setup` lists each component and whether it is installed.
+- `bookrack setup pdfium` downloads the pinned PDFium build, verifies
+  its SHA-256, and unpacks it into the per-user managed directory the
+  loader searches. A library already there is left alone and nothing is
+  downloaded. `--from <ARCHIVE>` installs from a copy of the pinned
+  release archive on this machine instead, for a host with no network;
+  the archive passes the same checksum, and one that fails it is
+  refused with nothing written.
+- `bookrack setup reranker` does the same for the pinned reranker
+  artifacts — the `llama-server` binary and the cross-encoder model —
+  which only a profile with a reranker stage needs. The model alone is
+  a ~610 MiB download; the row that asks for it names the size, and
+  `bookrack config fixed` reports the free-space floor the disk row
   warns under.
+
+`doctor --install-pdfium` and `doctor --install-reranker` still run the
+same installs before the report and print a deprecation warning; they
+go in the next minor release.
+
+Two maintenance flags cover one-off repairs; `--dry-run` computes
+either one's plan without touching disk:
+
 - `bookrack doctor --rename-envelopes` migrates envelope files from
   older libraries into the kind-prefixed filename layout.
 - `bookrack doctor --close-abandoned-runs` closes registry rows left
@@ -640,7 +653,7 @@ computes the plan for the last three without touching disk:
   listed on an `UNREAD` line with the reason and left as it is, and
   the command exits `1`: none of that catalog's runs were judged.
 
-The last two write the catalog directly, so both are refused while a
+Both write into the library directly, so both are refused while a
 daemon is serving the library — stop it with `bookrack quit` first.
 
 When something is broken, `bookrack diagnose` bundles crash reports,

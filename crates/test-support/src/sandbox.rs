@@ -159,6 +159,18 @@ impl Sandbox {
         self.home().join(".local").join("share")
     }
 
+    /// The per-user data directory a child resolves in this sandbox:
+    /// the parent of every managed native component's directory. On
+    /// macOS the platform rule ignores `XDG_DATA_HOME` and derives it
+    /// from the home directory.
+    pub fn managed_data_dir(&self) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            self.home().join("Library").join("Application Support")
+        } else {
+            self.data_home()
+        }
+    }
+
     /// Directory the child sees as `XDG_CACHE_HOME`.
     pub fn cache_home(&self) -> PathBuf {
         self.home().join(".cache")

@@ -542,7 +542,7 @@ fn push_pdfium_row(rows: &mut Vec<Row>) {
                 value: format!("(missing) searched {searched}"),
                 status: Status::Fail {
                     note: format!(
-                        "run `bookrack doctor --install-pdfium` to download \
+                        "run `bookrack setup pdfium` to download \
                          the pinned build, or set BOOKRACK_PDFIUM_LIB to a \
                          directory containing {filename}"
                     ),
@@ -768,7 +768,7 @@ fn push_disk_free_row(rows: &mut Vec<Row>, cfg: &Config) {
             status: Status::Warn {
                 note: format!(
                     "below {} on the volume holding the data root; an ingest, an index \
-                     rebuild, or `bookrack doctor --install-reranker` may run out of room",
+                     rebuild, or `bookrack setup reranker` may run out of room",
                     bytes_human(DISK_FREE_FLOOR)
                 ),
             },
@@ -1730,7 +1730,7 @@ fn reranker_binary_row(path: Option<std::path::PathBuf>) -> Row {
             label: "llama-server binary".to_string(),
             value: "missing".to_string(),
             status: Status::Fail {
-                note: "install with `bookrack doctor --install-reranker`".to_string(),
+                note: "install with `bookrack setup reranker`".to_string(),
             },
         },
     }
@@ -1763,10 +1763,10 @@ fn reranker_model_row(
         RerankerModelState::NotInstalled { .. } => missing(
             match bookrack_config::reranker_model_pin::reranker_model_pin(model_tag) {
                 Some(pin) => format!(
-                    "install with `bookrack doctor --install-reranker` ({} download)",
+                    "install with `bookrack setup reranker` ({} download)",
                     bytes_human(pin.bytes)
                 ),
-                None => "install with `bookrack doctor --install-reranker`".to_string(),
+                None => "install with `bookrack setup reranker`".to_string(),
             },
         ),
         RerankerModelState::Unpinned { .. } => missing(format!(
@@ -2368,7 +2368,7 @@ mod tests {
             ),
         ] {
             assert!(
-                matches!(&missing.status, Status::Fail { note } if note.contains("--install-reranker")),
+                matches!(&missing.status, Status::Fail { note } if note.contains("setup reranker")),
                 "{missing:?}"
             );
         }
@@ -3040,7 +3040,7 @@ mod tests {
                 panic!("a missing model fails the row: {row:?}");
             };
             assert!(
-                !note.contains("--install-reranker"),
+                !note.contains("--install-reranker") && !note.contains("setup reranker"),
                 "the installer downloads only pinned models into the managed directory: {note}"
             );
             assert!(note.contains(bookrack_config::RERANKER_MODEL_ENV), "{note}");
@@ -3054,7 +3054,7 @@ mod tests {
         let Status::Fail { note } = &row.status else {
             panic!("a missing model fails the row: {row:?}");
         };
-        assert!(note.contains("--install-reranker"), "{note}");
+        assert!(note.contains("setup reranker"), "{note}");
     }
 
     #[test]

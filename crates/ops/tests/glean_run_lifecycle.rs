@@ -41,7 +41,7 @@ fn pdfium_available() -> bool {
     // The extract crate's gate probes the PDF adapter's own loader, so
     // this follows the whole resolution chain — the override variable,
     // the executable's directory, and the per-user managed directory
-    // `bookrack doctor --install-pdfium` populates — and fails instead
+    // `bookrack setup pdfium` populates — and fails instead
     // of skipping where the environment declares PDFium mandatory.
     bookrack_extract::pdfium_gate::available()
 }

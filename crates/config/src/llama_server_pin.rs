@@ -102,7 +102,7 @@ pub struct LlamaServerLocation {
 /// fallback. The operator vouches for an explicit path, so no checksum
 /// applies to it. When unset, the running executable's own directory
 /// (the release-archive layout) is checked, then the per-user managed
-/// directory that `bookrack doctor --install-reranker` populates.
+/// directory that `bookrack setup reranker` populates.
 pub fn locate_llama_server() -> LlamaServerLocation {
     let exe_dir = std::env::current_exe()
         .ok()

@@ -16,6 +16,7 @@ pub mod path_sugar;
 pub mod render;
 pub mod retrieval_cmd;
 pub mod runs_cmd;
+pub mod setup_cmd;
 
 bookrack_core::fixed_settings! {
     owner = "cli";

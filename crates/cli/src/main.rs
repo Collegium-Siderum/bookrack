@@ -280,13 +280,14 @@ enum Command {
     /// with a non-zero status when any row fails, so a script can
     /// branch on the result.
     ///
-    /// The three repair flags are mutually exclusive and replace the
-    /// report with the repair's own summary; `--dry-run` qualifies one
-    /// of them. The install flags run first and the report follows.
+    /// The repair flags are mutually exclusive and replace the report
+    /// with the repair's own summary; `--dry-run` qualifies one of
+    /// them. The two deprecated install flags run first and the report
+    /// follows.
     #[command(
         after_long_help = bookrack_cli_grammar::examples![
             "doctor",
-            "doctor --install-pdfium",
+            "doctor --json",
             "doctor --close-abandoned-runs --dry-run",
         ],
         group(clap::ArgGroup::new("repair").multiple(false).args([
@@ -298,15 +299,13 @@ enum Command {
         /// Deprecated: use the top-level `--json` instead.
         #[arg(long, hide = true)]
         json: bool,
-        /// Download the pinned PDFium build into the per-user managed
-        /// directory before gathering the report. PDF ingest needs the
-        /// library; the other formats do not.
+        /// Deprecated: use `bookrack setup pdfium`. Installs the pinned
+        /// PDFium build before gathering the report.
         #[arg(long)]
         install_pdfium: bool,
-        /// Download the pinned llama-server build and reranker model
-        /// into the per-user managed directories before gathering the
-        /// report. Installs whichever is missing; a no-op when both
-        /// are already in place.
+        /// Deprecated: use `bookrack setup reranker`. Installs the
+        /// pinned llama-server build and reranker model before
+        /// gathering the report.
         #[arg(long)]
         install_reranker: bool,
         /// Rename legacy-named envelope files under the books and
@@ -504,6 +503,17 @@ enum Command {
         /// wizard itself or when Ollama is intentionally offline.
         #[arg(long)]
         no_smoke: bool,
+    },
+    /// Install the native components this build manages.
+    ///
+    /// The PDF adapter's PDFium library and the reranker's llama-server
+    /// and model are not part of the binary: each is a pinned,
+    /// checksum-verified build kept in a per-user directory of its own.
+    /// With no component named, lists each one and whether it is
+    /// installed. Needs no library and no daemon.
+    Setup {
+        #[command(subcommand)]
+        component: Option<SetupComponent>,
     },
     /// Build, verify, or list distilled reference-book entries.
     ///
@@ -869,6 +879,38 @@ fn parse_key_val(raw: &str) -> Result<(String, String), String> {
     Ok((key.to_string(), value.to_string()))
 }
 
+/// A native component `bookrack setup` installs.
+#[derive(clap::Subcommand, Debug)]
+enum SetupComponent {
+    /// Install the pinned PDFium library, which PDF ingest binds.
+    ///
+    /// Downloads the pinned release archive, verifies its checksum, and
+    /// unpacks the library into this build's managed directory; a
+    /// library already there is left alone and nothing is downloaded.
+    /// `--from` installs from a copy of that archive on this machine
+    /// instead, for a host with no network: it passes the same checksum
+    /// and replaces what is installed.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "setup pdfium",
+        "setup pdfium --from /path/to/pdfium-archive.tgz",
+    ])]
+    Pdfium {
+        /// A local copy of the pinned PDFium release archive.
+        #[arg(long, value_name = "ARCHIVE")]
+        from: Option<PathBuf>,
+    },
+    /// Install the pinned llama-server build and reranker model.
+    ///
+    /// Downloads whichever is missing and verifies each checksum; what
+    /// is already installed is left alone. Only a library whose index
+    /// profile enables a reranker stage uses them.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "setup reranker",
+        "setup reranker --json",
+    ])]
+    Reranker,
+}
+
 /// CLI mirror of [`bookrack_config::LibraryKind`], deriving clap's
 /// `ValueEnum` so `--kind` lists its choices and completes without the
 /// foundational `config` crate taking a clap dependency.
@@ -1121,7 +1163,7 @@ async fn run() -> Result<()> {
     }
     // Printed ahead of every check, so a deprecated command that then
     // fails still says what replaces it.
-    if let Some(notice) = deprecation_notice(&cli.command) {
+    for notice in deprecation_notice(&cli.command) {
         eprintln!("{notice}");
     }
     // A locally resolving command keeps its selection to itself: a path
@@ -1185,6 +1227,17 @@ async fn run() -> Result<()> {
             return Err(bookrack_cli::error::BookrackCliError::DoctorUnhealthy.into());
         }
         return Ok(());
+    }
+    if let Command::Setup { component } = &cli.command {
+        return match component {
+            None => bookrack_cli::setup_cmd::status(json_global),
+            Some(SetupComponent::Pdfium { from }) => {
+                bookrack_cli::setup_cmd::install_pdfium(from.as_deref(), json_global).await
+            }
+            Some(SetupComponent::Reranker) => {
+                bookrack_cli::setup_cmd::install_reranker(json_global).await
+            }
+        };
     }
     if let Command::Init {
         data_dir,
@@ -1512,6 +1565,7 @@ async fn run() -> Result<()> {
         Command::Quit => cmd::cli_client::quit::run(None).await,
         Command::Doctor { .. } => unreachable!("Doctor is dispatched above"),
         Command::Init { .. } => unreachable!("Init is dispatched above"),
+        Command::Setup { .. } => unreachable!("Setup is dispatched above"),
         Command::Run { .. } => unreachable!("Run is dispatched above"),
         Command::Rpc { .. } => unreachable!("Rpc is dispatched above"),
     }
@@ -1563,18 +1617,39 @@ fn accepts_audit_profile(command: &Command) -> bool {
         | Command::Status
         | Command::Quit
         | Command::Doctor { .. }
+        | Command::Setup { .. }
         | Command::Init { .. }
         | Command::Run { .. }
         | Command::Rpc { .. } => false,
     }
 }
 
-/// The warning a deprecated command prints on stderr before it runs,
-/// naming the command that replaces it; `None` for every other command.
-/// No command is in its deprecation period, so every command gets
-/// `None`.
-fn deprecation_notice(_command: &Command) -> Option<&'static str> {
-    None
+/// The warnings a deprecated form prints on stderr before it runs,
+/// each naming what replaces it; empty for every other command. One
+/// invocation can carry more than one deprecated flag, and each gets
+/// its own line.
+fn deprecation_notice(command: &Command) -> Vec<&'static str> {
+    let mut notices = Vec::new();
+    if let Command::Doctor {
+        install_pdfium,
+        install_reranker,
+        ..
+    } = command
+    {
+        if *install_pdfium {
+            notices.push(
+                "warning: `bookrack doctor --install-pdfium` is deprecated; use `bookrack setup \
+                 pdfium`",
+            );
+        }
+        if *install_reranker {
+            notices.push(
+                "warning: `bookrack doctor --install-reranker` is deprecated; use `bookrack \
+                 setup reranker`",
+            );
+        }
+    }
+    notices
 }
 
 /// Whether a set `BOOKRACK_DATA_DIR` will shadow a freshly written
@@ -2570,6 +2645,7 @@ mod tests {
         "run",
         "search",
         "runs",
+        "setup",
         "show",
         "stamps",
         "status",
@@ -2588,7 +2664,7 @@ mod tests {
     /// is a new help page, and a help page is a surface commitment, so the
     /// tree's shape is pinned here rather than left to grow silently.
     const SUBCOMMAND_COUNTS: &[(&str, usize)] = &[
-        ("bookrack", 30),
+        ("bookrack", 31),
         ("bookrack audit-profile", 3),
         ("bookrack config", 3),
         ("bookrack corpus", 1),
@@ -2605,6 +2681,7 @@ mod tests {
         ("bookrack retrieval", 2),
         ("bookrack rpc", 2),
         ("bookrack runs", 2),
+        ("bookrack setup", 2),
         ("bookrack stamps", 1),
         ("bookrack vectors", 4),
     ];
@@ -2680,6 +2757,13 @@ mod tests {
     /// deprecates it.
     const DEPRECATED: &[(&str, &str, &[&str])] = &[];
 
+    /// Flags kept through their deprecation period: an invocation that
+    /// carries the flag, and the command that replaces it.
+    const DEPRECATED_FLAGS: &[(&[&str], &str)] = &[
+        (&["doctor", "--install-pdfium"], "setup pdfium"),
+        (&["doctor", "--install-reranker"], "setup reranker"),
+    ];
+
     /// Collects `(invocation path, summary)` for every command in the
     /// tree, clap's generated `help` pseudo-subcommand excepted.
     fn summaries(cmd: &clap::Command, path: &str, out: &mut BTreeMap<String, String>) {
@@ -2748,21 +2832,73 @@ mod tests {
                     .collect()
             };
             let old = Cli::try_parse_from(argv(path)).expect("the deprecated form parses");
-            let notice = deprecation_notice(&old.command)
-                .unwrap_or_else(|| panic!("`{path}` prints no deprecation warning"));
+            let notices = deprecation_notice(&old.command);
+            let [notice] = notices.as_slice() else {
+                panic!("`{path}` prints {} deprecation warnings", notices.len());
+            };
             assert!(
                 notice.starts_with("warning: ")
                     && notice.contains(&format!("`bookrack {path}`"))
-                    && notice.contains(&format!("`bookrack {replacement}`")),
+                    && notice
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .contains(&format!("`bookrack {replacement}`")),
                 "the warning names the command and its replacement: {notice:?}"
             );
             let new = Cli::try_parse_from(argv(replacement)).expect("the replacement parses");
-            assert_eq!(
-                deprecation_notice(&new.command),
-                None,
+            assert!(
+                deprecation_notice(&new.command).is_empty(),
                 "`{replacement}` is not deprecated"
             );
         }
+    }
+
+    /// A deprecated flag warns and names its replacement, and the
+    /// replacement parses and does not warn.
+    #[test]
+    fn a_deprecated_flag_names_its_replacement_and_the_replacement_is_silent() {
+        for (argv, replacement) in DEPRECATED_FLAGS {
+            let old = Cli::try_parse_from(std::iter::once("bookrack").chain(argv.iter().copied()))
+                .expect("the deprecated form parses");
+            let notices = deprecation_notice(&old.command);
+            let [notice] = notices.as_slice() else {
+                panic!("{argv:?} prints {} deprecation warnings", notices.len());
+            };
+            let flat = notice.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                flat.starts_with("warning: ")
+                    && flat.contains(&format!("`bookrack {}`", argv.join(" ")))
+                    && flat.contains(&format!("`bookrack {replacement}`")),
+                "the warning names the flag and its replacement: {notice:?}"
+            );
+            let new =
+                Cli::try_parse_from(std::iter::once("bookrack").chain(replacement.split(' ')))
+                    .expect("the replacement parses");
+            assert!(
+                deprecation_notice(&new.command).is_empty(),
+                "`{replacement}` is not deprecated"
+            );
+        }
+    }
+
+    /// Two deprecated flags on one invocation each get their own line.
+    #[test]
+    fn each_deprecated_flag_on_one_invocation_is_warned_about() {
+        let cli = Cli::try_parse_from([
+            "bookrack",
+            "doctor",
+            "--install-pdfium",
+            "--install-reranker",
+        ])
+        .expect("both flags parse");
+        let notices = deprecation_notice(&cli.command);
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        assert!(notices[0].contains("--install-pdfium"), "{notices:?}");
+        assert!(notices[1].contains("--install-reranker"), "{notices:?}");
+
+        let plain = Cli::try_parse_from(["bookrack", "doctor"]).expect("doctor parses");
+        assert!(deprecation_notice(&plain.command).is_empty());
     }
 
     /// How an explicit library selection reaches a command: as a switch
@@ -2808,6 +2944,8 @@ mod tests {
             Reach::Local,
         ),
         (&["init"], Reach::Local),
+        (&["setup"], Reach::Local),
+        (&["setup", "pdfium"], Reach::Local),
         (&["libraries", "detect", "/tmp/library"], Reach::Local),
         (&["libraries", "list"], Reach::Routed),
         (&["libraries", "mount", "demo"], Reach::Routed),

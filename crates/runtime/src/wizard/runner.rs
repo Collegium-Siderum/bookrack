@@ -81,7 +81,7 @@ impl Wizard {
         let pdfium = probe_pdfium();
         if driver.step_pdfium(&pdfium).await? == PdfiumChoice::Install {
             let outcome = match crate::pdfium_install::install_pinned_pdfium().await {
-                Ok(path) => PdfiumInstallOutcome::Installed(path),
+                Ok(outcome) => PdfiumInstallOutcome::Installed(outcome.path),
                 Err(e) => PdfiumInstallOutcome::Failed(format!("{e:#}")),
             };
             driver.step_pdfium_install(&outcome).await?;

@@ -38,7 +38,7 @@ bookrack_core::fixed_settings! {
         acts on "the degraded state doctor and the status card report";
     "reranker.install_progress_step" = crate::reranker_install::PROGRESS_STEP,
         "bytes downloaded between two progress lines while a reranker model installs",
-        acts on "doctor --install-reranker and the setup wizard";
+        acts on "setup reranker and the setup wizard";
     "reranker.request_backoff_base" = crate::rerank_supervisor::RERANK_BACKOFF_BASE,
         "pause before the first retry of a rerank call, doubling per attempt",
         acts on "every reranked search";
