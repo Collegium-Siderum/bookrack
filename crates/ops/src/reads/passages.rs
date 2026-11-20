@@ -31,6 +31,8 @@ use crate::{Ops, OpsError, Result};
 /// carries no document-order position. Returns
 /// [`OpsError::PapersBackendNotConfigured`] when the target is a
 /// paper-kind node and this `Ops` was built without a papers backend.
+/// Returns [`OpsError::NoPassagesForKind`] for the reference kind,
+/// whose items have no corpus nodes.
 // Parallel implementation: kind-to-paths.
 pub fn read_context<E: Embedder>(
     ops: &Ops<E>,
@@ -58,10 +60,9 @@ pub fn read_context<E: Embedder>(
                 ItemKind::Paper => ops
                     .papers_corpus_db()
                     .ok_or(OpsError::PapersBackendNotConfigured)?,
-                ItemKind::Reference => unreachable!(
-                    "reference items have no corpus nodes; passage reads \
-                     are book/paper only — distill exposes its own lookup",
-                ),
+                ItemKind::Reference => {
+                    return Err(OpsError::NoPassagesForKind { kind: target.kind });
+                }
             };
             let corpus = Corpus::open_read_only(corpus_path)?;
             let id = target.node_id;
@@ -102,6 +103,8 @@ pub fn read_context<E: Embedder>(
 /// [`OpsError::NotOrganizing`] when the node is a leaf. Returns
 /// [`OpsError::PapersBackendNotConfigured`] when the target is a
 /// paper-kind node and this `Ops` was built without a papers backend.
+/// Returns [`OpsError::NoPassagesForKind`] for the reference kind,
+/// whose items have no corpus nodes.
 // Parallel implementation: kind-to-paths.
 pub fn read_span<E: Embedder>(
     ops: &Ops<E>,
@@ -123,10 +126,9 @@ pub fn read_span<E: Embedder>(
                 ItemKind::Paper => ops
                     .papers_corpus_db()
                     .ok_or(OpsError::PapersBackendNotConfigured)?,
-                ItemKind::Reference => unreachable!(
-                    "reference items have no corpus nodes; passage reads \
-                     are book/paper only — distill exposes its own lookup",
-                ),
+                ItemKind::Reference => {
+                    return Err(OpsError::NoPassagesForKind { kind: target.kind });
+                }
             };
             let corpus = Corpus::open_read_only(corpus_path)?;
             let id = target.node_id;

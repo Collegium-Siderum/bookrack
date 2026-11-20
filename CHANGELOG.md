@@ -203,6 +203,12 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **`library.read_context` and `library.read_span` refuse
+  `kind: "reference"`.** The two reads accepted the kind and then
+  failed without answering: the control-plane connection closed with no
+  response, and the MCP tool call stayed open until the client gave up.
+  Both now answer `-32602`, `cannot read passages of kind "reference"`,
+  with a hint naming `reference.lookup`.
 - **`reference.overlay_set` judges its arguments before it opens the
   store.** A call refused for a payload that is not an object, or for
   a key outside the property catalog, used to create `reference.db` on

@@ -971,6 +971,84 @@ async fn an_unknown_id_reads_as_null_and_writes_as_caller_input() -> Result<()> 
     join_with_deadline(runtime, repl_handle, driver).await
 }
 
+/// The two reads by node answer `kind: "reference"` with `-32602` on
+/// the connection that asked, and that connection goes on serving. A
+/// reference book has no corpus nodes, and the parameter type admits
+/// the kind, so the refusal has to be a response.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_passage_read_of_the_reference_kind_is_caller_input() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    seed_intake(
+        &data_root.path().join("catalog.db"),
+        ItemKind::Book,
+        "sha-book",
+    )?;
+    bookrack_corpus::Corpus::open_for_write(&data_root.path().join("corpus.db"))?;
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        for (id, method) in [(1, "library.read_context"), (2, "library.read_span")] {
+            let resp = call(
+                &mut w,
+                &mut reader,
+                id,
+                method,
+                json!({"node_id": 1, "kind": "reference"}),
+            )
+            .await
+            .map_err(|e| eyre!("{method} sent no response for kind reference: {e}"))?;
+            assert_eq!(
+                resp["error"]["code"].as_i64(),
+                Some(INVALID_PARAMS),
+                "{method}: {resp}"
+            );
+            assert_eq!(
+                resp["error"]["message"].as_str(),
+                Some("cannot read passages of kind \"reference\""),
+                "{method}: {resp}"
+            );
+            let hint = resp["error"]["data"]["hint"].as_str().unwrap_or_default();
+            assert!(hint.contains("reference.lookup"), "{method}: {resp}");
+        }
+
+        // The same connection still answers: the refusal ended one
+        // call, not the session.
+        let resp = call(
+            &mut w,
+            &mut reader,
+            3,
+            "library.read_context",
+            json!({"node_id": 1, "kind": "book"}),
+        )
+        .await?;
+        assert!(
+            resp["error"].is_null() && resp["result"].is_null(),
+            "an unknown book node still reads as a null body: {resp}"
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
 /// `library.find_books` applies the lifecycle-status filter it accepts,
 /// and refuses a status no book can be in rather than answering with
 /// the whole shelf.

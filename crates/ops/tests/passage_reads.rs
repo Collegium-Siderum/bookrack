@@ -8,7 +8,7 @@
 //! oversized leaves for the character-budget and paging behaviour.
 
 use bookrack_catalog::Catalog;
-use bookrack_core::KindedNodeId;
+use bookrack_core::{ItemKind, KindedNodeId};
 use bookrack_corpus::{Corpus, NewNode, NodeId, NodeType};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::{MAX_CONTEXT_RADIUS, MAX_READ_CHARS};
@@ -336,4 +336,54 @@ fn read_span_refuses_leaf_targets() {
     let err = read_span(&fx.ops, KindedNodeId::book(NodeId::new(999_999_999)), None)
         .expect_err("unknown node");
     assert!(matches!(err, OpsError::NodeNotFound { node_id } if node_id == 999_999_999));
+}
+
+/// A reference item has no corpus nodes, so a read by node that names
+/// the kind is refused as a value rather than served. The node id is
+/// one the book corpus holds, which keeps the refusal about the kind:
+/// a read that fell through to the book side would return a window.
+#[test]
+fn read_context_refuses_the_reference_kind() {
+    let mut fx = Fixture::build();
+    let book = seed_small_book(&mut fx.corpus, 1);
+    let target = KindedNodeId {
+        kind: ItemKind::Reference,
+        node_id: book.leaves[5],
+    };
+
+    let err = read_context(&fx.ops, target, 1, 1).expect_err("reference kind");
+    assert!(
+        matches!(
+            err,
+            OpsError::NoPassagesForKind {
+                kind: ItemKind::Reference
+            }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "cannot read passages of kind \"reference\""
+    );
+}
+
+#[test]
+fn read_span_refuses_the_reference_kind() {
+    let mut fx = Fixture::build();
+    let book = seed_small_book(&mut fx.corpus, 1);
+    let target = KindedNodeId {
+        kind: ItemKind::Reference,
+        node_id: book.chapter_one,
+    };
+
+    let err = read_span(&fx.ops, target, None).expect_err("reference kind");
+    assert!(
+        matches!(
+            err,
+            OpsError::NoPassagesForKind {
+                kind: ItemKind::Reference
+            }
+        ),
+        "{err:?}"
+    );
 }

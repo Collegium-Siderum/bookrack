@@ -205,6 +205,7 @@ fn error_kind(err: &OpsError) -> &'static str {
         OpsError::NodeNotFound { .. } => "node_not_found",
         OpsError::NotALeaf { .. } => "not_a_leaf",
         OpsError::NotOrganizing { .. } => "not_organizing",
+        OpsError::NoPassagesForKind { .. } => "no_passages_for_kind",
         OpsError::SearchUnavailable => "search_unavailable",
         OpsError::PapersBackendNotConfigured => "papers_backend_not_configured",
         OpsError::SourceNotArchived { .. } => "source_not_archived",

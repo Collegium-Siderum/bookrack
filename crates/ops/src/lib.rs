@@ -146,6 +146,14 @@ pub enum OpsError {
         node_id: i64,
     },
 
+    /// A passage read named a kind whose items have no corpus nodes.
+    /// Only books and papers are read by node.
+    #[error("cannot read passages of kind {:?}", kind.as_scope_str())]
+    NoPassagesForKind {
+        /// The kind the caller asked to read.
+        kind: bookrack_core::ItemKind,
+    },
+
     /// A search op was issued on an [`Ops`] built without a vector store.
     #[error("search is not available on a catalog-only Ops handle")]
     SearchUnavailable,
@@ -177,6 +185,15 @@ impl bookrack_core::Explain for OpsError {
             // remaining variants are leaves or have none yet.
             OpsError::Query(e) => e.explain(),
             OpsError::Rerank(e) => e.explain(),
+            OpsError::NoPassagesForKind { .. } => bookrack_core::Problem::new(self.to_string())
+                .detail(
+                    "Passage reads are anchored on corpus nodes, and only books and papers \
+                     have them.",
+                )
+                .hint(
+                    "Pass `kind` as \"book\" or \"paper\". Entries of a reference book are \
+                     read with reference.lookup.",
+                ),
             other => bookrack_core::Problem::from_error_chain(other),
         }
     }

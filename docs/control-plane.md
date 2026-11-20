@@ -372,6 +372,9 @@ side's rule too, because it is the opposite one.
   `show_paper`, `show_paper_toc`, `papers_export_csl`, and
   `papers_fetch_source` do this for an unknown `intake_id`;
   `read_context` and `read_span` do it for an unknown `node_id`.
+  Those two read corpus nodes, which only books and papers have:
+  `kind: "reference"` is refused with `-32602`, and the hint names
+  `reference.lookup`.
 - On every write-class method an id that resolves to nothing is an
   **error**: `-32602`, naming the id it could not resolve.
 

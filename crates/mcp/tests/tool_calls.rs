@@ -423,6 +423,42 @@ async fn show_book_reads_an_unknown_intake_as_a_null_body() {
     fx.stop().await;
 }
 
+/// The two reads by node answer `kind: "reference"` with
+/// `invalid_params`. The deadline is part of the assertion: a tool
+/// body that ends without a result leaves the request open, which a
+/// client sees as a call that never returns.
+#[tokio::test]
+async fn a_passage_read_of_the_reference_kind_is_invalid_params() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+
+    for tool in ["library.read_context", "library.read_span"] {
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.call_tool(call(
+                tool,
+                serde_json::json!({ "node_id": 1, "kind": "reference" }),
+            )),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{tool} sent no answer for kind reference"));
+        let data = rpc_error(answer.expect_err("the reference kind must be rejected"));
+        assert_eq!(
+            data.code,
+            ErrorCode::INVALID_PARAMS,
+            "{tool}: {}",
+            data.message
+        );
+        assert_eq!(
+            data.message, "cannot read passages of kind \"reference\"",
+            "{tool}"
+        );
+    }
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
 #[tokio::test]
 async fn an_unknown_library_selector_is_invalid_params() {
     let fx = Fixture::start().await;

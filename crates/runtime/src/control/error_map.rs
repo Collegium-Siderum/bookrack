@@ -614,6 +614,7 @@ fn from_ops(e: &OpsError) -> RpcError {
         | NodeNotFound { .. }
         | NotALeaf { .. }
         | NotOrganizing { .. }
+        | NoPassagesForKind { .. }
         | SourceNotArchived { .. } => INVALID_PARAMS,
         _ => INTERNAL_ERROR,
     };
@@ -2149,6 +2150,24 @@ mod tests {
             assert_eq!(rpc.code, INVALID_PARAMS, "{label}");
             assert!(rpc.message.contains("node 7"), "{label}: {}", rpc.message);
         }
+    }
+
+    /// A passage read of a kind without corpus nodes is caller input,
+    /// and its remedy travels in the hint rather than the summary.
+    #[test]
+    fn a_passage_read_of_a_kind_without_nodes_is_caller_input() {
+        let rpc = ops_err(OpsError::NoPassagesForKind {
+            kind: bookrack_core::ItemKind::Reference,
+        });
+        assert_eq!(rpc.code, INVALID_PARAMS);
+        assert_eq!(rpc.message, "cannot read passages of kind \"reference\"");
+        let data = rpc.data.expect("problem data");
+        assert!(
+            data["hint"]
+                .as_str()
+                .is_some_and(|h| h.contains("reference.lookup")),
+            "{data}"
+        );
     }
 
     #[test]
