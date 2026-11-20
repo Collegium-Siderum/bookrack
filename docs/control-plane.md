@@ -52,9 +52,13 @@ not know is served alone. A library bring-up skipped — its root
 missing, its lock held elsewhere, its stores unreadable, its backend
 unusable — holds no lock: its root can be purged, repaired, or served
 by another daemon, and `bookrack libraries mount <name>` brings it in
-once it is whole. A second daemon pointed at a served root — even from
-a different runtime directory — fails to start and names the holder's
-recorded `pid=` and `role=`. `bookrack libraries remove --purge` takes
+once it is whole. A second daemon — even from a different runtime
+directory — does not take a root another process holds: it skips that
+library and reports it among `unmounted`, the reason's detail naming
+the holder's recorded `pid=` and `role=`, and serves the libraries it
+could lock. It fails to start only when it has no library left to
+serve, and then reports the lock conflict itself. `bookrack libraries
+remove --purge` takes
 the same lock before its detect gate, so purging a root a daemon is
 serving is refused (exit 2) rather than silently destroying live data.
 Eager mounting covers every registered library that came up, so a

@@ -365,7 +365,7 @@ mod tests {
     }
 
     /// The data-root row is derived from the rung the resolution
-    /// already recorded, so it and `bookrack info` cannot disagree
+    /// already recorded, so it and `library.info` cannot disagree
     /// about which source won. Every variant maps, and the two registry
     /// rungs stay distinguishable by site.
     #[test]

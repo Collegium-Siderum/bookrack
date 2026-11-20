@@ -65,8 +65,10 @@ for its lifetime, and they answer different questions. The session lock
 under the runtime directory admits one daemon per runtime directory,
 and carries the lines other tools read to find the session. The
 data-root lock, `<data_root>/.bookrack.lock`, admits one writer per
-library: a second daemon pointed at a served root — even from a
-different `BOOKRACK_RUNTIME_DIR` — fails to start and names the holder.
+library: a second daemon — even from a different
+`BOOKRACK_RUNTIME_DIR` — skips a library whose root is already held,
+lists it as not mounted with the holder in the reason, and serves the
+rest; it fails to start only when no library is left for it to serve.
 Offline commands that would destroy data take it too, so `bookrack
 libraries remove --purge` refuses a root a daemon is serving rather
 than deleting it underneath. An eager daemon holds the lock on the

@@ -62,6 +62,24 @@ async fn the_ready_line_is_unchanged_and_skipped_libraries_follow_it() {
         .wait_ready(&lock_path, Duration::from_secs(20))
         .await
         .expect("bookrack run did not become ready");
+    // The skipped library's reason names who holds its root.
+    let status = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+        .args(["rpc", "call", "daemon.status"])
+        .output()
+        .await
+        .expect("run bookrack rpc call daemon.status");
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout)
+        .unwrap_or_else(|e| panic!("daemon.status is not JSON ({e}): {status:?}"));
+    let beta_row = status["unmounted"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["name"] == "beta"))
+        .unwrap_or_else(|| panic!("beta is not among the unmounted: {status}"));
+    let detail = beta_row["reason"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains(&format!("pid={}", std::process::id())) && detail.contains("role=test"),
+        "the reason's detail names the holder: {beta_row}"
+    );
+
     let output = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
         .arg("quit")
         .output()

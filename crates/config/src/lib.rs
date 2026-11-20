@@ -443,7 +443,7 @@ pub struct Config {
 /// [`DATA_DIR_ENV`], or the portable exe-neighbour layout — a registry
 /// `default = "<name>"` set by the operator has no effect on which root
 /// is served, yet stays on disk. This records the eclipsed default so
-/// `bookrack info` and `bookrack doctor` can surface it, instead of the
+/// `bookrack doctor` and `library.info` can surface it, instead of the
 /// operator having to infer the eclipse from [`ResolutionSource`] alone.
 /// The precedence itself is unchanged: the path source still wins.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -479,7 +479,7 @@ pub struct UnusableRegistry {
 
 /// How the data root in a resolved [`Config`] was selected.
 ///
-/// Surfaced to operators by `bookrack info` so the precedence ladder
+/// Surfaced to operators by `bookrack doctor` so the precedence ladder
 /// inside [`Config::resolve`] is no longer a black box: a wrong root is
 /// diagnosed by reading the source, not by guessing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -798,7 +798,7 @@ impl Config {
         self.library.as_deref()
     }
 
-    /// How the data root was selected. Surfaced by `bookrack info` so
+    /// How the data root was selected. Surfaced by `bookrack doctor` so
     /// operators can see which precedence rung of [`Config::resolve`]
     /// won, instead of guessing.
     pub fn source(&self) -> ResolutionSource {
@@ -2393,7 +2393,7 @@ pub(crate) fn unrooted_backup_dir_knob(
 /// [`ResolutionSource`] stands for.
 ///
 /// Derived from the source the resolution already recorded rather than
-/// re-walking the ladder, so this row and `bookrack info` cannot
+/// re-walking the ladder, so this row and `library.info` cannot
 /// disagree about which rung won. `env` is what the data-root variable
 /// holds; when a flag outranked it, the row reports it as a losing
 /// layer.
@@ -2562,7 +2562,7 @@ fn env_trimmed(value: Option<String>) -> Option<String> {
 }
 
 /// Outcome of [`select_root`]: the chosen data root paired with the
-/// metadata `bookrack info` needs to explain how it was chosen.
+/// metadata `library.info` needs to explain how it was chosen.
 #[cfg_attr(test, derive(Debug))]
 struct Resolved {
     data_dir: PathBuf,

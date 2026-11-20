@@ -37,7 +37,7 @@ the order below settles ties. Highest first:
 a daemon brought up on a path-class root that carries an identity
 manifest the registry does not know (see the registry section below).
 When a path-class source (1, 3, or 4) wins while a registry `default`
-is also set, `bookrack info` and `bookrack doctor` state both facts —
+is also set, `bookrack doctor` and the `library.info` method state both facts —
 which source selected the root, and where the registry default
 points — so a default that did not decide the root is visible rather
 than silently passed over. It is a statement, not a verdict: on a
@@ -49,7 +49,7 @@ the reply, rather than routed to another library.
 
 A path-class root whose manifest identity the registry records at
 another path is claimed by no name: it is one library in two places,
-and `info` and `doctor` show it as unregistered rather than under the
+and `bookrack doctor` shows it as unregistered rather than under the
 recorded entry. `bookrack run` refuses such a root and names both
 paths. `libraries add <name> <path>` re-registers a library that
 moved; `--new-uuid` gives a copy an identity of its own.

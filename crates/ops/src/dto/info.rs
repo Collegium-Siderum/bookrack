@@ -2,8 +2,7 @@
 
 //! The library-info status card.
 //!
-//! [`LibraryInfo`] is what `library.info` returns and what
-//! `bookrack info` renders: schema versions, embedder configuration,
+//! [`LibraryInfo`] is what `library.info` returns: schema versions, embedder configuration,
 //! stamped index parameters, vector-store state, and rough disk usage.
 
 use serde::Serialize;
