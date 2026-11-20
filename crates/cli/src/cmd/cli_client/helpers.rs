@@ -94,6 +94,42 @@ pub async fn daemon_library_view(runtime_dir: Option<&Path>) -> Option<DaemonLib
     .ok()?
 }
 
+/// Ask the running daemon for its configuration, for `config
+/// effective` to set beside this shell's own resolution.
+///
+/// Like [`daemon_library_view`], a probe: it settles no selection and
+/// sends none, since `daemon.config` answers for the whole process. A
+/// daemon that refuses the method as unknown is one that predates it;
+/// every other failure — no daemon, no answer in time, a reply in
+/// another shape — reads as no daemon.
+pub async fn daemon_config_view(
+    runtime_dir: Option<&Path>,
+) -> bookrack_cli::config_effective::DaemonView {
+    use bookrack_cli::config_effective::DaemonView;
+    use bookrack_control_client::ControlError;
+
+    let Ok(socket) = bookrack_control_client::discover(runtime_dir) else {
+        return DaemonView::NoDaemon;
+    };
+    tokio::time::timeout(SERVED_PROBE_WINDOW, async move {
+        let Ok(client) =
+            bookrack_control_client::connect_with_default_timeout(&socket, SERVED_PROBE_WINDOW)
+                .await
+        else {
+            return DaemonView::NoDaemon;
+        };
+        match client.call_raw("daemon.config", Value::Null).await {
+            Ok(reply) => serde_json::from_value(reply)
+                .map(|snapshot| DaemonView::Snapshot(Box::new(snapshot)))
+                .unwrap_or(DaemonView::NoDaemon),
+            Err(ControlError::Rpc { code: -32601, .. }) => DaemonView::NoSnapshot,
+            Err(_) => DaemonView::NoDaemon,
+        }
+    })
+    .await
+    .unwrap_or(DaemonView::NoDaemon)
+}
+
 /// The listing's view of a `daemon.status` reply: `None` when the reply
 /// carries no served rows, since the served column cannot then be
 /// filled.

@@ -254,6 +254,26 @@ knobs nothing is set for — every layer each one *can* be set at. It
 needs no daemon and works when the data root does not resolve, so it
 is also the surface for diagnosing a root that will not open.
 
+A running daemon resolved its configuration when it started, from the
+environment it was started under — which need not be the shell this
+command runs in. When one is running, the table shows the values the
+daemon is using, under a line naming its pid and version, and each row
+this shell would resolve differently carries a `from this shell a
+restart would resolve …` line. Rows the daemon does not report are
+marked `(this shell)`: the caller's own `confirm.timeout_secs` always,
+and the library-scoped rows when the selected library is not one the
+daemon has mounted. A closing section shows which libraries were
+mounted at start and which are now, and whether the queue is paused.
+With no daemon, a first line says so and the table is this shell's.
+
+In `--json` the `rows` are always this shell's resolution. A `daemon`
+object sits beside them: `{ "reachable": false }` with no daemon;
+`{ "reachable": true, "snapshot": false }` for a daemon too old to
+report its configuration; and otherwise `reachable`, `snapshot`,
+`identity`, `rows`, `libraries`, `differences` (each `{ key, daemon,
+shell }`), `mounted_at_start`, `mounted_now`, and `queue_paused`. The
+exit code does not depend on whether a daemon answered.
+
 `bookrack config knobs` lists every knob this build has, without
 consulting the machine at all: each one's compiled-in default, the
 variable that moves it, every other layer it can be set at, its reach,

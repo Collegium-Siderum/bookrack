@@ -8,6 +8,7 @@
 bookrack_test_support::test_group!("cmd", spec = None);
 
 mod config_effective;
+mod config_effective_daemon;
 mod config_knobs;
 mod config_notices;
 mod distill_run_lifecycle;

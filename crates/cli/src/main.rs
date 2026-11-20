@@ -1261,7 +1261,10 @@ async fn run() -> Result<()> {
     let selection = cli.selection();
     match cli.command {
         Command::Config { action } => match action {
-            ConfigAction::Effective => bookrack_cli::config_effective::run(&selection),
+            ConfigAction::Effective => {
+                let daemon = cmd::cli_client::helpers::daemon_config_view(None).await;
+                bookrack_cli::config_effective::run(&selection, &daemon)
+            }
             ConfigAction::Knobs => bookrack_cli::config_knobs::run(),
             ConfigAction::Fixed => bookrack_cli::config_fixed::run(),
         },

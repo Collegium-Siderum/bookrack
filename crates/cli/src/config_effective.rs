@@ -3,23 +3,124 @@
 //! `bookrack config effective`: what the configuration resolves to,
 //! and which layer supplied each value.
 //!
-//! Offline by construction. The report is assembled from the resolvers
-//! themselves rather than from a daemon, so it answers on exactly the
-//! machines where nothing else will — a data root that does not
-//! resolve produces a report with the failure at its head, not an
-//! error instead of a report.
+//! Needs no daemon. The report is assembled from the resolvers
+//! themselves, so it answers on exactly the machines where nothing
+//! else will — a data root that does not resolve produces a report
+//! with the failure at its head, not an error instead of a report.
+//!
+//! When a daemon is running, its own snapshot is what is in use, and
+//! the report says so: the table shows the daemon's values and marks
+//! each row this shell would resolve differently after a restart.
 
 use std::collections::BTreeSet;
 
 use bookrack_config::{Config, ForeignStatus, LibrarySelection};
-use bookrack_core::Problem;
 use bookrack_core::knob::{KnobOrigin, KnobReach};
+use bookrack_core::{DaemonIdentity, Problem};
 use bookrack_ops::settings::{Contributor, KNOB_CONTRIBUTORS};
 use eyre::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::BookrackCliError;
 use crate::render::table::RowTable;
+
+/// What a probe for the running daemon's configuration found.
+#[derive(Debug, Clone)]
+pub enum DaemonView {
+    /// No daemon answered.
+    NoDaemon,
+    /// A daemon answered and does not serve `daemon.config`.
+    NoSnapshot,
+    /// The daemon's own account of its configuration.
+    Snapshot(Box<DaemonSnapshot>),
+}
+
+/// The parts of a `daemon.config` reply this report reads.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DaemonSnapshot {
+    /// Which daemon answered.
+    pub identity: DaemonIdentity,
+    /// The process- and machine-scoped rows.
+    pub rows: Vec<KnobOrigin>,
+    /// Each mounted library's rows.
+    pub libraries: Vec<LibrarySnapshot>,
+    /// The libraries mounted when the daemon entered service.
+    pub mounted_at_start: Vec<String>,
+    /// Whether the queue worker is paused.
+    pub queue_paused: bool,
+}
+
+/// One mounted library in a [`DaemonSnapshot`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct LibrarySnapshot {
+    /// The name it is served under.
+    pub name: String,
+    /// Its data root.
+    pub data_dir: String,
+    /// Its library-scoped rows, as resolved when it was mounted.
+    pub rows: Vec<KnobOrigin>,
+}
+
+/// One knob the daemon and this shell resolve to different values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Difference {
+    /// The knob.
+    pub key: String,
+    /// What the daemon uses; `None` when unset there.
+    pub daemon: Option<String>,
+    /// What a start from this shell would resolve.
+    pub shell: Option<String>,
+}
+
+/// The knobs both sides carry whose values differ, in `shell` order. A
+/// key only one side carries is not a difference: nothing can be said
+/// about a value the other side did not report.
+pub fn differences(shell: &[KnobOrigin], daemon: &[KnobOrigin]) -> Vec<Difference> {
+    shell
+        .iter()
+        .filter_map(|ours| {
+            let theirs = daemon.iter().find(|row| row.key == ours.key)?;
+            (theirs.value != ours.value).then(|| Difference {
+                key: ours.key.clone(),
+                daemon: theirs.value.clone(),
+                shell: ours.value.clone(),
+            })
+        })
+        .collect()
+}
+
+/// The `daemon` node of the JSON report.
+#[derive(Serialize)]
+struct DaemonOut<'a> {
+    /// Whether a daemon answered at all.
+    reachable: bool,
+    /// Whether it reported its configuration; `false` for a daemon
+    /// that predates `daemon.config`. Absent when none answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<&'a DaemonIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rows: Option<Vec<RowOut<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    libraries: Option<Vec<LibraryOut<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    differences: Option<&'a [Difference]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mounted_at_start: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mounted_now: Option<Vec<&'a str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queue_paused: Option<bool>,
+}
+
+/// One mounted library in the `daemon` node.
+#[derive(Serialize)]
+struct LibraryOut<'a> {
+    name: &'a str,
+    data_dir: &'a str,
+    rows: Vec<RowOut<'a>>,
+}
 
 /// One row as the JSON form carries it.
 ///
@@ -132,6 +233,9 @@ struct ReportOut<'a> {
     /// name. Always present, empty included, for the reason
     /// `dotenv_foreign` is.
     unclaimed_variables: Vec<UnclaimedOut>,
+    /// What the running daemon reports, beside `rows`: those stay this
+    /// shell's own resolution whether or not a daemon answers.
+    daemon: DaemonOut<'a>,
     /// The variables an earlier release read that this process still
     /// carries, in the order the retirement table lists them. Each is
     /// ignored. Always present, empty included.
@@ -148,7 +252,11 @@ struct ReportOut<'a> {
 /// The resolution error is carried, not propagated: a root that will
 /// not resolve is the case this command exists for, and every knob
 /// that never depended on one still has an answer to give.
-pub fn run(selection: &LibrarySelection) -> Result<()> {
+///
+/// `daemon` is what a probe for the running daemon found. With a
+/// snapshot the human table shows the daemon's values; the JSON `rows`
+/// are this shell's either way, with the daemon's under `daemon`.
+pub fn run(selection: &LibrarySelection, daemon: &DaemonView) -> Result<()> {
     // root identity: read-only; the report reads the resolution and writes nothing
     let resolved = Config::resolve(selection);
     let cfg = resolved.as_ref().ok();
@@ -185,11 +293,99 @@ pub fn run(selection: &LibrarySelection) -> Result<()> {
         reranker_tag(cfg),
     );
 
+    // The daemon's rows this report can set against its own: the
+    // process rows, and the rows of the library on the root this shell
+    // resolved, when the daemon has it mounted.
+    let snapshot = match daemon {
+        DaemonView::Snapshot(snapshot) => Some(snapshot.as_ref()),
+        DaemonView::NoDaemon | DaemonView::NoSnapshot => None,
+    };
+    let mounted_here = snapshot.and_then(|snapshot| {
+        let root = cfg?.data_dir();
+        snapshot.libraries.iter().find(|library| {
+            bookrack_config::same_root(std::path::Path::new(&library.data_dir), root)
+        })
+    });
+    let in_use: Vec<KnobOrigin> = snapshot
+        .map(|snapshot| {
+            snapshot
+                .rows
+                .iter()
+                .chain(mounted_here.iter().flat_map(|library| library.rows.iter()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let differing = differences(&rows, &in_use);
+    let no_root = None;
+    let daemon_out = match daemon {
+        DaemonView::NoDaemon => DaemonOut {
+            reachable: false,
+            snapshot: None,
+            identity: None,
+            rows: None,
+            libraries: None,
+            differences: None,
+            mounted_at_start: None,
+            mounted_now: None,
+            queue_paused: None,
+        },
+        DaemonView::NoSnapshot => DaemonOut {
+            reachable: true,
+            snapshot: Some(false),
+            identity: None,
+            rows: None,
+            libraries: None,
+            differences: None,
+            mounted_at_start: None,
+            mounted_now: None,
+            queue_paused: None,
+        },
+        DaemonView::Snapshot(snapshot) => DaemonOut {
+            reachable: true,
+            snapshot: Some(true),
+            identity: Some(&snapshot.identity),
+            rows: Some(
+                snapshot
+                    .rows
+                    .iter()
+                    .map(|row| row_out(row, &no_root, None))
+                    .collect(),
+            ),
+            libraries: Some(
+                snapshot
+                    .libraries
+                    .iter()
+                    .map(|library| LibraryOut {
+                        name: &library.name,
+                        data_dir: &library.data_dir,
+                        rows: library
+                            .rows
+                            .iter()
+                            .map(|row| row_out(row, &no_root, None))
+                            .collect(),
+                    })
+                    .collect(),
+            ),
+            differences: Some(&differing),
+            mounted_at_start: Some(&snapshot.mounted_at_start),
+            mounted_now: Some(
+                snapshot
+                    .libraries
+                    .iter()
+                    .map(|library| library.name.as_str())
+                    .collect(),
+            ),
+            queue_paused: Some(snapshot.queue_paused),
+        },
+    };
+
     let ctx = crate::render::ctx();
     if !ctx.is_quiet() {
         let report = ReportOut {
             problem: problem.clone(),
             rows: out,
+            daemon: daemon_out,
             dotenv_path,
             dotenv_foreign: foreign,
             unclaimed_variables: unclaimed,
@@ -200,7 +396,23 @@ pub fn run(selection: &LibrarySelection) -> Result<()> {
         if ctx.is_json() {
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
-            print_human(&report);
+            let shown: Vec<ShownRow<'_>> = report
+                .rows
+                .iter()
+                .map(|ours| match in_use.iter().find(|row| row.key == ours.key) {
+                    Some(theirs) => ShownRow {
+                        row: row_out(theirs, &scope_instance, ours.note),
+                        from_this_shell: false,
+                        restart: differing.iter().any(|d| d.key == ours.key).then_some(ours),
+                    },
+                    None => ShownRow {
+                        row: row_out_copy(ours),
+                        from_this_shell: snapshot.is_some(),
+                        restart: None,
+                    },
+                })
+                .collect();
+            print_human(&report, daemon, &shown);
         }
     }
 
@@ -342,6 +554,48 @@ fn reranker_tag(_cfg: Option<&Config>) -> &'static str {
         .map_or("", |pin| pin.tag)
 }
 
+/// One row of the human table: whose value it shows, and what this
+/// shell would resolve instead when that differs.
+struct ShownRow<'a> {
+    /// The row as drawn.
+    row: RowOut<'a>,
+    /// The daemon reported no such row, so this is the shell's own.
+    from_this_shell: bool,
+    /// This shell's row, when its value differs from the daemon's.
+    restart: Option<&'a RowOut<'a>>,
+}
+
+/// A second view of a row already in wire shape.
+fn row_out_copy<'a>(row: &'a RowOut<'a>) -> RowOut<'a> {
+    RowOut {
+        key: row.key,
+        value: row.value,
+        layer: row.layer,
+        site: row.site,
+        shadowed: row
+            .shadowed
+            .iter()
+            .map(|s| ShadowedOut {
+                layer: s.layer,
+                site: s.site,
+                value: s.value,
+            })
+            .collect(),
+        chain: row
+            .chain
+            .iter()
+            .map(|s| SiteOut {
+                layer: s.layer,
+                site: s.site,
+            })
+            .collect(),
+        reach: row.reach,
+        scope_instance: row.scope_instance.clone(),
+        read_at: row.read_at,
+        note: row.note,
+    }
+}
+
 /// Convert one row to its wire shape.
 fn row_out<'a>(row: &'a KnobOrigin, root: &Option<String>, note: Option<&'a str>) -> RowOut<'a> {
     RowOut {
@@ -382,10 +636,11 @@ fn row_out<'a>(row: &'a KnobOrigin, root: &Option<String>, note: Option<&'a str>
 /// one fact about the run, and repeating it per row would bury the
 /// rows that are unaffected by it.
 // Parallel implementation: problem-rendering.
-fn print_human(report: &ReportOut<'_>) {
+fn print_human(report: &ReportOut<'_>, daemon: &DaemonView, shown: &[ShownRow<'_>]) {
     let ReportOut {
         problem,
-        rows,
+        rows: _,
+        daemon: _,
         dotenv_path,
         dotenv_foreign: foreign,
         unclaimed_variables: unclaimed,
@@ -405,17 +660,38 @@ fn print_human(report: &ReportOut<'_>) {
         println!();
     }
 
+    // Whose values the table holds is said once, above it.
+    match daemon {
+        DaemonView::Snapshot(snapshot) => println!(
+            "values in use by the running daemon (pid {}, version {})\n",
+            snapshot.identity.pid, snapshot.identity.version
+        ),
+        DaemonView::NoSnapshot => println!(
+            "a daemon is running and does not report its configuration; these are the values \
+             a start from this shell would resolve\n"
+        ),
+        DaemonView::NoDaemon => println!(
+            "no daemon is running; these are the values a start from this shell would resolve\n"
+        ),
+    }
+
     // The scope column carries the reach, not the root path: the path
     // is one value repeated down every library-scoped row, and it is
     // already stated once by the `data_dir` row above them. `--json`
     // carries it per row, where a consumer needs it without reading
     // the rest of the table.
     let mut table = RowTable::new(["key", "value", "from", "scope"]);
-    for row in rows {
+    for shown in shown {
+        let row = &shown.row;
+        let from = if shown.from_this_shell {
+            format!("{} (this shell)", row.layer)
+        } else {
+            row.layer.to_string()
+        };
         table.push_row([
             row.key,
             row.value.unwrap_or("(unset)"),
-            row.layer,
+            from.as_str(),
             row.reach,
         ]);
     }
@@ -426,7 +702,17 @@ fn print_human(report: &ReportOut<'_>) {
     // could not be read. The three are drawn differently on purpose —
     // `<-` is a value that was overridden, `.` is a place a value could
     // be put, `!` is a layer that failed.
-    for row in rows {
+    for shown in shown {
+        let row = &shown.row;
+        if let Some(ours) = shown.restart {
+            println!(
+                "  {key}  from this shell a restart would resolve {value} ({layer}, {site})",
+                key = row.key,
+                value = ours.value.unwrap_or("(unset)"),
+                layer = ours.layer,
+                site = ours.site
+            );
+        }
         for shadowed in &row.shadowed {
             println!(
                 "  {key}  <- {layer} {site} = {value}",
@@ -534,6 +820,27 @@ fn print_human(report: &ReportOut<'_>) {
         println!("{}", table.render());
     }
 
+    // What changed while the daemon ran, which no knob row carries.
+    if let DaemonView::Snapshot(snapshot) = daemon {
+        let now: Vec<&str> = snapshot
+            .libraries
+            .iter()
+            .map(|library| library.name.as_str())
+            .collect();
+        println!();
+        println!("Runtime state of the daemon:");
+        let mut table = RowTable::new(["state", "at start", "now"]);
+        let at_start = snapshot.mounted_at_start.join(", ");
+        let mounted_now = now.join(", ");
+        table.push_row(["mounted libraries", at_start.as_str(), mounted_now.as_str()]);
+        table.push_row([
+            "queue paused",
+            "-",
+            if snapshot.queue_paused { "yes" } else { "no" },
+        ]);
+        println!("{}", table.render());
+    }
+
     println!();
     let mut deps = RowTable::new(["dependency", "resolved", "from", "override with"]);
     for dep in native {
@@ -545,4 +852,56 @@ fn print_human(report: &ReportOut<'_>) {
         ]);
     }
     println!("{}", deps.render());
+}
+
+#[cfg(test)]
+mod tests {
+    use bookrack_core::knob::{Candidate, KnobReach, Layer, ReadAt, resolve_knob};
+
+    use super::*;
+
+    fn row(key: &str, value: Option<&str>) -> KnobOrigin {
+        resolve_knob(
+            key,
+            KnobReach::Process,
+            ReadAt::BeforeResolution,
+            vec![Candidate::of(
+                Layer::Default,
+                "built-in",
+                value.map(str::to_string),
+            )],
+        )
+    }
+
+    #[test]
+    fn differences_lists_only_keys_whose_values_differ() {
+        let shell = [row("a", Some("1")), row("b", Some("2")), row("c", None)];
+        let daemon = [
+            row("a", Some("1")),
+            row("b", Some("7")),
+            row("c", Some("x")),
+        ];
+        assert_eq!(
+            differences(&shell, &daemon),
+            [
+                Difference {
+                    key: "b".to_string(),
+                    daemon: Some("7".to_string()),
+                    shell: Some("2".to_string()),
+                },
+                Difference {
+                    key: "c".to_string(),
+                    daemon: Some("x".to_string()),
+                    shell: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_key_only_one_side_carries_is_not_a_difference() {
+        let shell = [row("only.shell", Some("1")), row("both", Some("1"))];
+        let daemon = [row("both", Some("1")), row("only.daemon", Some("9"))];
+        assert_eq!(differences(&shell, &daemon), []);
+    }
 }

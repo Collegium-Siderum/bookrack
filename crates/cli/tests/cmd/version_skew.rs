@@ -31,7 +31,7 @@ const OLDER_VERSION: &str = "0.14.0";
 
 /// How the stand-in answers one method.
 #[derive(Clone)]
-enum Reply {
+pub(crate) enum Reply {
     Result(Value),
     Error {
         code: i32,
@@ -42,9 +42,10 @@ enum Reply {
 
 /// A scripted daemon on a sandbox's runtime directory. Holds the
 /// session lock for as long as it lives.
-struct StandIn {
-    sandbox: Sandbox,
+pub(crate) struct StandIn {
+    pub(crate) sandbox: Sandbox,
     calls: Arc<Mutex<Vec<String>>>,
+    requests: Arc<Mutex<Vec<Value>>>,
     _lock: std::fs::File,
     server: tokio::task::JoinHandle<()>,
 }
@@ -53,7 +54,7 @@ impl StandIn {
     /// Bind the control socket, write and hold the lock, and answer
     /// `daemon.version` with `version`, each method in `script` as
     /// scripted, and anything else with `fallback`.
-    fn start(version: &str, script: &[(&str, Reply)], fallback: Reply) -> StandIn {
+    pub(crate) fn start(version: &str, script: &[(&str, Reply)], fallback: Reply) -> StandIn {
         let sandbox = Sandbox::new();
         let runtime_dir = sandbox.runtime_dir();
         std::fs::create_dir_all(&runtime_dir).expect("create the runtime directory");
@@ -92,10 +93,13 @@ impl StandIn {
         let replies = Arc::new(replies);
         let calls = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&calls);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let received = Arc::clone(&requests);
         let server = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let replies = Arc::clone(&replies);
                 let seen = Arc::clone(&seen);
+                let received = Arc::clone(&received);
                 let fallback = fallback.clone();
                 tokio::spawn(async move {
                     let (read, mut write) = stream.into_split();
@@ -106,6 +110,7 @@ impl StandIn {
                         };
                         let method = request["method"].as_str().unwrap_or_default().to_string();
                         seen.lock().expect("call log").push(method.clone());
+                        received.lock().expect("request log").push(request.clone());
                         let mut frame = json!({ "jsonrpc": "2.0", "id": request["id"] });
                         match replies.get(&method).unwrap_or(&fallback) {
                             Reply::Result(value) => frame["result"] = value.clone(),
@@ -132,13 +137,14 @@ impl StandIn {
         StandIn {
             sandbox,
             calls,
+            requests,
             _lock: lock,
             server,
         }
     }
 
     /// Run the binary against this stand-in.
-    async fn run(&self, args: &[&str]) -> std::process::Output {
+    pub(crate) async fn run(&self, args: &[&str]) -> std::process::Output {
         Command::from(bookrack_cmd!(&self.sandbox).without_data_dir().build())
             .args(args)
             .output()
@@ -160,6 +166,17 @@ impl StandIn {
     fn calls(&self) -> Vec<String> {
         self.calls.lock().expect("call log").clone()
     }
+
+    /// The `params` of every request for `method`, in arrival order.
+    pub(crate) fn params_of(&self, method: &str) -> Vec<Value> {
+        self.requests
+            .lock()
+            .expect("request log")
+            .iter()
+            .filter(|request| request["method"] == method)
+            .map(|request| request["params"].clone())
+            .collect()
+    }
 }
 
 impl Drop for StandIn {
@@ -172,7 +189,7 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-fn method_not_found() -> Reply {
+pub(crate) fn method_not_found() -> Reply {
     Reply::Error {
         code: -32601,
         message: "method not found",

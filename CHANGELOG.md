@@ -67,6 +67,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **`config effective` shows what a running daemon is using.** The
+  command reported what the calling shell would resolve, which is not
+  what a daemon started elsewhere, or earlier, runs under. With a daemon
+  running, the table now shows the daemon's values under a line naming
+  its pid and version; a row this shell would resolve differently adds
+  a `from this shell a restart would resolve …` line; a row the daemon
+  does not report is marked `(this shell)`; and a closing section shows
+  the libraries mounted at start and now, and whether the queue is
+  paused. With no daemon a first line says so. In `--json`, `rows` are
+  unchanged — still this shell's — and a new `daemon` object carries
+  the daemon's rows, each mounted library's rows, and the `differences`
+  between the two. A daemon from before 0.15 is reported as reachable
+  with no snapshot. The command still needs no daemon and exits the
+  same either way; `--library` selects what this shell resolves and is
+  not sent to the daemon.
 - **Where the backends are is the machine's setting; a library's
   search preferences are its own.** The Ollama endpoint and the
   reranker deployment are resolved once, from the daemon's environment,
