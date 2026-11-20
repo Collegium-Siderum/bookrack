@@ -83,6 +83,7 @@ async fn shutdown_broadcast_stops_serve_and_releases_the_listening_port() {
             LogStreamHandle::default(),
             Arc::new(Mutex::new(QueueState::default())),
             serve_tx,
+            test_event_stream(),
             listener,
             shutdown_rx,
         )
@@ -123,6 +124,75 @@ async fn shutdown_broadcast_stops_serve_and_releases_the_listening_port() {
     drop(rebound);
 }
 
+/// The `session.shutdown` tool publishes `daemon.state = stopping`
+/// before it fires the shutdown broadcast: a control-plane subscriber
+/// flushes only what is queued when the broadcast reaches it, so the
+/// transition has to be there already.
+#[tokio::test]
+async fn session_shutdown_publishes_stopping_before_broadcast() {
+    use bookrack_runtime::control::events::{DaemonState, Event};
+    use rmcp::ServiceExt;
+    use rmcp::model::CallToolRequestParams;
+    use rmcp::transport::StreamableHttpClientTransport;
+
+    let (listener, addr) = bound_local_listener().await;
+    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(4);
+    let event_stream = test_event_stream();
+    let mut events_rx = event_stream.subscribe();
+    let mut observer = shutdown_tx.subscribe();
+
+    let registry = stub_registry();
+    let info_context = stub_info_context(&addr);
+    let serve_tx = shutdown_tx.clone();
+    let server = tokio::spawn(async move {
+        bookrack_mcp::serve(
+            registry,
+            info_context,
+            Instant::now(),
+            test_identity(),
+            LogStreamHandle::default(),
+            Arc::new(Mutex::new(QueueState::default())),
+            serve_tx,
+            event_stream,
+            listener,
+            shutdown_rx,
+        )
+        .await
+    });
+
+    let client = timeout(Duration::from_secs(5), async {
+        loop {
+            let transport = StreamableHttpClientTransport::from_uri(format!("http://{addr}/mcp"));
+            match ().serve(transport).await {
+                Ok(client) => break client,
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .expect("an MCP client connects within 5s");
+
+    // The call may end in a transport error once the listener winds
+    // down under it; the broadcast below is what says it was served.
+    let _ = client
+        .call_tool(
+            CallToolRequestParams::new("session.shutdown").with_arguments(serde_json::Map::new()),
+        )
+        .await;
+
+    timeout(Duration::from_secs(5), observer.recv())
+        .await
+        .expect("the shutdown broadcast fires within 5s")
+        .expect("the broadcast is delivered");
+    match events_rx.try_recv() {
+        Ok(Event::DaemonState(DaemonState::Stopping)) => {}
+        other => panic!("no `stopping` transition was queued when the broadcast fired: {other:?}"),
+    }
+
+    drop(client);
+    let _ = timeout(Duration::from_secs(5), server).await;
+}
+
 /// A daemon identity for a server no daemon stands behind.
 fn test_identity() -> bookrack_core::DaemonIdentity {
     bookrack_core::DaemonIdentity {
@@ -133,4 +203,11 @@ fn test_identity() -> bookrack_core::DaemonIdentity {
         control_sock: None,
         started_at: "2026-01-01T00:00:00+00:00".to_string(),
     }
+}
+
+/// An event stream no control-plane client is attached to.
+fn test_event_stream() -> bookrack_runtime::control::events::EventStreamHandle {
+    use bookrack_runtime::control::events::{DaemonState, DaemonStateFlag, EventStreamHandle};
+
+    EventStreamHandle::new(8, Arc::new(DaemonStateFlag::new(DaemonState::Idle)))
 }

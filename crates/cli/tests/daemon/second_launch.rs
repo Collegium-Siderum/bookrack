@@ -196,11 +196,10 @@ async fn stale_lock_exits_three() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn daemon_shutdown_rpc_exits_cleanly() -> Result<()> {
     process_env(ProcessEnv::daemon());
-    // Covers one representative leg of the five shutdown paths that
-    // share `shutdown_tx.send(())`: the control-plane `daemon.shutdown`
-    // RPC. The other four (SIGINT, REPL disconnect, MCP
-    // `session.shutdown`, GUI tray) all route through the same
-    // broadcast and are covered by their respective component tests.
+    // Covers one leg of the three shutdown paths that go through
+    // `initiate_shutdown`: the control-plane `daemon.shutdown` RPC. The
+    // other two, a platform signal and the MCP `session.shutdown` tool,
+    // are covered by their own component tests.
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = DaemonRuntime::start(build_opts(

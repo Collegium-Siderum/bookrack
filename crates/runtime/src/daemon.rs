@@ -1216,7 +1216,7 @@ impl DaemonRuntime {
         // `shutdown_tx` clone. It cannot rescue that caller's attached
         // subscribers: connection tasks wake on the same broadcast and
         // flush only what is already queued, so a transition published
-        // here has already lost the race. Both in-tree entry points
+        // here has already lost the race. The three in-tree entry points
         // publish ahead of the broadcast instead; the repeat is a no-op.
         event_stream.set_stopping();
 

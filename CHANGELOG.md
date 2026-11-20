@@ -213,6 +213,12 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **The MCP `session.shutdown` tool tells subscribers the daemon is
+  stopping.** A control-plane client subscribed to `daemon.state` saw
+  its connection close with no `stopping` event when the shutdown came
+  from the MCP tool, unlike `daemon.shutdown` or a signal. The tool now
+  publishes the transition before it fires the shutdown, as the other
+  two do.
 - **A session lock is trusted only for its own control socket.** A
   client used to dial whatever path the lock's `control_sock=` line
   named. It now connects only to `control.sock` in the lock's own

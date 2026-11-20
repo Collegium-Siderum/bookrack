@@ -26,6 +26,7 @@ use bookrack_ops::dto::{
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, OpsError, SearchOptions, reads, with_caller_override, writes};
+use bookrack_runtime::control::events::EventStreamHandle;
 use eyre::WrapErr;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -894,6 +895,7 @@ pub struct BookrackServer {
     log_stream: LogStreamHandle,
     queue_state: Arc<Mutex<QueueState>>,
     shutdown_tx: broadcast::Sender<()>,
+    event_stream: EventStreamHandle,
     tool_router: ToolRouter<BookrackServer>,
 }
 
@@ -912,9 +914,13 @@ impl BookrackServer {
     /// of the ingest queue the daemon-REPL drives; a host that spawns
     /// no queue worker passes an inert default. `shutdown_tx` carries the session-wide graceful-shutdown
     /// signal so the `session.shutdown` tool can ask the daemon to
-    /// stop. Tools route each call through the registry, scoped to an
+    /// stop, and `event_stream` is where that tool publishes the
+    /// `stopping` state first. Tools route each call through the registry, scoped to an
     /// explicit `library` selector or, when the selector is absent, to
     /// the library the registry routes an unnamed call to.
+    // One handle per subsystem the tools reach, each passed once by the
+    // single caller; see `serve` for why they stay separate arguments.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
         info_context: LibraryInfoContext,
@@ -923,6 +929,7 @@ impl BookrackServer {
         log_stream: LogStreamHandle,
         queue_state: Arc<Mutex<QueueState>>,
         shutdown_tx: broadcast::Sender<()>,
+        event_stream: EventStreamHandle,
     ) -> BookrackServer {
         BookrackServer {
             registry,
@@ -932,6 +939,7 @@ impl BookrackServer {
             log_stream,
             queue_state,
             shutdown_tx,
+            event_stream,
             tool_router: Self::tool_router(),
         }
     }
@@ -1912,7 +1920,8 @@ impl BookrackServer {
         respond_with(&result)
     }
 
-    /// Ask the daemon to perform a graceful shutdown. Fires the
+    /// Ask the daemon to perform a graceful shutdown. Publishes the
+    /// `stopping` state to control-plane subscribers, then fires the
     /// session-wide broadcast signal that the signal listener, REPL,
     /// queue worker, and MCP listener all subscribe to; the daemon's
     /// own join logic then closes everything in order.
@@ -1931,7 +1940,7 @@ impl BookrackServer {
         &self,
         Parameters(_): Parameters<SessionShutdownArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let _ = self.shutdown_tx.send(());
+        bookrack_runtime::control::events::initiate_shutdown(&self.event_stream, &self.shutdown_tx);
         respond_with(&serde_json::json!({"status": "shutting down"}))
     }
 
@@ -2334,8 +2343,8 @@ impl ServerHandler for BookrackServer {
 ///
 /// `shutdown_tx` is the session-wide graceful-shutdown broadcaster
 /// that the signal listener, REPL, queue worker, and this listener
-/// all subscribe to. The `session.shutdown` MCP tool calls `send` on
-/// it; this function also subscribes through `shutdown_rx` (the
+/// all subscribe to. The `session.shutdown` MCP tool fires it, after
+/// publishing the `stopping` state on `event_stream`; this function also subscribes through `shutdown_rx` (the
 /// receiver side of the same broadcast) for its own listener loop.
 // Eight separate handles are the natural shape here: each is owned by a
 // distinct subsystem (registry, info, log fan-out, queue, shutdown
@@ -2352,6 +2361,7 @@ pub async fn serve(
     log_stream: LogStreamHandle,
     queue_state: Arc<Mutex<QueueState>>,
     shutdown_tx: broadcast::Sender<()>,
+    event_stream: EventStreamHandle,
     listener: tokio::net::TcpListener,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> eyre::Result<()> {
@@ -2366,6 +2376,7 @@ pub async fn serve(
                 log_stream.clone(),
                 queue_state.clone(),
                 shutdown_tx.clone(),
+                event_stream.clone(),
             ))
         },
         LocalSessionManager::default().into(),
@@ -2452,6 +2463,7 @@ pub fn spawn_listener(
     let log_stream = runtime.log_stream.clone();
     let queue_state = Arc::clone(&runtime.queue_state);
     let shutdown_tx = runtime.shutdown_tx.clone();
+    let event_stream = runtime.event_stream.clone();
     let rx = runtime.shutdown_tx.subscribe();
     Some(tokio::spawn(async move {
         serve(
@@ -2462,6 +2474,7 @@ pub fn spawn_listener(
             log_stream,
             queue_state,
             shutdown_tx,
+            event_stream,
             listener,
             rx,
         )

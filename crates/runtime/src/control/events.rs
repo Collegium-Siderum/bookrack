@@ -411,9 +411,10 @@ impl Drop for WorkingGuard {
 /// Connection tasks exit on the broadcast and, on their way out, flush
 /// whatever is already queued on their event subscription. A transition
 /// published after the broadcast races that teardown and may reach no
-/// client at all, so both shutdown entry points — the signal task and
-/// `daemon.shutdown` — go through here rather than each restating the
-/// order for itself.
+/// client at all, so all three shutdown entry points — the signal
+/// task, the control plane's `daemon.shutdown`, and the MCP
+/// `session.shutdown` tool — go through here rather than each restating
+/// the order for itself.
 pub fn initiate_shutdown(event_stream: &EventStreamHandle, shutdown_tx: &broadcast::Sender<()>) {
     event_stream.set_stopping();
     let _ = shutdown_tx.send(());

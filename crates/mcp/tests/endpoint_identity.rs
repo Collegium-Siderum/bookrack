@@ -76,6 +76,7 @@ async fn the_health_probe_recognises_a_real_bookrack_server() {
             LogStreamHandle::default(),
             Arc::new(Mutex::new(QueueState::default())),
             serve_tx,
+            test_event_stream(),
             listener,
             shutdown_rx,
         )
@@ -110,4 +111,11 @@ fn test_identity() -> bookrack_core::DaemonIdentity {
         control_sock: None,
         started_at: "2026-01-01T00:00:00+00:00".to_string(),
     }
+}
+
+/// An event stream no control-plane client is attached to.
+fn test_event_stream() -> bookrack_runtime::control::events::EventStreamHandle {
+    use bookrack_runtime::control::events::{DaemonState, DaemonStateFlag, EventStreamHandle};
+
+    EventStreamHandle::new(8, Arc::new(DaemonStateFlag::new(DaemonState::Idle)))
 }
