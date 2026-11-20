@@ -3132,7 +3132,9 @@ pub fn upsert_library_entry_claiming_default(
 }
 
 /// The one entry write behind both public forms. Refuses a relative
-/// root before taking the lock, then inserts the entry and, with
+/// root before taking the lock, then writes the entry — over an
+/// existing table by [`LibraryEntryFields::update_toml_table`], so keys
+/// this build does not know stay — and, with
 /// `claim_default`, points an absent `default` at it inside the same
 /// read-modify-write window. Returns whether the default was claimed.
 fn write_library_entry(
@@ -3153,7 +3155,12 @@ fn write_library_entry(
             .expect("normalize_registry_entries inserts the libraries table")
             .as_table_mut()
             .expect("normalize_registry_entries guarantees a table");
-        libraries.insert(name.to_string(), toml::Value::Table(entry.to_toml_table()));
+        match libraries.get_mut(name).and_then(toml::Value::as_table_mut) {
+            Some(existing) => entry.update_toml_table(existing),
+            None => {
+                libraries.insert(name.to_string(), toml::Value::Table(entry.to_toml_table()));
+            }
+        }
         let claimed = claim_default && !doc.contains_key("default");
         if claimed {
             doc.insert("default".to_string(), toml::Value::String(name.to_string()));
@@ -3186,6 +3193,14 @@ impl LibraryEntryFields {
     /// that are set. `data_dir` and `kind` are always present.
     fn to_toml_table(&self) -> toml::Table {
         let mut table = toml::Table::new();
+        self.update_toml_table(&mut table);
+        table
+    }
+
+    /// Write the entry's fields into `table`: `data_dir` and `kind`
+    /// always, each optional field when set, and removed when not. Any
+    /// other key of `table` is left alone.
+    fn update_toml_table(&self, table: &mut toml::Table) {
         table.insert(
             "data_dir".to_string(),
             toml::Value::String(self.data_dir.display().to_string()),
@@ -3200,11 +3215,15 @@ impl LibraryEntryFields {
             ("created_at", self.created_at.as_ref()),
             ("uuid", self.uuid.as_ref()),
         ] {
-            if let Some(v) = value {
-                table.insert(key.to_string(), toml::Value::String(v.clone()));
+            match value {
+                Some(v) => {
+                    table.insert(key.to_string(), toml::Value::String(v.clone()));
+                }
+                None => {
+                    table.remove(key);
+                }
             }
         }
-        table
     }
 }
 
@@ -3374,7 +3393,7 @@ where
 
     // Entry kind and description: an explicit flag wins over the manifest.
     let kind = kind
-        .or_else(|| existing.as_ref().map(|m| m.kind))
+        .or_else(|| existing.as_ref().map(|m| m.kind.clone()))
         .unwrap_or_default();
     let description = description.or_else(|| existing.as_ref().and_then(|m| m.description.clone()));
 
@@ -3398,7 +3417,7 @@ where
             (Some(manifest.uuid.clone()), manifest.created_at.clone())
         }
     } else {
-        let manifest = new_manifest(key.clone(), kind, description.clone());
+        let manifest = new_manifest(key.clone(), kind.clone(), description.clone());
         match confirm_manifest(&manifest) {
             Ok(true) => {}
             Ok(false) => return Ok(AddOutcome::Aborted),
@@ -3476,15 +3495,15 @@ fn is_read_only(error: &std::io::Error) -> bool {
 }
 
 /// Regenerate the identity uuid of the manifest at `data_dir`, writing
-/// the rewritten manifest back atomically and returning it. The root
-/// must already carry a readable manifest; the birth name, kind,
-/// description, and creation timestamp are preserved.
+/// the manifest back atomically and returning it. The root must
+/// already carry a readable manifest; only the `uuid` key is edited, so
+/// every other key, comment, and the key order stay as written.
 pub fn regenerate_manifest_uuid(data_dir: &Path) -> Result<LibraryManifest, ManifestError> {
     let mut manifest = load_manifest(data_dir)?.ok_or_else(|| ManifestError::NotALibrary {
         path: data_dir.join(MANIFEST_FILENAME),
     })?;
     manifest.uuid = uuid::Uuid::now_v7().to_string();
-    write_manifest(data_dir, &manifest)?;
+    manifest::edit_manifest_key(data_dir, "uuid", Some(&manifest.uuid))?;
     Ok(manifest)
 }
 
@@ -7194,6 +7213,133 @@ mod tests {
         let parsed = parse_registry(&std::fs::read_to_string(&path).expect("read")).expect("reg");
         assert_eq!(parsed.default, None);
         assert!(!parsed.libraries.contains_key("alpha"));
+    }
+
+    /// A registry whose one entry, `lib`, maps to `root` and carries
+    /// `extra` lines.
+    fn registry_with_entry(dir: &Path, root: &Path, extra: &str) -> PathBuf {
+        let path = dir.join("registry.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "[libraries.lib]\ndata_dir = {:?}\n{extra}",
+                root.display().to_string()
+            ),
+        )
+        .expect("seed registry");
+        path
+    }
+
+    #[test]
+    fn an_unknown_kind_survives_an_entry_rewrite() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = registry_with_entry(tmp.path(), tmp.path(), "kind = \"archive\"\n");
+        let entry = find_library(&path, "lib")
+            .expect("a kind another build wrote does not fail the registry")
+            .expect("present");
+        let fields = LibraryEntryFields {
+            data_dir: entry.data_dir.clone(),
+            kind: entry.kind.clone(),
+            description: None,
+            index_profile: Some("fast-local".to_string()),
+            created_at: None,
+            uuid: None,
+        };
+        upsert_library_entry(&path, "lib", &fields).expect("upsert");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("kind = \"archive\""), "{text}");
+        assert!(text.contains("index_profile = \"fast-local\""), "{text}");
+    }
+
+    #[test]
+    fn an_unknown_entry_key_survives_an_entry_rewrite() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = registry_with_entry(
+            tmp.path(),
+            tmp.path(),
+            "kind = \"test\"\nmount_at_start = false\n",
+        );
+        let fields = LibraryEntryFields {
+            kind: LibraryKind::Test,
+            index_profile: Some("fast-local".to_string()),
+            ..entry_fields(tmp.path())
+        };
+        upsert_library_entry(&path, "lib", &fields).expect("upsert");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            text.contains("mount_at_start = false"),
+            "the rewrite dropped a key it does not know: {text}"
+        );
+        assert!(text.contains("index_profile = \"fast-local\""), "{text}");
+    }
+
+    #[test]
+    fn an_entry_rewrite_removes_a_known_field_it_is_given_none_for() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = registry_with_entry(
+            tmp.path(),
+            tmp.path(),
+            "index_profile = \"fast-local\"\ndescription = \"old\"\n",
+        );
+        upsert_library_entry(&path, "lib", &entry_fields(tmp.path())).expect("upsert");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(!text.contains("index_profile"), "{text}");
+        assert!(!text.contains("description"), "{text}");
+    }
+
+    #[test]
+    fn re_adding_a_name_at_another_root_drops_the_old_identity_and_keeps_unknown_keys() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        std::fs::create_dir_all(&first).expect("first");
+        std::fs::create_dir_all(&second).expect("second");
+        let registry = registry_with_entry(
+            tmp.path(),
+            &first,
+            "uuid = \"00000000-0000-7000-8000-000000000001\"\ndescription = \"old root\"\n\
+             mount_at_start = false\n",
+        );
+        add_library(
+            &registry,
+            Some("lib"),
+            &second,
+            None,
+            None,
+            AddOptions::default(),
+            |_m| Ok(true),
+        )
+        .expect("re-add");
+        let text = std::fs::read_to_string(&registry).expect("read");
+        assert!(text.contains("second"), "{text}");
+        assert!(
+            !text.contains("00000000-0000-7000-8000-000000000001"),
+            "the old root's uuid stayed on the entry: {text}"
+        );
+        assert!(!text.contains("old root"), "{text}");
+        assert!(
+            text.contains("mount_at_start = false"),
+            "the rewrite dropped a key it does not know: {text}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_manifest_key_survives_regenerate_manifest_uuid() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let m = new_manifest("lib", LibraryKind::Test, None);
+        write_manifest(tmp.path(), &m).expect("write");
+        let path = tmp.path().join(MANIFEST_FILENAME);
+        let mut text = std::fs::read_to_string(&path).expect("read");
+        text.push_str("future_key = \"x\"\n");
+        std::fs::write(&path, text).expect("append");
+
+        let fresh = regenerate_manifest_uuid(tmp.path()).expect("regen");
+        assert_ne!(fresh.uuid, m.uuid);
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            text.contains("future_key = \"x\""),
+            "the rewrite dropped a key it does not know: {text}"
+        );
     }
 
     #[test]

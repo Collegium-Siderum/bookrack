@@ -65,7 +65,7 @@ async fn an_unpinned_reranker_model_is_not_sent_to_the_installer() {
         Some(PROFILE),
         ManifestIdentitySeed {
             name: "default",
-            kind: LibraryKind::Test,
+            kind: &LibraryKind::Test,
             description: None,
             registered_uuid: None,
         },

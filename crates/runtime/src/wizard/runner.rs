@@ -365,7 +365,7 @@ fn write_default_registry(data_root: &Path, manifest: &LibraryManifest) -> Resul
     };
     let entry = LibraryEntryFields {
         data_dir: data_root.to_path_buf(),
-        kind: manifest.kind,
+        kind: manifest.kind.clone(),
         description: manifest.description.clone(),
         index_profile: None,
         created_at: manifest.created_at.clone(),

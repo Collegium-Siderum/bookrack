@@ -97,7 +97,7 @@ fn declare_profile(root: &Path, name: &str, profile: &str) {
         Some(profile),
         ManifestIdentitySeed {
             name,
-            kind: LibraryKind::Test,
+            kind: &LibraryKind::Test,
             description: None,
             registered_uuid: None,
         },

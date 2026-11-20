@@ -719,7 +719,7 @@ mod tests {
             Some("p"),
             bookrack_config::ManifestIdentitySeed {
                 name: "lib",
-                kind: bookrack_config::LibraryKind::Test,
+                kind: &bookrack_config::LibraryKind::Test,
                 description: None,
                 registered_uuid: None,
             },

@@ -41,6 +41,7 @@ mod queue_short_id;
 mod queue_wait;
 mod quit_e2e;
 mod registry_absolute_roots;
+mod registry_forward_compat;
 mod removed_commands;
 mod retrieval_weak_advisory;
 mod root_identity_gate;

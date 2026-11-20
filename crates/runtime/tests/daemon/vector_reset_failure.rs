@@ -200,7 +200,7 @@ fn declare_profile(root: &Path, name: &str, model: &str, dim: u32) -> Result<()>
         Some(name),
         ManifestIdentitySeed {
             name: "default",
-            kind: LibraryKind::Test,
+            kind: &LibraryKind::Test,
             description: None,
             registered_uuid: None,
         },
@@ -360,7 +360,7 @@ async fn a_reset_that_never_started_offers_no_resume(
         Some("no-such-profile"),
         ManifestIdentitySeed {
             name: "default",
-            kind: LibraryKind::Test,
+            kind: &LibraryKind::Test,
             description: None,
             registered_uuid: None,
         },

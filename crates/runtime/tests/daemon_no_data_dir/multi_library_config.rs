@@ -95,7 +95,7 @@ fn world() -> &'static Sandbox {
                 Some(profile),
                 ManifestIdentitySeed {
                     name,
-                    kind: LibraryKind::Test,
+                    kind: &LibraryKind::Test,
                     description: None,
                     registered_uuid: None,
                 },

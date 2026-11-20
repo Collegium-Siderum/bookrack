@@ -128,7 +128,7 @@ pub fn decide(
     }
     Ok(LibraryEntryFields {
         data_dir: root.to_path_buf(),
-        kind: manifest.kind,
+        kind: manifest.kind.clone(),
         description: manifest.description.clone(),
         index_profile: manifest.index_profile.clone(),
         created_at: manifest.created_at.clone(),

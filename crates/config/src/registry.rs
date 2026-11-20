@@ -98,8 +98,12 @@ pub struct RegistryEntryTable {
 /// What a library is for. Advisory today; carried so tooling can
 /// distinguish a production library from a throwaway test or scratch
 /// root.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
+///
+/// The registry and the manifest are shared by every build that opens
+/// the library, so a token this build does not know is kept as
+/// [`LibraryKind::Other`] and written back unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(from = "String", into = "String")]
 pub enum LibraryKind {
     /// A primary, long-lived library.
     #[default]
@@ -108,17 +112,37 @@ pub enum LibraryKind {
     Test,
     /// A disposable scratch library.
     Scratch,
+    /// A kind another build wrote, carried as its token.
+    Other(String),
 }
 
 impl LibraryKind {
-    /// The wire token, matching the serde `snake_case` representation,
-    /// for writing the value back into a registry table.
-    pub fn as_str(self) -> &'static str {
+    /// The wire token, for writing the value back into a registry table
+    /// or a manifest.
+    pub fn as_str(&self) -> &str {
         match self {
             LibraryKind::Prod => "prod",
             LibraryKind::Test => "test",
             LibraryKind::Scratch => "scratch",
+            LibraryKind::Other(token) => token,
         }
+    }
+}
+
+impl From<String> for LibraryKind {
+    fn from(token: String) -> LibraryKind {
+        match token.as_str() {
+            "prod" => LibraryKind::Prod,
+            "test" => LibraryKind::Test,
+            "scratch" => LibraryKind::Scratch,
+            _ => LibraryKind::Other(token),
+        }
+    }
+}
+
+impl From<LibraryKind> for String {
+    fn from(kind: LibraryKind) -> String {
+        kind.as_str().to_string()
     }
 }
 
@@ -136,7 +160,7 @@ impl RawRegistryEntry {
     pub fn kind(&self) -> LibraryKind {
         match self {
             RawRegistryEntry::Path(_) => LibraryKind::default(),
-            RawRegistryEntry::Table(t) => t.kind,
+            RawRegistryEntry::Table(t) => t.kind.clone(),
         }
     }
 
@@ -259,8 +283,20 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_kind_token_is_rejected() {
-        let err = parse_registry("[libraries.x]\ndata_dir = \"/x\"\nkind = \"archive\"\n");
-        assert!(err.is_err(), "an unknown kind token must not parse");
+    fn registry_with_an_unknown_kind_still_loads() {
+        let registry = parse_registry("[libraries.x]\ndata_dir = \"/x\"\nkind = \"archive\"\n")
+            .expect("a kind another build wrote does not fail the registry");
+        assert_eq!(
+            registry.libraries["x"].kind(),
+            LibraryKind::Other("archive".to_string())
+        );
+    }
+
+    #[test]
+    fn a_known_token_never_becomes_other() {
+        for token in ["prod", "test", "scratch"] {
+            let kind = LibraryKind::from(token.to_string());
+            assert!(!matches!(kind, LibraryKind::Other(_)), "{token}");
+        }
     }
 }

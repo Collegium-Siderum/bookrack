@@ -132,7 +132,7 @@ fn scan_register(outcome: &ScanOutcome, kind: Option<LibraryKind>) -> Result<()>
                     &registry_path,
                     None,
                     path,
-                    kind,
+                    kind.clone(),
                     None,
                     AddOptions::default(),
                     |_manifest| Ok(true),
@@ -504,7 +504,7 @@ pub fn config(name: String, sets: Vec<(String, String)>, unset: Vec<String>) -> 
     if profile_set.is_some() || profile_unset {
         let seed = ManifestIdentitySeed {
             name: &name,
-            kind: entry.kind,
+            kind: &entry.kind,
             description: entry.description.as_deref(),
             registered_uuid: entry.uuid.as_deref(),
         };
@@ -524,7 +524,7 @@ pub fn config(name: String, sets: Vec<(String, String)>, unset: Vec<String>) -> 
         Some(value) if value.as_deref() != entry.index_profile.as_deref() => {
             let fields = LibraryEntryFields {
                 data_dir: data_dir.clone(),
-                kind: entry.kind,
+                kind: entry.kind.clone(),
                 description: entry.description.clone(),
                 index_profile: value.clone(),
                 created_at: entry.created_at.clone(),

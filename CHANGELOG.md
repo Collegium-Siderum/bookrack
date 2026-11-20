@@ -55,6 +55,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **The registry and a library's manifest keep what another build
+  wrote.** A `kind` this build does not know used to make the whole
+  registry unreadable, and the manifest of that library with it; it is
+  now carried as its token and shown as written by `libraries list`.
+  Rewriting a registry entry — refreshing its cached `index_profile`,
+  re-adding a name — updates the fields this build knows and leaves any
+  other key of the entry in place. Setting or clearing a manifest's
+  `index_profile`, and regenerating its uuid, edit that one key and
+  leave the rest of the file, comments and key order included, as it
+  was. `--kind` on the command line still takes only `prod`, `test`,
+  and `scratch`.
 - **A `config.toml` key this build does not resolve is reported, not
   refused.** A library whose `config.toml` carries a retired key
   (`embed_model`, `index_profile`, `mcp_addr`, `log_directive`) or a key

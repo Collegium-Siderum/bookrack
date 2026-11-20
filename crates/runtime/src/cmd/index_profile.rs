@@ -510,7 +510,7 @@ impl ProfileTarget {
     /// registry does not carry.
     pub fn kind(&self) -> LibraryKind {
         match &self.entry {
-            Some(entry) => entry.kind,
+            Some(entry) => entry.kind.clone(),
             None => LibraryKind::default(),
         }
     }

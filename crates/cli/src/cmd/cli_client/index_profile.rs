@@ -306,7 +306,7 @@ fn declare_target(plan: &ApplyPlan, name: &str) -> Result<()> {
         Some(name),
         ManifestIdentitySeed {
             name: plan.target.label(),
-            kind: plan.target.kind(),
+            kind: &plan.target.kind(),
             description: plan.target.description(),
             registered_uuid: plan.target.entry.as_ref().and_then(|e| e.uuid.as_deref()),
         },
@@ -329,7 +329,7 @@ fn declare_target(plan: &ApplyPlan, name: &str) -> Result<()> {
             })?;
             let fields = LibraryEntryFields {
                 data_dir: data_dir.to_path_buf(),
-                kind: entry.kind,
+                kind: entry.kind.clone(),
                 description: entry.description.clone(),
                 index_profile: Some(name.to_string()),
                 created_at: entry.created_at.clone(),

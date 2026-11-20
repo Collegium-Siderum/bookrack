@@ -1323,7 +1323,7 @@ async fn read_proxies_route_failures_through_the_shared_classifier() -> Result<(
             Some("no-such-profile"),
             ManifestIdentitySeed {
                 name: "default",
-                kind: LibraryKind::Test,
+                kind: &LibraryKind::Test,
                 description: None,
                 registered_uuid: None,
             },

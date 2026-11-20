@@ -104,7 +104,7 @@ fn world() -> &'static Sandbox {
             Some("alt-model"),
             ManifestIdentitySeed {
                 name: "alpha",
-                kind: LibraryKind::Test,
+                kind: &LibraryKind::Test,
                 description: None,
                 registered_uuid: None,
             },

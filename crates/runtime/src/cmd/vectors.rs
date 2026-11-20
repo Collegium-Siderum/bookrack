@@ -669,7 +669,7 @@ mod tests {
             Some(bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT),
             bookrack_config::ManifestIdentitySeed {
                 name: "lib",
-                kind: bookrack_config::LibraryKind::Test,
+                kind: &bookrack_config::LibraryKind::Test,
                 description: None,
                 registered_uuid: None,
             },

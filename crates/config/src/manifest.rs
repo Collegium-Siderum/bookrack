@@ -244,7 +244,7 @@ pub struct ManifestIdentitySeed<'a> {
     /// Registry name to record as the library's birth name.
     pub name: &'a str,
     /// Library kind.
-    pub kind: LibraryKind,
+    pub kind: &'a LibraryKind,
     /// Free-form description; `None` leaves the field absent.
     pub description: Option<&'a str>,
     /// The uuid the registry entry caches for this root, when it caches
@@ -369,14 +369,54 @@ pub fn set_manifest_index_profile(
             }));
         }
     }
-    let mut manifest = match (existing, profile) {
-        (Some(m), _) => m,
-        (None, None) => return Ok(None),
-        (None, Some(_)) => new_manifest(seed.name, seed.kind, seed.description.map(str::to_string)),
-    };
-    manifest.index_profile = profile.map(str::to_string);
-    write_manifest(data_dir, &manifest)?;
-    Ok(Some(manifest))
+    match (existing, profile) {
+        (Some(mut manifest), _) => {
+            edit_manifest_key(data_dir, "index_profile", profile)?;
+            manifest.index_profile = profile.map(str::to_string);
+            Ok(Some(manifest))
+        }
+        (None, None) => Ok(None),
+        (None, Some(_)) => {
+            let mut manifest = new_manifest(
+                seed.name,
+                seed.kind.clone(),
+                seed.description.map(str::to_string),
+            );
+            manifest.index_profile = profile.map(str::to_string);
+            write_manifest(data_dir, &manifest)?;
+            Ok(Some(manifest))
+        }
+    }
+}
+
+/// Set the string key `key` of the manifest at `data_dir` to `value`,
+/// or remove it for `None`, editing the document in place: comments,
+/// key order, and keys this build does not know are left as written.
+/// The caller has already loaded the manifest, so the file is one this
+/// build reads.
+pub(crate) fn edit_manifest_key(
+    data_dir: &Path,
+    key: &str,
+    value: Option<&str>,
+) -> Result<(), ManifestError> {
+    let path = data_dir.join(MANIFEST_FILENAME);
+    let text = std::fs::read_to_string(&path).map_err(|error| ManifestError::Io {
+        path: path.clone(),
+        error,
+    })?;
+    let mut doc = text
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| ManifestError::Io {
+            path: path.clone(),
+            error: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+        })?;
+    match value {
+        Some(value) => doc[key] = toml_edit::value(value),
+        None => {
+            doc.remove(key);
+        }
+    }
+    write_atomically(&path, &doc.to_string()).map_err(|error| ManifestError::Io { path, error })
 }
 
 #[cfg(test)]
@@ -398,7 +438,7 @@ mod tests {
     fn seed() -> ManifestIdentitySeed<'static> {
         ManifestIdentitySeed {
             name: "seeded",
-            kind: LibraryKind::Test,
+            kind: &LibraryKind::Test,
             description: Some("from the registry entry"),
             registered_uuid: None,
         }
@@ -564,6 +604,65 @@ mod tests {
         assert_eq!(written.name, sample().name);
         let loaded = load_manifest(dir.path()).expect("load").expect("present");
         assert_eq!(loaded, written);
+    }
+
+    #[test]
+    fn an_unknown_manifest_key_survives_set_manifest_index_profile() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_manifest(dir.path(), &sample()).expect("write");
+        let path = dir.path().join(MANIFEST_FILENAME);
+        let mut text = std::fs::read_to_string(&path).expect("read");
+        text.push_str("future_key = \"x\"\n");
+        std::fs::write(&path, text).expect("append");
+
+        set_manifest_index_profile(dir.path(), Some("fast-local"), seed()).expect("set");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            text.contains("future_key = \"x\""),
+            "the rewrite dropped a key it does not know: {text}"
+        );
+        assert!(text.contains("index_profile = \"fast-local\""), "{text}");
+    }
+
+    /// A hand-arranged manifest: a comment of its own, keys out of the
+    /// rendered order, and a key this build does not know.
+    const ARRANGED: &str = "# kept by hand\n\
+        name = \"arranged\"\n\
+        future_key = \"x\" # trailing remark\n\
+        uuid = \"00000000-0000-7000-8000-000000000002\"\n\
+        format_version = 1\n\
+        format = \"bookrack-library\"\n";
+
+    #[test]
+    fn a_manifest_rewrite_keeps_comments_and_key_order() {
+        assert_eq!(MANIFEST_FORMAT, "bookrack-library");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(MANIFEST_FILENAME);
+        std::fs::write(&path, ARRANGED).expect("write");
+
+        set_manifest_index_profile(dir.path(), Some("fast-local"), seed()).expect("set");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(
+            text,
+            format!("{ARRANGED}index_profile = \"fast-local\"\n"),
+            "setting a key must leave every other byte alone"
+        );
+
+        set_manifest_index_profile(dir.path(), None, seed()).expect("clear");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(text, ARRANGED, "clearing it restores the document");
+    }
+
+    #[test]
+    fn an_unknown_manifest_kind_survives_a_rewrite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(MANIFEST_FILENAME);
+        std::fs::write(&path, format!("{ARRANGED}kind = \"archive\"\n")).expect("write");
+
+        set_manifest_index_profile(dir.path(), Some("fast-local"), seed())
+            .expect("a kind another build wrote does not fail the manifest");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("kind = \"archive\""), "{text}");
     }
 
     #[test]
