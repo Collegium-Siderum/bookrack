@@ -9,11 +9,11 @@
 use std::path::{Path, PathBuf};
 
 use bookrack_config::{
-    AddOptions, AddOutcome, AddReport, ConfigError, DetectError, DetectVerdict, LibraryEntryFields,
-    LibraryKind, LibraryManifest, LibraryOpError, ManifestIdentitySeed, ROOT_CONFIG_NAME,
-    RootConfigSetError, ScanOutcome, Signal, add_library, detect_library, find_library,
-    load_root_config, mounted_volumes, read_root_config_text, registry_target_path, remove_library,
-    render_manifest_toml, repoint_library, retired_root_config_key_help, retired_root_config_keys,
+    AddOptions, AddOutcome, AddReport, ConfigError, ConfigNotice, DetectError, DetectVerdict,
+    LibraryEntryFields, LibraryKind, LibraryManifest, LibraryOpError, ManifestIdentitySeed,
+    ROOT_CONFIG_NAME, RootConfigSetError, ScanOutcome, Signal, add_library, detect_library,
+    find_library, load_root_config, mounted_volumes, parse_root_config, read_root_config_text,
+    registry_target_path, remove_library, render_manifest_toml, repoint_library,
     root_config_env_override, scan_for_libraries, set_manifest_index_profile,
     set_root_config_values, upsert_library_entry,
 };
@@ -561,15 +561,15 @@ pub fn root_config_exists(data_dir: &Path) -> bool {
     data_dir.join(ROOT_CONFIG_NAME).exists()
 }
 
-/// Dump a library's `config.toml`: the parsed [`RootConfig`] for `--json`,
-/// the raw file text (comments and all) for a human reader.
+/// Dump a library's `config.toml`: the parsed [`RootConfig`] for `--json`
+/// with a `notices` array beside its keys, the raw file text (comments
+/// and all) for a human reader.
 fn print_root_config(name: &str, data_dir: &Path) -> Result<()> {
     if ctx().is_json() {
-        let cfg = load_root_config(data_dir).map_err(config_error)?;
-        println!(
-            "{}",
-            serde_json::to_string(&cfg).expect("root config serializes")
-        );
+        let loaded = load_root_config(data_dir).map_err(config_error)?;
+        let mut out = serde_json::to_value(&loaded.config).expect("root config serializes");
+        out["notices"] = serde_json::to_value(&loaded.notices).expect("notices serialize");
+        println!("{out}");
         return Ok(());
     }
     if ctx().is_quiet() {
@@ -583,36 +583,32 @@ fn print_root_config(name: &str, data_dir: &Path) -> Result<()> {
         );
     } else {
         print!("{text}");
-        // The verbatim dump is the one read surface a retired line
-        // survives: `load_root_config` refuses the file, so every other
-        // command names the key already. Say so here too, rather than
-        // handing back a line that resolves to nothing.
-        for note in retired_key_notes(&text) {
+        // The dump is the text as written, so a line that resolves to
+        // nothing looks like any other; say which ones do not.
+        for note in config_notice_notes(&text) {
             eprintln!("{note}");
         }
     }
     Ok(())
 }
 
-/// One `note:` line per retired key the raw `config.toml` text declares,
-/// in the order the retirement table lists them.
-///
-/// Matches on a line's leading key name rather than parsing the
-/// document: a file carrying a retired key may carry other faults too,
-/// and a dump that cannot be parsed still deserves the annotation.
-fn retired_key_notes(text: &str) -> Vec<String> {
-    let declares = |key: &str| {
-        text.lines().any(|line| {
-            let line = line.trim_start();
-            line.strip_prefix(key)
-                .is_some_and(|rest| rest.trim_start().starts_with('='))
-        })
+/// One `note:` line per key of the raw `config.toml` text that this
+/// build does not resolve, sorted by key. A text that does not parse
+/// yields none.
+fn config_notice_notes(text: &str) -> Vec<String> {
+    let Ok(loaded) = parse_root_config(text) else {
+        return Vec::new();
     };
-    retired_root_config_keys()
-        .filter(|key| declares(key))
-        .map(|key| {
-            let help = retired_root_config_key_help(key).unwrap_or_default();
-            format!("note: `{key}` is retired and resolves to nothing; {help}")
+    loaded
+        .notices
+        .iter()
+        .map(|notice| match notice {
+            ConfigNotice::Retired { key, help, .. } => {
+                format!("note: `{key}` is retired and resolves to nothing; {help}")
+            }
+            ConfigNotice::Unknown { key } => {
+                format!("note: `{key}` is not a key this build reads and is ignored")
+            }
         })
         .collect()
 }
@@ -971,8 +967,8 @@ mod tests {
     }
 
     #[test]
-    fn retired_key_notes_annotate_only_the_lines_that_declare_one() {
-        let notes = retired_key_notes(
+    fn config_notice_notes_name_each_key_the_file_declares_and_nothing_else() {
+        let notes = config_notice_notes(
             "ollama_url = \"http://127.0.0.1:11434\"\n  mcp_addr = \"127.0.0.1:9999\"\n",
         );
         assert_eq!(notes.len(), 1, "{notes:?}");
@@ -980,16 +976,26 @@ mod tests {
         // The way out travels with the note.
         assert!(notes[0].contains("BOOKRACK_MCP_ADDR"), "{notes:?}");
 
-        // A file with no retired key gets no note, and neither a
-        // commented-out line nor a longer key that merely starts with a
-        // retired name counts as a declaration.
-        assert!(retired_key_notes("ollama_url = \"http://x:1\"\n").is_empty());
-        assert!(retired_key_notes("# mcp_addr = \"127.0.0.1:9999\"\n").is_empty());
-        assert!(retired_key_notes("mcp_addr_extra = \"x\"\n").is_empty());
+        // A file with no ignored key gets no note, and a commented-out
+        // line is not a declaration.
+        assert!(config_notice_notes("ollama_url = \"http://x:1\"\n").is_empty());
+        assert!(config_notice_notes("# mcp_addr = \"127.0.0.1:9999\"\n").is_empty());
+
+        // A key that merely starts with a retired name is its own,
+        // unknown key.
+        let longer = config_notice_notes("mcp_addr_extra = \"x\"\n");
+        assert_eq!(longer.len(), 1, "{longer:?}");
+        assert!(
+            longer[0].contains("`mcp_addr_extra` is not a key"),
+            "{longer:?}"
+        );
 
         // Two retired lines in one file are both named, so a single dump
         // tells the operator everything to delete.
-        let both = retired_key_notes("mcp_addr = \"127.0.0.1:1\"\nlog_directive = \"debug\"\n");
+        let both = config_notice_notes("mcp_addr = \"127.0.0.1:1\"\nlog_directive = \"debug\"\n");
         assert_eq!(both.len(), 2, "{both:?}");
+
+        // A text that does not parse has no keys to name.
+        assert!(config_notice_notes("mcp_addr = \n").is_empty());
     }
 }

@@ -55,6 +55,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **A `config.toml` key this build does not resolve is reported, not
+  refused.** A library whose `config.toml` carries a retired key
+  (`embed_model`, `index_profile`, `mcp_addr`, `log_directive`) or a key
+  this build does not know used to fail every command that resolved its
+  data root, and a daemon skipped it at start. It now opens: the key is
+  ignored, `bookrack doctor` warns in a new `config.toml` row naming
+  each such key and the way out, `bookrack config effective` lists them
+  in a `config_notices` section (always present in `--json`, as `kind`,
+  `key`, `help`), `libraries config <name>` annotates each on stderr,
+  and `libraries config <name> --json` carries them in a `notices`
+  array beside the keys. A notice never carries the value the key was
+  set to. Writing is as strict as before: an unknown key cannot be set
+  or unset, and a retired key can only be unset. A known key holding a
+  value of the wrong type is still an error. `--unset` now also removes
+  a key written inside an inline table.
 - **Catalog schema 18 keys an intake row by item kind and source
   hash.** The migration runs when the library is mounted, after the
   usual snapshot; `intake_id` values are kept. An earlier release

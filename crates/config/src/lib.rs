@@ -431,6 +431,7 @@ pub struct Config {
     library: Option<String>,
     source: ResolutionSource,
     root_config: RootConfig,
+    config_notices: Vec<ConfigNotice>,
     shadowed_default: Option<ShadowedDefault>,
     library_identification: Option<LibraryIdentification>,
     unusable_registry: Option<UnusableRegistry>,
@@ -670,20 +671,6 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
-    /// `<data_root>/config.toml` sets a key that no longer carries any
-    /// meaning. Retired keys are refused rather than ignored: a silently
-    /// dropped `embed_model` would change which model a write path
-    /// resolves without the operator seeing it.
-    #[error(
-        "the root config at {} sets retired key `{key}`; {help}",
-        .path.display()
-    )]
-    RootConfigRetiredKey {
-        path: PathBuf,
-        key: &'static str,
-        /// What replaces the key and how to get rid of the line.
-        help: &'static str,
-    },
     /// The daemon state directory could not be resolved: the override
     /// is unset and the platform reports no per-user data directory.
     #[error(
@@ -767,6 +754,7 @@ impl Config {
             library: None,
             source: ResolutionSource::Explicit,
             root_config: RootConfig::default(),
+            config_notices: Vec::new(),
             shadowed_default: None,
             library_identification: None,
             unusable_registry: None,
@@ -777,6 +765,12 @@ impl Config {
     /// or the default (every field `None`) when the file was absent.
     pub fn root_config(&self) -> &RootConfig {
         &self.root_config
+    }
+
+    /// The keys `<data_root>/config.toml` carries that this build does
+    /// not resolve, sorted by key.
+    pub fn config_notices(&self) -> &[ConfigNotice] {
+        &self.config_notices
     }
 
     /// The data root that every other path is derived from.
@@ -1080,33 +1074,16 @@ pub const ROOT_CONFIG_NAME: &str = "config.toml";
 /// exists) overrides this layer, and the hardcoded default wins when
 /// both are absent. Written by `bookrack init`; safe to edit by hand.
 ///
-/// The retired fields carry nothing: they exist so a document written
-/// by an older release still parses far enough for
-/// [`load_root_config`] to refuse the key by name.
+/// Only the keys of [`ROOT_CONFIG_KEYS`] have a field. A document may
+/// carry others — a retired key, or one another build wrote —
+/// and [`load_root_config`] reports each as a [`ConfigNotice`] instead
+/// of resolving it.
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct RootConfig {
     /// Ollama HTTP endpoint for embeddings.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ollama_url: Option<String>,
-    /// Retired: the embed model is declared by the index profile. The
-    /// field stays so the document still parses under
-    /// `deny_unknown_fields` and [`load_root_config`] can name the key
-    /// in [`ConfigError::RootConfigRetiredKey`]; nothing reads it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub embed_model: Option<String>,
-    /// Retired: the MCP listen address is resolved before any data root
-    /// is known. Kept for the same reason as [`RootConfig::embed_model`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mcp_addr: Option<String>,
-    /// Retired: log verbosity is resolved before any data root is known.
-    /// Kept for the same reason as [`RootConfig::embed_model`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub log_directive: Option<String>,
-    /// Retired: a library's profile reference lives in its manifest.
-    /// Kept for the same reason as [`RootConfig::embed_model`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub index_profile: Option<String>,
     /// Retrieval knobs, under a `[search]` table.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub search: Option<RootSearchConfig>,
@@ -1119,7 +1096,7 @@ pub struct RootConfig {
 /// counterpart of the `BOOKRACK_SEARCH_*` env overrides. Fields are
 /// optional so a file can pin one knob without freezing the other.
 #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct RootSearchConfig {
     /// How many nearest passages a query returns.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1134,7 +1111,7 @@ pub struct RootSearchConfig {
 /// that is the index profile's fact. None of this enters a profile or
 /// a stamp, mirroring how `ollama_url` stays outside them.
 #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct RootRerankerConfig {
     /// Operator-run rerank server URL. Setting it switches the daemon
     /// from spawning a supervised llama-server to probing this
@@ -1152,9 +1129,8 @@ pub struct RootRerankerConfig {
 }
 
 /// Keys a `config.toml` may still carry from an older release but that
-/// no longer resolve to anything, each paired with the way out. Every
-/// entry names a field that [`RootConfig`] still declares so the
-/// document parses far enough for the key to be reported by name.
+/// no longer resolve to anything, each paired with the way out. A
+/// dotted key names a field of a table.
 const RETIRED_ROOT_CONFIG_KEYS: &[(&str, &str)] = &[
     (
         "embed_model",
@@ -1182,63 +1158,173 @@ const RETIRED_ROOT_CONFIG_KEYS: &[(&str, &str)] = &[
     ),
 ];
 
-/// The way out of `key`, if `key` is retired. Lets a surface that prints
-/// a `config.toml` verbatim — where a retired line is text, not a parse
-/// failure — say what the line means without keeping a second copy of
-/// [`RETIRED_ROOT_CONFIG_KEYS`].
-pub fn retired_root_config_key_help(key: &str) -> Option<&'static str> {
-    RETIRED_ROOT_CONFIG_KEYS
-        .iter()
-        .find(|(k, _)| *k == key)
-        .map(|(_, help)| *help)
+/// Something a `config.toml` carries that this build does not resolve.
+///
+/// A notice never fails a load: the file is shared by every build that
+/// opens the library, so a key one build retired or another introduced
+/// is reported and ignored. The serialized form is `kind`, `key`, and
+/// `help`; a retired key's value stays in the process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigNotice {
+    /// A key an older release resolved and this one does not.
+    Retired {
+        /// The dotted key.
+        key: String,
+        /// What replaces the key and how to get rid of the line.
+        help: &'static str,
+        /// What the file sets the key to: a string's content, any other
+        /// value's TOML literal. Never serialized.
+        value: String,
+    },
+    /// A key no table of this build names.
+    Unknown {
+        /// The dotted key, or the name of an empty table.
+        key: String,
+    },
 }
 
-/// Every retired key, in the order they are listed. Lets a caller walk
-/// the set without owning it.
-pub fn retired_root_config_keys() -> impl Iterator<Item = &'static str> {
-    RETIRED_ROOT_CONFIG_KEYS.iter().map(|(key, _)| *key)
+/// What [`ConfigNotice::help`] says about a key this build does not know.
+const UNKNOWN_ROOT_CONFIG_KEY_HELP: &str =
+    "this build reads no such key and ignores it -- another build may have written it";
+
+impl ConfigNotice {
+    /// The dotted key the notice is about.
+    pub fn key(&self) -> &str {
+        match self {
+            ConfigNotice::Retired { key, .. } | ConfigNotice::Unknown { key } => key,
+        }
+    }
+
+    /// The token the serialized form carries as `kind`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ConfigNotice::Retired { .. } => "retired",
+            ConfigNotice::Unknown { .. } => "unknown",
+        }
+    }
+
+    /// What the operator can do about the key.
+    pub fn help(&self) -> &'static str {
+        match self {
+            ConfigNotice::Retired { help, .. } => help,
+            ConfigNotice::Unknown { .. } => UNKNOWN_ROOT_CONFIG_KEY_HELP,
+        }
+    }
 }
 
-/// Which retired key `cfg` sets, if any, in the order they are listed.
-fn retired_root_config_key(cfg: &RootConfig) -> Option<(&'static str, &'static str)> {
-    let set = |key: &str| match key {
-        "embed_model" => cfg.embed_model.is_some(),
-        "index_profile" => cfg.index_profile.is_some(),
-        "mcp_addr" => cfg.mcp_addr.is_some(),
-        "log_directive" => cfg.log_directive.is_some(),
-        _ => false,
-    };
-    RETIRED_ROOT_CONFIG_KEYS
-        .iter()
-        .find(|(key, _)| set(key))
-        .copied()
+impl serde::Serialize for ConfigNotice {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut out = serializer.serialize_struct("ConfigNotice", 3)?;
+        out.serialize_field("kind", self.kind())?;
+        out.serialize_field("key", self.key())?;
+        out.serialize_field("help", self.help())?;
+        out.end()
+    }
+}
+
+/// A parsed `config.toml`: the keys this build resolves, and a notice
+/// for every other key the document carries.
+#[derive(Debug, Clone, Default)]
+pub struct LoadedRootConfig {
+    /// The resolved keys.
+    pub config: RootConfig,
+    /// One notice per retired or unknown key, sorted by key.
+    pub notices: Vec<ConfigNotice>,
 }
 
 /// Read `<data_root>/config.toml`. A missing file resolves to the
-/// default (every field `None`) so a fresh data root is no error; a
-/// malformed file surfaces as [`ConfigError::RootConfigMalformed`], and
-/// a document carrying a retired key as
-/// [`ConfigError::RootConfigRetiredKey`].
-pub fn load_root_config(data_dir: &Path) -> Result<RootConfig, ConfigError> {
+/// default (every field `None`) so a fresh data root is no error. A
+/// document that is not TOML, or that gives a known key the wrong type,
+/// surfaces as [`ConfigError::RootConfigMalformed`]; a retired or
+/// unknown key is a [`ConfigNotice`] beside the loaded config.
+pub fn load_root_config(data_dir: &Path) -> Result<LoadedRootConfig, ConfigError> {
     let path = data_dir.join(ROOT_CONFIG_NAME);
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(RootConfig::default());
+            return Ok(LoadedRootConfig::default());
         }
         Err(source) => {
             return Err(ConfigError::RootConfigUnreadable { path, source });
         }
     };
-    let cfg: RootConfig =
-        toml::from_str(&text).map_err(|source| ConfigError::RootConfigMalformed {
-            path: path.clone(),
-            source,
-        })?;
-    if let Some((key, help)) = retired_root_config_key(&cfg) {
-        return Err(ConfigError::RootConfigRetiredKey { path, key, help });
+    parse_root_config(&text).map_err(|source| ConfigError::RootConfigMalformed { path, source })
+}
+
+/// Parse the text of a `config.toml`, sorting its keys into the ones
+/// [`RootConfig`] resolves and the ones reported as notices.
+///
+/// Keys are addressed by dotted path. A table that prefixes a key of
+/// [`ROOT_CONFIG_KEYS`] is known: empty, it draws no notice, and a
+/// non-table in its place fails the parse. Every other leaf is a
+/// notice under its full path, and an empty table outside the known
+/// ones is named once.
+pub fn parse_root_config(text: &str) -> Result<LoadedRootConfig, toml::de::Error> {
+    let document: toml::Table = toml::from_str(text)?;
+    let mut known = toml::Table::new();
+    let mut notices = Vec::new();
+    sort_root_config_keys(&document, "", &mut known, &mut notices);
+    let config: RootConfig = toml::Value::Table(known).try_into()?;
+    notices.sort_by(|a, b| a.key().cmp(b.key()));
+    Ok(LoadedRootConfig { config, notices })
+}
+
+/// Walk `table`, whose dotted path is `prefix`, copying the keys
+/// [`RootConfig`] resolves into `known` and recording a notice for each
+/// of the others.
+fn sort_root_config_keys(
+    table: &toml::Table,
+    prefix: &str,
+    known: &mut toml::Table,
+    notices: &mut Vec<ConfigNotice>,
+) {
+    for (name, value) in table {
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}.{name}")
+        };
+        let known_table = ROOT_CONFIG_KEYS.iter().any(|key| {
+            key.strip_prefix(path.as_str())
+                .is_some_and(|rest| rest.starts_with('.'))
+        });
+        if ROOT_CONFIG_KEYS.contains(&path.as_str()) {
+            known.insert(name.clone(), value.clone());
+        } else if let Some((_, help)) = RETIRED_ROOT_CONFIG_KEYS
+            .iter()
+            .find(|(key, _)| *key == path)
+        {
+            let value = match value {
+                toml::Value::String(content) => content.clone(),
+                other => other.to_string(),
+            };
+            notices.push(ConfigNotice::Retired {
+                key: path,
+                help,
+                value,
+            });
+        } else if known_table {
+            match value {
+                toml::Value::Table(inner) => {
+                    let mut kept = toml::Table::new();
+                    sort_root_config_keys(inner, &path, &mut kept, notices);
+                    known.insert(name.clone(), toml::Value::Table(kept));
+                }
+                // Left in place so the typed parse refuses it.
+                other => {
+                    known.insert(name.clone(), other.clone());
+                }
+            }
+        } else {
+            match value {
+                toml::Value::Table(inner) if !inner.is_empty() => {
+                    sort_root_config_keys(inner, &path, &mut toml::Table::new(), notices);
+                }
+                _ => notices.push(ConfigNotice::Unknown { key: path }),
+            }
+        }
     }
-    Ok(cfg)
 }
 
 /// Render a `<data_root>/config.toml` body for a freshly initialized
@@ -1251,8 +1337,7 @@ pub fn load_root_config(data_dir: &Path) -> Result<RootConfig, ConfigError> {
 /// or a `\n` inside `ollama_url` would break the document.
 ///
 /// Only the endpoint is written. The embed model is the index profile's
-/// fact, and `embed_model` is a retired key that
-/// [`load_root_config`] refuses.
+/// fact, and `embed_model` is a retired key that resolves to nothing.
 pub fn render_root_config_toml(ollama_url: &str) -> String {
     let cfg = RootConfig {
         ollama_url: Some(ollama_url.to_string()),
@@ -1263,9 +1348,9 @@ pub fn render_root_config_toml(ollama_url: &str) -> String {
 }
 
 /// The keys `bookrack libraries config` accepts, mirroring the fields of
-/// [`RootConfig`]. A `set` or `unset` of any other key is refused so a
-/// typo cannot silently leave `deny_unknown_fields` to reject the file on
-/// the next load. A test asserts this list stays in lockstep with the
+/// [`RootConfig`]. A `set` of any other key is refused, so a typo is
+/// caught when it is written instead of being ignored on the next load.
+/// A test asserts this list stays in lockstep with the
 /// struct's serialized field names. A dotted key addresses a field in a
 /// nested table (`search.top_k` edits `top_k` under `[search]`).
 pub const ROOT_CONFIG_KEYS: &[&str] = &[
@@ -1409,7 +1494,10 @@ pub fn set_root_config_values(
     for key in unsets {
         match key.split_once('.') {
             Some((table, field)) => {
-                if let Some(t) = doc.get_mut(table).and_then(toml_edit::Item::as_table_mut) {
+                if let Some(t) = doc
+                    .get_mut(table)
+                    .and_then(toml_edit::Item::as_table_like_mut)
+                {
                     t.remove(field);
                     if t.is_empty() {
                         doc.remove(table);
@@ -1440,8 +1528,7 @@ fn validate_root_config_key(key: &str) -> Result<(), RootConfigSetError> {
 
 /// Reject a key that cannot be unset. Wider than
 /// [`validate_root_config_key`] by the retired keys: deleting the line
-/// is exactly what [`ConfigError::RootConfigRetiredKey`] tells the
-/// operator to do, so the cure cannot be refused along with the disease.
+/// is what a [`ConfigNotice::Retired`] tells the operator to do.
 fn validate_root_config_unset_key(key: &str) -> Result<(), RootConfigSetError> {
     if RETIRED_ROOT_CONFIG_KEYS.iter().any(|(k, _)| *k == key) {
         return Ok(());
@@ -2959,7 +3046,10 @@ fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, 
     if !data_dir.is_dir() {
         return Err(ConfigError::DataDirNotFound(data_dir));
     }
-    let root_config = load_root_config(&data_dir)?;
+    let LoadedRootConfig {
+        config: root_config,
+        notices: config_notices,
+    } = load_root_config(&data_dir)?;
     let ollama_url = knob_value(
         &ollama_url_knob(ollama_url_env, NO_DOTENV_RECORD, &root_config),
         DEFAULT_OLLAMA_URL.to_string(),
@@ -2970,6 +3060,7 @@ fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, 
         library,
         source,
         root_config,
+        config_notices,
         shadowed_default: None,
         library_identification: None,
         unusable_registry: None,
@@ -4901,7 +4992,7 @@ mod tests {
     }
 
     #[test]
-    fn retired_root_config_keys_are_refused_by_name_with_a_way_out() {
+    fn retired_root_config_keys_are_named_with_a_way_out() {
         for (key, value) in [
             ("embed_model", "some-model"),
             ("index_profile", "some-profile"),
@@ -4913,17 +5004,20 @@ mod tests {
             )
             .expect("write config");
 
-            let err = load_root_config(dir.path()).expect_err("retired key must be refused");
-            let ConfigError::RootConfigRetiredKey { key: named, .. } = &err else {
-                panic!("expected RootConfigRetiredKey, got {err:?}");
+            let loaded = load_root_config(dir.path()).expect("a retired key does not fail a load");
+            // The rest of the document still resolves.
+            assert_eq!(
+                loaded.config.ollama_url.as_deref(),
+                Some("http://127.0.0.1:11434")
+            );
+            let [notice] = loaded.notices.as_slice() else {
+                panic!("expected one notice, got {:?}", loaded.notices);
             };
-            assert_eq!(*named, key);
-
-            // The message names the key and carries the way out, so the
-            // error is actionable without reaching for the docs.
-            let text = err.to_string();
-            assert!(text.contains(key), "{text}");
-            assert!(text.contains("--unset"), "{text}");
+            assert_eq!(notice.kind(), "retired");
+            assert_eq!(notice.key(), key);
+            // The notice carries the way out, so it is actionable
+            // without reaching for the docs.
+            assert!(notice.help().contains("--unset"), "{}", notice.help());
         }
     }
 
@@ -4936,8 +5030,12 @@ mod tests {
         )
         .expect("write config");
 
-        let cfg = load_root_config(dir.path()).expect("clean config loads");
-        assert_eq!(cfg.ollama_url.as_deref(), Some("http://127.0.0.1:11434"));
+        let loaded = load_root_config(dir.path()).expect("clean config loads");
+        assert_eq!(
+            loaded.config.ollama_url.as_deref(),
+            Some("http://127.0.0.1:11434")
+        );
+        assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
     }
 
     #[test]
@@ -4965,7 +5063,7 @@ mod tests {
                 "{err:?}"
             );
 
-            // Unsetting is the cure the retired-key error prescribes, so
+            // Unsetting is the cure the retired-key notice prescribes, so
             // it must work while the stale line is still there.
             set_root_config_values(dir.path(), &[], &[key.to_string()])
                 .expect("a retired key can be unset");
@@ -4977,48 +5075,37 @@ mod tests {
             assert!(text.contains("operator note"), "{text}");
             assert!(text.contains("ollama_url"), "{text}");
 
-            // And the root loads again once the line is gone.
-            let cfg = load_root_config(dir.path()).expect("load after unset");
-            assert_eq!(cfg.ollama_url.as_deref(), Some("http://127.0.0.1:11434"));
+            // And the notice goes with the line.
+            let loaded = load_root_config(dir.path()).expect("load after unset");
+            assert_eq!(
+                loaded.config.ollama_url.as_deref(),
+                Some("http://127.0.0.1:11434")
+            );
+            assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
         }
     }
 
     #[test]
-    fn a_root_config_setting_mcp_addr_is_refused_by_name() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            dir.path().join(ROOT_CONFIG_NAME),
-            "mcp_addr = \"127.0.0.1:9999\"\n",
-        )
-        .expect("write config");
-
-        let err = load_root_config(dir.path()).expect_err("a retired key must be refused");
-        let ConfigError::RootConfigRetiredKey { key, help, .. } = &err else {
-            panic!("expected RootConfigRetiredKey, got {err:?}");
-        };
-        assert_eq!(*key, "mcp_addr");
-        // The way out names the knob's actual home and the command that
-        // deletes the dead line.
-        assert!(help.contains(MCP_ADDR_ENV), "{help}");
-        assert!(help.contains("--unset mcp_addr"), "{help}");
-    }
-
-    #[test]
-    fn a_root_config_setting_log_directive_is_refused_by_name() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            dir.path().join(ROOT_CONFIG_NAME),
-            "log_directive = \"debug\"\n",
-        )
-        .expect("write config");
-
-        let err = load_root_config(dir.path()).expect_err("a retired key must be refused");
-        let ConfigError::RootConfigRetiredKey { key, help, .. } = &err else {
-            panic!("expected RootConfigRetiredKey, got {err:?}");
-        };
-        assert_eq!(*key, "log_directive");
-        assert!(help.contains(LOG_ENV), "{help}");
-        assert!(help.contains("--unset log_directive"), "{help}");
+    fn the_retired_process_level_keys_name_where_the_knob_lives_now() {
+        for (key, value, home) in [
+            ("mcp_addr", "127.0.0.1:9999", MCP_ADDR_ENV),
+            ("log_directive", "debug", LOG_ENV),
+        ] {
+            let dir = root_with_config(&format!("{key} = \"{value}\"\n"));
+            let loaded = load_root_config(dir.path()).expect("a retired key does not fail a load");
+            let [notice] = loaded.notices.as_slice() else {
+                panic!("expected one notice, got {:?}", loaded.notices);
+            };
+            assert_eq!(notice.key(), key);
+            // The way out names the knob's actual home and the command
+            // that deletes the dead line.
+            assert!(notice.help().contains(home), "{}", notice.help());
+            assert!(
+                notice.help().contains(&format!("--unset {key}")),
+                "{}",
+                notice.help()
+            );
+        }
     }
 
     #[test]
@@ -5035,8 +5122,8 @@ mod tests {
                 "{err:?}"
             );
 
-            // Deleting the line is the cure the load error prescribes, so
-            // it stays available against a file that still carries it.
+            // Deleting the line is the cure the notice prescribes, so it
+            // stays available against a file that still carries it.
             std::fs::write(
                 dir.path().join(ROOT_CONFIG_NAME),
                 format!(
@@ -5052,8 +5139,12 @@ mod tests {
             assert!(!text.contains(key), "{text}");
             assert!(text.contains("operator note"), "{text}");
             assert!(text.contains("ollama_url"), "{text}");
-            let cfg = load_root_config(dir.path()).expect("load after unset");
-            assert_eq!(cfg.ollama_url.as_deref(), Some("http://127.0.0.1:11434"));
+            let loaded = load_root_config(dir.path()).expect("load after unset");
+            assert_eq!(
+                loaded.config.ollama_url.as_deref(),
+                Some("http://127.0.0.1:11434")
+            );
+            assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
         }
     }
 
@@ -5176,7 +5267,7 @@ mod tests {
             &[],
         )
         .expect("set succeeds");
-        let cfg = load_root_config(tmp.path()).expect("round-trips");
+        let cfg = load_root_config(tmp.path()).expect("round-trips").config;
         let reranker = cfg.reranker.expect("[reranker] written");
         assert_eq!(reranker.url.as_deref(), Some("http://h:1"));
         assert_eq!(reranker.ctx, Some(8192));
@@ -6034,7 +6125,7 @@ mod tests {
         assert!(!text.contains("top_k = \"7\""));
 
         // The written file round-trips through the typed loader.
-        let cfg = load_root_config(tmp.path()).expect("load config");
+        let cfg = load_root_config(tmp.path()).expect("load config").config;
         let search = cfg.search.expect("search table present");
         assert_eq!(search.top_k, Some(7));
         assert!((search.weak_threshold.expect("threshold") - 0.4).abs() < 1e-6);
@@ -6051,7 +6142,7 @@ mod tests {
         .expect("unset nested keys");
         let text = read_root_config_text(tmp.path()).expect("read config");
         assert!(!text.contains("[search]"));
-        let cfg = load_root_config(tmp.path()).expect("load config");
+        let cfg = load_root_config(tmp.path()).expect("load config").config;
         assert!(cfg.search.is_none());
         // A scalar key sitting beside the table is untouched by the
         // table's removal.
@@ -6080,11 +6171,11 @@ mod tests {
     #[test]
     fn root_config_missing_file_is_default() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let cfg = load_root_config(tmp.path()).expect("missing file resolves to default");
-        assert!(cfg.ollama_url.is_none());
-        assert!(cfg.embed_model.is_none());
-        assert!(cfg.mcp_addr.is_none());
-        assert!(cfg.log_directive.is_none());
+        let loaded = load_root_config(tmp.path()).expect("missing file resolves to default");
+        assert!(loaded.config.ollama_url.is_none());
+        assert!(loaded.config.search.is_none());
+        assert!(loaded.config.reranker.is_none());
+        assert!(loaded.notices.is_empty());
     }
 
     #[test]
@@ -6096,7 +6187,9 @@ mod tests {
              \n[search]\ntop_k = 9\n",
         )
         .expect("write root config");
-        let cfg = load_root_config(tmp.path()).expect("root config parses");
+        let cfg = load_root_config(tmp.path())
+            .expect("root config parses")
+            .config;
         assert_eq!(cfg.ollama_url.as_deref(), Some("http://elsewhere:1234"));
         let search = cfg.search.expect("search table present");
         assert_eq!(search.top_k, Some(9));
@@ -6106,19 +6199,133 @@ mod tests {
         assert!(cfg.reranker.is_none());
     }
 
+    fn root_with_config(body: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(ROOT_CONFIG_NAME), body).expect("write root config");
+        dir
+    }
+
     #[test]
-    fn root_config_rejects_unknown_fields() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            tmp.path().join(ROOT_CONFIG_NAME),
-            "ollama_url = \"http://x\"\n\
-             not_a_known_field = \"oops\"\n",
-        )
-        .expect("write root config");
+    fn a_retired_key_loads_with_a_notice_and_is_not_resolved() {
+        let dir = root_with_config("mcp_addr = \"x\"\n");
+        let loaded = load_root_config(dir.path()).expect("a retired key loads with a notice");
+        let [ConfigNotice::Retired { key, value, .. }] = loaded.notices.as_slice() else {
+            panic!("expected one retired notice, got {:?}", loaded.notices);
+        };
+        assert_eq!(key, "mcp_addr");
+        assert_eq!(value, "x");
+        // Nothing of the retired key reaches the resolved config.
+        let resolved = toml::to_string(&loaded.config).expect("serialize");
+        assert_eq!(resolved, "", "{resolved}");
+    }
+
+    #[test]
+    fn an_unknown_key_and_an_unknown_table_load_with_notices() {
+        let dir = root_with_config("colour = 1\n\n[future]\nx = 1\n");
+        let loaded = load_root_config(dir.path()).expect("unknown keys load with notices");
+        let keys: Vec<(&str, &str)> = loaded.notices.iter().map(|n| (n.kind(), n.key())).collect();
+        assert_eq!(keys, [("unknown", "colour"), ("unknown", "future.x")]);
+    }
+
+    #[test]
+    fn an_unknown_key_inside_a_known_table_loads_with_a_notice() {
+        let dir = root_with_config("[search]\nfuture = 1\ntop_k = 3\n");
+        let loaded = load_root_config(dir.path())
+            .expect("an unknown key under [search] loads with a notice");
+        assert_eq!(
+            loaded.notices,
+            [ConfigNotice::Unknown {
+                key: "search.future".to_string()
+            }]
+        );
+        assert_eq!(loaded.config.search.expect("search table").top_k, Some(3));
+    }
+
+    #[test]
+    fn a_known_key_of_the_wrong_type_is_still_malformed() {
+        let dir = root_with_config("[search]\ntop_k = \"five\"\n");
         assert!(matches!(
-            load_root_config(tmp.path()),
+            load_root_config(dir.path()),
             Err(ConfigError::RootConfigMalformed { .. })
         ));
+    }
+
+    #[test]
+    fn an_empty_known_table_draws_no_notice() {
+        let dir = root_with_config("[search]\n");
+        let loaded = load_root_config(dir.path()).expect("load");
+        assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    }
+
+    #[test]
+    fn an_empty_unknown_table_is_named_once() {
+        let dir = root_with_config("[future]\n");
+        let loaded = load_root_config(dir.path()).expect("load");
+        assert_eq!(
+            loaded.notices,
+            [ConfigNotice::Unknown {
+                key: "future".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_scalar_where_a_known_table_belongs_is_malformed() {
+        let dir = root_with_config("search = 1\n");
+        assert!(matches!(
+            load_root_config(dir.path()),
+            Err(ConfigError::RootConfigMalformed { .. })
+        ));
+    }
+
+    #[test]
+    fn a_nested_unknown_table_is_reported_by_leaf_path() {
+        let dir = root_with_config("[future.inner]\nx = 1\ny = 2\n\n[search.later]\nz = 1\n");
+        let loaded = load_root_config(dir.path()).expect("load");
+        let keys: Vec<&str> = loaded.notices.iter().map(ConfigNotice::key).collect();
+        assert_eq!(keys, ["future.inner.x", "future.inner.y", "search.later.z"]);
+    }
+
+    #[test]
+    fn a_notice_serializes_without_the_value_it_was_read_with() {
+        let dir = root_with_config("mcp_addr = \"secret-host:1\"\ncolour = 1\n");
+        let loaded = load_root_config(dir.path()).expect("load");
+        let json = serde_json::to_value(&loaded.notices).expect("serialize");
+        assert!(!json.to_string().contains("secret-host"), "{json}");
+        for notice in json.as_array().expect("array") {
+            let mut fields: Vec<&str> = notice
+                .as_object()
+                .expect("object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            fields.sort_unstable();
+            assert_eq!(fields, ["help", "key", "kind"]);
+        }
+    }
+
+    #[test]
+    fn an_unknown_key_cannot_be_set_or_unset() {
+        let dir = root_with_config("colour = 1\n");
+        for (sets, unsets) in [
+            (vec![("colour".to_string(), "2".to_string())], vec![]),
+            (vec![], vec!["colour".to_string()]),
+        ] {
+            let err = set_root_config_values(dir.path(), &sets, &unsets)
+                .expect_err("an unknown key is refused on the write path");
+            assert!(
+                matches!(err, RootConfigSetError::UnknownKey { .. }),
+                "{err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_in_an_inline_table_can_be_unset() {
+        let dir = root_with_config("reranker = { url = \"http://x\" }\n");
+        set_root_config_values(dir.path(), &[], &["reranker.url".to_string()]).expect("unset");
+        let text = std::fs::read_to_string(dir.path().join(ROOT_CONFIG_NAME)).expect("read");
+        assert!(!text.contains("http://x"), "the key is still there: {text}");
     }
 
     #[test]
@@ -6130,10 +6337,6 @@ mod tests {
         // dotted keys, matching the whitelist's addressing scheme.
         let full = RootConfig {
             ollama_url: Some("http://x:1".to_string()),
-            embed_model: Some("m".to_string()),
-            mcp_addr: Some("127.0.0.1:1".to_string()),
-            log_directive: Some("info".to_string()),
-            index_profile: Some("p".to_string()),
             search: Some(RootSearchConfig {
                 top_k: Some(5),
                 weak_threshold: Some(0.5),
@@ -6154,10 +6357,6 @@ mod tests {
                 None => fields.push(key.clone()),
             }
         }
-        // Retired fields survive on the struct so a document carrying
-        // one still parses far enough to be refused by name, but they
-        // are not settable, so they are not in the key list.
-        fields.retain(|f| !RETIRED_ROOT_CONFIG_KEYS.iter().any(|(k, _)| k == f));
         fields.sort();
         let mut keys: Vec<String> = ROOT_CONFIG_KEYS.iter().map(|k| k.to_string()).collect();
         keys.sort();
@@ -6238,7 +6437,7 @@ mod tests {
             &[],
         )
         .expect("write from empty");
-        let cfg = load_root_config(tmp.path()).expect("reloads");
+        let cfg = load_root_config(tmp.path()).expect("reloads").config;
         assert_eq!(cfg.ollama_url.as_deref(), Some("http://host:11434"));
     }
 
@@ -6253,12 +6452,12 @@ mod tests {
         // Unsetting a key the file never set is a no-op, not an error.
         set_root_config_values(tmp.path(), &[], &["reranker.url".to_string()])
             .expect("unset absent");
-        let cfg = load_root_config(tmp.path()).expect("reloads");
+        let cfg = load_root_config(tmp.path()).expect("reloads").config;
         assert_eq!(cfg.ollama_url.as_deref(), Some("http://host:11434"));
         // Unsetting a key that is present removes it.
         set_root_config_values(tmp.path(), &[], &["ollama_url".to_string()])
             .expect("unset present");
-        let cfg = load_root_config(tmp.path()).expect("reloads");
+        let cfg = load_root_config(tmp.path()).expect("reloads").config;
         assert!(cfg.ollama_url.is_none());
     }
 

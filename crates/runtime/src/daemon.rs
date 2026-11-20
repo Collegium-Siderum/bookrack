@@ -1422,6 +1422,15 @@ pub(crate) async fn build_library_handle(
     mount_guard: Option<MountGuard>,
 ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>> {
     let cfg = cfg_arc.as_ref();
+    for notice in cfg.config_notices() {
+        tracing::warn!(
+            library = name,
+            key = notice.key(),
+            kind = notice.kind(),
+            help = notice.help(),
+            "config.toml carries a key this build ignores"
+        );
+    }
     // The embed model resolves per library from the index profile,
     // else the built-in default; an undefined or unloadable profile
     // refuses the handle with the repair spelled out, rather than

@@ -117,6 +117,10 @@ struct ReportOut<'a> {
     /// name. Always present, empty included, for the reason
     /// `dotenv_foreign` is.
     unclaimed_variables: Vec<UnclaimedOut>,
+    /// The keys the resolved library's `config.toml` carries that this
+    /// build ignores, each as `kind`, `key`, and `help`. Always present,
+    /// empty included — also when no root resolved.
+    config_notices: &'a [bookrack_config::ConfigNotice],
     native_dependencies: Vec<bookrack_config::NativeDependencyOrigin>,
 }
 
@@ -141,6 +145,7 @@ pub fn run(selection: &LibrarySelection) -> Result<()> {
         bookrack_config::dotenv_load().map_or(&[], |load| load.supplied.as_slice()),
     );
     let dotenv_path = bookrack_config::dotenv_load().map(|load| load.supply().path);
+    let notices = cfg.map_or(&[][..], Config::config_notices);
     let native = bookrack_config::native_dependency_origins(
         bookrack_ops::PDFIUM_RELEASE_TAG,
         reranker_tag(cfg),
@@ -155,6 +160,7 @@ pub fn run(selection: &LibrarySelection) -> Result<()> {
                 dotenv_path,
                 dotenv_foreign: foreign,
                 unclaimed_variables: unclaimed,
+                config_notices: notices,
                 native_dependencies: native,
             };
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -165,6 +171,7 @@ pub fn run(selection: &LibrarySelection) -> Result<()> {
                 dotenv_path,
                 &foreign,
                 &unclaimed,
+                notices,
                 &native,
             );
         }
@@ -319,6 +326,7 @@ fn print_human(
     dotenv_path: Option<&str>,
     foreign: &[ForeignOut<'_>],
     unclaimed: &[UnclaimedOut],
+    notices: &[bookrack_config::ConfigNotice],
     native: &[bookrack_config::NativeDependencyOrigin],
 ) {
     if let Some(problem) = problem {
@@ -377,6 +385,18 @@ fn print_human(
                 );
             }
         }
+    }
+
+    // Keys of the library's own file that no row reports, because this
+    // build resolves nothing from them.
+    if !notices.is_empty() {
+        println!();
+        println!("config.toml carries these keys, which this build ignores:");
+        let mut table = RowTable::new(["key", "why", "what to do"]);
+        for notice in notices {
+            table.push_row([notice.key(), notice.kind(), notice.help()]);
+        }
+        println!("{}", table.render());
     }
 
     // A section rather than rows: these have no layer to sit in and no

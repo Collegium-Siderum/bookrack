@@ -20,11 +20,12 @@ use bookrack_test_support::{ProcessEnv, process_env};
 /// index-profile sections contribute rows only for registered
 /// libraries, and the reranker section only for a profile that
 /// enables one; the built-in default does not.
-const BARE_ROOT_LABELS: [&str; 19] = [
+const BARE_ROOT_LABELS: [&str; 20] = [
     "report by",
     "data root",
     "PDFium library",
     "fd limit",
+    "config.toml",
     "catalog.db",
     "corpus.db",
     "lancedb/",

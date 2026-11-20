@@ -1883,15 +1883,20 @@ async fn libraries_config_rejects_an_unknown_key_with_exit_2() -> Result<()> {
     Ok(())
 }
 
+/// The `config.toml` row of a doctor report, or an empty string.
+fn config_toml_row(report: &str) -> &str {
+    report
+        .lines()
+        .find(|line| line.starts_with("config.toml"))
+        .unwrap_or_default()
+}
+
 /// A `config.toml` left over from a release that still honoured
-/// `embed_model` is refused by name, not ignored: silently dropping it
-/// would change which model a write path resolves without the operator
-/// seeing it. The refusal reaches the operator the same way any other
-/// unusable root config does — `doctor` renders it as a failing row
-/// carrying the way out — and following that way out makes the root
-/// usable again.
+/// `embed_model` still resolves: the key is ignored, and `doctor` says
+/// so in a warning row of its own that names the key and carries the
+/// way out. Following the way out clears the row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_root_config_with_a_retired_key_is_refused_until_the_line_goes() -> Result<()> {
+async fn a_root_config_with_a_retired_key_is_reported_until_the_line_goes() -> Result<()> {
     let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let root = tempfile::tempdir()?;
@@ -1923,32 +1928,27 @@ async fn a_root_config_with_a_retired_key_is_refused_until_the_line_goes() -> Re
         .await
     };
 
-    // The root does not resolve, so `doctor` reports it unhealthy and
-    // names both the key and the way out.
-    let refused = doctor().await?;
-    assert_eq!(
-        refused.status.code(),
-        Some(1),
-        "an unusable root config is a self-reported unhealthy doctor (exit 1)",
-    );
-    let report = String::from_utf8_lossy(&refused.stdout);
+    // The root resolves, and `doctor` names both the key and the way
+    // out in the row that is about the file.
+    let reported = doctor().await?;
+    let report = String::from_utf8_lossy(&reported.stdout);
+    let data_root = report
+        .lines()
+        .find(|line| line.starts_with("data root"))
+        .unwrap_or_default();
     assert!(
-        report.contains("data root") && report.contains("FAIL"),
-        "the data-root row must fail: {report}",
+        data_root.contains(" OK "),
+        "the data-root row must not fail: {report}",
     );
+    let row = config_toml_row(&report);
+    assert!(row.contains("WARN"), "the config.toml row warns: {report}");
+    assert!(row.contains("embed_model"), "the row names the key: {row}");
     assert!(
-        report.contains("embed_model"),
-        "the refusal must name the key: {report}",
-    );
-    assert!(
-        report.contains("--unset embed_model"),
-        "the refusal must carry the way out: {report}",
+        row.contains("--unset embed_model"),
+        "the row carries the way out: {row}",
     );
 
-    // The way out the refusal prescribes works while the stale line is
-    // still there -- `libraries config` resolves the root from the
-    // registry and edits the file as text, so the cure cannot be
-    // blocked by the disease.
+    // The way out works while the stale line is still there.
     let unset = tokio::process::Command::from(
         bookrack_cmd!(&sandbox)
             .registry(&registry_path)
@@ -1974,12 +1974,13 @@ async fn a_root_config_with_a_retired_key_is_refused_until_the_line_goes() -> Re
         "the rest of the file survives: {written}"
     );
 
-    // The root resolves again: the data-root row no longer fails.
+    // The warning goes with the line.
     let cured = doctor().await?;
     let report = String::from_utf8_lossy(&cured.stdout);
+    let row = config_toml_row(&report);
     assert!(
-        !report.contains("retired key"),
-        "the refusal must be gone once the line is: {report}",
+        row.contains(" OK ") && !row.contains("retired"),
+        "the config.toml row is clean once the line is gone: {report}",
     );
 
     // And setting it back is refused: the key no longer exists.
@@ -2004,13 +2005,11 @@ async fn a_root_config_with_a_retired_key_is_refused_until_the_line_goes() -> Re
     Ok(())
 }
 
-/// The two process-level keys are refused the same way: a `config.toml`
-/// carrying `mcp_addr` or `log_directive` fails every command that
-/// resolves the root, and the verbatim dump — the one read surface a
-/// retired line survives, because it never parses the document — says so
-/// instead of handing back a line that resolves to nothing.
+/// The two process-level keys are reported the same way: `doctor`
+/// names each with its real home, and the verbatim dump annotates each
+/// line that resolves to nothing instead of handing it back unmarked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_root_config_with_a_process_level_key_is_refused_and_annotated() -> Result<()> {
+async fn a_root_config_with_a_process_level_key_is_reported_and_annotated() -> Result<()> {
     let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let root = tempfile::tempdir()?;
@@ -2040,15 +2039,19 @@ async fn a_root_config_with_a_process_level_key_is_refused_and_annotated() -> Re
     .stderr(Stdio::piped())
     .output()
     .await?;
-    assert_eq!(
-        doctor.status.code(),
-        Some(1),
-        "an unusable root config is a self-reported unhealthy doctor (exit 1)",
-    );
     let report = String::from_utf8_lossy(&doctor.stdout);
+    let row = config_toml_row(&report);
     assert!(
-        report.contains("mcp_addr") && report.contains("BOOKRACK_MCP_ADDR"),
-        "the refusal must name the key and its real home: {report}",
+        row.contains("WARN") && row.contains("2 keys ignored"),
+        "the config.toml row counts both keys: {report}",
+    );
+    assert!(
+        row.contains("mcp_addr") && row.contains("BOOKRACK_MCP_ADDR"),
+        "the row names the key and its real home: {row}",
+    );
+    assert!(
+        row.contains("log_directive") && row.contains("BOOKRACK_LOG"),
+        "the row names the second key too: {row}",
     );
 
     // The verbatim dump still prints the file -- an operator has to see
@@ -2081,7 +2084,7 @@ async fn a_root_config_with_a_process_level_key_is_refused_and_annotated() -> Re
         "both retired lines are annotated: {notes}",
     );
 
-    // Both lines go in one invocation, and the root resolves again.
+    // Both lines go in one invocation, and the row clears.
     let unset = tokio::process::Command::from(
         bookrack_cmd!(&sandbox)
             .registry(&registry_path)
@@ -2128,9 +2131,11 @@ async fn a_root_config_with_a_process_level_key_is_refused_and_annotated() -> Re
     .stderr(Stdio::piped())
     .output()
     .await?;
+    let report = String::from_utf8_lossy(&cured.stdout);
+    let row = config_toml_row(&report);
     assert!(
-        !String::from_utf8_lossy(&cured.stdout).contains("retired key"),
-        "the refusal must be gone once the lines are",
+        row.contains(" OK ") && !row.contains("retired"),
+        "the config.toml row is clean once the lines are gone: {report}",
     );
     Ok(())
 }

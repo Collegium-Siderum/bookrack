@@ -541,10 +541,12 @@ mod tests {
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(text.contains("ollama_url = \"http://x:1\""));
         // The embed model is the index profile's fact, and `embed_model`
-        // is a retired key: writing one would produce a root the very
-        // next command refuses to load.
+        // is a retired key: writing one would produce a root every
+        // command reports a notice about.
         assert!(!text.contains("embed_model"), "{text}");
-        bookrack_config::load_root_config(tmp.path()).expect("a freshly written root loads");
+        let loaded =
+            bookrack_config::load_root_config(tmp.path()).expect("a freshly written root loads");
+        assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
     }
 
     #[test]
@@ -570,7 +572,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         write_root_config(tmp.path(), tricky, false).expect("write");
         let loaded = bookrack_config::load_root_config(tmp.path()).expect("load");
-        assert_eq!(loaded.ollama_url.as_deref(), Some(tricky));
+        assert_eq!(loaded.config.ollama_url.as_deref(), Some(tricky));
     }
 
     /// A wider sweep of single tricky characters: each one used to be
@@ -585,7 +587,7 @@ mod tests {
             write_root_config(tmp.path(), &url, true).expect("write");
             let parsed = bookrack_config::load_root_config(tmp.path())
                 .unwrap_or_else(|e| panic!("char {ch:?} broke parse: {e}"));
-            assert_eq!(parsed.ollama_url.as_deref(), Some(url.as_str()));
+            assert_eq!(parsed.config.ollama_url.as_deref(), Some(url.as_str()));
         }
     }
 

@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 use bookrack_catalog::Catalog;
 use bookrack_config::{
-    Config, ConfigError, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, LibraryEntry,
+    Config, ConfigError, ConfigNotice, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, LibraryEntry,
     LibraryIdentification, LibrarySelection, ManifestError, ProfileRefDrift, ProfileRefOrigin,
     ResolutionSource, ShadowedDefault, default_registry_path, effective_profile_reference,
     list_libraries, load_manifest, locate_pdfium, pdfium_library_filename, profile_reference_drift,
@@ -206,6 +206,7 @@ pub async fn gather_with(
     push_pdfium_row(&mut rows);
     push_fd_limit_row(&mut rows);
     if let Some(cfg) = &cfg {
+        push_root_config_row(&mut rows, cfg.config_notices());
         push_store_rows(&mut rows, cfg);
         push_open_runs_row(&mut rows, cfg);
         push_disk_free_row(&mut rows, cfg);
@@ -876,6 +877,38 @@ impl Door {
                 .map_err(flatten),
         }
     }
+}
+
+/// The `config.toml` row: the keys the library's file carries that
+/// this build does not resolve. Always present, so a clean file reads
+/// as checked.
+fn push_root_config_row(rows: &mut Vec<Row>, notices: &[ConfigNotice]) {
+    let status = if notices.is_empty() {
+        Status::Ok { note: None }
+    } else {
+        let each: Vec<String> = notices
+            .iter()
+            .map(|notice| match notice {
+                ConfigNotice::Retired { key, help, .. } => format!("`{key}` is retired: {help}"),
+                ConfigNotice::Unknown { key } => {
+                    format!("`{key}` is not a key this build reads")
+                }
+            })
+            .collect();
+        Status::Warn {
+            note: each.join("; "),
+        }
+    };
+    let value = match notices.len() {
+        0 => "every key resolves".to_string(),
+        1 => "1 key ignored".to_string(),
+        n => format!("{n} keys ignored"),
+    };
+    rows.push(Row {
+        label: "config.toml".to_string(),
+        value,
+        status,
+    });
 }
 
 /// What a missing store means for the library it belongs to.
@@ -2086,6 +2119,36 @@ mod tests {
         };
         assert!(note.contains(&command), "{note}");
         assert!(hint.contains(&command), "{hint}");
+    }
+
+    #[test]
+    fn the_config_toml_row_warns_and_names_every_ignored_key() {
+        let mut rows = Vec::new();
+        push_root_config_row(&mut rows, &[]);
+        assert_eq!(rows[0].label, "config.toml");
+        assert!(matches!(rows[0].status, Status::Ok { .. }), "{:?}", rows[0]);
+
+        let mut rows = Vec::new();
+        push_root_config_row(
+            &mut rows,
+            &[
+                ConfigNotice::Unknown {
+                    key: "colour".to_string(),
+                },
+                ConfigNotice::Retired {
+                    key: "log_directive".to_string(),
+                    help: "set BOOKRACK_LOG",
+                    value: "debug".to_string(),
+                },
+            ],
+        );
+        assert_eq!(rows[0].value, "2 keys ignored");
+        let Status::Warn { note } = &rows[0].status else {
+            panic!("ignored keys are a warning: {:?}", rows[0]);
+        };
+        assert!(note.contains("`colour`"), "{note}");
+        assert!(note.contains("`log_directive` is retired"), "{note}");
+        assert!(note.contains("set BOOKRACK_LOG"), "{note}");
     }
 
     fn row(label: &str, value: &str, status: Status) -> Row {

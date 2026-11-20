@@ -228,12 +228,17 @@ inside a library could never have been read. Their homes are
 `BOOKRACK_MCP_ADDR` (or `bookrack run --mcp-addr`) and `BOOKRACK_LOG` /
 `BOOKRACK_LOG_CONSOLE`; both variables are alive and unchanged.
 
-A file still carrying any of the four is refused by name — every command
-that resolves a data root fails until the line goes, rather than the
-field being silently ignored — and `libraries config <name> --unset
-<key>` deletes it. Printing the file with `libraries config <name>`
-still works and annotates each retired line. See [Declaring the embed
-model through an index
+A file still carrying any of the four still loads: the key resolves to
+nothing, and is reported instead of refused. So is a key this build does
+not know — one another build wrote, or a typo. The file belongs to the
+library, and every build that opens the library has to be able to read
+it. `bookrack doctor` shows the ignored keys in its `config.toml` row,
+`bookrack config effective` lists them under `config_notices`, and
+`libraries config <name>` annotates each as it prints the file.
+`libraries config <name> --unset <key>` deletes a retired key; an unknown one is edited out by
+hand, since the verb refuses to write or delete a key it does not know.
+A known key holding a value of the wrong type is still an error. See
+[Declaring the embed model through an index
 profile](UPGRADE.md#declaring-the-embed-model-through-an-index-profile)
 and [Retiring the process-level keys from
 `config.toml`](UPGRADE.md#retiring-the-process-level-keys-from-configtoml).

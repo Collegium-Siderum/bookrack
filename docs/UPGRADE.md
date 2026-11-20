@@ -453,11 +453,10 @@ What you will see:
   library's profile instead. If you relied on it to pin a model, follow
   the migration below before upgrading, or check afterwards that the
   model still resolves the way you expect.
-- **`embed_model` or `index_profile` in a `config.toml`** makes every
-  command fail with a message naming the retired key and the way out,
-  until the line is deleted. That is deliberate: silently ignoring the
-  field would change which model a library resolves without telling
-  anyone.
+- **`embed_model` or `index_profile` in a `config.toml`** resolves to
+  nothing. The library still opens; `bookrack doctor` warns in its
+  `config.toml` row, naming the retired key and the way out, until the
+  line is deleted.
 
 Migrating, per library. Nothing here rebuilds an index or needs a
 running daemon:
@@ -465,10 +464,8 @@ running daemon:
 1. **Delete the retired lines first.** `bookrack libraries config <name>
    --unset embed_model` (and `--unset index_profile`, if the root
    carries one) removes them while leaving the rest of the file, and its
-   comments, alone. Unsetting a retired key still works — it is the cure
-   the refusal prescribes, and it reads the registry directly rather
-   than resolving a data root, which is why it works while the line is
-   still there. Every step below resolves a root, so it has to go first.
+   comments, alone. A retired line no longer stops a command, but it
+   reads as a declaration that nothing honours, so it goes first.
    Unset `BOOKRACK_EMBED_MODEL` in any shell profile or CI environment
    that exports it; it does nothing now, but a variable that does
    nothing is a trap for the next reader.
@@ -510,10 +507,9 @@ it. A reference declared in the registry entry alone keeps resolving:
 resolution reads the manifest first and the entry second, taking the
 first that names one.
 
-A reference in the root's `config.toml` does not. That key is retired,
-and every command that resolves a data root refuses the file by name
-until the line goes. One offline verb — which reads the registry
-directly rather than resolving a root — clears it:
+A reference in the root's `config.toml` does not. That key is retired:
+it is ignored, and `bookrack doctor` names it in its `config.toml` row
+until the line goes. One offline verb clears it:
 
 ```
 bookrack libraries config <name> --unset index_profile
@@ -559,14 +555,12 @@ value written inside a library was accepted, stored, and never consulted.
 Writing one succeeded, restarting the daemon changed nothing, and nothing
 said so.
 
-They are now refused by name. **A library whose `config.toml` still
-carries either line fails on every command that resolves a data root**
-until the line goes. That is the point: a hard error naming the key beats
-the silent ignore it replaces, and the error carries both the real home
-and the command that deletes the line.
+They are now reported by name. A library whose `config.toml` still
+carries either line opens as before, and `bookrack doctor` warns in its
+`config.toml` row until the line goes; the warning carries both the real
+home and the command that deletes the line.
 
-One offline verb — it reads the registry directly rather than resolving a
-root, so the cure is not blocked by the disease — clears them:
+One offline verb clears them:
 
 ```
 bookrack libraries config <name> --unset mcp_addr --unset log_directive

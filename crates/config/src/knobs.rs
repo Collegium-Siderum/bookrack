@@ -748,6 +748,7 @@ mod tests {
             library: None,
             source,
             root_config: RootConfig::default(),
+            config_notices: Vec::new(),
             shadowed_default: None,
             library_identification: None,
             unusable_registry: None,
