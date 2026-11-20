@@ -34,8 +34,8 @@ use bookrack_config::{
     Config, EmbedConfig, LibraryEntry, LibraryIdentification, LibrarySelection, LogConfig,
     McpConfig, ResolutionSource, RootIdentity, SearchConfig,
 };
-use bookrack_core::Problem;
 use bookrack_core::queue::QueueState;
+use bookrack_core::{DaemonIdentity, Problem};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::WorkerGuard;
 use bookrack_obs::stream::LogStreamHandle;
@@ -147,6 +147,9 @@ pub struct DaemonRuntime {
     /// control-plane clients through `daemon.version` so they can
     /// derive an uptime.
     pub started_at_wall: DateTime<Utc>,
+    /// Which daemon this is: the six fields `daemon.version`, `status`,
+    /// and the MCP `session.info` tool report.
+    pub identity: DaemonIdentity,
     /// Address the MCP listener bound, or `disabled` when the session
     /// runs without one. Set from the socket's own `local_addr`, so a
     /// `port 0` configuration reports the port the kernel assigned.
@@ -1081,6 +1084,14 @@ impl DaemonRuntime {
         // every attached client.
         let mcp_tools = Arc::new(opts.mcp_tools);
         let plan_registry = Arc::new(crate::control::plan_registry::PlanRegistry::new());
+        let identity = DaemonIdentity {
+            instance_id: uuid::Uuid::now_v7().to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            pid: std::process::id(),
+            runtime_dir: runtime_dir.display().to_string(),
+            control_sock: Some(control_sock_guard.path().display().to_string()),
+            started_at: started_at_wall.to_rfc3339(),
+        };
         let method_ctx = MethodContext {
             registry: Arc::clone(&registry),
             info_context: info_context.clone(),
@@ -1089,7 +1100,7 @@ impl DaemonRuntime {
             event_stream: event_stream.clone(),
             write_guard: Arc::clone(&write_guard),
             shutdown_tx: shutdown_tx.clone(),
-            started_at_rfc3339: started_at_wall.to_rfc3339(),
+            identity: identity.clone(),
             selection: selection_for_doctor,
             library_name: library_name.clone(),
             auto_registered,
@@ -1148,6 +1159,7 @@ impl DaemonRuntime {
             lock_path,
             started_at,
             started_at_wall,
+            identity,
             mcp_label,
             mcp_listener,
             event_stream,

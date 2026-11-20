@@ -11,6 +11,7 @@
 mod bytes;
 mod error_chain;
 pub mod fixed;
+mod identity;
 mod item_kind;
 mod kinded_node_id;
 pub mod knob;
@@ -26,6 +27,7 @@ mod vector;
 
 pub use bytes::bytes_human;
 pub use error_chain::error_chain;
+pub use identity::DaemonIdentity;
 pub use item_kind::ItemKind;
 pub use kinded_node_id::KindedNodeId;
 pub use node_type::NodeType;

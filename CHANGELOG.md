@@ -10,6 +10,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **A daemon reports its identity on every surface that names it.**
+  `daemon.version`, `daemon.status`, the `daemon.version` event
+  snapshot, and the MCP `session.info` tool carry the same six fields
+  with the same values: `instance_id`, `version`, `pid`, `runtime_dir`,
+  `control_sock`, `started_at`. `instance_id` is a UUIDv7 drawn at
+  start, so a restart is told apart from the daemon it replaced even on
+  the same pid. Every field these surfaces already carried is
+  unchanged. `bookrack status` shows `daemon.instance_id` and
+  `daemon.runtime_dir`, and asks the daemon one question fewer to draw
+  its card.
 - **`bookrack ingest --rule <RULE>` ingests a book kept as plain-text
   files.** A rule file, written in TOML and kept beside the text, names
   the member files, says how they are cut into units — one per file, at

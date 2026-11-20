@@ -421,12 +421,22 @@ the exit-code bucket does not distinguish the two.
 
 ## Methods (Phase 1)
 
-- `daemon.version` — `{ version, started_at }`.
+- `daemon.version` — the daemon's identity, `{ instance_id, version,
+  pid, runtime_dir, control_sock, started_at }`. `instance_id` is a
+  UUIDv7 drawn at start, so two starts never share one, a restart on
+  the same pid and runtime directory included; `version` is the
+  workspace version the daemon was built from; `runtime_dir` and
+  `control_sock` are the absolute paths of the directory holding the
+  session lock and of the endpoint answering this call; `started_at`
+  is RFC 3339. The `daemon.version` snapshot of `events.subscribe` and
+  `events.snapshot` is this same object. A daemon older than 0.15
+  answers with `version` and `started_at` alone.
 - `daemon.shutdown` — fires the shared shutdown broadcast; the
   response is `null` and is written before the listener stops.
 - `daemon.status` — `{ state, queue_pending, queue_running,
   queue_worker_enabled, library, data_dir, served, unmounted,
-  auto_registered }`.
+  auto_registered }`, plus the six identity fields of `daemon.version`
+  at the top level, with the same values.
   The canonical name; `status` is a compatibility alias answered by
   the same handler.
   `state` is one of
@@ -1240,6 +1250,10 @@ Eleven of the tools write:
 `session.info` reports the same served and unmounted sets as
 `daemon.status`: `libraries` and `unmounted` are read from the registry
 in one instant, with each skipped library's root and three-part reason.
+It also carries the six identity fields of `daemon.version` —
+`instance_id`, `version`, `pid`, `runtime_dir`, `control_sock`,
+`started_at` — with the daemon's own values, so an agent client and a
+control-plane client can tell they are talking to the same daemon.
 
 Every write tool runs attributed to `Caller::mcp()`, so its audit rows
 carry `actor_kind=llm` / `actor_detail=mcp` regardless of the surface

@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 #[cfg(test)]
 use bookrack_config::Config;
 use bookrack_config::LibrarySelection;
+use bookrack_core::DaemonIdentity;
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::stream::LogStreamHandle;
@@ -129,7 +130,8 @@ pub struct MethodContext {
     pub event_stream: EventStreamHandle,
     pub write_guard: Arc<TokioMutex<()>>,
     pub shutdown_tx: broadcast::Sender<()>,
-    pub started_at_rfc3339: String,
+    /// Which daemon this is; reported by `daemon.version` and `status`.
+    pub identity: DaemonIdentity,
     pub selection: LibrarySelection,
     /// Name of the primary (bring-up-selected) library. A single-value
     /// snapshot consumed by the `status` card and the `library.changed`
@@ -859,7 +861,14 @@ pub(crate) fn test_method_context(
         event_stream: EventStreamHandle::new(8, state),
         write_guard: Arc::new(TokioMutex::new(())),
         shutdown_tx,
-        started_at_rfc3339: "2026-01-01T00:00:00Z".to_string(),
+        identity: DaemonIdentity {
+            instance_id: "018f0000-0000-7000-8000-000000000000".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            pid: std::process::id(),
+            runtime_dir: dir.display().to_string(),
+            control_sock: None,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+        },
         selection: LibrarySelection::default(),
         library_name: library_name.unwrap_or("default").to_string(),
         auto_registered: Vec::new(),

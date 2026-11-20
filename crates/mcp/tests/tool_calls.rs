@@ -154,6 +154,7 @@ impl Fixture {
                 serve_registry,
                 info_context,
                 Instant::now(),
+                test_identity(),
                 LogStreamHandle::default(),
                 serve_queue,
                 serve_tx,
@@ -1202,4 +1203,63 @@ async fn queue_status_reports_a_failure_as_recorded() {
 
     let _ = client.cancel().await;
     fx.stop().await;
+}
+
+/// `session.info` reports the daemon's six identity fields with the
+/// values the server was built over, beside the seven fields it has
+/// always carried.
+#[tokio::test]
+async fn session_info_reports_the_daemons_identity() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+    let body = body_json(
+        &client
+            .call_tool(call("session.info", serde_json::json!({})))
+            .await
+            .expect("session.info"),
+    );
+    let identity = serde_json::to_value(test_identity()).expect("serialize the identity");
+    let identity = identity.as_object().expect("an object");
+    assert_eq!(
+        identity.len(),
+        6,
+        "the identity gained or lost a field: {identity:?}"
+    );
+    for (key, value) in identity {
+        assert_eq!(
+            body.get(key),
+            Some(value),
+            "session.info disagrees with the daemon's identity on `{key}`: {body}"
+        );
+    }
+    for kept in [
+        "uptime_seconds",
+        "libraries",
+        "default_library",
+        "unmounted",
+        "mcp_addr",
+        "ollama_url",
+    ] {
+        assert!(
+            body.get(kept).is_some(),
+            "session.info lost `{kept}`: {body}"
+        );
+    }
+    assert_eq!(
+        body.as_object().map(|o| o.len()),
+        Some(12),
+        "session.info carries a field outside the contract: {body}"
+    );
+}
+
+/// A daemon identity for a server no daemon stands behind.
+fn test_identity() -> bookrack_core::DaemonIdentity {
+    bookrack_core::DaemonIdentity {
+        instance_id: "018f0000-0000-7000-8000-000000000000".to_string(),
+        version: "0.0.0-test".to_string(),
+        pid: 4242,
+        runtime_dir: "/run/bookrack-test".to_string(),
+        control_sock: None,
+        started_at: "2026-01-01T00:00:00+00:00".to_string(),
+    }
 }

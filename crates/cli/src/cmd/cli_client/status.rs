@@ -19,8 +19,9 @@
 //! - flock held but the lock cannot be read, or names a control socket
 //!   its daemon does not bind →
 //!   [`BookrackCliError::SessionLockUnreadable`], exit 1;
-//! - healthy → one connection, three sequential RPCs
-//!   (`daemon.version`, `status`, `library.info`), full card, exit 0.
+//! - healthy → one connection, two sequential RPCs (`status`,
+//!   `library.info`), full card, exit 0. A daemon whose `status`
+//!   carries no identity is asked `daemon.version` as well.
 //!
 //! Identity rows (`library.name`, `library.data_dir`) come from the
 //! `status` RPC, never from the lock file's `data_dir=` /
@@ -87,8 +88,14 @@ pub async fn run(runtime_dir: Option<PathBuf>) -> Result<()> {
 
 async fn full_card(runtime_dir: Option<&Path>, lock_path: &Path, info: &LockInfo) -> Result<()> {
     let client = helpers::connect(runtime_dir).await?;
-    let version = helpers::dispatch(&client, "daemon.version", Value::Null).await?;
     let status = helpers::dispatch(&client, "status", Value::Null).await?;
+    // `status` carries the daemon's identity; a daemon that predates
+    // that answers `daemon.version` with the two fields it has.
+    let identity = if status.get("version").is_some() {
+        status.clone()
+    } else {
+        helpers::dispatch(&client, "daemon.version", Value::Null).await?
+    };
     // A primary bring-up skipped is named by `status` but served by no
     // row: asking for it would be refused, so the card carries no
     // counts rather than no card.
@@ -96,7 +103,7 @@ async fn full_card(runtime_dir: Option<&Path>, lock_path: &Path, info: &LockInfo
         Some(params) => helpers::dispatch(&client, "library.info", params).await?,
         None => json!({}),
     };
-    let card = compose_card(lock_path, info, &version, &status, &library);
+    let card = compose_card(lock_path, info, &identity, &status, &library);
     let hint = card_hint(&card);
     emit_card(&card, &hint)
 }
@@ -151,22 +158,24 @@ fn primary_served_name(status: &Value) -> Option<&str> {
         .as_str()
 }
 
-/// Assemble the full card from the lock snapshot and the three RPC
+/// Assemble the full card from the lock snapshot and the daemon's RPC
 /// responses. Endpoint rows (`lock`, `pid`, `mcp`, `control`) come from
 /// the lock; everything else comes from the daemon.
 fn compose_card(
     lock_path: &Path,
     info: &LockInfo,
-    version: &Value,
+    identity: &Value,
     status: &Value,
     library: &Value,
 ) -> Value {
     let mut card = json!({
         "daemon": {
-            "version": version.get("version").cloned().unwrap_or(Value::Null),
+            "version": identity.get("version").cloned().unwrap_or(Value::Null),
+            "instance_id": identity.get("instance_id").cloned().unwrap_or(Value::Null),
+            "runtime_dir": identity.get("runtime_dir").cloned().unwrap_or(Value::Null),
             "lock": lock_path.display().to_string(),
             "pid": info.pid,
-            "uptime": version
+            "uptime": identity
                 .get("started_at")
                 .and_then(Value::as_str)
                 .map(uptime_from_iso),
@@ -543,7 +552,12 @@ mod tests {
 
     #[test]
     fn compose_card_sections_daemon_library_and_queue() {
-        let version = json!({ "version": "0.1.0", "started_at": "2026-01-01T00:00:00Z" });
+        let version = json!({
+            "version": "0.1.0",
+            "started_at": "2026-01-01T00:00:00Z",
+            "instance_id": "018f0000-0000-7000-8000-000000000000",
+            "runtime_dir": "/run",
+        });
         let status = json!({
             "state": "idle",
             "queue_pending": 1,
@@ -565,6 +579,11 @@ mod tests {
             &library,
         );
         assert_eq!(card["daemon"]["version"], "0.1.0");
+        assert_eq!(
+            card["daemon"]["instance_id"],
+            "018f0000-0000-7000-8000-000000000000"
+        );
+        assert_eq!(card["daemon"]["runtime_dir"], "/run");
         assert_eq!(card["daemon"]["pid"], 4242);
         // The lock path is on every card shape: the full card is the
         // only place a running daemon's lock file can be looked up.

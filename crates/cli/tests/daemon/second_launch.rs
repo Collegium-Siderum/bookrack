@@ -115,6 +115,8 @@ async fn status_against_a_live_daemon_prints_the_card() -> Result<()> {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(0), "stdout: {stdout}");
     for needle in [
+        "daemon.instance_id",
+        "daemon.runtime_dir",
         "daemon.state",
         "library.name",
         "library.data_dir",

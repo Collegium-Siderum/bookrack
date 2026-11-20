@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use axum::response::sse::{Event, KeepAlive, Sse};
 use bookrack_core::queue::{JobState, QueueState};
-use bookrack_core::{ItemKind, KindedNodeId, NodeId, Problem};
+use bookrack_core::{DaemonIdentity, ItemKind, KindedNodeId, NodeId, Problem};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::{LogEvent, LogStreamHandle};
 use bookrack_ops::dto::{
@@ -537,9 +537,20 @@ pub struct SessionInfoArgs {}
 /// Response shape returned by `session.info`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SessionInfoResult {
-    /// `bookrack` workspace version, taken from the binary's
-    /// `CARGO_PKG_VERSION` at build time.
+    /// A UUIDv7 the daemon drew when it started; distinct for every
+    /// start.
+    pub instance_id: String,
+    /// `bookrack` workspace version the daemon was built from.
     pub version: String,
+    /// The daemon's process id.
+    pub pid: u32,
+    /// The runtime directory holding the daemon's session lock.
+    pub runtime_dir: String,
+    /// The control-plane endpoint the daemon answers on, when it has
+    /// one.
+    pub control_sock: Option<String>,
+    /// When the daemon entered service, RFC 3339.
+    pub started_at: String,
     /// Wall-clock seconds since the daemon started.
     pub uptime_seconds: u64,
     /// Every library this session has mounted, one row each, sorted by
@@ -879,6 +890,7 @@ pub struct BookrackServer {
     registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     info_context: LibraryInfoContext,
     started_at: Instant,
+    identity: DaemonIdentity,
     log_stream: LogStreamHandle,
     queue_state: Arc<Mutex<QueueState>>,
     shutdown_tx: broadcast::Sender<()>,
@@ -893,7 +905,8 @@ impl BookrackServer {
     /// url and takes every library's name and root from the registry;
     /// `library.info` takes only the MCP address from it and builds the
     /// rest from the selected library's handle. `started_at` stamps the daemon's birth so
-    /// `session.info` can report uptime. `log_stream` is the shared
+    /// `session.info` can report uptime; `identity` is the daemon's
+    /// own, reported by the same tool. `log_stream` is the shared
     /// in-process log fan-out the `session.logs_tail` tool reads its
     /// ring-buffer snapshot from. `queue_state` is the shared snapshot
     /// of the ingest queue the daemon-REPL drives; a host that spawns
@@ -906,6 +919,7 @@ impl BookrackServer {
         registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
         info_context: LibraryInfoContext,
         started_at: Instant,
+        identity: DaemonIdentity,
         log_stream: LogStreamHandle,
         queue_state: Arc<Mutex<QueueState>>,
         shutdown_tx: broadcast::Sender<()>,
@@ -914,6 +928,7 @@ impl BookrackServer {
             registry,
             info_context,
             started_at,
+            identity,
             log_stream,
             queue_state,
             shutdown_tx,
@@ -1781,7 +1796,12 @@ impl BookrackServer {
             .map(|row| row.name.clone())
             .unwrap_or_default();
         let result = SessionInfoResult {
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            instance_id: self.identity.instance_id.clone(),
+            version: self.identity.version.clone(),
+            pid: self.identity.pid,
+            runtime_dir: self.identity.runtime_dir.clone(),
+            control_sock: self.identity.control_sock.clone(),
+            started_at: self.identity.started_at.clone(),
             uptime_seconds: self.started_at.elapsed().as_secs(),
             libraries,
             default_library,
@@ -2328,6 +2348,7 @@ pub async fn serve(
     registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     info_context: LibraryInfoContext,
     started_at: Instant,
+    identity: DaemonIdentity,
     log_stream: LogStreamHandle,
     queue_state: Arc<Mutex<QueueState>>,
     shutdown_tx: broadcast::Sender<()>,
@@ -2341,6 +2362,7 @@ pub async fn serve(
                 registry.clone(),
                 info_context.clone(),
                 started_at,
+                identity.clone(),
                 log_stream.clone(),
                 queue_state.clone(),
                 shutdown_tx.clone(),
@@ -2426,6 +2448,7 @@ pub fn spawn_listener(
     let registry = Arc::clone(&runtime.registry);
     let info_context = runtime.info_context.clone();
     let started_at = runtime.started_at;
+    let identity = runtime.identity.clone();
     let log_stream = runtime.log_stream.clone();
     let queue_state = Arc::clone(&runtime.queue_state);
     let shutdown_tx = runtime.shutdown_tx.clone();
@@ -2435,6 +2458,7 @@ pub fn spawn_listener(
             registry,
             info_context,
             started_at,
+            identity,
             log_stream,
             queue_state,
             shutdown_tx,

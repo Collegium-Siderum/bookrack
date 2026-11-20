@@ -102,6 +102,7 @@ impl Fixture {
                 serve_registry,
                 info_context,
                 Instant::now(),
+                test_identity(),
                 LogStreamHandle::default(),
                 serve_queue,
                 serve_tx,
@@ -152,7 +153,7 @@ impl Fixture {
             event_stream: EventStreamHandle::new(8, state),
             write_guard: Arc::new(tokio::sync::Mutex::new(())),
             shutdown_tx: self.shutdown_tx.clone(),
-            started_at_rfc3339: "2026-01-01T00:00:00Z".to_string(),
+            identity: test_identity(),
             selection: LibrarySelection::default(),
             library_name: "with".to_string(),
             auto_registered: Vec::new(),
@@ -670,4 +671,16 @@ async fn a_store_stamped_for_a_newer_reader_is_unusable_to_the_overlay_as_to_the
 
     client.cancel().await.expect("client shutdown");
     fx.stop().await;
+}
+
+/// A daemon identity for a server no daemon stands behind.
+fn test_identity() -> bookrack_core::DaemonIdentity {
+    bookrack_core::DaemonIdentity {
+        instance_id: "018f0000-0000-7000-8000-000000000000".to_string(),
+        version: "0.0.0-test".to_string(),
+        pid: 4242,
+        runtime_dir: "/run/bookrack-test".to_string(),
+        control_sock: None,
+        started_at: "2026-01-01T00:00:00+00:00".to_string(),
+    }
 }

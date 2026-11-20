@@ -21,9 +21,6 @@ use crate::control::events::{Event, JobOutcomeSummary, QueueTick};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::doctor;
 
-/// Workspace version reported to clients through `daemon.version`.
-const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
-
 /// Channel names emitted as part of the `events.subscribe` snapshot
 /// bundle. Their order is the order clients receive the notifications.
 pub const SNAPSHOT_CHANNELS: &[&str] = &[
@@ -63,11 +60,12 @@ pub fn snapshot_for(channel: &str, ctx: &MethodContext) -> Option<Value> {
     }
 }
 
+/// The daemon's identity: the six fields of [`DaemonIdentity`], under
+/// its field names.
+///
+/// [`DaemonIdentity`]: bookrack_core::DaemonIdentity
 pub fn daemon_version(ctx: &MethodContext) -> Value {
-    json!({
-        "version": DAEMON_VERSION,
-        "started_at": ctx.started_at_rfc3339,
-    })
+    json!(ctx.identity)
 }
 
 /// Adapter to the uniform `(params, ctx) -> Result<Value, RpcError>`
@@ -114,7 +112,7 @@ pub fn status(ctx: &MethodContext) -> Value {
         ),
         Err(_) => (Value::Null, Value::Null),
     };
-    json!({
+    let mut card = json!({
         "state": ctx.event_stream.current_state(),
         "queue_pending": queue_pending,
         "queue_running": queue_running,
@@ -142,7 +140,13 @@ pub fn status(ctx: &MethodContext) -> Value {
         // empty when nothing was. Not persisted: a restart on the same
         // root finds it registered and reports nothing here.
         "auto_registered": ctx.auto_registered,
-    })
+    });
+    // Which daemon is answering: the same six fields, with the same
+    // values, as `daemon.version`.
+    if let (Some(card), Value::Object(identity)) = (card.as_object_mut(), daemon_version(ctx)) {
+        card.extend(identity);
+    }
+    card
 }
 
 /// Every library this daemon has mounted, one row each, sorted by name,

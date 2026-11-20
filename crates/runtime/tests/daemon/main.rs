@@ -14,6 +14,7 @@ mod control_error_codes;
 mod control_minimal;
 mod control_writes;
 mod crash_replay;
+mod daemon_identity;
 mod daemon_lifecycle;
 mod doctor_gather;
 mod glean_submit;

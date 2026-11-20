@@ -79,6 +79,7 @@ async fn shutdown_broadcast_stops_serve_and_releases_the_listening_port() {
             registry,
             info_context,
             Instant::now(),
+            test_identity(),
             LogStreamHandle::default(),
             Arc::new(Mutex::new(QueueState::default())),
             serve_tx,
@@ -120,4 +121,16 @@ async fn shutdown_broadcast_stops_serve_and_releases_the_listening_port() {
         .await
         .expect("rebind on released port");
     drop(rebound);
+}
+
+/// A daemon identity for a server no daemon stands behind.
+fn test_identity() -> bookrack_core::DaemonIdentity {
+    bookrack_core::DaemonIdentity {
+        instance_id: "018f0000-0000-7000-8000-000000000000".to_string(),
+        version: "0.0.0-test".to_string(),
+        pid: 4242,
+        runtime_dir: "/run/bookrack-test".to_string(),
+        control_sock: None,
+        started_at: "2026-01-01T00:00:00+00:00".to_string(),
+    }
 }
