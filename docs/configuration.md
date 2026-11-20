@@ -260,8 +260,7 @@ and when it is read. Use it to find out what can be configured;
 Every environment variable bookrack reads is documented, with its
 default, in [`.env.example`](../.env.example): the data-root and
 registry selectors, the Ollama endpoint, the embed-batch and search
-knobs, the PDFium library directory, the log filters, and the
-per-query ANN overrides. Copy that file to `.env` and fill in what you
+knobs, the PDFium library directory, and the log filters. Copy that file to `.env` and fill in what you
 need. That file and `config knobs` cannot drift apart: a test compares
 the two in both directions, so a knob with no stanza and a stanza with
 no knob are both build failures.
@@ -272,28 +271,24 @@ These are the rows `config effective` marks `per_call`: read afresh on
 every operation rather than snapshotted, so two calls in one process
 can legitimately differ.
 
-`BOOKRACK_VECTORS_BYPASS_ANN`, `BOOKRACK_VECTORS_NPROBES`, and
-`BOOKRACK_VECTORS_REFINE_FACTOR` are read from the environment and have
-no `config.toml` counterpart, on purpose. They are per-query overrides
-for tuning retrieval breadth on a daemon that cannot take a per-call
-flag on its request surface — a debugging escape hatch, not a durable
-property of a library. Giving them a key would give a temporary knob a
-permanent home, and `libraries config set` would then warn that a
-library-level value is "overridden by the environment" for a value the
-library never had.
+The ANN search overrides are not among them. `bypass_index`, `nprobes`,
+and `refine_factor` travel on a search request and nowhere else; the
+three variables that once set them — `BOOKRACK_VECTORS_BYPASS_ANN`,
+`BOOKRACK_VECTORS_NPROBES`, `BOOKRACK_VECTORS_REFINE_FACTOR` — are
+retired. One that is still set is ignored, and `config effective` lists
+it under `retired_variables` rather than among the variables no knob
+reads; `bookrack doctor` names it in a `retired variables` row.
 
-Leaving the latter two unset is not the same as switching them off.
-`nprobes` and `refine_factor` fall through to the ANN settings the
-build stamped beside the vector store (`vectors_meta.json`), which is
-why `config knobs` reports no default for them and names that file as
-the rung under the variable. The values in it come from the index
-profile the library ran under when the index was built, so a profile
-edited afterwards does not move them until `index-profile apply`
-rebuilds; `index-profile current` shows both sides. With no ANN index
-present nothing decides them, and the search is exhaustive anyway.
+A request that carries neither `nprobes` nor `refine_factor` falls
+through to the ANN settings the build stamped beside the vector store
+(`vectors_meta.json`). The values in it come from the index profile the
+library ran under when the index was built, so a profile edited
+afterwards does not move them until `index-profile apply` rebuilds;
+`index-profile current` shows both sides. With no ANN index present
+nothing decides them, and the search is exhaustive anyway.
 
-The same reasoning retired `mcp_addr` and `log_directive` from
-`config.toml`: a knob read before any data root is known does not
+`mcp_addr` and `log_directive` left `config.toml` for a reason of the
+same kind: a knob read before any data root is known does not
 belong to a data root.
 
 ### The MCP address is taken before the daemon reports success
@@ -524,8 +519,8 @@ bookrack index-profile diff <a> <b>         # two profiles, field by field
 A profile's `[ann]` and `[reranker]` fields are not knobs and have no
 priority chain of their own: they are settings a build bakes into an
 index, and `current` is where they are read back. The only ones a
-running system can still move are `nprobes` and `refine_factor`, through
-the two per-query variables above.
+running system can still move are `nprobes` and `refine_factor`, on a
+search request.
 
 `validate` enforces the product-quantization constraints, checks the
 cross-encoder reranker contract and the embed section's structure, and

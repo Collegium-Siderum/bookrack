@@ -47,10 +47,6 @@ pub struct Contributor {
 /// by each surface.
 pub const KNOB_CONTRIBUTORS: &[Contributor] = &[
     Contributor {
-        report: bookrack_search::knob_origins,
-        catalog: bookrack_search::knob_catalog,
-    },
-    Contributor {
         report: bookrack_session::knob_origins,
         catalog: bookrack_session::knob_catalog,
     },

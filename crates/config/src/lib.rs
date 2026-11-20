@@ -1158,6 +1158,52 @@ const RETIRED_ROOT_CONFIG_KEYS: &[(&str, &str)] = &[
     ),
 ];
 
+/// An environment variable an earlier release read and this one does
+/// not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetiredVariable {
+    /// The variable's full name.
+    pub name: &'static str,
+    /// What replaces it, or that nothing does.
+    pub help: &'static str,
+}
+
+/// What every `BOOKRACK_VECTORS_*` entry says.
+const RETIRED_VECTORS_HELP: &str = "the ANN search overrides are per-request only -- pass them      on the search request (`library.search` and the MCP search tools take them), then unset      the variable";
+
+/// Every retired variable. One that is set is ignored, and reported by
+/// name rather than left among the variables no knob reads. No entry
+/// names a variable the knob inventory still carries.
+pub const RETIRED_ENV_VARS: &[RetiredVariable] = &[
+    RetiredVariable {
+        name: "BOOKRACK_VECTORS_BYPASS_ANN",
+        help: RETIRED_VECTORS_HELP,
+    },
+    RetiredVariable {
+        name: "BOOKRACK_VECTORS_NPROBES",
+        help: RETIRED_VECTORS_HELP,
+    },
+    RetiredVariable {
+        name: "BOOKRACK_VECTORS_REFINE_FACTOR",
+        help: RETIRED_VECTORS_HELP,
+    },
+];
+
+/// The retired variables among those `is_set` answers for, in table
+/// order.
+pub fn retired_seen(is_set: impl Fn(&str) -> bool) -> Vec<RetiredVariable> {
+    RETIRED_ENV_VARS
+        .iter()
+        .filter(|var| is_set(var.name))
+        .copied()
+        .collect()
+}
+
+/// [`retired_seen`] over the process environment.
+pub fn retired_seen_in_process() -> Vec<RetiredVariable> {
+    retired_seen(|name| std::env::var_os(name).is_some())
+}
+
 /// Something a `config.toml` carries that this build does not resolve.
 ///
 /// A notice never fails a load: the file is shared by every build that
@@ -6216,6 +6262,27 @@ mod tests {
         // a default at this layer.
         assert!(search.weak_threshold.is_none());
         assert!(cfg.reranker.is_none());
+    }
+
+    #[test]
+    fn every_retired_variable_is_absent_from_the_catalog_and_carries_help() {
+        let catalog = crate::knob_catalog();
+        for var in RETIRED_ENV_VARS {
+            assert!(var.name.starts_with(ENV_PREFIX), "{}", var.name);
+            assert!(!var.help.is_empty(), "{} has no help", var.name);
+            let still_read = catalog
+                .iter()
+                .any(|row| row.chain.iter().any(|site| site.site == var.name));
+            assert!(!still_read, "{} is retired and still a knob site", var.name);
+        }
+    }
+
+    #[test]
+    fn retired_seen_lists_only_the_variables_that_are_set() {
+        let seen = retired_seen(|name| name == "BOOKRACK_VECTORS_NPROBES");
+        let names: Vec<&str> = seen.iter().map(|var| var.name).collect();
+        assert_eq!(names, ["BOOKRACK_VECTORS_NPROBES"]);
+        assert!(retired_seen(|_| false).is_empty());
     }
 
     fn root_with_config(body: &str) -> tempfile::TempDir {

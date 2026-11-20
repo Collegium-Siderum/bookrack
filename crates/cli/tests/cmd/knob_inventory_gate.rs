@@ -225,8 +225,9 @@ fn every_knob_reporting_crate_is_named_by_a_collector() -> Result<()> {
         }
     }
 
+    // `config`, `session`, `extract`, and `cli`.
     assert!(
-        checked >= 5,
+        checked >= 4,
         "the scan found only {checked} knob-reporting crates, so it is no \
          longer looking where they live"
     );

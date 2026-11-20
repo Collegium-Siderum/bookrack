@@ -21,9 +21,7 @@ use bookrack_catalog::Catalog;
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::{Corpus, IndexStamps};
 use bookrack_embed::Embedder;
-use bookrack_search::{
-    cite, embed_query, env_overrides, recall_with, retrieve_with, retrieve_with_partition,
-};
+use bookrack_search::{cite, embed_query, recall_with, retrieve_with, retrieve_with_partition};
 use bookrack_text::{CHUNK_VERSION, NORMALIZE_VERSION};
 use bookrack_vectors::ChunkReader;
 pub use bookrack_vectors::SearchOptions;
@@ -233,7 +231,8 @@ impl<E: Embedder> Library<E> {
     }
 
     /// Search the library for passages matching `query`, nearest first.
-    /// `top_k` falls back to the configured default when `None`.
+    /// `top_k` falls back to the configured default when `None`. No
+    /// override is applied: the index's own persisted settings decide.
     ///
     /// The async retrieval runs first, touching only the store and
     /// embedder; the corpus and catalog handles are opened only
@@ -241,15 +240,15 @@ impl<E: Embedder> Library<E> {
     /// non-`Sync` handle is ever held across an await, so this future
     /// is `Send` and can serve requests on a multi-threaded runtime.
     pub async fn search(&self, query: &str, top_k: Option<usize>) -> Result<Vec<Citation>> {
-        self.search_with(query, env_overrides(), top_k).await
+        self.search_with(query, SearchOptions::default(), top_k)
+            .await
     }
 
     /// Variant of [`Self::search`] that layers per-call overrides on top
     /// of the persisted meta defaults — see
     /// [`bookrack_search::retrieve_with`] for the merge order. Callers
-    /// that already source overrides themselves (CLI flags, MCP tool
-    /// arguments) pass them through here instead of reading the
-    /// `BOOKRACK_VECTORS_*` env vars again.
+    /// source overrides from their request (control-plane parameters,
+    /// MCP tool arguments) and pass them through here.
     pub async fn search_with(
         &self,
         query: &str,
@@ -327,7 +326,7 @@ impl<E: Embedder> Library<E> {
         query: &str,
         top_k: Option<usize>,
     ) -> Result<Vec<Citation>> {
-        self.search_in_book_with(intake_id, query, env_overrides(), top_k)
+        self.search_in_book_with(intake_id, query, SearchOptions::default(), top_k)
             .await
     }
 
@@ -376,7 +375,7 @@ impl<E: Embedder> Library<E> {
         query: &str,
         top_k: Option<usize>,
     ) -> Result<Vec<Citation>> {
-        self.search_in_paper_with(intake_id, query, env_overrides(), top_k)
+        self.search_in_paper_with(intake_id, query, SearchOptions::default(), top_k)
             .await
     }
 

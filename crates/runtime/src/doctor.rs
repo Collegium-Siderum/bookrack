@@ -207,6 +207,7 @@ pub async fn gather_with(
     push_fd_limit_row(&mut rows);
     if let Some(cfg) = &cfg {
         push_root_config_row(&mut rows, cfg.config_notices());
+        push_retired_variables_row(&mut rows, &bookrack_config::retired_seen_in_process());
         push_store_rows(&mut rows, cfg);
         push_open_runs_row(&mut rows, cfg);
         push_disk_free_row(&mut rows, cfg);
@@ -908,6 +909,26 @@ fn push_root_config_row(rows: &mut Vec<Row>, notices: &[ConfigNotice]) {
         label: "config.toml".to_string(),
         value,
         status,
+    });
+}
+
+/// The retired variables this process carries, each ignored. The row
+/// appears only when there is one to name.
+fn push_retired_variables_row(rows: &mut Vec<Row>, seen: &[bookrack_config::RetiredVariable]) {
+    if seen.is_empty() {
+        return;
+    }
+    let names: Vec<&str> = seen.iter().map(|var| var.name).collect();
+    let each: Vec<String> = seen
+        .iter()
+        .map(|var| format!("{} is ignored: {}", var.name, var.help))
+        .collect();
+    rows.push(Row {
+        label: "retired variables".to_string(),
+        value: names.join(", "),
+        status: Status::Warn {
+            note: each.join("; "),
+        },
     });
 }
 
@@ -2149,6 +2170,22 @@ mod tests {
         assert!(note.contains("`colour`"), "{note}");
         assert!(note.contains("`log_directive` is retired"), "{note}");
         assert!(note.contains("set BOOKRACK_LOG"), "{note}");
+    }
+
+    #[test]
+    fn the_retired_variables_row_appears_only_when_one_is_set() {
+        let mut rows = Vec::new();
+        push_retired_variables_row(&mut rows, &[]);
+        assert!(rows.is_empty(), "{rows:?}");
+
+        let seen = bookrack_config::retired_seen(|name| name == "BOOKRACK_VECTORS_NPROBES");
+        push_retired_variables_row(&mut rows, &seen);
+        let [row] = rows.as_slice() else {
+            panic!("one row: {rows:?}");
+        };
+        assert_eq!(row.label, "retired variables");
+        assert_eq!(row.value, "BOOKRACK_VECTORS_NPROBES");
+        assert!(matches!(row.status, Status::Warn { .. }), "{row:?}");
     }
 
     fn row(label: &str, value: &str, status: Status) -> Row {

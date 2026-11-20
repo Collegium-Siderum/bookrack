@@ -328,6 +328,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Removed
 
+- **`BOOKRACK_VECTORS_BYPASS_ANN`, `BOOKRACK_VECTORS_NPROBES`, and
+  `BOOKRACK_VECTORS_REFINE_FACTOR` are retired.** The ANN search
+  overrides travel on a search request (`bypass_index`, `nprobes`,
+  `refine_factor`) and nowhere else; the searches a daemon serves
+  already took them from the request alone. The three `vectors.*` rows
+  are gone from `config knobs` and `config effective`. A retired
+  variable that is still set is ignored and reported by name:
+  `config effective` lists it in a new `retired_variables` section
+  (always present in `--json`, as `key`, `source`, `help`) instead of
+  among the variables no knob reads, `bookrack doctor` shows a
+  `retired variables` row, and the daemon logs a warning when it
+  starts.
 - **The `bookrack intake` command group; use `bookrack ingest --rule`
   and `bookrack find --awaiting-text`.** `intake ocr` and
   `intake list-ocr-pending` are no longer part of the grammar: typing

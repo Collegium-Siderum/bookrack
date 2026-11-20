@@ -247,6 +247,14 @@ impl DaemonRuntime {
         // from its own working directory.
         let runtime_dir = bookrack_session::normalize_runtime_dir(&runtime_dir)?;
 
+        for var in bookrack_config::retired_seen_in_process() {
+            tracing::warn!(
+                variable = var.name,
+                help = var.help,
+                "a retired environment variable is set and ignored"
+            );
+        }
+
         // 2. resolve the MCP listener address up front so the lock
         //    file records a complete session record from the instant
         //    it exists. This is the *intended* address; step 3c

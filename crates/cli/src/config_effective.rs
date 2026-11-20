@@ -93,6 +93,17 @@ enum UnclaimedSource {
     Dotenv,
 }
 
+/// One retired variable this process carries.
+///
+/// The fields are a contract like the row fields. The value is left out
+/// for the reason the unclaimed section leaves it out.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct RetiredOut {
+    key: &'static str,
+    source: UnclaimedSource,
+    help: &'static str,
+}
+
 /// The whole report.
 #[derive(Serialize)]
 struct ReportOut<'a> {
@@ -117,6 +128,10 @@ struct ReportOut<'a> {
     /// name. Always present, empty included, for the reason
     /// `dotenv_foreign` is.
     unclaimed_variables: Vec<UnclaimedOut>,
+    /// The variables an earlier release read that this process still
+    /// carries, in the order the retirement table lists them. Each is
+    /// ignored. Always present, empty included.
+    retired_variables: Vec<RetiredOut>,
     /// The keys the resolved library's `config.toml` carries that this
     /// build ignores, each as `kind`, `key`, and `help`. Always present,
     /// empty included — also when no root resolved.
@@ -144,6 +159,10 @@ pub fn run(selection: &LibrarySelection) -> Result<()> {
         &crate::config_knobs::claimed_variables(),
         bookrack_config::dotenv_load().map_or(&[], |load| load.supplied.as_slice()),
     );
+    let retired = retired_out(
+        bookrack_config::retired_seen_in_process(),
+        bookrack_config::dotenv_load().map_or(&[], |load| load.supplied.as_slice()),
+    );
     let dotenv_path = bookrack_config::dotenv_load().map(|load| load.supply().path);
     let notices = cfg.map_or(&[][..], Config::config_notices);
     let native = bookrack_config::native_dependency_origins(
@@ -153,27 +172,20 @@ pub fn run(selection: &LibrarySelection) -> Result<()> {
 
     let ctx = crate::render::ctx();
     if !ctx.is_quiet() {
+        let report = ReportOut {
+            problem: problem.clone(),
+            rows: out,
+            dotenv_path,
+            dotenv_foreign: foreign,
+            unclaimed_variables: unclaimed,
+            retired_variables: retired,
+            config_notices: notices,
+            native_dependencies: native,
+        };
         if ctx.is_json() {
-            let report = ReportOut {
-                problem: problem.clone(),
-                rows: out,
-                dotenv_path,
-                dotenv_foreign: foreign,
-                unclaimed_variables: unclaimed,
-                config_notices: notices,
-                native_dependencies: native,
-            };
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
-            print_human(
-                problem.as_ref(),
-                &out,
-                dotenv_path,
-                &foreign,
-                &unclaimed,
-                notices,
-                &native,
-            );
+            print_human(&report);
         }
     }
 
@@ -247,8 +259,8 @@ fn foreign_out() -> Vec<ForeignOut<'static>> {
         .unwrap_or_default()
 }
 
-/// The prefixed variables among `present` that no name in `claimed`
-/// accounts for, sorted by name, each credited to `.env` when the load
+/// The prefixed variables among `present` that neither a name in
+/// `claimed` nor the retirement table accounts for, sorted by name, each credited to `.env` when the load
 /// supplied it and to the environment otherwise.
 ///
 /// A name the file also wrote but the environment already carried is
@@ -261,6 +273,11 @@ fn unclaimed_out(
 ) -> Vec<UnclaimedOut> {
     let mut out: Vec<UnclaimedOut> = present
         .filter(|key| key.starts_with(bookrack_config::ENV_PREFIX) && !claimed.contains(key))
+        .filter(|key| {
+            !bookrack_config::RETIRED_ENV_VARS
+                .iter()
+                .any(|var| var.name == key)
+        })
         .map(|key| {
             let source = if supplied.contains(&key) {
                 UnclaimedSource::Dotenv
@@ -272,6 +289,25 @@ fn unclaimed_out(
         .collect();
     out.sort_by(|a, b| a.key.cmp(&b.key));
     out
+}
+
+/// The retired variables `seen`, each credited to `.env` when the load
+/// supplied it and to the environment otherwise.
+fn retired_out(
+    seen: Vec<bookrack_config::RetiredVariable>,
+    supplied: &[String],
+) -> Vec<RetiredOut> {
+    seen.into_iter()
+        .map(|var| RetiredOut {
+            key: var.name,
+            source: if supplied.iter().any(|name| name == var.name) {
+                UnclaimedSource::Dotenv
+            } else {
+                UnclaimedSource::Environment
+            },
+            help: var.help,
+        })
+        .collect()
 }
 
 /// The reranker model tag the native-dependency search looks for.
@@ -320,15 +356,18 @@ fn row_out<'a>(row: &'a KnobOrigin, root: &Option<String>) -> RowOut<'a> {
 /// one fact about the run, and repeating it per row would bury the
 /// rows that are unaffected by it.
 // Parallel implementation: problem-rendering.
-fn print_human(
-    problem: Option<&Problem>,
-    rows: &[RowOut<'_>],
-    dotenv_path: Option<&str>,
-    foreign: &[ForeignOut<'_>],
-    unclaimed: &[UnclaimedOut],
-    notices: &[bookrack_config::ConfigNotice],
-    native: &[bookrack_config::NativeDependencyOrigin],
-) {
+fn print_human(report: &ReportOut<'_>) {
+    let ReportOut {
+        problem,
+        rows,
+        dotenv_path,
+        dotenv_foreign: foreign,
+        unclaimed_variables: unclaimed,
+        retired_variables: retired,
+        config_notices: notices,
+        native_dependencies: native,
+    } = report;
+    let dotenv_path = *dotenv_path;
     if let Some(problem) = problem {
         println!("{}", problem.summary);
         if let Some(detail) = &problem.data.detail {
@@ -393,7 +432,7 @@ fn print_human(
         println!();
         println!("config.toml carries these keys, which this build ignores:");
         let mut table = RowTable::new(["key", "why", "what to do"]);
-        for notice in notices {
+        for notice in notices.iter() {
             table.push_row([notice.key(), notice.kind(), notice.help()]);
         }
         println!("{}", table.render());
@@ -444,6 +483,25 @@ fn print_human(
         }
         println!("{}", table.render());
         println!("`bookrack config knobs` lists the variables this build reads.");
+    }
+
+    // Apart from the unclaimed list: these names were knobs once, so
+    // the report can say what became of each.
+    if !retired.is_empty() {
+        println!();
+        println!("These variables are retired and ignored:");
+        let mut table = RowTable::new(["variable", "set by", "what to do"]);
+        for var in retired {
+            table.push_row([
+                var.key,
+                match var.source {
+                    UnclaimedSource::Dotenv => dotenv_path.unwrap_or(".env"),
+                    UnclaimedSource::Environment => "the environment",
+                },
+                var.help,
+            ]);
+        }
+        println!("{}", table.render());
     }
 
     println!();

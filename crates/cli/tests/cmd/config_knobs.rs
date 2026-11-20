@@ -195,46 +195,25 @@ async fn the_inventory_names_every_native_dependency_and_its_variable() -> Resul
     Ok(())
 }
 
-/// The two ANN knobs hold no default, and an inventory that stopped at
-/// the variable would say nothing is under it. Both renderings name the
-/// artifact that decides instead, and the human one names the command
-/// that opens it — this one reads no data root, so the file name alone
-/// would leave the reader to find the contents themselves.
+/// The ANN search overrides are request parameters, not knobs: no row
+/// of the inventory carries one, and no variable it names sets one.
 #[tokio::test]
-async fn the_ann_knobs_name_the_built_index_that_decides_them() -> Result<()> {
+async fn the_inventory_carries_no_vectors_knob() -> Result<()> {
     let sandbox = Sandbox::new();
-    let json = inventory(&run(&sandbox, &["--json"], &[]).await?)?;
-
-    for key in ["vectors.nprobes", "vectors.refine_factor"] {
-        let row = knob(&json, key).unwrap_or_else(|| panic!("no {key} entry"));
-        assert!(
-            row["default"].is_null(),
-            "{key} invents a default this build does not hold: {row}"
-        );
-        assert_eq!(
-            row["default_layer"], "manifest",
-            "{key} claims the variable is the last rung: {row}"
-        );
-        assert!(
-            row["settable_at"].as_array().is_some_and(|sites| {
-                sites.iter().any(|s| {
-                    s["layer"] == "manifest"
-                        && s["site"]
-                            .as_str()
-                            .is_some_and(|site| site.contains("vectors_meta.json"))
-                })
-            }),
-            "{key} does not name the built index that decides it: {row}"
-        );
+    let out = run(&sandbox, &["--json"], &[]).await?;
+    let json = inventory(&out)?;
+    for key in [
+        "vectors.bypass_ann",
+        "vectors.nprobes",
+        "vectors.refine_factor",
+    ] {
+        assert!(knob(&json, key).is_none(), "{key} is still a knob: {json}");
     }
-
-    let human = run(&sandbox, &[], &[]).await?;
-    let text = String::from_utf8_lossy(&human.stdout);
+    let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text.contains("index-profile current"),
-        "the inventory names an artifact and no way to read it:\n{text}"
+        !text.contains("BOOKRACK_VECTORS_"),
+        "the inventory still names a retired variable:\n{text}"
     );
-
     Ok(())
 }
 

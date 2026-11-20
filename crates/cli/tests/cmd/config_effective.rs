@@ -468,3 +468,81 @@ async fn quiet_prints_nothing_and_still_signals() -> Result<()> {
 
     Ok(())
 }
+
+/// A variable an earlier release read is neither a knob nor an unknown
+/// name: it is listed as retired, with what to do about it and where
+/// the process got it, and it resolves nothing.
+#[tokio::test]
+async fn a_retired_variable_is_reported_as_retired_and_not_as_unclaimed() -> Result<()> {
+    let sandbox = Sandbox::new();
+    let root = sandbox.data_root("main");
+    std::fs::write(
+        sandbox.cwd().join(".env"),
+        format!(
+            "BOOKRACK_DATA_DIR={}\nBOOKRACK_VECTORS_REFINE_FACTOR=3\n",
+            root.display()
+        ),
+    )?;
+    let env = [("BOOKRACK_VECTORS_NPROBES", "8")];
+
+    let out = run(&sandbox, &["--json"], &env).await?;
+    let report = report(&out)?;
+    assert_eq!(out.status.code(), Some(0), "{report}");
+    assert!(
+        row(&report, "vectors.nprobes").is_none(),
+        "a retired variable still resolves a row: {report}"
+    );
+    let retired = report["retired_variables"]
+        .as_array()
+        .expect("retired_variables is an array");
+    let seen: Vec<(&str, &str)> = retired
+        .iter()
+        .map(|var| {
+            (
+                var["key"].as_str().expect("key"),
+                var["source"].as_str().expect("source"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("BOOKRACK_VECTORS_NPROBES", "environment"),
+            ("BOOKRACK_VECTORS_REFINE_FACTOR", "dotenv"),
+        ],
+        "{report}"
+    );
+    for var in retired {
+        assert!(
+            !var["help"].as_str().expect("help").is_empty(),
+            "a retired variable says what to do: {var}"
+        );
+    }
+    assert_eq!(
+        report["unclaimed_variables"],
+        serde_json::json!([]),
+        "a retired variable is not also unclaimed: {report}"
+    );
+
+    let human = run(&sandbox, &[], &env).await?;
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        text.contains("BOOKRACK_VECTORS_NPROBES") && text.contains("retired"),
+        "the human report omits the retired variable:\n{text}"
+    );
+    Ok(())
+}
+
+/// A clean environment still carries the section, empty.
+#[tokio::test]
+async fn the_retired_section_is_present_when_empty() -> Result<()> {
+    let sandbox = Sandbox::new();
+    let out = run(&sandbox, &["--json"], &[]).await?;
+    let report = report(&out)?;
+    assert_eq!(
+        report["retired_variables"],
+        serde_json::json!([]),
+        "{report}"
+    );
+    Ok(())
+}
