@@ -19,17 +19,14 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use bookrack_config::{DATA_DIR_ENV, MCP_ADDR_ENV, NO_DOTENV_ENV, OLLAMA_URL_ENV, REGISTRY_ENV};
+use bookrack_session::{CONTROL_SOCKET_NAME, endpoint_matches, endpoint_path_matches};
 use serde_json::Value;
 use tokio::process::Command;
 
 use super::NO_STUB_URL;
 use super::argv::{self, Stripped};
-use crate::child::{DaemonProcess, Output, SpawnOpts, endpoint_matches, endpoint_path_matches};
+use crate::child::{DaemonProcess, Output, SpawnOpts};
 use crate::sandbox::Sandbox;
-
-/// File name of the control socket the daemon binds beside the session
-/// lock.
-const CONTROL_SOCKET_NAME: &str = "control.sock";
 
 /// Capacity of a Unix socket address's path, NUL included; a path this
 /// long or longer cannot be bound.

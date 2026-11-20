@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use bookrack_session::LockEndpointState;
 use eyre::{Context, eyre};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -103,6 +104,11 @@ impl ControlSocket {
 /// Read the session lock at `<runtime_dir>/bookrack.tty.lock` and
 /// return the address recorded by the daemon, or [`ControlError::NotRunning`]
 /// when no daemon is running.
+///
+/// The address is returned only when it is the socket a daemon owning
+/// that lock binds ([`bookrack_session::check_lock_endpoint`]). A lock
+/// whose socket is gone reads as no daemon; one naming any other
+/// endpoint is a [`ControlError::Protocol`], and nothing is dialed.
 pub fn discover(runtime_dir_override: Option<&Path>) -> Result<ControlSocket, ControlError> {
     let runtime_dir = bookrack_session::resolve_runtime_dir(runtime_dir_override)
         .map_err(|err| ControlError::Protocol(format!("resolve runtime dir: {err:#}")))?;
@@ -119,7 +125,14 @@ pub fn discover(runtime_dir_override: Option<&Path>) -> Result<ControlSocket, Co
         .find_map(|line| line.strip_prefix("control_sock="))
         .map(PathBuf::from)
         .ok_or(ControlError::NotRunning)?;
-    Ok(ControlSocket { path })
+    match bookrack_session::check_lock_endpoint(&lock_path, &path) {
+        LockEndpointState::Valid => Ok(ControlSocket { path }),
+        LockEndpointState::Missing => Err(ControlError::NotRunning),
+        LockEndpointState::Invalid(reason) => Err(ControlError::Protocol(format!(
+            "session lock at {} records an invalid control socket: {reason}",
+            lock_path.display()
+        ))),
+    }
 }
 
 /// Open a connection to the daemon and spawn the reader task that
@@ -194,6 +207,16 @@ struct Inner<W> {
     /// wait-forever behaviour so direct library consumers that opt in
     /// to bounded waits do so explicitly.
     default_timeout: std::sync::Mutex<Option<std::time::Duration>>,
+    /// Aborts the reader task, which owns the read half of the stream.
+    reader_abort: tokio::task::AbortHandle,
+}
+
+/// Dropping the last handle ends the reader task, so both halves of the
+/// stream are released and the peer reads EOF.
+impl<W> Drop for Inner<W> {
+    fn drop(&mut self) {
+        self.reader_abort.abort();
+    }
 }
 
 /// Multiplexed JSON-RPC client over one daemon connection.
@@ -219,17 +242,25 @@ impl ControlClient {
         let (event_tx, _event_rx) = broadcast::channel(DEFAULT_EVENT_CAPACITY);
         let closed = Arc::new(AtomicBool::new(false));
 
+        let weak_event_tx = event_tx.downgrade();
+        let reader_abort = tokio::spawn(reader_loop(
+            read_half,
+            pending.clone(),
+            event_tx,
+            closed.clone(),
+        ))
+        .abort_handle();
+
         let inner = Arc::new(Inner {
             writer: Mutex::new(Box::new(write_half) as Box<dyn AsyncWriter>),
-            pending: pending.clone(),
-            event_tx: event_tx.downgrade(),
+            pending,
+            event_tx: weak_event_tx,
             next_id: AtomicU64::new(1),
             subscribed: tokio::sync::Mutex::new(false),
-            closed: closed.clone(),
+            closed,
             default_timeout: std::sync::Mutex::new(None),
+            reader_abort,
         });
-
-        tokio::spawn(reader_loop(read_half, pending, event_tx, closed));
 
         Self { inner }
     }
@@ -608,13 +639,114 @@ mod tests {
         assert!(matches!(result, Err(ControlError::NotRunning)));
     }
 
+    /// The lock carries the `control_sock=` line alone: `discover` asks
+    /// for no other line.
+    #[cfg(unix)]
     #[test]
     fn discover_reads_control_sock_line() {
         let dir = tempfile::tempdir().unwrap();
-        let lock = dir.path().join(bookrack_session::tty_lock_name());
-        std::fs::write(&lock, "pid=42\nmcp=127.0.0.1:1\ncontrol_sock=/tmp/x.sock\n").unwrap();
+        let sock = dir.path().join("control.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        lock_naming(dir.path(), &sock);
         let socket = discover(Some(dir.path())).unwrap();
-        assert_eq!(socket.path(), Path::new("/tmp/x.sock"));
+        assert_eq!(socket.path(), sock);
+    }
+
+    /// A session lock in `dir` naming `sock`, with nothing else in it.
+    #[cfg(unix)]
+    fn lock_naming(dir: &Path, sock: &Path) {
+        let lock = dir.join(bookrack_session::tty_lock_name());
+        std::fs::write(&lock, format!("control_sock={}\n", sock.display())).unwrap();
+    }
+
+    /// Whether a connection is waiting on `listener`.
+    #[cfg(unix)]
+    fn was_dialed(listener: &std::os::unix::net::UnixListener) -> bool {
+        listener.set_nonblocking(true).unwrap();
+        listener.accept().is_ok()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_rejects_foreign_directory_control_sock() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let sock = elsewhere.path().join("control.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        lock_naming(dir.path(), &sock);
+        let result = discover(Some(dir.path()));
+        let Err(ControlError::Protocol(message)) = result else {
+            panic!("a socket outside the lock's directory must be refused: {result:?}");
+        };
+        assert!(message.contains("invalid control socket"), "{message}");
+        assert!(!was_dialed(&listener), "the foreign socket was dialed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_rejects_symlink_and_regular_file_control_sock() {
+        let elsewhere = tempfile::tempdir().unwrap();
+        let target = elsewhere.path().join("control.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&target).unwrap();
+
+        let linked = tempfile::tempdir().unwrap();
+        let link = linked.path().join("control.sock");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        lock_naming(linked.path(), &link);
+        let result = discover(Some(linked.path()));
+        assert!(
+            matches!(&result, Err(ControlError::Protocol(m)) if m.contains("symbolic link")),
+            "a symbolic link must be refused: {result:?}"
+        );
+        assert!(!was_dialed(&listener), "the link's target was dialed");
+
+        let plain = tempfile::tempdir().unwrap();
+        let file = plain.path().join("control.sock");
+        std::fs::write(&file, b"").unwrap();
+        lock_naming(plain.path(), &file);
+        let result = discover(Some(plain.path()));
+        assert!(
+            matches!(&result, Err(ControlError::Protocol(m)) if m.contains("not a socket")),
+            "a regular file must be refused: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_reports_not_running_when_control_sock_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        lock_naming(dir.path(), &dir.path().join("control.sock"));
+        let result = discover(Some(dir.path()));
+        assert!(
+            matches!(result, Err(ControlError::NotRunning)),
+            "a lock whose socket is gone names no running daemon: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_control_client_closes_server_connection() {
+        use std::io::Read;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("control.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let client = connect(&ControlSocket::from_path(&sock)).await.unwrap();
+        let (mut server_side, _) = listener.accept().unwrap();
+        server_side
+            .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+            .unwrap();
+        drop(client);
+        let read = tokio::task::spawn_blocking(move || {
+            let mut rest = Vec::new();
+            server_side.read_to_end(&mut rest).map(|_| rest)
+        })
+        .await
+        .unwrap();
+        match read {
+            Ok(rest) => assert!(rest.is_empty(), "unexpected bytes: {rest:?}"),
+            Err(err) => panic!("the server saw no EOF after the client was dropped: {err}"),
+        }
     }
 
     /// Drive a client over the local end of a `tokio::io::duplex`

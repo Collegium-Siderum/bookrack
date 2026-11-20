@@ -274,7 +274,7 @@ async fn an_unreadable_session_lock_refuses_the_offline_repair() {
 async fn a_stale_lock_refuses_the_offline_repair() {
     let sandbox = Sandbox::new();
     let root = root_with_a_dead_run(&sandbox);
-    let missing = sandbox.runtime_dir().join("no-such-control.sock");
+    let missing = sandbox.runtime_dir().join("control.sock");
     let _held = write_lock(&sandbox, true, Some(&missing.display().to_string()));
 
     let (code, text) = close_abandoned_runs(&sandbox, &root, &["--dry-run"]).await;

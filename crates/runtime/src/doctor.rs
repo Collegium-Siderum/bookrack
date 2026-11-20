@@ -634,13 +634,10 @@ fn push_reporter_row(rows: &mut Vec<Row>, reporter: &Reporter<'_>) {
 /// `None` when no lock is held. A lock left behind by a crashed daemon
 /// is not held, so it reports as no daemon — the same reading
 /// `bookrack status` takes.
-// Parallel implementation: session-lock-classify.
 fn session_lock_holder(runtime_dir: Option<&Path>) -> Result<Option<u32>, String> {
-    let dir = bookrack_session::resolve_runtime_dir(runtime_dir).map_err(|e| format!("{e}"))?;
-    let lock_path = dir.join(bookrack_session::tty_lock_name());
-    let info = bookrack_session::peek_lock(&lock_path).map_err(|e| format!("{e}"))?;
-    let held = bookrack_session::lock_is_held(&lock_path).map_err(|e| format!("{e}"))?;
-    Ok(info.filter(|_| held).map(|i| i.pid))
+    let (_, info) =
+        bookrack_session::inspect_session_lock(runtime_dir).map_err(|e| format!("{e}"))?;
+    Ok(info.map(|i| i.pid))
 }
 
 /// The daemon's own state directory and the queue snapshot inside it.

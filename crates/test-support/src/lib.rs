@@ -58,12 +58,12 @@ pub mod test_group;
 #[cfg(unix)]
 pub mod tool;
 
+#[cfg(unix)]
+pub use bookrack_session::{endpoint_matches, endpoint_path_matches};
 pub use child::{
     CaptureMode, DaemonProcess, Exit, Failure, FailureKind, Output, Ready, ReadyFailure, Sink,
     SpawnOpts, Stage, StreamStats, TEARDOWN_BUDGET,
 };
-#[cfg(unix)]
-pub use child::{endpoint_matches, endpoint_path_matches};
 pub use embed_stub::{EmbedFailure, EmbedStub, StubSpec, StubSpecError, Vectors};
 pub use process::{ProcessEnv, process_env};
 pub use sandbox::Sandbox;

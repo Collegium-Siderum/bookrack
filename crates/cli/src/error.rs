@@ -13,7 +13,7 @@
 //! unexpected error and renders through `color-eyre`'s full cause
 //! chain so the bug is debuggable.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bookrack_control_client::ControlError;
 use bookrack_core::{Explain, Problem, ProblemData};
@@ -302,6 +302,22 @@ pub enum BookrackCliError {
 }
 
 impl BookrackCliError {
+    /// A held session lock at `lock_path` whose `control_sock=` line
+    /// names an endpoint its daemon does not bind. `reason` is the
+    /// endpoint check's refusal; `tail`, when given, is a sentence
+    /// appended after it.
+    pub fn invalid_lock_endpoint(lock_path: &Path, reason: &str, tail: Option<&str>) -> Self {
+        let mut message = format!(
+            "the session lock at {} records an invalid control socket: {reason}",
+            lock_path.display()
+        );
+        if let Some(tail) = tail {
+            message.push_str(". ");
+            message.push_str(tail);
+        }
+        Self::SessionLockUnreadable { message }
+    }
+
     /// Exit code the binary returns for this failure. See
     /// `docs/control-plane.md` for the full exit-code table.
     pub fn exit_code(&self) -> u8 {

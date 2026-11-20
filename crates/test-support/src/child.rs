@@ -61,13 +61,13 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, Write};
-#[cfg(unix)]
-use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use bookrack_session::endpoint_matches;
 #[cfg(unix)]
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions};
 #[cfg(unix)]
@@ -120,11 +120,6 @@ const SINK_DEADLINE: Duration = Duration::from_secs(2);
 // setting: internal -- derived from the harness's settle and sink deadlines, not a value to tune
 pub const TEARDOWN_BUDGET: Duration =
     Duration::from_secs(2 * SETTLE_DEADLINE.as_secs() + SINK_DEADLINE.as_secs());
-
-/// File name of the control socket the daemon binds in its runtime
-/// directory, beside the session lock.
-#[cfg(unix)]
-const CONTROL_SOCKET_NAME: &str = "control.sock";
 
 /// The most the readiness probe buffers of one control-plane frame
 /// before it has seen the frame's newline.
@@ -1267,80 +1262,6 @@ impl DaemonProcess {
     }
 }
 
-/// Whether `control_sock`, as a session lock at `lock_path` names it,
-/// is the control socket a daemon owning that lock binds: all four of
-///
-/// 1. an absolute path whose components are the root and plain names,
-///    with no `..` (`Path::components` already folds an interior `.`
-///    away);
-/// 2. named `control.sock`;
-/// 3. in the lock's own directory, both sides canonicalized, so a
-///    directory reached through an alias still matches;
-/// 4. an existing socket that is not itself a symbolic link.
-///
-/// The daemon binds `control.sock` in its runtime directory, writes the
-/// lock in the same directory, and records the path as it was given, so
-/// a lock naming anything else routes a client somewhere this lock's
-/// daemon is not. The check and a later connection are not atomic: it
-/// rules out a link already in the tree, not one swapped in alongside.
-#[cfg(unix)]
-pub fn endpoint_matches(lock_path: &Path, control_sock: &Path) -> Result<(), String> {
-    use std::os::unix::fs::FileTypeExt;
-
-    endpoint_path_matches(lock_path, control_sock)?;
-    let shown = control_sock.display();
-    let meta = std::fs::symlink_metadata(control_sock)
-        .map_err(|err| format!("the control socket {shown} cannot be inspected: {err}"))?;
-    if meta.file_type().is_symlink() {
-        return Err(format!("the control socket {shown} is a symbolic link"));
-    }
-    if !meta.file_type().is_socket() {
-        return Err(format!("the control socket {shown} is not a socket"));
-    }
-    Ok(())
-}
-
-/// The first three of [`endpoint_matches`]'s four checks: the ones
-/// about the path alone, which hold for a socket that is no longer
-/// there. A lock a cleanly stopped daemon left behind still names its
-/// socket, and a client discovering through that lock would dial the
-/// path, so the path has to be the sandbox's own even when nothing
-/// listens on it.
-#[cfg(unix)]
-pub fn endpoint_path_matches(lock_path: &Path, control_sock: &Path) -> Result<(), String> {
-    let shown = control_sock.display();
-    if !control_sock.is_absolute()
-        || control_sock
-            .components()
-            .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
-    {
-        return Err(format!(
-            "the control socket {shown} is not an absolute path free of `.` and `..`"
-        ));
-    }
-    if control_sock.file_name() != Some(std::ffi::OsStr::new(CONTROL_SOCKET_NAME)) {
-        return Err(format!(
-            "the control socket {shown} is not named {CONTROL_SOCKET_NAME}"
-        ));
-    }
-    let lock_dir = match lock_path.parent() {
-        Some(dir) if !dir.as_os_str().is_empty() => dir,
-        _ => Path::new("."),
-    };
-    let sock_dir = control_sock.parent().unwrap_or(Path::new("/"));
-    let resolve = |dir: &Path| {
-        dir.canonicalize()
-            .map_err(|err| format!("resolving {} failed: {err}", dir.display()))
-    };
-    if resolve(sock_dir)? != resolve(lock_dir)? {
-        return Err(format!(
-            "the control socket {shown} is not in the directory of the session lock at {}",
-            lock_path.display(),
-        ));
-    }
-    Ok(())
-}
-
 /// Steps 4 and 5 of [`DaemonProcess::probe_ready`]: check the endpoint,
 /// then call it inside what is left of the budget.
 #[cfg(unix)]
@@ -1493,44 +1414,6 @@ mod tests {
                 Ok(Err(err)) => panic!("reading the probe failed: {err}"),
                 Err(_) => return false,
             }
-        }
-    }
-
-    /// The path checks hold for a socket that is not there, and the
-    /// full check adds exactly the look at the socket itself.
-    #[test]
-    fn the_path_checks_pass_a_socket_that_is_gone_and_the_full_check_does_not() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let lock = dir.path().join("bookrack.tty.lock");
-        std::fs::write(&lock, "pid=1\n").expect("write lock");
-        let sock = dir.path().join("control.sock");
-        endpoint_path_matches(&lock, &sock).expect("the path alone matches");
-        let err = endpoint_matches(&lock, &sock).expect_err("no socket is there");
-        assert!(
-            err.contains("cannot be inspected"),
-            "the full check must fail on the missing socket: {err}"
-        );
-    }
-
-    /// The path checks refuse the same shapes the full check refuses
-    /// before it looks at the socket.
-    #[test]
-    fn the_path_checks_refuse_a_foreign_shape() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let lock = dir.path().join("bookrack.tty.lock");
-        std::fs::write(&lock, "pid=1\n").expect("write lock");
-        let elsewhere = tempfile::tempdir().expect("tempdir");
-        for (sock, mentions) in [
-            (PathBuf::from("relative/control.sock"), "absolute"),
-            (dir.path().join("other.sock"), "named control.sock"),
-            (
-                elsewhere.path().join("control.sock"),
-                "directory of the session lock",
-            ),
-            (dir.path().join("../control.sock"), "absolute"),
-        ] {
-            let err = endpoint_path_matches(&lock, &sock).expect_err("refused");
-            assert!(err.contains(mentions), "{}: {err}", sock.display());
         }
     }
 

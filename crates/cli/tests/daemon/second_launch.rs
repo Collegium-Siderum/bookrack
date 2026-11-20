@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use bookrack_config::LibrarySelection;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
-use bookrack_test_support::{EmbedStub, ProcessEnv, bookrack_cmd, process_env};
+use bookrack_test_support::{DaemonProcess, EmbedStub, ProcessEnv, bookrack_cmd, process_env};
 use eyre::Result;
 
 fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
@@ -153,10 +153,7 @@ async fn stale_lock_exits_three() -> Result<()> {
     writeln!(
         writer,
         "control_sock={}",
-        runtime_root
-            .path()
-            .join("bookrack-no-such-sock-phase5.sock")
-            .display()
+        runtime_root.path().join("control.sock").display()
     )?;
     writer.flush()?;
 
@@ -222,5 +219,135 @@ async fn daemon_shutdown_rpc_exits_cleanly() -> Result<()> {
 
     runtime.run_until_shutdown(None, repl_handle).await?;
     driver.await??;
+    Ok(())
+}
+
+/// A held session lock whose `control_sock=` line names a live socket in
+/// another directory is refused by `run`, by `status`, and by a routed
+/// command, and nothing dials the socket.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn held_lock_pointing_to_foreign_socket_is_refused_without_dialing() -> Result<()> {
+    let sandbox = process_env(ProcessEnv::daemon());
+    use std::io::Write;
+
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let other_dir = tempfile::tempdir()?;
+    let foreign = other_dir.path().join("control.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&foreign)?;
+    listener.set_nonblocking(true)?;
+
+    let lock_path = runtime_root.path().join("bookrack.tty.lock");
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    holder.try_lock()?;
+    let mut writer = &holder;
+    writeln!(writer, "pid=999999")?;
+    writeln!(writer, "mcp=disabled")?;
+    writeln!(writer, "control_sock={}", foreign.display())?;
+    writer.flush()?;
+
+    for (args, code) in [
+        (&["run", "--no-mcp"][..], 1),
+        (&["status"][..], 1),
+        (&["queue", "list"][..], 2),
+    ] {
+        let out = tokio::process::Command::from(
+            bookrack_cmd!(sandbox)
+                .runtime_dir(runtime_root.path())
+                .data_dir(data_root.path())
+                .ollama_url(EmbedStub::shared().url())
+                .build(),
+        )
+        .args(args)
+        .output()
+        .await?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(code), "{args:?} stderr: {stderr}");
+        assert!(
+            stderr.contains("invalid control socket"),
+            "{args:?} names the refused endpoint: {stderr}"
+        );
+        assert!(
+            listener.accept().is_err(),
+            "{args:?} dialed the foreign socket"
+        );
+    }
+    drop(holder);
+    Ok(())
+}
+
+/// A daemon given a runtime directory that is relative, or that climbs
+/// through `..`, records an absolute control socket free of both, and a
+/// client pointed at the same directory from elsewhere reaches it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relative_runtime_dir_is_recorded_as_a_clean_absolute_path() -> Result<()> {
+    use std::path::Component;
+
+    let sandbox = process_env(ProcessEnv::daemon());
+    for given in ["./rt", "side/../rt"] {
+        let data_root = tempfile::tempdir()?;
+        let work = tempfile::tempdir()?;
+        std::fs::create_dir(work.path().join("side"))?;
+        let runtime_dir = work.path().join("rt");
+        let lock_path = runtime_dir.join("bookrack.tty.lock");
+
+        let mut daemon_cmd = tokio::process::Command::from(
+            bookrack_cmd!(sandbox)
+                .data_dir(data_root.path())
+                .ollama_url(EmbedStub::shared().url())
+                .build(),
+        );
+        daemon_cmd
+            .current_dir(work.path())
+            .args(["run", "--no-mcp", "--runtime-dir", given]);
+        let daemon = DaemonProcess::spawn(daemon_cmd)?
+            .wait_ready(&lock_path, Duration::from_secs(20))
+            .await
+            .unwrap_or_else(|failure| panic!("{given}: daemon did not become ready: {failure}"));
+
+        let info = bookrack_session::peek_lock(&lock_path)?.expect("the lock is written");
+        let recorded = info.control_sock.expect("the lock names a control socket");
+        assert!(
+            recorded.is_absolute()
+                && recorded
+                    .components()
+                    .all(|part| matches!(part, Component::RootDir | Component::Normal(_))),
+            "{given}: recorded {}",
+            recorded.display()
+        );
+        assert_eq!(
+            recorded.parent().expect("a parent").canonicalize()?,
+            runtime_dir.canonicalize()?,
+            "{given}: recorded {}",
+            recorded.display()
+        );
+
+        for args in [&["status"][..], &["quit"][..]] {
+            let out = tokio::process::Command::from(
+                bookrack_cmd!(sandbox)
+                    .runtime_dir(&runtime_dir)
+                    .data_dir(data_root.path())
+                    .build(),
+            )
+            .args(args)
+            .output()
+            .await?;
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "{given} {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        daemon
+            .exit_within(Duration::from_secs(10))
+            .await
+            .unwrap_or_else(|failure| panic!("{given}: daemon did not exit: {failure}"));
+    }
     Ok(())
 }

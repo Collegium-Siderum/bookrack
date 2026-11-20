@@ -318,7 +318,7 @@ async fn status_with_a_stale_lock_exits_three() -> Result<()> {
     writeln!(
         writer,
         "control_sock={}",
-        sandbox.runtime_dir().join("no-such-control.sock").display()
+        sandbox.runtime_dir().join("control.sock").display()
     )?;
     writer.flush()?;
 

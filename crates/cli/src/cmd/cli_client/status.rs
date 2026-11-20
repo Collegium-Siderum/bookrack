@@ -6,9 +6,9 @@
 //! [`helpers::connect`]: connect translates "no daemon" into
 //! [`BookrackCliError::DaemonNotRunning`] (exit 2), while for a status
 //! card "not running" is a legal answer, not an error. The module
-//! therefore probes the session lock first — `peek_lock`,
-//! `lock_is_held`, then `control::probe` — and only connects once the
-//! probe reports a healthy daemon:
+//! therefore classifies the session lock first
+//! (`control::classify_session_lock`) and only connects once the probe
+//! reports a healthy daemon:
 //!
 //! - no lock, or a leftover lock nobody holds → short card, exit 0;
 //! - flock held but the control plane does not answer the probe
@@ -16,6 +16,9 @@
 //! - flock held but the lock names no control socket (unprobeable) →
 //!   short card with the recorded pid, exit 0 — the probe made no
 //!   verdict that the daemon is dead, so neither does the card;
+//! - flock held but the lock cannot be read, or names a control socket
+//!   its daemon does not bind →
+//!   [`BookrackCliError::SessionLockUnreadable`], exit 1;
 //! - healthy → one connection, three sequential RPCs
 //!   (`daemon.version`, `status`, `library.info`), full card, exit 0.
 //!
@@ -30,7 +33,6 @@
 //! different library than `status` reports.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::render::ctx;
@@ -38,40 +40,48 @@ use bookrack_cli::render::human::bytes_human;
 use bookrack_cli::render::table::{KvTable, flatten_into_kv};
 use bookrack_cli::render::time::uptime_from_iso;
 use bookrack_runtime::control::methods::library_key_for;
-use bookrack_runtime::control::{HealthProbe, probe};
-use bookrack_session::{LockInfo, lock_is_held, peek_lock, resolve_runtime_dir, tty_lock_name};
+use bookrack_runtime::control::{HealthProbe, SessionLockState, classify_session_lock};
+use bookrack_session::LockInfo;
 use eyre::{Context, Result};
 use serde_json::{Value, json};
 
 use super::helpers;
 
-// Parallel implementation: session-lock-classify.
 pub async fn run(runtime_dir: Option<PathBuf>) -> Result<()> {
-    let resolved = resolve_runtime_dir(runtime_dir.as_deref())
+    let state = classify_session_lock(runtime_dir.as_deref())
+        .await
         .context("resolve BOOKRACK_RUNTIME_DIR for `bookrack status`")?;
-    let lock_path = resolved.join(tty_lock_name());
-
-    let Some(info) = peek_lock(&lock_path)? else {
-        return not_running_card(&lock_path);
-    };
-    if !lock_is_held(&lock_path)? {
+    match state {
         // A crashed daemon leaves lock content behind but the kernel
         // released the flock; the next `bookrack run` takes over
         // without operator cleanup, so this is "not running", not
         // "stale".
-        return not_running_card(&lock_path);
-    }
-    match probe(&info, Duration::from_secs(2)).await {
-        HealthProbe::Stale => Err(BookrackCliError::StaleSessionLock {
-            path: lock_path,
-            pid: info.pid,
+        SessionLockState::NotHeld { lock_path } => not_running_card(&lock_path),
+        SessionLockState::Unreadable { error, .. } => {
+            Err(BookrackCliError::SessionLockUnreadable {
+                message: format!("{error:#}"),
+            }
+            .into())
         }
-        .into()),
-        HealthProbe::Unprobeable => unprobeable_card(&lock_path, &info),
-        // A daemon that exits between the probe and the connect
-        // surfaces as `DaemonNotRunning` (exit 2); no second short
-        // card for that race.
-        HealthProbe::Healthy(..) => full_card(runtime_dir.as_deref(), &lock_path, &info).await,
+        SessionLockState::Held {
+            lock_path,
+            info,
+            probe,
+        } => match probe {
+            HealthProbe::Stale => Err(BookrackCliError::StaleSessionLock {
+                path: lock_path,
+                pid: info.pid,
+            }
+            .into()),
+            HealthProbe::Unprobeable => unprobeable_card(&lock_path, &info),
+            HealthProbe::InvalidEndpoint(reason) => {
+                Err(BookrackCliError::invalid_lock_endpoint(&lock_path, &reason, None).into())
+            }
+            // A daemon that exits between the probe and the connect
+            // surfaces as `DaemonNotRunning` (exit 2); no second short
+            // card for that race.
+            HealthProbe::Healthy(..) => full_card(runtime_dir.as_deref(), &lock_path, &info).await,
+        },
     }
 }
 

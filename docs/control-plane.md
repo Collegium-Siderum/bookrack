@@ -14,8 +14,16 @@ not read-only: see *MCP tool surface* below.
 - Unix-likes: Unix domain socket bound at `<runtime_dir>/control.sock`.
 - Windows: named pipe bound at `\\.\pipe\bookrack-control`.
 - Discovery: clients read `<runtime_dir>/bookrack.tty.lock` and pick
-  up the `control_sock=<path>` line. The lock file's `pid=` and
-  `mcp=` lines are unchanged. The lock records no library identity at
+  up the `control_sock=<path>` line. The daemon records the path as
+  absolute, with no `.` or `..`, whatever spelling its runtime
+  directory was given in. A client accepts the line only when it names
+  the socket a daemon owning that lock binds: `control.sock`, in the
+  lock's own directory, an existing socket and not a symbolic link.
+  Any other endpoint is refused without being dialed, the refusal
+  saying the lock `records an invalid control socket`; a path of the
+  right shape with nothing behind it reads as no daemon running. The
+  lock file's `pid=` and `mcp=` lines are unchanged. The lock records
+  no library identity at
   all: a daemon mounts every registered library it can bring up, so any
   single name or root it carried would name one mount among several.
   Which libraries a daemon serves — and which it skipped, with the

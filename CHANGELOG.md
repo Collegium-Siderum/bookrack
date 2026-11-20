@@ -203,6 +203,26 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A session lock is trusted only for its own control socket.** A
+  client used to dial whatever path the lock's `control_sock=` line
+  named. It now connects only to `control.sock` in the lock's own
+  directory, and only when that entry is a socket rather than a
+  symbolic link or a regular file. A lock naming anything else is
+  refused without dialing: routed commands exit 2, and `bookrack run`,
+  `bookrack status`, and the offline `doctor` repairs exit 1, each
+  saying the lock `records an invalid control socket` and why. A lock
+  left behind by a stopped daemon, whose socket is gone, reads as no
+  daemon running.
+- **The daemon records an absolute control socket.** Started with a
+  relative runtime directory, or one that climbs through `..`, the
+  daemon wrote the path as given into the session lock and the ready
+  line, so a client in another working directory dialed a different
+  path. The runtime directory is now made absolute before the lock is
+  written; a directory reached through a symbolic link keeps the
+  spelling it was given.
+- **Dropping a control-plane client closes its connection.** The
+  connection used to stay open until the daemon closed it or the
+  client process exited.
 - **`library.read_context` and `library.read_span` refuse
   `kind: "reference"`.** The two reads accepted the kind and then
   failed without answering: the control-plane connection closed with no

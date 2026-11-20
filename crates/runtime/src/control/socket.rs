@@ -114,7 +114,7 @@ pub enum BoundListener {
 const _: () = ();
 
 #[cfg(windows)]
-const WINDOWS_PIPE_NAME: &str = r"\\.\pipe\bookrack-control";
+use bookrack_session::WINDOWS_CONTROL_PIPE_NAME as WINDOWS_PIPE_NAME;
 
 /// Bind the control-plane listener.
 ///
@@ -128,7 +128,7 @@ const WINDOWS_PIPE_NAME: &str = r"\\.\pipe\bookrack-control";
 pub async fn bind(runtime_dir: &Path) -> Result<(BoundListener, ControlSocketPath)> {
     #[cfg(unix)]
     {
-        let path = runtime_dir.join("control.sock");
+        let path = runtime_dir.join(bookrack_session::CONTROL_SOCKET_NAME);
         if path.exists() {
             std::fs::remove_file(&path)
                 .with_context(|| format!("remove stale control socket at {}", path.display()))?;

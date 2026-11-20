@@ -238,6 +238,11 @@ impl DaemonRuntime {
                 runtime_dir.display()
             )
         })?;
+        // The lock and the control socket are recorded under an
+        // absolute path with no `.` or `..`, whatever spelling the
+        // directory was given in: a client reads the recorded socket
+        // from its own working directory.
+        let runtime_dir = bookrack_session::normalize_runtime_dir(&runtime_dir)?;
 
         // 2. resolve the MCP listener address up front so the lock
         //    file records a complete session record from the instant

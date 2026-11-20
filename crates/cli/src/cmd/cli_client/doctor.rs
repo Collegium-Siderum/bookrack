@@ -6,13 +6,11 @@
 //! still produce a useful health summary before any session exists.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::library_param;
 use bookrack_config::LibrarySelection;
-use bookrack_runtime::control::{HealthProbe, probe};
-use bookrack_session::{lock_is_held, peek_lock, resolve_runtime_dir, tty_lock_name};
+use bookrack_runtime::control::{HealthProbe, SessionLockState, classify_session_lock};
 use eyre::{Context, Result};
 use serde_json::Value;
 
@@ -26,55 +24,60 @@ use super::helpers;
 /// what a crashed daemon leaves behind, and what the next `bookrack run`
 /// takes over without cleanup. Every other reading is a refusal with
 /// the exit code the state already has elsewhere: a lock that cannot be
-/// read or parsed, or one that is held but names no control socket, is
-/// `SessionLockUnreadable` (exit 1); a held lock whose daemon does not
+/// read or parsed, or one that is held but names no control socket or
+/// one its daemon does not bind, is `SessionLockUnreadable` (exit 1); a held lock whose daemon does not
 /// answer is `StaleSessionLock` (exit 3); a daemon that answers is
 /// serving the library, and the refusal is operator input (exit 2).
-// Parallel implementation: session-lock-classify.
 async fn refuse_repair_under_a_daemon(runtime_dir: Option<&Path>, flag: &str) -> Result<()> {
-    let resolved =
-        resolve_runtime_dir(runtime_dir).context("resolve BOOKRACK_RUNTIME_DIR for the repair")?;
-    let lock_path = resolved.join(tty_lock_name());
-    let info = match peek_lock(&lock_path) {
-        Ok(Some(info)) => info,
-        Ok(None) => return Ok(()),
-        Err(err) => {
-            return Err(BookrackCliError::SessionLockUnreadable {
+    let state = classify_session_lock(runtime_dir)
+        .await
+        .context("resolve BOOKRACK_RUNTIME_DIR for the repair")?;
+    match state {
+        SessionLockState::NotHeld { .. } => Ok(()),
+        SessionLockState::Unreadable { lock_path, error } => {
+            Err(BookrackCliError::SessionLockUnreadable {
                 message: format!(
-                    "could not read the session lock at {}: {err:#}. {flag} is an offline \
+                    "could not read the session lock at {}: {error:#}. {flag} is an offline \
                      repair and is refused while it cannot be told whether a daemon is \
                      serving this library.",
                     lock_path.display()
                 ),
             }
-            .into());
+            .into())
         }
-    };
-    if !lock_is_held(&lock_path)? {
-        return Ok(());
-    }
-    match probe(&info, Duration::from_secs(2)).await {
-        HealthProbe::Healthy(..) => Err(BookrackCliError::LocalUserError {
-            message: format!(
-                "a daemon is serving this library; {flag} is an offline repair. Stop the \
-                 daemon with `bookrack quit` and re-run."
-            ),
-        }
-        .into()),
-        HealthProbe::Stale => Err(BookrackCliError::StaleSessionLock {
-            path: lock_path,
-            pid: info.pid,
-        }
-        .into()),
-        HealthProbe::Unprobeable => Err(BookrackCliError::SessionLockUnreadable {
-            message: format!(
-                "the session lock at {} is held but names no control socket, so it cannot be \
-                 told whether a daemon is serving this library. {flag} is an offline repair \
-                 and is refused.",
-                lock_path.display()
-            ),
-        }
-        .into()),
+        SessionLockState::Held {
+            lock_path,
+            info,
+            probe,
+        } => match probe {
+            HealthProbe::Healthy(..) => Err(BookrackCliError::LocalUserError {
+                message: format!(
+                    "a daemon is serving this library; {flag} is an offline repair. Stop the \
+                     daemon with `bookrack quit` and re-run."
+                ),
+            }
+            .into()),
+            HealthProbe::Stale => Err(BookrackCliError::StaleSessionLock {
+                path: lock_path,
+                pid: info.pid,
+            }
+            .into()),
+            HealthProbe::Unprobeable => Err(BookrackCliError::SessionLockUnreadable {
+                message: format!(
+                    "the session lock at {} is held but names no control socket, so it cannot \
+                     be told whether a daemon is serving this library. {flag} is an offline \
+                     repair and is refused.",
+                    lock_path.display()
+                ),
+            }
+            .into()),
+            HealthProbe::InvalidEndpoint(reason) => Err(BookrackCliError::invalid_lock_endpoint(
+                &lock_path,
+                &reason,
+                Some(&format!("{flag} is an offline repair and is refused.")),
+            )
+            .into()),
+        },
     }
 }
 

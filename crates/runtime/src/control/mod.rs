@@ -23,6 +23,9 @@ pub mod progress;
 pub mod socket;
 
 pub use events::{DaemonState, DaemonStateFlag, Event, EventStreamHandle};
-pub use probe::{HealthProbe, probe};
+pub use probe::{
+    HealthProbe, SESSION_PROBE_TIMEOUT, SessionLockState, classify_session_lock,
+    classify_session_lock_at, probe,
+};
 pub use progress::{EventProgressSink, NoopProgressSink, ProgressSink};
 pub use socket::{BoundListener, ControlSocketPath, bind, run_accept_loop};

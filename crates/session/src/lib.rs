@@ -27,7 +27,7 @@ use bookrack_core::knob::{
 };
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use eyre::{Context, Result, eyre};
 
@@ -38,6 +38,14 @@ pub const RUNTIME_DIR_ENV: &str = "BOOKRACK_RUNTIME_DIR";
 const TTY_LOCK_NAME_STR: &str = "bookrack.tty.lock";
 
 const ROOT_LOCK_NAME_STR: &str = ".bookrack.lock";
+
+/// File name of the control-plane socket a daemon binds in its runtime
+/// directory on Unix.
+pub const CONTROL_SOCKET_NAME: &str = "control.sock";
+
+/// Kernel-namespace name of the control-plane pipe a daemon binds on
+/// Windows.
+pub const WINDOWS_CONTROL_PIPE_NAME: &str = r"\\.\pipe\bookrack-control";
 
 /// File name of the session-scoped lock under the runtime directory.
 /// Exposed so siblings (the `cli` REPL, `bookrack rpc`) discover the
@@ -498,6 +506,186 @@ fn parse_lock(raw: &str, source: &Path) -> Result<LockInfo> {
         mcp,
         control_sock,
     })
+}
+
+/// The runtime directory a daemon binds in and records, derived from
+/// the directory it was given: absolute, with no `.` or `..` component.
+///
+/// A relative directory is joined to the working directory and loses
+/// its `.` components without touching the filesystem, so a directory
+/// reached through a symbolic link keeps the spelling it was given. Only
+/// a path that still climbs through `..` is canonicalized, which needs
+/// the directory to exist.
+pub fn normalize_runtime_dir(dir: &Path) -> Result<PathBuf> {
+    let absolute = std::path::absolute(dir)
+        .with_context(|| format!("resolve runtime directory {}", dir.display()))?;
+    if is_plain_absolute(&absolute) {
+        return Ok(absolute);
+    }
+    #[cfg(unix)]
+    {
+        std::fs::canonicalize(&absolute)
+            .with_context(|| format!("canonicalize runtime directory {}", absolute.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(absolute)
+    }
+}
+
+/// Whether `path` is absolute and made of the root and plain names
+/// only. `Path::components` already folds an interior `.` away.
+fn is_plain_absolute(path: &Path) -> bool {
+    path.is_absolute()
+        && path
+            .components()
+            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+}
+
+/// Whether `control_sock`, as a session lock at `lock_path` names it,
+/// is the control socket a daemon owning that lock binds: all four of
+///
+/// 1. an absolute path whose components are the root and plain names,
+///    with no `..` (`Path::components` already folds an interior `.`
+///    away);
+/// 2. named `control.sock`;
+/// 3. in the lock's own directory, both sides canonicalized, so a
+///    directory reached through an alias still matches;
+/// 4. an existing socket that is not itself a symbolic link.
+///
+/// The daemon binds `control.sock` in its runtime directory, writes the
+/// lock in the same directory, and records the path it bound, so a lock
+/// naming anything else routes a client somewhere this lock's daemon is
+/// not. The check and a later connection are not atomic: it rules out a
+/// link already in the tree, not one swapped in alongside.
+///
+/// On Windows the endpoint is a named pipe, which has no filesystem
+/// entry to inspect: the check is [`endpoint_path_matches`] alone.
+pub fn endpoint_matches(lock_path: &Path, control_sock: &Path) -> Result<(), String> {
+    endpoint_path_matches(lock_path, control_sock)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+
+        let shown = control_sock.display();
+        let meta = std::fs::symlink_metadata(control_sock)
+            .map_err(|err| format!("the control socket {shown} cannot be inspected: {err}"))?;
+        if meta.file_type().is_symlink() {
+            return Err(format!("the control socket {shown} is a symbolic link"));
+        }
+        if !meta.file_type().is_socket() {
+            return Err(format!("the control socket {shown} is not a socket"));
+        }
+    }
+    Ok(())
+}
+
+/// The first three of [`endpoint_matches`]'s four checks: the ones
+/// about the path alone, which hold for a socket that is no longer
+/// there. A lock a cleanly stopped daemon left behind still names its
+/// socket, and a client discovering through that lock would dial the
+/// path, so the path has to be the lock's own even when nothing listens
+/// on it.
+///
+/// On Windows the one acceptable path is [`WINDOWS_CONTROL_PIPE_NAME`].
+#[cfg(unix)]
+pub fn endpoint_path_matches(lock_path: &Path, control_sock: &Path) -> Result<(), String> {
+    let shown = control_sock.display();
+    if !is_plain_absolute(control_sock) {
+        return Err(format!(
+            "the control socket {shown} is not an absolute path free of `.` and `..`"
+        ));
+    }
+    if control_sock.file_name() != Some(std::ffi::OsStr::new(CONTROL_SOCKET_NAME)) {
+        return Err(format!(
+            "the control socket {shown} is not named {CONTROL_SOCKET_NAME}"
+        ));
+    }
+    let lock_dir = match lock_path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let sock_dir = control_sock.parent().unwrap_or(Path::new("/"));
+    let resolve = |dir: &Path| {
+        dir.canonicalize()
+            .map_err(|err| format!("resolving {} failed: {err}", dir.display()))
+    };
+    if resolve(sock_dir)? != resolve(lock_dir)? {
+        return Err(format!(
+            "the control socket {shown} is not in the directory of the session lock at {}",
+            lock_path.display(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn endpoint_path_matches(_lock_path: &Path, control_sock: &Path) -> Result<(), String> {
+    if control_sock == Path::new(WINDOWS_CONTROL_PIPE_NAME) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the control endpoint {} is not {WINDOWS_CONTROL_PIPE_NAME}",
+            control_sock.display()
+        ))
+    }
+}
+
+/// What a session lock's recorded control socket turns out to be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LockEndpointState {
+    /// The socket the lock's own daemon binds, present on disk.
+    Valid,
+    /// The path is the lock's own, and nothing is there: a daemon that
+    /// stopped cleanly, or one that has not bound yet.
+    Missing,
+    /// Not an endpoint a daemon owning this lock binds. Carries the
+    /// reason, which names the socket path.
+    Invalid(String),
+}
+
+/// Classify `control_sock` as the session lock at `lock_path` names it.
+///
+/// [`LockEndpointState::Invalid`] is every refusal of
+/// [`endpoint_matches`] but one: a path of the right shape with no
+/// entry behind it is [`LockEndpointState::Missing`]. On Windows a pipe
+/// has no entry to look for, so a matching name is always `Valid`.
+pub fn check_lock_endpoint(lock_path: &Path, control_sock: &Path) -> LockEndpointState {
+    if let Err(reason) = endpoint_path_matches(lock_path, control_sock) {
+        return LockEndpointState::Invalid(reason);
+    }
+    #[cfg(unix)]
+    if matches!(
+        std::fs::symlink_metadata(control_sock),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound
+    ) {
+        return LockEndpointState::Missing;
+    }
+    match endpoint_matches(lock_path, control_sock) {
+        Ok(()) => LockEndpointState::Valid,
+        Err(reason) => LockEndpointState::Invalid(reason),
+    }
+}
+
+/// The contents of the session lock at `lock_path` when a process holds
+/// it, and `None` when the file is absent or nobody holds it.
+///
+/// The file is read before its `flock` is probed: a lock path that
+/// cannot be read or parsed is an `Err` whatever the probe would say,
+/// so a path that is not a lock file never reads as "not held".
+pub fn inspect_session_lock_at(lock_path: &Path) -> Result<Option<LockInfo>> {
+    let Some(info) = peek_lock(lock_path)? else {
+        return Ok(None);
+    };
+    Ok(lock_is_held(lock_path)?.then_some(info))
+}
+
+/// [`inspect_session_lock_at`] on the session lock of the runtime
+/// directory `runtime_dir` resolves to, with the lock's path.
+pub fn inspect_session_lock(runtime_dir: Option<&Path>) -> Result<(PathBuf, Option<LockInfo>)> {
+    let lock_path = resolve_runtime_dir(runtime_dir)?.join(tty_lock_name());
+    let info = inspect_session_lock_at(&lock_path)?;
+    Ok((lock_path, info))
 }
 
 #[cfg(test)]
@@ -967,5 +1155,178 @@ mod tests {
         );
 
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    /// The path checks hold for a socket that is not there, and the
+    /// full check adds exactly the look at the socket itself.
+    #[cfg(unix)]
+    #[test]
+    fn the_path_checks_pass_a_socket_that_is_gone_and_the_full_check_does_not() {
+        let dir = tempdir().unwrap();
+        let lock = dir.path().join(tty_lock_name());
+        std::fs::write(&lock, "pid=1\n").unwrap();
+        let sock = dir.path().join(CONTROL_SOCKET_NAME);
+        endpoint_path_matches(&lock, &sock).expect("the path alone matches");
+        let err = endpoint_matches(&lock, &sock).expect_err("no socket is there");
+        assert!(
+            err.contains("cannot be inspected"),
+            "the full check must fail on the missing socket: {err}"
+        );
+        assert_eq!(
+            check_lock_endpoint(&lock, &sock),
+            LockEndpointState::Missing
+        );
+    }
+
+    /// The path checks refuse the same shapes the full check refuses
+    /// before it looks at the socket.
+    #[cfg(unix)]
+    #[test]
+    fn the_path_checks_refuse_a_foreign_shape() {
+        let dir = tempdir().unwrap();
+        let lock = dir.path().join(tty_lock_name());
+        std::fs::write(&lock, "pid=1\n").unwrap();
+        let elsewhere = tempdir().unwrap();
+        for (sock, mentions) in [
+            (PathBuf::from("relative/control.sock"), "absolute"),
+            (dir.path().join("other.sock"), "named control.sock"),
+            (
+                elsewhere.path().join("control.sock"),
+                "directory of the session lock",
+            ),
+            (dir.path().join("../control.sock"), "absolute"),
+        ] {
+            let err = endpoint_path_matches(&lock, &sock).expect_err("refused");
+            assert!(err.contains(mentions), "{}: {err}", sock.display());
+            assert_eq!(
+                check_lock_endpoint(&lock, &sock),
+                LockEndpointState::Invalid(err),
+                "{}",
+                sock.display()
+            );
+        }
+    }
+
+    /// Only a socket in the lock's own directory, under its own name
+    /// and not reached through a link, is a valid endpoint.
+    #[cfg(unix)]
+    #[test]
+    fn check_lock_endpoint_accepts_only_the_locks_own_socket() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempdir().unwrap();
+        let lock = dir.path().join(tty_lock_name());
+        let sock = dir.path().join(CONTROL_SOCKET_NAME);
+        let _listener = UnixListener::bind(&sock).unwrap();
+        assert_eq!(check_lock_endpoint(&lock, &sock), LockEndpointState::Valid);
+
+        let elsewhere = tempdir().unwrap();
+        let foreign = elsewhere.path().join(CONTROL_SOCKET_NAME);
+        let _foreign_listener = UnixListener::bind(&foreign).unwrap();
+
+        let other_name = dir.path().join("other.sock");
+        let _other_listener = UnixListener::bind(&other_name).unwrap();
+        assert!(matches!(
+            check_lock_endpoint(&lock, &other_name),
+            LockEndpointState::Invalid(why) if why.contains("named control.sock")
+        ));
+        assert!(matches!(
+            check_lock_endpoint(&lock, &foreign),
+            LockEndpointState::Invalid(why) if why.contains("directory of the session lock")
+        ));
+
+        let linked = tempdir().unwrap();
+        let linked_lock = linked.path().join(tty_lock_name());
+        let link = linked.path().join(CONTROL_SOCKET_NAME);
+        std::os::unix::fs::symlink(&foreign, &link).unwrap();
+        assert!(matches!(
+            check_lock_endpoint(&linked_lock, &link),
+            LockEndpointState::Invalid(why) if why.contains("symbolic link")
+        ));
+
+        let plain = tempdir().unwrap();
+        let plain_lock = plain.path().join(tty_lock_name());
+        let file = plain.path().join(CONTROL_SOCKET_NAME);
+        std::fs::write(&file, b"").unwrap();
+        assert!(matches!(
+            check_lock_endpoint(&plain_lock, &file),
+            LockEndpointState::Invalid(why) if why.contains("not a socket")
+        ));
+
+        let nested = tempdir().unwrap();
+        let nested_lock = nested.path().join(tty_lock_name());
+        let as_dir = nested.path().join(CONTROL_SOCKET_NAME);
+        std::fs::create_dir(&as_dir).unwrap();
+        assert!(matches!(
+            check_lock_endpoint(&nested_lock, &as_dir),
+            LockEndpointState::Invalid(why) if why.contains("not a socket")
+        ));
+    }
+
+    /// A lock path that is a directory opens and locks without error, so
+    /// the read has to come before the probe for it to be an `Err`.
+    #[cfg(unix)]
+    #[test]
+    fn inspecting_a_lock_path_that_is_a_directory_is_an_error() {
+        let dir = tempdir().unwrap();
+        let lock = dir.path().join(tty_lock_name());
+        std::fs::create_dir(&lock).unwrap();
+        assert!(inspect_session_lock_at(&lock).is_err());
+    }
+
+    #[test]
+    fn inspecting_a_session_lock_reports_it_only_while_held() {
+        let dir = tempdir().unwrap();
+        let lock = dir.path().join(tty_lock_name());
+        assert_eq!(inspect_session_lock_at(&lock).unwrap(), None);
+
+        let held = TtyLock::acquire(&lock, 4242, "disabled", None).unwrap();
+        let info = inspect_session_lock_at(&lock).unwrap().expect("held");
+        assert_eq!(info.pid, 4242);
+        let (path, by_dir) = inspect_session_lock(Some(dir.path())).unwrap();
+        assert_eq!(path, lock);
+        assert_eq!(by_dir, Some(info));
+
+        drop(held);
+        assert_eq!(
+            inspect_session_lock_at(&lock).unwrap(),
+            None,
+            "content left behind by a released lock is not a held lock"
+        );
+    }
+
+    #[test]
+    fn a_relative_runtime_dir_is_joined_to_the_working_directory() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            normalize_runtime_dir(Path::new("./run")).unwrap(),
+            cwd.join("run")
+        );
+        assert_eq!(normalize_runtime_dir(Path::new(".")).unwrap(), cwd);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_runtime_dir_climbing_through_dot_dot_is_resolved() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("side")).unwrap();
+        std::fs::create_dir(dir.path().join("run")).unwrap();
+        let normalized = normalize_runtime_dir(&dir.path().join("side/../run")).unwrap();
+        assert_eq!(normalized, dir.path().canonicalize().unwrap().join("run"));
+        assert!(is_plain_absolute(&normalized));
+    }
+
+    /// A clean absolute path is returned as given: a directory reached
+    /// through a symbolic link keeps the link's spelling.
+    #[cfg(unix)]
+    #[test]
+    fn a_clean_runtime_dir_keeps_its_spelling_through_a_link() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        assert_eq!(normalize_runtime_dir(&alias).unwrap(), alias);
+        assert_ne!(alias.canonicalize().unwrap(), alias);
     }
 }

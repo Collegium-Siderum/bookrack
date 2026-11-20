@@ -1088,19 +1088,6 @@ agreement = "divergent"
 exit = "one renderer prints every problem"
 
 [[parallel]]
-id = "session-lock-classify"
-summary = "deciding whether a daemon holds the session lock"
-sites = [
-  "crates/cli/src/run.rs::handle_lock_conflict",
-  "crates/cli/src/cmd/cli_client/status.rs::run",
-  "crates/cli/src/cmd/cli_client/doctor.rs::refuse_repair_under_a_daemon",
-  "crates/runtime/src/doctor.rs::session_lock_holder",
-]
-reason = "transitional"
-agreement = "unverified"
-exit = "session classifies the lock in one function"
-
-[[parallel]]
 id = "pid-alive"
 summary = "deciding whether a process is alive"
 sites = [

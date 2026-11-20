@@ -17,7 +17,6 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use bookrack_cli::error::BookrackCliError;
 use bookrack_config::{LibrarySelection, LogConfig};
@@ -25,7 +24,7 @@ use bookrack_core::Explain;
 use bookrack_ops::Caller;
 use bookrack_ops::registry::UnmountedLibrary;
 use bookrack_runtime::backend_probe::PreflightRefusal;
-use bookrack_runtime::control::HealthProbe;
+use bookrack_runtime::control::{HealthProbe, SessionLockState, classify_session_lock_at};
 use bookrack_runtime::mcp_endpoint::McpBindRefusal;
 use bookrack_runtime::queue::QueueLoadError;
 use bookrack_runtime::rerank_supervisor::RerankerModelRefusal;
@@ -178,36 +177,35 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
 /// healthy daemon prints the recorded pid and control socket and
 /// returns `Ok` so a second `bookrack run` invocation is a no-op. A
 /// held lock whose recorded daemon does not answer returns
-/// [`BookrackCliError::StaleSessionLock`] (exit 3); an unprobeable
-/// lock returns [`BookrackCliError::SessionLockUnreadable`] (exit 1).
-// Parallel implementation: session-lock-classify.
+/// [`BookrackCliError::StaleSessionLock`] (exit 3). Every other reading
+/// returns [`BookrackCliError::SessionLockUnreadable`] (exit 1): a lock
+/// that cannot be read, one that names no control socket or an invalid
+/// one, and one its holder released before it could be read again.
 async fn handle_lock_conflict(err: eyre::Report, lock_path: &Path) -> Result<()> {
-    let info = match bookrack_session::peek_lock(lock_path) {
-        Ok(Some(i)) => i,
-        Ok(None) | Err(_) => {
-            return Err(BookrackCliError::SessionLockUnreadable {
-                message: format!("{err:#}"),
-            }
-            .into());
-        }
+    let acquire_error = || BookrackCliError::SessionLockUnreadable {
+        message: format!("{err:#}"),
     };
-    let probe = bookrack_runtime::control::probe(&info, Duration::from_secs(2)).await;
-    match probe {
-        HealthProbe::Healthy(pid, sock) => {
-            println!(
-                "bookrack daemon already running: pid={pid} control_sock={}",
-                sock.display()
-            );
-            Ok(())
+    match classify_session_lock_at(lock_path).await {
+        SessionLockState::NotHeld { .. } | SessionLockState::Unreadable { .. } => {
+            Err(acquire_error().into())
         }
-        HealthProbe::Stale => Err(BookrackCliError::StaleSessionLock {
-            path: lock_path.to_path_buf(),
-            pid: info.pid,
-        }
-        .into()),
-        HealthProbe::Unprobeable => Err(BookrackCliError::SessionLockUnreadable {
-            message: format!("{err:#}"),
-        }
-        .into()),
+        SessionLockState::Held { info, probe, .. } => match probe {
+            HealthProbe::Healthy(pid, sock) => {
+                println!(
+                    "bookrack daemon already running: pid={pid} control_sock={}",
+                    sock.display()
+                );
+                Ok(())
+            }
+            HealthProbe::Stale => Err(BookrackCliError::StaleSessionLock {
+                path: lock_path.to_path_buf(),
+                pid: info.pid,
+            }
+            .into()),
+            HealthProbe::Unprobeable => Err(acquire_error().into()),
+            HealthProbe::InvalidEndpoint(reason) => {
+                Err(BookrackCliError::invalid_lock_endpoint(lock_path, &reason, None).into())
+            }
+        },
     }
 }
