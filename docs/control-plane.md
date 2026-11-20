@@ -417,7 +417,13 @@ the kind of failure without parsing stderr.
 the common case — `bookrack rpc call <typo>` — exits with the same code
 as any other CLI usage mistake. The same code is also raised when a
 CLI version targets a daemon that has not yet shipped the method;
-the exit-code bucket does not distinguish the two.
+the exit-code bucket does not distinguish the two. The hint does: when
+a routed command is refused with `-32601` or `-32602`, the CLI asks
+the daemon its version on the same connection, and if that differs
+from its own, appends a sentence naming both to the refusal's hint —
+after the daemon's hint when there is one, in the human rendering and
+under `--json` alike. No other failure asks, and the exit code is
+unchanged.
 
 ## Methods (Phase 1)
 
@@ -1434,12 +1440,17 @@ the tool description says which one it ran.
   across entry points. `LockInfo` and `peek_lock` move from the
   `bookrack-cli` `exec` module into `bookrack-session`; the new
   `bookrack_runtime::control::probe` resolves a recorded session
-  into one of `Healthy(pid, control_sock)` / `Stale` /
-  `Unprobeable` with a 2 s timeout on the connect and another on the
+  into one of `Healthy` (with the recorded pid and socket and the
+  version the daemon reported) / `Stale` / `Unprobeable` /
+  `InvalidEndpoint` with a 2 s timeout on the connect and another on the
   `daemon.version` call against the recorded socket. A second
   `bookrack run` invocation against a healthy
   lock prints `bookrack daemon already running: pid=… control_sock=…`
-  and exits zero; a held lock whose recorded daemon does not answer
+  and exits zero. When the running daemon reports another version than
+  the binary just started, a second stdout line follows, `note:
+  running daemon is version <running>; this CLI is version <cli> (run
+  'bookrack quit' before 'bookrack run' to switch)`, and the exit code
+  is still zero. A held lock whose recorded daemon does not answer
   exits with status 3, and the message points at the process holding
   it; an
   unprobeable lock (no `control_sock=` recorded) falls back to

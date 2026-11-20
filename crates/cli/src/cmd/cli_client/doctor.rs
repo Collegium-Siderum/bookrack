@@ -50,7 +50,7 @@ async fn refuse_repair_under_a_daemon(runtime_dir: Option<&Path>, flag: &str) ->
             info,
             probe,
         } => match probe {
-            HealthProbe::Healthy(..) => Err(BookrackCliError::LocalUserError {
+            HealthProbe::Healthy { .. } => Err(BookrackCliError::LocalUserError {
                 message: format!(
                     "a daemon is serving this library; {flag} is an offline repair. Stop the \
                      daemon with `bookrack quit` and re-run."
@@ -174,8 +174,7 @@ pub async fn run(
                 // puts that name on the call.
                 helpers::settle_library_selection(&client).await?;
                 let params = library_param::apply("doctor.gather", Value::Null)?;
-                let value = client
-                    .call_raw("doctor.gather", params)
+                let value = helpers::call_rpc(&client, "doctor.gather", params)
                     .await
                     .map_err(eyre::Report::from)?;
                 bookrack_runtime::doctor::render_value(&value, json)

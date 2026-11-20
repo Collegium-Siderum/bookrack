@@ -39,8 +39,13 @@ pub const SESSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 pub enum HealthProbe {
     /// Daemon answered `daemon.version` inside the timeout. Carries
     /// the recorded pid and the control-plane socket path so the
-    /// caller can surface either to the operator.
-    Healthy(u32, PathBuf),
+    /// caller can surface either to the operator, and the version the
+    /// daemon reported, when its answer carried one.
+    Healthy {
+        pid: u32,
+        sock_path: PathBuf,
+        version: Option<String>,
+    },
     /// The lock named a control-plane socket but no live daemon
     /// answered inside the timeout (the socket is not there, connect
     /// failed, or `daemon.version` did not return).
@@ -79,7 +84,17 @@ pub async fn probe(lock_path: &Path, info: &LockInfo, timeout: Duration) -> Heal
     };
     let call_fut = client.call_raw("daemon.version", Value::Null);
     match tokio::time::timeout(timeout, call_fut).await {
-        Ok(Ok(_)) => HealthProbe::Healthy(info.pid, sock_path),
+        // Only `version` is read: a daemon of another release answers
+        // with a different set of fields beside it, and is healthy all
+        // the same.
+        Ok(Ok(answer)) => HealthProbe::Healthy {
+            pid: info.pid,
+            sock_path,
+            version: answer
+                .get("version")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        },
         _ => HealthProbe::Stale,
     }
 }
@@ -129,4 +144,51 @@ pub async fn classify_session_lock_at(lock_path: &Path) -> SessionLockState {
 pub async fn classify_session_lock(runtime_dir: Option<&Path>) -> eyre::Result<SessionLockState> {
     let dir = bookrack_session::resolve_runtime_dir(runtime_dir)?;
     Ok(classify_session_lock_at(&dir.join(bookrack_session::tty_lock_name())).await)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    /// A daemon of an earlier release answers `daemon.version` with two
+    /// fields. It is healthy, and its version is carried.
+    #[tokio::test]
+    async fn a_two_field_answer_is_healthy_and_carries_its_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join(bookrack_session::tty_lock_name());
+        let sock_path = dir.path().join(bookrack_session::CONTROL_SOCKET_NAME);
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let frame = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": { "version": "0.14.0", "started_at": "2026-01-01T00:00:00Z" },
+                });
+                write
+                    .write_all(format!("{frame}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        let info = LockInfo {
+            pid: 4242,
+            mcp: "disabled".to_string(),
+            control_sock: Some(sock_path.clone()),
+        };
+        assert_eq!(
+            probe(&lock_path, &info, SESSION_PROBE_TIMEOUT).await,
+            HealthProbe::Healthy {
+                pid: 4242,
+                sock_path,
+                version: Some("0.14.0".to_string()),
+            }
+        );
+    }
 }

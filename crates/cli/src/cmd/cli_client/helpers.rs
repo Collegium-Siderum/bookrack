@@ -14,7 +14,9 @@ use bookrack_cli::render::human::short_id;
 use bookrack_cli::render::job_report::JobOutcomeReport;
 use bookrack_cli::render::{OutputMode, ctx};
 use bookrack_control_client::{ControlClient, ControlError};
+use bookrack_core::ProblemData;
 use bookrack_runtime::cmd::libraries::DaemonLibraries;
+use bookrack_runtime::control::jsonrpc::{INVALID_PARAMS, METHOD_NOT_FOUND};
 use eyre::{Context, Result};
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -142,8 +144,7 @@ pub(super) async fn settle_library_selection(client: &ControlClient) -> Result<(
         Routing::Unselected => None,
         Routing::Named(name) => Some(Selected::named(name)),
         Routing::UnclaimedRoot(asked) => {
-            let status = client
-                .call_raw("status", Value::Null)
+            let status = call_rpc(client, "status", Value::Null)
                 .await
                 .context("status rpc")?;
             route_unclaimed_root(&status, &asked)?
@@ -225,8 +226,7 @@ fn same_root(a: &Path, b: &Path) -> bool {
 /// its own target on every action it sends afterwards — so a selection
 /// has nowhere to go here.
 pub(super) async fn daemon_status(client: &ControlClient) -> Result<Value> {
-    client
-        .call_raw("status", Value::Null)
+    call_rpc(client, "status", Value::Null)
         .await
         .context("status rpc")
 }
@@ -267,10 +267,83 @@ pub(super) async fn answering_library(client: &ControlClient) -> Option<String> 
     card_library(None, status.as_ref())
 }
 
+/// Send one request and return its result, the operator's call as
+/// opposed to a probe the command makes on its own behalf.
+///
+/// A refusal as an unknown method or as bad parameters is what a client
+/// and a daemon of different versions produce when one names something
+/// the other does not have. On either code the daemon is asked its
+/// version, on this same connection and inside
+/// [`SERVED_PROBE_WINDOW`]; when it differs from this binary's, the
+/// refusal's hint gains a sentence saying so. Nothing else about the
+/// error changes, and no other failure asks.
+pub(super) async fn call_rpc(
+    client: &ControlClient,
+    method: &str,
+    params: Value,
+) -> Result<Value, ControlError> {
+    let (code, message, data) = match client.call_raw(method, params).await {
+        Err(ControlError::Rpc {
+            code,
+            message,
+            data,
+        }) if matches!(code, METHOD_NOT_FOUND | INVALID_PARAMS) && method != "daemon.version" => {
+            (code, message, data)
+        }
+        other => return other,
+    };
+    let running = client
+        .call_raw_with_timeout("daemon.version", Value::Null, Some(SERVED_PROBE_WINDOW))
+        .await
+        .ok()
+        .and_then(|answer| answer.get("version")?.as_str().map(str::to_owned));
+    let data = match running {
+        Some(running) => attach_version_skew_hint(data, &running, env!("CARGO_PKG_VERSION")),
+        None => data,
+    };
+    Err(ControlError::Rpc {
+        code,
+        message,
+        data,
+    })
+}
+
+/// `data` with a sentence naming the two versions appended to its hint,
+/// or `data` unchanged when the versions are the same.
+///
+/// A hint the daemon sent is kept and the sentence follows it; every
+/// other key of `data` is left as it was. `data` that is absent, or is
+/// not an object, becomes the three-part shape carrying the sentence
+/// alone.
+fn attach_version_skew_hint(data: Option<Value>, running: &str, this: &str) -> Option<Value> {
+    if running == this {
+        return data;
+    }
+    let note = format!(
+        "The running daemon is version {running} while this CLI is version {this}; restart \
+         the daemon with 'bookrack quit' and 'bookrack run' if they should match."
+    );
+    match data {
+        Some(Value::Object(mut fields)) => {
+            let hint = match fields.get("hint").and_then(Value::as_str) {
+                Some(hint) if !hint.trim().is_empty() => format!("{hint} {note}"),
+                _ => note,
+            };
+            fields.insert("hint".to_string(), Value::String(hint));
+            Some(Value::Object(fields))
+        }
+        _ => serde_json::to_value(ProblemData {
+            detail: None,
+            hint: Some(note),
+            retryable: false,
+        })
+        .ok(),
+    }
+}
+
 pub async fn dispatch(client: &ControlClient, method: &str, params: Value) -> Result<Value> {
     let params = library_param::apply(method, params)?;
-    client
-        .call_raw(method, params)
+    call_rpc(client, method, params)
         .await
         .with_context(|| format!("{method} rpc"))
 }
@@ -316,8 +389,7 @@ pub async fn call_with_progress_value(
     let method_owned = method.to_string();
     let client_for_call = Arc::clone(&client);
     let call_future = async move {
-        client_for_call
-            .call_raw(&method_owned, params)
+        call_rpc(&client_for_call, &method_owned, params)
             .await
             .map_err(eyre::Report::from)
     };
@@ -761,6 +833,40 @@ mod tests {
         assert_eq!(route_unclaimed_root(&json!({}), asked).unwrap(), None);
     }
 
+    #[test]
+    fn the_version_note_follows_a_hint_the_daemon_sent_and_keeps_other_keys() {
+        let data = json!({ "detail": "d", "hint": "Do this.", "retryable": true, "plan": 7 });
+        let out = attach_version_skew_hint(Some(data), "0.14.0", "0.15.0").unwrap();
+        let hint = out["hint"].as_str().unwrap();
+        assert!(hint.starts_with("Do this. The running daemon is version 0.14.0"));
+        assert!(hint.contains("this CLI is version 0.15.0"));
+        assert_eq!(out["detail"], "d");
+        assert_eq!(out["retryable"], true);
+        assert_eq!(out["plan"], 7);
+    }
+
+    #[test]
+    fn the_version_note_stands_alone_without_a_hint_to_follow() {
+        for data in [None, Some(json!({ "hint": "  " })), Some(json!("text"))] {
+            let out = attach_version_skew_hint(data, "0.14.0", "0.15.0").unwrap();
+            let hint = out["hint"].as_str().unwrap();
+            assert!(
+                hint.starts_with("The running daemon is version 0.14.0"),
+                "{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_same_version_leaves_the_data_untouched() {
+        let data = Some(json!({ "hint": "Do this." }));
+        assert_eq!(
+            attach_version_skew_hint(data.clone(), "0.15.0", "0.15.0"),
+            data
+        );
+        assert_eq!(attach_version_skew_hint(None, "0.15.0", "0.15.0"), None);
+    }
+
     /// Every method name this module tree sends must be one the
     /// daemon answers.
     ///
@@ -786,9 +892,9 @@ mod tests {
         }
     }
 
-    /// The selection gate lives on the path to `call_raw`, so a call
-    /// site that reaches for `call_raw` on its own is a call that can
-    /// skip it.
+    /// The selection gate lives on the path to `call_raw` and to
+    /// `call_rpc`, which wraps it, so a call site that reaches for
+    /// either on its own is a call that can skip it.
     ///
     /// Two files legitimately do: `doctor` sits between two
     /// no-daemon fallbacks and `quit` swallows the shutdown race.
@@ -799,16 +905,17 @@ mod tests {
     fn call_raw_stays_behind_the_selection_gate() {
         let mut offenders: Vec<String> = Vec::new();
         for (name, source) in client_sources() {
-            if !source.contains("call_raw(") || name == "helpers.rs" {
+            let bare = source.contains("call_raw(") || source.contains("call_rpc(");
+            if !bare || name == "helpers.rs" {
                 continue;
             }
             if !matches!(name.as_str(), "doctor.rs" | "quit.rs") {
-                offenders.push(format!("{name} calls call_raw outside helpers"));
+                offenders.push(format!("{name} sends a bare call outside helpers"));
                 continue;
             }
             assert!(
                 source.contains("library_param::apply("),
-                "{name} calls call_raw without passing the selection gate"
+                "{name} sends a bare call without passing the selection gate"
             );
         }
         assert!(offenders.is_empty(), "{}", offenders.join("; "));
@@ -819,12 +926,13 @@ mod tests {
     /// from a variable contributes nothing — the literal behind it, if
     /// any, is out of reach from here.
     fn method_literals_in_call_position() -> Vec<(String, String)> {
-        const CALLS: [&str; 5] = [
+        const CALLS: [&str; 6] = [
             "dispatch(",
             "call_and_print(",
             "call_with_progress(",
             "call_with_progress_value(",
             "call_raw(",
+            "call_rpc(",
         ];
         let mut found = Vec::new();
         for (name, source) in client_sources() {

@@ -175,7 +175,9 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
 
 /// Resolve a session-lock conflict by probing the running daemon. A
 /// healthy daemon prints the recorded pid and control socket and
-/// returns `Ok` so a second `bookrack run` invocation is a no-op. A
+/// returns `Ok` so a second `bookrack run` invocation is a no-op; one
+/// that reports another version than this binary's gets a second line
+/// saying so. A
 /// held lock whose recorded daemon does not answer returns
 /// [`BookrackCliError::StaleSessionLock`] (exit 3). Every other reading
 /// returns [`BookrackCliError::SessionLockUnreadable`] (exit 1): a lock
@@ -190,11 +192,22 @@ async fn handle_lock_conflict(err: eyre::Report, lock_path: &Path) -> Result<()>
             Err(acquire_error().into())
         }
         SessionLockState::Held { info, probe, .. } => match probe {
-            HealthProbe::Healthy(pid, sock) => {
+            HealthProbe::Healthy {
+                pid,
+                sock_path,
+                version,
+            } => {
                 println!(
                     "bookrack daemon already running: pid={pid} control_sock={}",
-                    sock.display()
+                    sock_path.display()
                 );
+                let this = env!("CARGO_PKG_VERSION");
+                if let Some(running) = version.filter(|running| running != this) {
+                    println!(
+                        "note: running daemon is version {running}; this CLI is version {this} \
+                         (run 'bookrack quit' before 'bookrack run' to switch)"
+                    );
+                }
                 Ok(())
             }
             HealthProbe::Stale => Err(BookrackCliError::StaleSessionLock {

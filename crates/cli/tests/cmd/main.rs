@@ -53,3 +53,4 @@ mod source_scan;
 mod status_card_identity;
 mod status_registered_at_startup;
 mod verify_exit_code;
+mod version_skew;

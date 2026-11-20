@@ -81,7 +81,9 @@ pub async fn run(runtime_dir: Option<PathBuf>) -> Result<()> {
             // A daemon that exits between the probe and the connect
             // surfaces as `DaemonNotRunning` (exit 2); no second short
             // card for that race.
-            HealthProbe::Healthy(..) => full_card(runtime_dir.as_deref(), &lock_path, &info).await,
+            HealthProbe::Healthy { .. } => {
+                full_card(runtime_dir.as_deref(), &lock_path, &info).await
+            }
         },
     }
 }
