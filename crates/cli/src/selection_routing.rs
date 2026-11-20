@@ -48,6 +48,11 @@ pub(crate) fn resolves_root_locally(command: &Command) -> bool {
         | Command::Runs { .. }
         | Command::Retrieval { .. } => true,
 
+        // All three `config` verbs report from this process: the
+        // inventory and the fixed values read no root at all, and
+        // `effective` resolves the one the selection names.
+        Command::Config { .. } => true,
+
         // `apply` executes its plan through the daemon; its `--dry-run`
         // form stays offline.
         Command::IndexProfile { action } => match action {
@@ -80,8 +85,7 @@ pub(crate) fn resolves_root_locally(command: &Command) -> bool {
         // `ingest` is a submission to the daemon's queue.
         Command::Ingest(args) => args.dry_run,
 
-        Command::Config { .. }
-        | Command::Verify
+        Command::Verify
         | Command::Diagnose { .. }
         | Command::Rpc { .. }
         | Command::Doctor { .. }

@@ -613,3 +613,83 @@ async fn a_retired_ollama_url_in_config_toml_is_not_used() -> Result<()> {
     assert_eq!(notices, ["ollama_url"], "{report}");
     Ok(())
 }
+
+/// A user index profile declaring `model`, valid on structure alone.
+fn write_profile(sandbox: &Sandbox, name: &str, model: &str) {
+    let dir = sandbox.path().join("index-profiles");
+    std::fs::create_dir_all(&dir).expect("profile directory");
+    std::fs::write(
+        dir.join(format!("{name}.toml")),
+        format!(
+            "schema_version = 1\nname = \"{name}\"\ndescription = \"Test profile.\"\n\n\
+             [embed]\nbackend = \"ollama\"\nmodel = \"{model}\"\ndim = 1024\n\n\
+             [ann]\nkind = \"ivf-pq\"\nnum_partitions = 256\nnum_sub_vectors = 128\n\
+             num_bits = 8\nnprobes = 16\nrefine_factor = 10\n\n\
+             [reranker]\nkind = \"none\"\n"
+        ),
+    )
+    .expect("write profile");
+}
+
+/// A registry whose one library, `lib`, references `profile`.
+fn library_referencing(sandbox: &Sandbox, profile: &str) {
+    let root = sandbox.data_root("lib");
+    sandbox.write_registry(&format!(
+        "[libraries.lib]\ndata_dir = {:?}\nindex_profile = \"{profile}\"\n",
+        root.display().to_string()
+    ));
+}
+
+/// The embed model is the index profile's fact, and the row says so:
+/// the profile's model at the manifest layer, the compiled-in default
+/// beneath it as the value it eclipsed.
+#[tokio::test]
+async fn embed_model_reports_the_profile_that_declares_it() -> Result<()> {
+    let sandbox = Sandbox::new();
+    write_profile(&sandbox, "probe", "probe-embed-model");
+    library_referencing(&sandbox, "probe");
+
+    let out = run(&sandbox, &["--library", "lib", "--json"], &[]).await?;
+    let report = report(&out)?;
+    assert_eq!(out.status.code(), Some(0), "{report}");
+    let model = row(&report, "embed.model").expect("embed.model row");
+    assert_eq!(
+        model["value"], "probe-embed-model",
+        "the row ignores the profile the library declares: {model}"
+    );
+    assert_eq!(model["layer"], "manifest", "{model}");
+    assert!(
+        model["shadowed"]
+            .as_array()
+            .is_some_and(|lost| lost.iter().any(|s| s["layer"] == "default")),
+        "the default the profile eclipsed is not shown: {model}"
+    );
+    assert!(model.get("note").is_none(), "{model}");
+    Ok(())
+}
+
+/// A profile reference that does not resolve leaves the row at the
+/// default and says why; the report is still a report.
+#[tokio::test]
+async fn an_unresolvable_profile_does_not_fail_the_report() -> Result<()> {
+    let sandbox = Sandbox::new();
+    library_referencing(&sandbox, "no-such-profile");
+
+    let out = run(&sandbox, &["--library", "lib", "--json"], &[]).await?;
+    let report = report(&out)?;
+    assert_eq!(out.status.code(), Some(0), "{report}");
+    let model = row(&report, "embed.model").expect("embed.model row");
+    assert_eq!(model["layer"], "default", "{model}");
+    let note = model["note"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the row does not say why the profile is missing: {model}"));
+    assert!(note.contains("no-such-profile"), "{note}");
+
+    let human = run(&sandbox, &["--library", "lib"], &[]).await?;
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        text.contains("no-such-profile"),
+        "the human report drops the reason:\n{text}"
+    );
+    Ok(())
+}

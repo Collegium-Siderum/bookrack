@@ -43,6 +43,10 @@ struct RowOut<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     scope_instance: Option<String>,
     read_at: &'a str,
+    /// Why a layer of this row could not be read, when one could not.
+    /// The row then reports what the remaining layers resolve.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -150,9 +154,20 @@ pub fn run(selection: &LibrarySelection) -> Result<()> {
     let cfg = resolved.as_ref().ok();
     let problem = resolved.as_ref().err().map(resolution_problem);
 
-    let rows = collect_rows(cfg);
+    let profile = cfg.map(profile_model).unwrap_or(Ok(None));
+    let rows = collect_rows(
+        cfg,
+        profile.as_ref().ok().and_then(|model| model.as_deref()),
+    );
+    let profile_note = profile.as_ref().err().map(String::as_str);
     let scope_instance = cfg.map(|c| c.data_dir().display().to_string());
-    let out: Vec<RowOut<'_>> = rows.iter().map(|r| row_out(r, &scope_instance)).collect();
+    let out: Vec<RowOut<'_>> = rows
+        .iter()
+        .map(|r| {
+            let note = profile_note.filter(|_| r.key == "embed.model");
+            row_out(r, &scope_instance, note)
+        })
+        .collect();
     let foreign = foreign_out();
     let unclaimed = unclaimed_out(
         std::env::vars_os().filter_map(|(key, _)| key.into_string().ok()),
@@ -230,14 +245,24 @@ pub const CONTRIBUTORS: &[Contributor] = &[Contributor {
 /// chain actually runs; assembling them here rather than restating
 /// them is what keeps this command from becoming a second answer that
 /// can disagree with the first.
-fn collect_rows(cfg: Option<&Config>) -> Vec<KnobOrigin> {
+fn collect_rows(cfg: Option<&Config>, profile_model: Option<&str>) -> Vec<KnobOrigin> {
     let dotenv = bookrack_config::dotenv_load().map(|load| load.supply());
 
-    let mut rows = bookrack_config::knob_origins(cfg, None);
+    let mut rows = bookrack_config::knob_origins(cfg, profile_model);
     for contributor in KNOB_CONTRIBUTORS.iter().chain(CONTRIBUTORS) {
         rows.extend((contributor.report)(dotenv));
     }
     rows
+}
+
+/// The embed model the library's effective index profile declares:
+/// `Ok(None)` when no profile is in effect, and the flattened cause
+/// when the reference does not resolve. A failure is carried rather
+/// than raised, so the report still answers for every other row.
+fn profile_model(cfg: &Config) -> Result<Option<String>, String> {
+    bookrack_runtime::profile::effective_index_profile(cfg)
+        .map(|effective| effective.map(|e| e.profile.embed.model))
+        .map_err(|err| format!("{err:#}"))
 }
 
 /// What this process's `.env` did outside the workspace's own prefix.
@@ -318,7 +343,7 @@ fn reranker_tag(_cfg: Option<&Config>) -> &'static str {
 }
 
 /// Convert one row to its wire shape.
-fn row_out<'a>(row: &'a KnobOrigin, root: &Option<String>) -> RowOut<'a> {
+fn row_out<'a>(row: &'a KnobOrigin, root: &Option<String>, note: Option<&'a str>) -> RowOut<'a> {
     RowOut {
         key: &row.key,
         value: row.value.as_deref(),
@@ -347,6 +372,7 @@ fn row_out<'a>(row: &'a KnobOrigin, root: &Option<String>) -> RowOut<'a> {
             _ => None,
         },
         read_at: row.read_at.as_str(),
+        note,
     }
 }
 
@@ -396,9 +422,10 @@ fn print_human(report: &ReportOut<'_>) {
     println!("{}", table.render());
 
     // The continuation lines carry what a four-column table cannot:
-    // which layers lost, and which could speak but did not. The two
-    // are drawn differently on purpose — `<-` is a value that was
-    // overridden, `.` is a place a value could be put.
+    // which layers lost, which could speak but did not, and which
+    // could not be read. The three are drawn differently on purpose —
+    // `<-` is a value that was overridden, `.` is a place a value could
+    // be put, `!` is a layer that failed.
     for row in rows {
         for shadowed in &row.shadowed {
             println!(
@@ -408,6 +435,9 @@ fn print_human(report: &ReportOut<'_>) {
                 site = shadowed.site,
                 value = shadowed.value
             );
+        }
+        if let Some(note) = row.note {
+            println!("  {key}  !  {note}", key = row.key);
         }
         for site in &row.chain {
             let is_winner = site.layer == row.layer && site.site == row.site;

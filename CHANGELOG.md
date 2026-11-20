@@ -281,6 +281,13 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **`config effective` reports the embed model the library's index
+  profile declares.** The `embed.model` row always showed the
+  compiled-in default, whatever profile the selected library referenced.
+  It now carries the profile's model at the `manifest` layer, with the
+  default as the value it eclipsed. A profile reference that does not
+  resolve leaves the row at the default and says why, in a `note` field
+  on the row and a `!` line under it, and the report is still printed.
 - **The MCP `session.shutdown` tool tells subscribers the daemon is
   stopping.** A control-plane client subscribed to `daemon.state` saw
   its connection close with no `stopping` event when the shutdown came

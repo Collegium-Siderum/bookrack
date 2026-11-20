@@ -2782,7 +2782,9 @@ mod tests {
     /// each row through the real parser and the real classifier.
     const ROUTING_CASES: &[(&[&str], Reach)] = &[
         (&["audit-profile", "list"], Reach::Local),
-        (&["config", "effective"], Reach::Routed),
+        (&["config", "effective"], Reach::Local),
+        (&["config", "knobs"], Reach::Local),
+        (&["config", "fixed"], Reach::Local),
         (&["corpus", "rebuild"], Reach::Routed),
         (&["diagnose"], Reach::Routed),
         (&["distill", "list"], Reach::Local),
