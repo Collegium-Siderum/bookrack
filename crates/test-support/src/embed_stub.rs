@@ -9,8 +9,8 @@ use std::net::TcpListener;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
 
 use bookrack_config::DEFAULT_EMBED_MODEL;
 
@@ -251,12 +251,24 @@ impl Default for StubSpec {
 /// holder through [`EmbedStub::wait_shutdown`]. The stub itself keeps
 /// serving: what a shutdown means is the holder's call.
 ///
+/// A hold switch parks embed requests in flight:
+/// [`EmbedStub::hold_marked`] opens it, and until the returned
+/// [`HeldEmbeds`] is dropped every `POST /api/embed` request with
+/// [`EmbedStub::HOLD_MARKER`] in any input waits on its service thread
+/// unanswered. Unmarked requests, the tags arm and the control paths are
+/// never held. Holding the shared stub relies on one process per test,
+/// as flipping its failure switch does. The embed client gives up on a
+/// request after its `request_timeout`, 120 seconds by default, so a
+/// holder releases well before that.
+///
 /// A listener runs on detached threads for the process's lifetime; a
 /// dropped stub stops answering only when the process ends.
 pub struct EmbedStub {
     url: String,
     spec: Arc<StubSpec>,
     failure: Arc<AtomicU8>,
+    /// The open hold's gate, if any.
+    hold: HoldSlot,
     /// Receives one `()` per accepted shutdown. Behind a mutex because a
     /// receiver is not `Sync`, and the shared stub lives in a static.
     shutdown: Mutex<Receiver<()>>,
@@ -282,6 +294,11 @@ impl EmbedStub {
     /// [`EmbedFailure::UnusableVector`].
     pub const UNUSABLE_MARKER: &'static str = "zero-vector-marker";
 
+    /// The text that marks an input for the hold switch: while a
+    /// [`HeldEmbeds`] is alive, an embed request carrying it in any input
+    /// is held unanswered. See [`EmbedStub::hold_marked`].
+    pub const HOLD_MARKER: &'static str = "hold-embed-marker";
+
     /// Start a stub of its own on a kernel-assigned port, answering
     /// healthily with [`StubSpec::default`] until its switch is flipped.
     pub fn start() -> EmbedStub {
@@ -297,14 +314,17 @@ impl EmbedStub {
         let switch = Arc::clone(&failure);
         let spec = Arc::new(spec);
         let served = Arc::clone(&spec);
+        let hold = HoldSlot::default();
+        let held = hold.clone();
         let (announce, shutdown) = mpsc::channel();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let switch = Arc::clone(&switch);
                 let spec = Arc::clone(&served);
+                let hold = held.clone();
                 let announce: Sender<()> = announce.clone();
                 std::thread::spawn(move || {
-                    let _ = serve(stream, &switch, &spec, &|| {
+                    let _ = serve(stream, &switch, &spec, &hold, &|| {
                         let _ = announce.send(());
                     });
                 });
@@ -314,6 +334,7 @@ impl EmbedStub {
             url,
             spec,
             failure,
+            hold,
             shutdown: Mutex::new(shutdown),
             shut_down: AtomicBool::new(false),
         }
@@ -346,6 +367,27 @@ impl EmbedStub {
         EmbedFailure::from_u8(self.failure.load(Ordering::SeqCst))
     }
 
+    /// Hold every embed request that carries [`EmbedStub::HOLD_MARKER`]
+    /// from now until the returned guard is dropped; see the type
+    /// documentation for what is held and for how long it may be.
+    ///
+    /// # Panics
+    ///
+    /// When a hold on this stub is already open: one hold at a time.
+    pub fn hold_marked(&self) -> HeldEmbeds {
+        let gate = Arc::new(HoldGate::default());
+        let mut slot = self.hold.lock();
+        assert!(
+            slot.is_none(),
+            "the embed stub keeps one hold at a time; drop the open hold first"
+        );
+        *slot = Some(Arc::clone(&gate));
+        HeldEmbeds {
+            slot: self.hold.clone(),
+            gate,
+        }
+    }
+
     /// Whether a shutdown was accepted, waiting up to `within` for one;
     /// [`Duration::ZERO`] only looks. Once one is seen, every later call
     /// answers `true` at once. A stub without an identity never accepts
@@ -367,6 +409,109 @@ impl EmbedStub {
     }
 }
 
+/// The slot holding the gate of a stub's open hold, shared between the
+/// stub and its service threads.
+#[derive(Clone, Default)]
+struct HoldSlot(Arc<Mutex<Option<Arc<HoldGate>>>>);
+
+impl HoldSlot {
+    /// The slot, locked; a poisoned lock is taken over, so a test that
+    /// panics with a hold open still releases it while unwinding.
+    fn lock(&self) -> MutexGuard<'_, Option<Arc<HoldGate>>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Wait at the open hold's gate, if there is one. The slot is locked
+    /// only long enough to clone the gate out.
+    fn park(&self) {
+        let gate = self.lock().clone();
+        if let Some(gate) = gate {
+            gate.park();
+        }
+    }
+}
+
+/// One hold's gate. Each hold gets a gate of its own, so a request
+/// parked under an earlier hold is never counted by a later one.
+#[derive(Default)]
+struct HoldGate {
+    state: Mutex<GateState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct GateState {
+    released: bool,
+    parked: usize,
+}
+
+impl HoldGate {
+    fn lock(&self) -> MutexGuard<'_, GateState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Count one parked request and wait for the release; returns at
+    /// once when the gate is already released.
+    fn park(&self) {
+        let mut state = self.lock();
+        if state.released {
+            return;
+        }
+        state.parked += 1;
+        self.changed.notify_all();
+        while !state.released {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+}
+
+/// An open hold on a stub's marked embed requests, from
+/// [`EmbedStub::hold_marked`]. Dropping it releases every request it
+/// holds and closes the hold.
+pub struct HeldEmbeds {
+    slot: HoldSlot,
+    gate: Arc<HoldGate>,
+}
+
+impl HeldEmbeds {
+    /// Whether at least `n` requests are parked under this hold, waiting
+    /// up to `within` for them.
+    pub fn wait_parked(&self, n: usize, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        let mut state = self.gate.lock();
+        loop {
+            if state.parked >= n {
+                return true;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            state = self
+                .gate
+                .changed
+                .wait_timeout(state, deadline - now)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+    }
+}
+
+impl Drop for HeldEmbeds {
+    fn drop(&mut self) {
+        *self.slot.lock() = None;
+        self.gate.lock().released = true;
+        self.gate.changed.notify_all();
+    }
+}
+
 /// Serve one connection until the client hangs up, reading `switch`
 /// afresh for every request. Model and embed answers keep the
 /// connection open so a pooled HTTP client can reuse it; a control
@@ -379,6 +524,7 @@ fn serve<RW: Read + Write>(
     stream: RW,
     switch: &AtomicU8,
     spec: &StubSpec,
+    hold: &HoldSlot,
     announce: &dyn Fn(),
 ) -> io::Result<()> {
     let mut reader = io::BufReader::new(stream);
@@ -409,6 +555,13 @@ fn serve<RW: Read + Write>(
                 announce();
             }
             return Ok(());
+        }
+        if is_embed(&request_line)
+            && embed_inputs(&body)
+                .iter()
+                .any(|input| input.contains(EmbedStub::HOLD_MARKER))
+        {
+            hold.park();
         }
         let failure = EmbedFailure::from_u8(switch.load(Ordering::SeqCst));
         let (status, response) = respond(&request_line, &body, failure, spec);
@@ -503,18 +656,8 @@ fn respond(
     failure: EmbedFailure,
     spec: &StubSpec,
 ) -> (u16, serde_json::Value) {
-    if request_line.starts_with("POST /api/embed") {
-        let inputs: Vec<String> = serde_json::from_slice::<serde_json::Value>(body)
-            .ok()
-            .and_then(|v| {
-                v["input"].as_array().map(|inputs| {
-                    inputs
-                        .iter()
-                        .map(|i| i.as_str().unwrap_or_default().to_string())
-                        .collect()
-                })
-            })
-            .unwrap_or_default();
+    if is_embed(request_line) {
+        let inputs = embed_inputs(body);
         match failure {
             EmbedFailure::None => {
                 let embeddings: Vec<Vec<f32>> =
@@ -558,6 +701,27 @@ fn respond(
             }),
         )
     }
+}
+
+/// Whether `request_line` is an embed request.
+fn is_embed(request_line: &str) -> bool {
+    request_line.starts_with("POST /api/embed")
+}
+
+/// The `input` strings of an embed request body; a body that is not a
+/// JSON object with an `input` array has none.
+fn embed_inputs(body: &[u8]) -> Vec<String> {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v["input"].as_array().map(|inputs| {
+                inputs
+                    .iter()
+                    .map(|i| i.as_str().unwrap_or_default().to_string())
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
 }
 
 /// The healthy vector for `input` under `spec`.
@@ -1342,6 +1506,7 @@ mod tests {
             connection,
             &AtomicU8::new(EmbedFailure::None.as_u8()),
             &spec(8, Vectors::Constant, Some("n1")),
+            &HoldSlot::default(),
             &|| announced.lock().unwrap().push("announce"),
         );
         events.lock().unwrap().clone()
@@ -1360,5 +1525,94 @@ mod tests {
     fn a_shutdown_that_cannot_be_answered_is_not_announced() {
         assert!(serve_shutdown(Fault::Write).is_empty());
         assert_eq!(serve_shutdown(Fault::Flush), ["write"]);
+    }
+
+    /// The request body for one embed call over `inputs`.
+    fn embed_body(inputs: &[&str]) -> Vec<u8> {
+        serde_json::json!({ "input": inputs })
+            .to_string()
+            .into_bytes()
+    }
+
+    /// Send one embed request on its own thread; the receiver yields the
+    /// answer's status once the stub has written it.
+    fn embed_in_background(url: &str, inputs: &[&str]) -> mpsc::Receiver<u16> {
+        let url = url.to_string();
+        let body = embed_body(inputs);
+        let (sent, answered) = mpsc::channel();
+        std::thread::spawn(move || {
+            let answer = http(&url, "POST", "/api/embed", &body);
+            let _ = sent.send(answer.status);
+        });
+        answered
+    }
+
+    const MARKED: &str = "a hold-embed-marker input";
+
+    /// An open hold keeps a marked request unanswered and counts it;
+    /// dropping the hold answers it.
+    #[test]
+    fn a_hold_parks_a_marked_request_until_it_is_dropped() {
+        let stub = EmbedStub::start();
+        let hold = stub.hold_marked();
+        let answered = embed_in_background(stub.url(), &["plain", MARKED]);
+        assert!(
+            hold.wait_parked(1, Duration::from_secs(5)),
+            "the marked request never parked"
+        );
+        assert!(
+            answered.recv_timeout(Duration::from_millis(300)).is_err(),
+            "a held request was answered while the hold was open"
+        );
+        drop(hold);
+        assert_eq!(
+            answered.recv_timeout(Duration::from_secs(5)),
+            Ok(200),
+            "dropping the hold did not answer the held request"
+        );
+    }
+
+    /// A hold touches only marked embed requests: an unmarked embed
+    /// request and the tags arm answer at once while it is open.
+    #[test]
+    fn a_hold_leaves_unmarked_requests_and_the_tags_arm_alone() {
+        let stub = EmbedStub::start();
+        let hold = stub.hold_marked();
+        let answered = embed_in_background(stub.url(), &["plain", "also plain"]);
+        assert_eq!(answered.recv_timeout(Duration::from_secs(5)), Ok(200));
+        assert_eq!(http(stub.url(), "GET", "/api/tags", b"").status, 200);
+        assert!(!hold.wait_parked(1, Duration::from_millis(200)));
+    }
+
+    /// Each hold counts only its own requests: a request parked under a
+    /// dropped hold does not make a later hold report a parked request.
+    #[test]
+    fn a_new_hold_counts_only_its_own_requests() {
+        let stub = EmbedStub::start();
+        let first = stub.hold_marked();
+        let earlier = embed_in_background(stub.url(), &[MARKED]);
+        assert!(first.wait_parked(1, Duration::from_secs(5)));
+        drop(first);
+        assert_eq!(earlier.recv_timeout(Duration::from_secs(5)), Ok(200));
+
+        let second = stub.hold_marked();
+        assert!(
+            !second.wait_parked(1, Duration::from_millis(200)),
+            "the second hold counted a request parked under the first"
+        );
+        let later = embed_in_background(stub.url(), &[MARKED]);
+        assert!(second.wait_parked(1, Duration::from_secs(5)));
+        assert!(later.recv_timeout(Duration::from_millis(300)).is_err());
+        drop(second);
+        assert_eq!(later.recv_timeout(Duration::from_secs(5)), Ok(200));
+    }
+
+    /// Two holds may not overlap on one stub.
+    #[test]
+    #[should_panic(expected = "one hold at a time")]
+    fn a_second_hold_while_one_is_open_panics() {
+        let stub = EmbedStub::start();
+        let _first = stub.hold_marked();
+        let _second = stub.hold_marked();
     }
 }

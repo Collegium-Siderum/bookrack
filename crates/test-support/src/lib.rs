@@ -69,7 +69,7 @@ pub use child::{
     CaptureMode, DaemonProcess, Exit, Failure, FailureKind, Output, Ready, ReadyFailure, Sink,
     SpawnOpts, Stage, StreamStats, TEARDOWN_BUDGET,
 };
-pub use embed_stub::{EmbedFailure, EmbedStub, StubSpec, StubSpecError, Vectors};
+pub use embed_stub::{EmbedFailure, EmbedStub, HeldEmbeds, StubSpec, StubSpecError, Vectors};
 pub use host_slot::host_pdfium_root;
 pub use process::{ProcessEnv, process_env};
 pub use sandbox::Sandbox;
