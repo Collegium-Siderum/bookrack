@@ -58,10 +58,8 @@ pub struct IngestSubmitParams {
     /// queue worker as-is, which treats them as ingest failures.
     #[serde(default)]
     recursive: bool,
-    /// When `true`, the worker parks each book at STRUCTURE if the
-    /// audit verdict is `needs_work`, skipping CHUNK and EMBED;
-    /// ingesting the book again without the hold finishes it. Off by
-    /// default; the audit remains advisory.
+    /// Retired. `true` is refused; `false`, which every earlier client
+    /// sends, is accepted and ignored.
     #[serde(default)]
     hold_for_metadata: bool,
     /// Optional book-side audit profile name. When unset, the
@@ -165,7 +163,6 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             bookrack_core::ItemKind::Book,
             priority,
             parsed.force,
-            parsed.hold_for_metadata,
             parsed.audit_profile.clone(),
         )
     })?;
@@ -173,9 +170,9 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
     Ok(json!({ "job_ids": ids }))
 }
 
-/// Why `params` mixes the file form with the rule form, or names a
-/// rule-form field the rest of the call gives no meaning to; `None`
-/// when the call is one form or the other.
+/// Why `params` asks for the retired metadata hold, mixes the file form
+/// with the rule form, or names a rule-form field the rest of the call
+/// gives no meaning to; `None` when the call is one form or the other.
 fn form_refusal(params: &IngestSubmitParams) -> Option<CmdInputError> {
     let refused = |summary: &str, hint: &str| {
         Some(CmdInputError::Refused {
@@ -183,6 +180,14 @@ fn form_refusal(params: &IngestSubmitParams) -> Option<CmdInputError> {
             hint: Some(hint.to_string()),
         })
     };
+    if params.hold_for_metadata {
+        return refused(
+            "`hold_for_metadata` is no longer accepted",
+            "Submit without it: a book is embedded as it is ingested, and metadata edits \
+             take effect without re-embedding. `bookrack dryrun` shows a source's audit \
+             verdict without writing to the library. docs/UPGRADE.md covers the change.",
+        );
+    }
     let Some(rule) = &params.rule else {
         if params.source.is_some() {
             return refused(
@@ -208,12 +213,6 @@ fn form_refusal(params: &IngestSubmitParams) -> Option<CmdInputError> {
         return refused(
             "`recursive` does not apply to a `rule` submission",
             "Send the rule without `recursive`: the rule names its own member files.",
-        );
-    }
-    if params.hold_for_metadata {
-        return refused(
-            "`hold_for_metadata` does not apply to a `rule` submission",
-            "Send the rule without `hold_for_metadata`.",
         );
     }
     if params.allow_partial && params.source.is_none() {

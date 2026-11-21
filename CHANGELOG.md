@@ -321,6 +321,12 @@ release workflow extracts the matching section verbatim from this file.
   `library.metadata.approve` tool now mean the same thing. A parked
   book is finished by ingesting its source again; `docs/UPGRADE.md`
   covers it.
+- **`ingest.submit` refuses `hold_for_metadata: true`.** The parameter
+  is retired in both submission forms: `true` is `-32602` before a job
+  is queued, and `false`, which every earlier client sends, is accepted
+  and ignored. A job queued with the hold before the upgrade fails when
+  the worker reaches it, and `bookrack queue retry` runs it without the
+  hold.
 
 ### Deprecated
 
@@ -499,6 +505,10 @@ release workflow extracts the matching section verbatim from this file.
   `2`); calling the method is `-32601`. A book parked at the metadata
   gate is finished by ingesting its source again (`docs/UPGRADE.md`,
   *Retiring the metadata hold*).
+- **`bookrack ingest --hold-for-metadata`.** A book is embedded as it
+  is ingested; typing the flag is a usage error (exit `2`). To see a
+  source's audit verdict before it enters the library, run
+  `bookrack dryrun` on it.
 
 ## [0.14.0] - 2026-11-07
 

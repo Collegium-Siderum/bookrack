@@ -838,7 +838,7 @@ sites = [
   "crates/ops/src/pipeline/paper/mod.rs::glean_paper_with_progress",
 ]
 reason = "transitional"
-detail = "the book side compares a source behind on the extractor alone with its envelope and restamps it, and can hold a book for metadata; the paper side has an identify stage and reruns in full"
+detail = "the book side compares a source behind on the extractor alone with its envelope and restamps it; the paper side has an identify stage and reruns in full"
 agreement = "divergent"
 exit = "the pipeline takes the kind as a parameter"
 

@@ -46,9 +46,7 @@ impl FieldGrade {
 /// medium; it does *not* mean the metadata is correct, and the pipeline
 /// never derives `node_reviews.status` from it. Review status is a
 /// strictly human/LLM concern handled in `bookrack-catalog`; this enum
-/// is the audit's own internal summary, used (for example) by
-/// `--hold-for-metadata` to decide whether to park a book before
-/// embedding.
+/// is the audit's own internal summary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     /// Every required field is at [`FieldGrade::Medium`] or better.

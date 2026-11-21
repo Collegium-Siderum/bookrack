@@ -26,6 +26,7 @@ mod queue_document_gate;
 mod queue_failure_problem;
 mod queue_lifecycle;
 mod queue_retry;
+mod retired_hold;
 mod rule_job;
 mod rule_submit;
 mod unusable_vector_ingest;

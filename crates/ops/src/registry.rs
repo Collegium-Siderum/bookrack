@@ -210,8 +210,7 @@ pub struct LibraryHandle<E: Embedder> {
 /// data root: the audit profile and data overlays under
 /// `<data_root>/audit-rules/`, the heading patterns, and the embedding
 /// model its index profile declares. A job then patches only what the
-/// job itself carries (`force`, `hold_for_metadata`, a named
-/// `audit_profile`).
+/// job itself carries (`force`, a named `audit_profile`).
 ///
 /// They live on the handle because the alternative is a process-wide
 /// template, and a process serving several libraries has no single

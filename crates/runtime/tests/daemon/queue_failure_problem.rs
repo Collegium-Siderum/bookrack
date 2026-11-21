@@ -190,3 +190,92 @@ async fn a_failed_job_lists_its_problem_and_the_tick_carries_the_same() -> Resul
     })
     .await
 }
+
+/// A pending job queued with the retired metadata hold fails when the
+/// worker picks it up, naming the hold and what replaces it; a retry
+/// runs it as a plain ingest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_queued_with_the_retired_hold_fails_and_a_retry_runs_it() -> Result<()> {
+    let sandbox = process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let sources = tempfile::tempdir()?;
+    let book = sources.path().join("held-almanac.txt");
+    std::fs::write(
+        &book,
+        "Chapter One\n\n\
+         The synthetic almanac listed every fictional harbour of the coast, and \
+         the keeper of the almanac checked each one against a fictional chart.\n",
+    )?;
+    let id = "01900000-0000-7000-8000-0000000000aa";
+    let document = json!({
+        "schema_version": bookrack_runtime::queue::QUEUE_SCHEMA_VERSION,
+        "paused": false,
+        "jobs": [{
+            "id": id,
+            "library": "default",
+            "kind": "book",
+            "priority": "normal",
+            "op": {
+                "type": "ingest",
+                "path": book,
+                "force": false,
+                "hold_for_metadata": true,
+                "audit_profile": null,
+                "input": { "type": "file" },
+            },
+            "state": "pending",
+            "queued_at": "2026-01-02T03:04:05Z",
+            "started_at": null,
+            "finished_at": null,
+            "error": null,
+            "problem": null,
+            "merged_into": null,
+        }],
+    });
+    std::fs::write(
+        sandbox.daemon_state_dir().join("queue.json"),
+        serde_json::to_vec(&document)?,
+    )?;
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+    let driver = tokio::spawn(async move {
+        let (mut r, mut w) = connect(&sock).await?;
+        let row = wait_for(&mut r, &mut w, id).await?;
+        assert_eq!(row["state"], "failed", "{row}");
+        assert_eq!(
+            row["error"].as_str(),
+            Some(bookrack_core::queue::RETIRED_HOLD),
+            "{row}"
+        );
+        assert_eq!(
+            row["problem"]["summary"].as_str(),
+            Some(bookrack_core::queue::RETIRED_HOLD),
+            "{row}"
+        );
+        assert!(
+            row["problem"]["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("bookrack queue retry")),
+            "{row}"
+        );
+
+        let retried = call(&mut r, &mut w, 4, "queue.retry", json!({ "job_id": id })).await?;
+        assert_eq!(retried["result"]["retried"], json!([id]), "{retried}");
+        let rerun = wait_for(&mut r, &mut w, id).await?;
+        assert_eq!(
+            rerun["state"], "done",
+            "the retry did not run the job: {rerun}"
+        );
+
+        let _ = call(&mut r, &mut w, u64::MAX, "daemon.shutdown", Value::Null).await?;
+        Ok(())
+    });
+    join_with_deadline(runtime, repl_handle, driver).await
+}

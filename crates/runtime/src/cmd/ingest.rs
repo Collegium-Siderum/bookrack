@@ -22,7 +22,6 @@ pub async fn run(
     daemon: &bookrack_config::DaemonConfig,
     path: &Path,
     recursive: bool,
-    hold_for_metadata: bool,
     force: bool,
     profile_name: Option<&str>,
 ) -> Result<()> {
@@ -36,7 +35,6 @@ pub async fn run(
     let heading_patterns = load_heading_patterns(cfg);
     let params = IngestParams {
         embed: embed_cfg,
-        hold_for_metadata,
         force,
         audit_data,
         audit_profile,

@@ -68,7 +68,6 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             bookrack_core::ItemKind::Paper,
             priority,
             parsed.force,
-            false,
             None,
         )
     })?;

@@ -240,6 +240,25 @@ impl QueueJob {
     }
 }
 
+/// The summary and flattened text recorded on a job queued with the
+/// retired metadata hold.
+pub const RETIRED_HOLD: &str = "cannot run a job queued with the retired metadata hold";
+
+/// The failure recorded on a job queued with the retired metadata hold:
+/// [`RETIRED_HOLD`] with what the hold asked for and what replaces it.
+pub fn retired_hold_problem() -> Problem {
+    Problem::new(RETIRED_HOLD)
+        .detail(
+            "The job asked to park the book at the metadata gate, which this build no \
+             longer has.",
+        )
+        .hint(
+            "`bookrack queue retry` runs it without the hold. `bookrack dryrun` shows a \
+             source's audit verdict without writing to the library. docs/UPGRADE.md covers \
+             the change.",
+        )
+}
+
 /// The summary and flattened text recorded on a job an earlier binary
 /// queued for the OCR intake path.
 const OCR_PATH_REMOVED: &str = "cannot run a job queued for the removed OCR intake path";

@@ -450,7 +450,6 @@ mod tests {
             bookrack_core::ItemKind::Book,
             crate::queue::Priority::Normal,
             false,
-            false,
             None,
         )
     }
@@ -522,7 +521,6 @@ mod tests {
             library,
             bookrack_core::ItemKind::Book,
             crate::queue::Priority::Normal,
-            false,
             false,
             None,
         )

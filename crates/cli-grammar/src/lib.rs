@@ -245,11 +245,6 @@ pub struct IngestArgs {
     /// Without this flag, `<PATH>` must point at a single book file.
     #[arg(long, conflicts_with = "rule")]
     pub recursive: bool,
-    /// Pause each book after EXTRACT so a curator can review the audit
-    /// verdict before CHUNK / EMBED. Ingest the book again without this
-    /// flag to finish it.
-    #[arg(long, conflicts_with = "rule")]
-    pub hold_for_metadata: bool,
     /// Ingest the book a rule file describes, in place of `<PATH>`. The
     /// rule names the text files that make up the book and how to cut
     /// them into units.
@@ -2103,20 +2098,12 @@ mod tests {
 
     #[test]
     fn ingest_carries_priority_flag() {
-        let args = parse_ingest(&[
-            "ingest",
-            "/tmp/b.epub",
-            "--force",
-            "--hold-for-metadata",
-            "--priority",
-            "high",
-        ]);
+        let args = parse_ingest(&["ingest", "/tmp/b.epub", "--force", "--priority", "high"]);
         assert_eq!(
             args.path.as_deref(),
             Some(std::path::Path::new("/tmp/b.epub"))
         );
         assert!(args.force);
-        assert!(args.hold_for_metadata);
         assert!(!args.recursive);
         assert!(!args.no_wait);
         assert_eq!(args.priority.as_deref(), Some("high"));
@@ -2157,7 +2144,6 @@ mod tests {
             &["ingest", "/tmp/b.epub", "--rule", "/tmp/rule.toml"],
             // File-form flags on the rule form.
             &["ingest", "--rule", "/tmp/rule.toml", "--recursive"],
-            &["ingest", "--rule", "/tmp/rule.toml", "--hold-for-metadata"],
             // Rule-form flags on the file form.
             &["ingest", "/tmp/b.epub", "--source", "/tmp/scan.pdf"],
             &["ingest", "/tmp/b.epub", "--dry-run"],

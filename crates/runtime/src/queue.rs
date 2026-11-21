@@ -355,8 +355,12 @@ pub fn fail_jobs_against(state: &mut QueueState, library: &str, failure: &JobFai
 /// Return a terminal row to `Pending` as a fresh submission: the state
 /// flips and the five fields a run writes — `started_at`,
 /// `finished_at`, `error`, `problem`, `merged_into` — are cleared. The id,
-/// position, `queued_at`, and every submit-time flag stay.
+/// position, `queued_at`, and every submit-time flag stay, except the
+/// retired metadata hold, which is cleared so the rerun is a plain
+/// ingest.
 fn reset_for_retry(job: &mut QueueJob) {
+    let JobOp::Ingest(ingest) = &mut job.op;
+    ingest.hold_for_metadata = false;
     job.state = JobState::Pending;
     job.started_at = None;
     job.finished_at = None;
@@ -584,9 +588,8 @@ pub fn apply_outcome(state: &mut QueueState, id: &str, outcome: JobOutcome) {
 }
 
 /// Append one job per `path` to the queue, all sharing `library`,
-/// `kind`, `priority`, `force`, `hold_for_metadata`, and
-/// `book_audit_profile`. Returns the ids of the appended jobs in the
-/// order they were inserted.
+/// `kind`, `priority`, `force`, and `book_audit_profile`. Returns the
+/// ids of the appended jobs in the order they were inserted.
 ///
 /// `book_audit_profile` overrides the book-side audit profile used by
 /// the worker for the appended jobs. It is named for the book pipeline
@@ -594,10 +597,6 @@ pub fn apply_outcome(state: &mut QueueState, id: &str, outcome: JobOutcome) {
 /// profile through `glean_params_template`; callers enqueueing
 /// paper-kind jobs must pass `None` here, and any future paper-side
 /// override needs a separate field on the job.
-// The argument list mirrors the shape of `QueueJob` itself; collapsing
-// the seven scalars into an options struct would only add an
-// intermediate type that callers immediately destructure.
-#[allow(clippy::too_many_arguments)]
 pub fn enqueue_files(
     state: &mut QueueState,
     paths: &[PathBuf],
@@ -605,7 +604,6 @@ pub fn enqueue_files(
     kind: ItemKind,
     priority: Priority,
     force: bool,
-    hold_for_metadata: bool,
     book_audit_profile: Option<String>,
 ) -> Vec<String> {
     let mut ids = Vec::with_capacity(paths.len());
@@ -619,7 +617,7 @@ pub fn enqueue_files(
             op: JobOp::Ingest(IngestJob {
                 path: path.clone(),
                 force,
-                hold_for_metadata,
+                hold_for_metadata: false,
                 audit_profile: book_audit_profile.clone(),
                 input: JobInput::File,
             }),
@@ -638,9 +636,10 @@ pub fn enqueue_files(
 
 /// Append one book-pipeline job whose input is the rule file at
 /// `rule`, and return its id. `source_pdf` and `allow_partial` ride on
-/// the job's input for the worker to hand to the rule ingest; a rule
-/// job is never held at the metadata gate.
-// Same trade-off as `enqueue_files`.
+/// the job's input for the worker to hand to the rule ingest.
+// The argument list mirrors the shape of `QueueJob` itself; collapsing
+// the scalars into an options struct would only add an intermediate
+// type that callers immediately destructure.
 #[allow(clippy::too_many_arguments)]
 pub fn enqueue_rule(
     state: &mut QueueState,
@@ -2049,7 +2048,6 @@ mod tests {
             ItemKind::Book,
             Priority::High,
             true,
-            false,
             None,
         );
         assert_eq!(ids.len(), 3);
@@ -2124,6 +2122,18 @@ mod tests {
             apply_outcome(&mut state, "xx", outcome);
             assert!(state.jobs[0].problem.is_none(), "{label} keeps the problem");
         }
+    }
+
+    /// A retry runs a job queued with the retired hold as a plain
+    /// ingest.
+    #[test]
+    fn reset_for_retry_clears_the_retired_hold() {
+        let mut row = job("xx", Priority::Normal, JobState::Failed);
+        let JobOp::Ingest(ingest) = &mut row.op;
+        ingest.hold_for_metadata = true;
+        reset_for_retry(&mut row);
+        let JobOp::Ingest(ingest) = &row.op;
+        assert!(!ingest.hold_for_metadata, "the retry kept the hold");
     }
 
     #[test]
@@ -2237,7 +2247,6 @@ mod tests {
             ItemKind::Book,
             Priority::Normal,
             false,
-            false,
             None,
         );
         let state = Arc::new(Mutex::new(initial));
@@ -2298,7 +2307,6 @@ mod tests {
             "default",
             ItemKind::Book,
             Priority::Normal,
-            false,
             false,
             None,
         );
@@ -2362,7 +2370,6 @@ mod tests {
             "default",
             ItemKind::Book,
             Priority::Normal,
-            false,
             false,
             None,
         );
@@ -2439,7 +2446,6 @@ mod tests {
             ItemKind::Book,
             Priority::Normal,
             false,
-            false,
             None,
         );
         let state = Arc::new(Mutex::new(initial));
@@ -2515,7 +2521,6 @@ mod tests {
             ItemKind::Book,
             Priority::Normal,
             false,
-            false,
             None,
         );
         let state = Arc::new(Mutex::new(initial));
@@ -2571,7 +2576,6 @@ mod tests {
             "default",
             ItemKind::Book,
             Priority::Normal,
-            false,
             false,
             None,
         );
@@ -2658,7 +2662,6 @@ mod tests {
             "default",
             ItemKind::Book,
             Priority::Normal,
-            false,
             false,
             None,
         );

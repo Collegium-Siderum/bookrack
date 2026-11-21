@@ -339,7 +339,6 @@ pub async fn ingest_rule_with_progress<E: Embedder>(
             run_id,
             started,
             behind,
-            hold_for_metadata: false,
         },
         corpus,
         catalog,

@@ -128,7 +128,7 @@ async fn a_rule_submission_is_checked_then_queued_as_one_rule_job() -> Result<()
             (
                 "a rule held for metadata",
                 json!({ "rule": rule, "hold_for_metadata": true }),
-                "hold_for_metadata",
+                "is no longer accepted",
                 true,
             ),
             (

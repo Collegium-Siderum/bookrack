@@ -67,7 +67,6 @@ pub async fn run(
                 "paths": [path],
                 "force": args.force,
                 "recursive": args.recursive,
-                "hold_for_metadata": args.hold_for_metadata,
             }),
             path,
         ),

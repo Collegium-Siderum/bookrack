@@ -357,7 +357,6 @@ mod tests {
             ItemKind::Book,
             Priority::Normal,
             false,
-            false,
             None,
         )
     }

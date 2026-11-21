@@ -337,7 +337,6 @@ enum Command {
     /// library.
     #[command(after_long_help = bookrack_cli_grammar::examples![
         "ingest /path/to/book.epub",
-        "ingest /path/to/book.epub --hold-for-metadata",
         "ingest --rule /path/to/rule.toml --dry-run",
         "ingest --rule /path/to/rule.toml --source /path/to/scan.pdf",
     ])]
@@ -2271,9 +2270,12 @@ mod tests {
     }
 
     #[test]
-    fn ingest_accepts_hold_for_metadata_flag() {
-        Cli::try_parse_from(["bookrack", "ingest", "/x/book.epub", "--hold-for-metadata"])
-            .expect("the flag parses");
+    fn ingest_refuses_the_retired_hold_flag() {
+        assert!(
+            Cli::try_parse_from(["bookrack", "ingest", "/x/book.epub", "--hold-for-metadata"])
+                .is_err(),
+            "--hold-for-metadata must be refused by the grammar"
+        );
     }
 
     #[test]

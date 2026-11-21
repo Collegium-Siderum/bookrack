@@ -948,6 +948,18 @@ impl DaemonRuntime {
                                 input,
                             }) = job.op.clone();
                             runtime.block_on(async move {
+                                // A job queued with the retired
+                                // metadata hold fails before any
+                                // pipeline runs, whatever its side or
+                                // input, rather than embedding a book
+                                // its submitter asked to hold back.
+                                // `queue retry` clears the hold.
+                                if hold_for_metadata {
+                                    return Err(queue::JobError::Book(queue::JobFailure {
+                                        message: bookrack_core::queue::RETIRED_HOLD.to_string(),
+                                        problem: Some(bookrack_core::queue::retired_hold_problem()),
+                                    }));
+                                }
                                 if library.is_empty() {
                                     return Err(queue::JobError::Book(queue::JobFailure::text(
                                         "this job names no library, so it cannot be routed; \
@@ -987,7 +999,6 @@ impl DaemonRuntime {
                                         &handle.templates().ingest,
                                         handle.cfg(),
                                         force,
-                                        false,
                                         audit_profile.as_deref(),
                                     );
                                     let rule_params = bookrack_ops::pipeline::book::RuleIngestParams {
@@ -1012,7 +1023,6 @@ impl DaemonRuntime {
                                             &handle.templates().ingest,
                                             handle.cfg(),
                                             force,
-                                            hold_for_metadata,
                                             audit_profile.as_deref(),
                                         );
                                         // A source with no usable text layer
@@ -1662,7 +1672,6 @@ fn rerank_degraded_transition(state: &SupervisorState) -> Option<bool> {
 fn build_queue_params_template(cfg: &Config, embed_cfg: &EmbedConfig) -> IngestParams {
     IngestParams {
         embed: embed_cfg.clone(),
-        hold_for_metadata: false,
         force: false,
         audit_data: load_audit_data(cfg),
         audit_profile: load_audit_profile(cfg, None),
@@ -1674,7 +1683,7 @@ fn build_queue_params_template(cfg: &Config, embed_cfg: &EmbedConfig) -> IngestP
 /// Overlay the per-job overrides on top of the worker's startup
 /// [`IngestParams`] template.
 ///
-/// `force` and `hold_for_metadata` come straight off the
+/// `force` comes straight off the
 /// [`bookrack_core::queue::QueueJob`]. `audit_profile`, when present,
 /// triggers a fresh [`load_audit_profile`] for the named built-in so
 /// the override actually reaches the pipeline; when absent the
@@ -1683,12 +1692,10 @@ fn prepare_book_params(
     template: &IngestParams,
     cfg: &Config,
     force: bool,
-    hold_for_metadata: bool,
     audit_profile: Option<&str>,
 ) -> IngestParams {
     let mut params = template.clone();
     params.force = force;
-    params.hold_for_metadata = hold_for_metadata;
     if let Some(name) = audit_profile {
         params.audit_profile = load_audit_profile(cfg, Some(name));
     }
@@ -1991,12 +1998,11 @@ mod tests {
     }
 
     #[test]
-    fn prepare_book_params_threads_force_and_hold_for_metadata() {
+    fn prepare_book_params_threads_force() {
         let (cfg, _dir) = synthetic_cfg();
         let template = build_queue_params_template(&cfg, &EmbedConfig::default());
-        let params = prepare_book_params(&template, &cfg, true, true, None);
+        let params = prepare_book_params(&template, &cfg, true, None);
         assert!(params.force);
-        assert!(params.hold_for_metadata);
         // No per-job override: the template's profile passes through.
         assert_eq!(params.audit_profile.name, template.audit_profile.name);
     }
@@ -2005,7 +2011,7 @@ mod tests {
     fn prepare_book_params_overrides_audit_profile_when_set() {
         let (cfg, _dir) = synthetic_cfg();
         let template = build_queue_params_template(&cfg, &EmbedConfig::default());
-        let params = prepare_book_params(&template, &cfg, false, false, Some("strict"));
+        let params = prepare_book_params(&template, &cfg, false, Some("strict"));
         // The override resolves through `load_audit_profile`, so the
         // result must be the named built-in -- not the template's
         // baseline profile.

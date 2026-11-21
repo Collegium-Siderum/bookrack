@@ -783,9 +783,10 @@ unchanged.
   its supported-format files before enqueueing; files passed
   directly are enqueued verbatim. With `recursive` omitted or
   `false`, directory paths reach the worker as-is and fail there.
-  When `hold_for_metadata` is `true`, the worker parks every book
-  whose audit verdict is `needs_work` at STRUCTURE, skipping CHUNK
-  and EMBED until a curator drives it past the metadata gate.
+  `hold_for_metadata` is retired and kept only so earlier clients are
+  served: `true` is refused with `-32602` in either form, before a
+  job is queued, and `false`, which every earlier client sends, is
+  accepted and ignored. A book is embedded as it is ingested.
   `audit_profile` resolves in three ways: absent, the daemon's startup
   profile applies; set to a built-in (`default` / `trust-source` /
   `strict`), that name rides on every enqueued job and the worker
@@ -806,8 +807,8 @@ unchanged.
   job is written; what can only be judged by reading the members — a
   unit that cannot be cut, pages `source` has and the text does not —
   fails the job instead. The two forms do not mix: `rule` beside a
-  non-empty `paths`, `recursive`, or `hold_for_metadata`, and `source`
-  or `allow_partial` without `rule`, are each `-32602`. The reply
+  non-empty `paths` or `recursive`, and `source` or `allow_partial`
+  without `rule`, are each `-32602`. The reply
   carries the one job's id in `job_ids`.
 - `ingest.cancel` — `{ job_id }` → `{ ok: true, job_id }`. Marks the
   one pending or running job whose id contains `job_id` as cancelled:

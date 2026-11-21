@@ -578,11 +578,25 @@ written.
 
 ## Retiring the metadata hold
 
-`bookrack metadata advance` and the control-plane method
-`metadata.advance` are gone, and `bookrack metadata approve` no longer
-resumes a book: it records the review and nothing else, as `ack` and
-`reject` do. Its reply drops `resumed`, `chunks_written`, and
-`batches`. An older client calling `metadata.advance` gets `-32601`.
+A book is embedded as it is ingested. `bookrack ingest
+--hold-for-metadata` is gone, and so are `bookrack metadata advance`
+and the control-plane method `metadata.advance`; `bookrack metadata
+approve` no longer resumes a book: it records the review and nothing
+else, as `ack` and `reject` do. Its reply drops `resumed`,
+`chunks_written`, and `batches`. Metadata edits take effect without
+re-embedding, so nothing is lost by embedding first; to see a source's
+audit verdict before it enters the library, run `bookrack dryrun` on
+it.
+
+`ingest.submit` still takes `hold_for_metadata` so earlier clients are
+served: `false`, which an earlier `bookrack ingest` sends on every
+call, is accepted and ignored, and `true` is refused with `-32602`. An
+earlier client calling `metadata.advance` gets `-32601`.
+
+A job queued with the hold before the upgrade and not yet run fails
+when the worker reaches it: `bookrack queue list` shows it `failed`,
+naming the retired hold, and `bookrack queue retry --job <id>` runs it
+as a plain ingest.
 
 A book an earlier build parked at the metadata gate stays parked. It
 shows as `extracted` in the `status` column of `bookrack list`, and

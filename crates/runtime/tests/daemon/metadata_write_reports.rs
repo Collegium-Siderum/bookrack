@@ -6,10 +6,11 @@
 //! approval on a book parked at the metadata gate records the review
 //! and leaves the book parked; `metadata.advance` is not a method.
 //!
-//! A bare text with no bibliographic data audits as `needs_work`, so
-//! `ingest.submit { hold_for_metadata: true }` parks it at the gate
-//! through the real worker. The embedder is
-//! `bookrack_test_support::EmbedStub`, so no Ollama daemon is required.
+//! A book parked at the metadata gate is a state only an earlier build
+//! leaves behind, so the test writes it into the catalog before
+//! bring-up: an intake at `Extracted` whose state row is at `metadata`.
+//! The embedder is `bookrack_test_support::EmbedStub`, so no Ollama
+//! daemon is required.
 
 #![cfg(unix)]
 
@@ -17,7 +18,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use bookrack_catalog::{Catalog, NewIntake};
+use bookrack_catalog::{Catalog, IntakeStatus, NewIntake, NewItemState};
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_test_support::{ProcessEnv, process_env};
 use bookrack_vectors::ChunkReader;
@@ -143,22 +144,29 @@ fn write_bare(dir: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Ingest a bare text with the metadata hold on, wait until the worker
-/// has parked it at the gate, and return its intake id.
-async fn park_one(reader: &mut Reader, w: &mut Writer, root: &Path, dir: &Path) -> Result<i64> {
-    let path = write_bare(dir)?;
-    let params = json!({ "paths": [path], "hold_for_metadata": true });
-    let book = ingest_and_wait(reader, w, root, params).await?;
-    assert_eq!(
-        stage_of(root, book)?.as_deref(),
-        Some("metadata"),
-        "a bare text must park at the metadata gate"
-    );
+/// Register a book the way an earlier build left one parked at the
+/// metadata gate, and return its intake id.
+fn seed_parked(root: &Path) -> Result<i64> {
+    let catalog_db = root.join("catalog.db");
+    let mut catalog = Catalog::open_for_write_unbacked(&catalog_db)?;
+    let book = catalog
+        .register_intake(
+            ItemKind::Book,
+            &NewIntake::new("sha-parked-at-gate").format("txt"),
+        )?
+        .into_intake()
+        .intake_id;
+    catalog.upsert_book_state(&NewItemState::new(
+        PartitionIdx::new(book).root().get(),
+        book,
+        "metadata",
+    ))?;
+    catalog.set_intake_status(ItemKind::Book, book, IntakeStatus::Extracted)?;
     Ok(book)
 }
 
-/// Ingest a bare text through the real worker, without the hold, and
-/// return its intake id.
+/// Ingest a bare text through the real worker and return its intake
+/// id.
 async fn ingest_one(reader: &mut Reader, w: &mut Writer, root: &Path, dir: &Path) -> Result<i64> {
     let path = write_bare(dir)?;
     ingest_and_wait(reader, w, root, json!({ "paths": [path] })).await
@@ -171,9 +179,22 @@ where
     F: FnOnce(PathBuf, PathBuf) -> Fut + Send + 'static,
     Fut: Future<Output = Result<()>> + Send + 'static,
 {
+    with_seeded_daemon(|_| Ok(()), move |sock, root, ()| body(sock, root)).await
+}
+
+/// [`with_daemon`], with `seed` run against the root before bring-up
+/// and what it returns handed to `body`.
+async fn with_seeded_daemon<T, S, F, Fut>(seed: S, body: F) -> Result<()>
+where
+    T: Send + 'static,
+    S: FnOnce(&Path) -> Result<T>,
+    F: FnOnce(PathBuf, PathBuf, T) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
     process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
+    let seeded = seed(data_root.path())?;
     let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
         data_root.path().into(),
         runtime_root.path().into(),
@@ -184,7 +205,7 @@ where
     let root = data_root.path().to_path_buf();
     let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
     let driver = tokio::spawn(async move {
-        let result = body(sock.clone(), root).await;
+        let result = body(sock.clone(), root, seeded).await;
         let (mut reader, mut w) = connect(&sock).await?;
         let _ = call(
             &mut reader,
@@ -280,10 +301,8 @@ async fn a_reaudit_reports_the_verdict_it_stored() -> Result<()> {
 /// vectors are written for it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_approve_at_the_gate_leaves_the_book_parked() -> Result<()> {
-    with_daemon(|sock, root| async move {
-        let sources = tempfile::tempdir()?;
+    with_seeded_daemon(seed_parked, |sock, root, book| async move {
         let (mut r, mut w) = connect(&sock).await?;
-        let book = park_one(&mut r, &mut w, &root, sources.path()).await?;
 
         let approved = ok_result(
             &mut r,
