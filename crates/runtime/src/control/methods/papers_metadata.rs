@@ -49,10 +49,10 @@ fn parse<T: for<'de> Deserialize<'de>>(
 /// path, with the target library's ops handle resolved.
 ///
 /// Everything a write needs beyond the change itself comes from
-/// [`run_write`]: the mutex that serializes this against an ingest or
-/// glean writing the same catalog, the MCP pause, the blocking
-/// executor the synchronous sqlite work belongs on, and the
-/// `LibraryChanged` broadcast that tells a subscriber to refresh the
+/// [`run_write`]: the mutex that makes this exclusive with every other
+/// control-plane write (a queue job does not take it), the MCP pause,
+/// the blocking executor the synchronous sqlite work belongs on, and
+/// the `LibraryChanged` broadcast that tells a subscriber to refresh the
 /// library this call named.
 ///
 /// The op opens the catalog itself rather than being handed one, so no

@@ -33,3 +33,4 @@ mod vector_reset_failure;
 mod vector_write_reports;
 mod worker_progress;
 mod workerless_dispatch;
+mod write_alongside_job;

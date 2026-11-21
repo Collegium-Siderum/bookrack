@@ -986,11 +986,16 @@ unchanged.
   field, the value it replaced, and the `reason` when one was given.
 
   Every `papers.metadata.*` method runs through the same write path as
-  its book-side peer: the daemon's write mutex serializes it against a
-  concurrent ingest or glean on the same catalog, MCP is paused for the
-  duration, and a successful call broadcasts `library.changed` naming
-  the library it wrote. None of them enqueue work, so all of them serve
-  on a daemon without a queue worker.
+  its book-side peer: the daemon's write mutex makes it exclusive with
+  every other control-plane write, MCP is paused for the duration, and
+  a successful call broadcasts `library.changed` naming the library it
+  wrote. The queue worker does not take that mutex, so a curation write
+  runs alongside a queue job on the same library; the two are
+  serialized only by SQLite's write lock on the catalog they share.
+  `papers.metadata.reaudit` is the exception: it also takes the
+  library's glean lock, so it waits for a running glean job to end.
+  None of them enqueue work, so all of them serve on a daemon without a
+  queue worker.
 
 - `remove` — `{ intake_id?, sha?, dry_run?, yes?, plan_id?, library? }`.
   Exactly
@@ -1067,7 +1072,9 @@ stream and crash reports, the daemon's listening address and state
 directory — and is the same whichever library is named.
 
 Every write command takes the runtime-wide write mutex on entry; a
-second concurrent write returns `-32001 busy`. The dry-run legs —
+second concurrent write returns `-32001 busy`. The queue worker does
+not take the mutex: a write command runs alongside a queue job (see
+`working` under the `daemon.state` event). The dry-run legs —
 `dryrun`, `papers.dryrun`, and the `dry_run` legs of `remove`,
 `papers.remove`, `corpus.rebuild`, `papers.corpus_rebuild`,
 `vectors.reembed` and `papers.vectors_reembed` — take the mutex too,
