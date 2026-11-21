@@ -936,9 +936,15 @@ mod tests {
     /// Send one embed request to `url` over a fresh connection and
     /// return the HTTP status the stub answers with.
     fn embed_status(url: &str) -> u16 {
+        embed_status_of(url, br#"{"input":["a"]}"#)
+    }
+
+    /// Send one embed request carrying `body` to `url` over a fresh
+    /// connection and return the HTTP status as soon as the stub writes
+    /// its status line, without reading the rest of the answer.
+    fn embed_status_of(url: &str, body: &[u8]) -> u16 {
         let addr = url.strip_prefix("http://").expect("loopback url");
         let mut stream = TcpStream::connect(addr).expect("connect to the stub");
-        let body = br#"{"input":["a"]}"#;
         write!(
             stream,
             "POST /api/embed HTTP/1.1\r\nhost: {addr}\r\ncontent-length: {}\r\n\r\n",
@@ -1535,14 +1541,14 @@ mod tests {
     }
 
     /// Send one embed request on its own thread; the receiver yields the
-    /// answer's status once the stub has written it.
+    /// answer's status as soon as the stub writes its status line, so a
+    /// request answered at once is seen at once.
     fn embed_in_background(url: &str, inputs: &[&str]) -> mpsc::Receiver<u16> {
         let url = url.to_string();
         let body = embed_body(inputs);
         let (sent, answered) = mpsc::channel();
         std::thread::spawn(move || {
-            let answer = http(&url, "POST", "/api/embed", &body);
-            let _ = sent.send(answer.status);
+            let _ = sent.send(embed_status_of(&url, &body));
         });
         answered
     }
