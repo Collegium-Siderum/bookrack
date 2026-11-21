@@ -14,10 +14,12 @@
 //! manifest recording another uuid as it is.
 //!
 //! The manifest carries identity and the data contract — what this
-//! library *is* and what its vectors *are* — and nothing else. Runtime
-//! preferences and facility knobs (a `top_k`, an Ollama URL) belong to
-//! `config.toml`: they describe how one machine runs the library, not
-//! the library itself, and so must not travel with the data.
+//! library *is* and what its vectors *are* — and nothing else. A
+//! library's preferences (a `top_k`) sit beside it in `config.toml`:
+//! they travel with the data too, but change how it is searched, not
+//! what it is. Where the backends are (an Ollama URL) is in neither
+//! file: that describes the machine, and the daemon takes it from its
+//! environment.
 
 use std::path::{Path, PathBuf};
 

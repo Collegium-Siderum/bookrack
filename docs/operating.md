@@ -636,6 +636,23 @@ by `bookrack setup`, which needs no library and no daemon:
   `bookrack config fixed` reports the free-space floor the disk row
   warns under.
 
+Each component is looked for in two places, in this order, and
+nowhere else:
+
+1. The directory holding the `bookrack` executable. A release archive
+   ships the PDFium library there.
+2. The per-user managed directory `setup` installs into, under the
+   platform data directory. It is one directory per pinned build —
+   `bookrack/pdfium/<release tag>/` for PDFium and
+   `bookrack/llama-server/<tag>/` for llama-server — so two bookrack
+   builds on one machine each find the build they bind, and an upgrade
+   installs beside the previous copy instead of replacing it.
+
+The reranker model has only the second stop, `bookrack/models/`: model
+weights do not ship in release archives. No environment variable
+redirects any of the three searches. `bookrack config effective` shows
+where each component was found and every place that was checked.
+
 `doctor --install-pdfium` and `doctor --install-reranker` still run the
 same installs before the report and print a deprecation warning; they
 go in the next minor release.

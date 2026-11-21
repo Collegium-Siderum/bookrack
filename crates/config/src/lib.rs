@@ -1070,8 +1070,10 @@ fn library_entries(registry: &Registry) -> Vec<LibraryEntry> {
     entries
 }
 
-/// Filename of the per-data-root configuration TOML, written by
-/// `bookrack init` next to the catalog and corpus databases.
+/// Filename of the per-data-root configuration TOML, which sits next
+/// to the catalog and corpus databases once `bookrack libraries config`
+/// or a hand edit creates it. A library without one runs on the
+/// defaults.
 pub const ROOT_CONFIG_NAME: &str = "config.toml";
 
 /// Per-data-root configuration loaded from `<data_root>/config.toml`:
@@ -1916,7 +1918,9 @@ fn embed_usize_knob(
 }
 
 /// Retrieval knobs. Separate from [`EmbedConfig`] so the query side reads
-/// only what it needs.
+/// only what it needs. Both are a library's preferences: each resolves
+/// its `config.toml` key over the built-in default, and no environment
+/// variable reaches either.
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
     /// How many nearest passages a query returns.

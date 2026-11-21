@@ -283,37 +283,63 @@ and when it is read. Use it to find out what can be configured;
 Every environment variable bookrack reads is documented, with its
 default, in [`.env.example`](../.env.example): the data-root and
 registry selectors, the Ollama endpoint, the embed-batch knobs, the
-reranker deployment, the PDFium library directory, and the log filters.
+reranker deployment, and the log filters.
 Copy that file to `.env` and fill in what you
 need. That file and `config knobs` cannot drift apart: a test compares
 the two in both directions, so a knob with no stanza and a stanza with
 no knob are both build failures.
 
-### Process-level knobs with no `config.toml` key
+### Who decides a value
 
-These are the rows `config effective` marks `per_call`: read afresh on
-every operation rather than snapshotted, so two calls in one process
-can legitimately differ.
+Every knob has one owner, and the `scope` column of `config effective`
+says which.
 
-The ANN search overrides are not among them. `bypass_index`, `nprobes`,
-and `refine_factor` travel on a search request and nowhere else; the
-three variables that once set them — `BOOKRACK_VECTORS_BYPASS_ANN`,
-`BOOKRACK_VECTORS_NPROBES`, `BOOKRACK_VECTORS_REFINE_FACTOR` — are
-retired. One that is still set is ignored, and `config effective` lists
-it under `retired_variables` rather than among the variables no knob
-reads; `bookrack doctor` names it in a `retired variables` row.
+A **daemon value** describes the machine or the process: where Ollama
+and the rerank server are, how the supervised rerank server is run, the
+embed-batch cadence, the MCP address, the log filters, the daemon state
+directory. A flag outranks the environment, the environment outranks
+`.env`, and `.env` outranks the built-in default. No library file sets
+one. The daemon resolves them when it starts, from the environment it
+was started under, so changing one means restarting the daemon.
 
-A request that carries neither `nprobes` nor `refine_factor` falls
-through to the ANN settings the build stamped beside the vector store
-(`vectors_meta.json`). The values in it come from the index profile the
-library ran under when the index was built, so a profile edited
-afterwards does not move them until `index-profile apply` rebuilds;
-`index-profile current` shows both sides. With no ANN index present
-nothing decides them, and the search is exhaustive anyway.
+A **library value** travels with the library — the rows whose scope is
+`library`: `search.top_k` and `search.weak_threshold` from its
+[`config.toml`](#per-library-settings-configtoml), and the embed model
+from the index profile its manifest names. No environment variable
+overrides one. The daemon resolves them when it mounts the library, so
+an edit takes effect once the library is unmounted and mounted again.
 
-`mcp_addr` and `log_directive` left `config.toml` for a reason of the
-same kind: a knob read before any data root is known does not
-belong to a data root.
+A value a request carries is neither. A search's result count can be
+given on the call, and the ANN search overrides — `bypass_index`,
+`nprobes`, and `refine_factor` — travel on a search request and nowhere
+else; see [Retrieval profiles](#retrieval-profiles-index-profile) for
+what a request that omits them gets.
+
+To see what a running daemon resolved, rather than what this shell
+would, run `bookrack config effective` while it is up, or call the
+read-only control-plane method `daemon.config`, which returns the
+daemon's rows, each mounted library's rows, and the libraries mounted
+at start ([control-plane.md](control-plane.md)).
+
+A few rows are marked `per_call`: read afresh on every operation
+rather than once, so two calls in one process can legitimately differ.
+
+### Retired variables
+
+A variable an earlier release read and this one does not is ignored
+when set, and reported by name: `config effective` lists it under
+`retired_variables` rather than among the variables no knob reads, and
+`bookrack doctor` names it in a `retired variables` row. Each entry
+says what replaces it.
+
+| Variable | Replaced by |
+|---|---|
+| `BOOKRACK_SEARCH_TOP_K`, `BOOKRACK_SEARCH_WEAK_THRESHOLD` | `search.top_k` and `search.weak_threshold` in the library's `config.toml` |
+| `BOOKRACK_VECTORS_BYPASS_ANN`, `BOOKRACK_VECTORS_NPROBES`, `BOOKRACK_VECTORS_REFINE_FACTOR` | `bypass_index`, `nprobes`, and `refine_factor` on a search request |
+| `BOOKRACK_PDFIUM_LIB` | `bookrack setup pdfium` |
+| `BOOKRACK_LLAMA_SERVER_BIN` | `bookrack setup reranker` |
+| `BOOKRACK_RERANKER_MODEL` | `bookrack setup reranker` for a pinned model; an operator-run server named by `BOOKRACK_RERANKER_URL` for any other |
+| `BOOKRACK_REQUIRE_PDFIUM` | nothing: only the test suite read it, and the suite reads `CI` |
 
 ### The MCP address is taken before the daemon reports success
 
@@ -547,6 +573,14 @@ priority chain of their own: they are settings a build bakes into an
 index, and `current` is where they are read back. The only ones a
 running system can still move are `nprobes` and `refine_factor`, on a
 search request.
+
+A request that carries neither `nprobes` nor `refine_factor` falls
+through to the ANN settings the build stamped beside the vector store
+(`vectors_meta.json`). The values in it come from the index profile the
+library ran under when the index was built, so a profile edited
+afterwards does not move them until `index-profile apply` rebuilds;
+`index-profile current` shows both sides. With no ANN index present
+nothing decides them, and the search is exhaustive anyway.
 
 `validate` enforces the product-quantization constraints, checks the
 cross-encoder reranker contract and the embed section's structure, and

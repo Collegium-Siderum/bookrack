@@ -7,7 +7,7 @@
 //! steps make no on-disk changes. Step four exercises the full
 //! ingest -> embed -> query pipeline against a tempdir, leaving the
 //! chosen data root untouched until validation passes. Step five
-//! creates the real data root, writes `<data_root>/config.toml`, and
+//! creates the real data root, writes its identity manifest, and
 //! merges a pointer into the platform-default registry.
 //!
 //! `CliWizardDriver` is the terminal implementation; a GUI front end
@@ -94,8 +94,8 @@ pub enum PdfiumInstallOutcome {
 }
 
 /// Step 3 inputs. `backend` is the embed backend's state as the daemon's
-/// own preflight judges it; `embed_model` is the name the runner intends
-/// to record into `config.toml`.
+/// own preflight judges it; `embed_model` is the model the smoke test
+/// embeds with.
 pub struct OllamaStep<'a> {
     pub url: &'a str,
     pub embed_model: &'a str,
