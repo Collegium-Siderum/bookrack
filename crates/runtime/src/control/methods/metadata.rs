@@ -16,7 +16,6 @@ use serde_json::Value;
 
 use super::{MethodContext, input_err, ok_reply, run_write};
 use crate::audit_helpers::require_known_profile;
-use std::sync::Arc;
 
 use crate::cmd::metadata::{WriteMetadataAction, run_write as run_metadata};
 use crate::control::error_map::{handler_err, registry_err};
@@ -134,22 +133,6 @@ pub struct MetadataRejectParams {
     library: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct MetadataAdvanceParams {
-    book: i64,
-    /// Optional book-side audit profile name. Used when `advance`
-    /// triggers a re-audit on the way out of the metadata gate;
-    /// resolves through the shared built-in set and is refused as
-    /// invalid params on a name outside it, absent means the daemon's
-    /// overlay-resolved default profile.
-    #[serde(default)]
-    audit_profile: Option<String>,
-    /// The library this call acts on. Absent means the library a call
-    /// naming none is routed to: `select_library`'s rule.
-    #[serde(default)]
-    library: Option<String>,
-}
-
 pub async fn set(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: MetadataSetParams = parse(params, "metadata.set")?;
     let action = WriteMetadataAction::Set {
@@ -249,18 +232,6 @@ pub async fn reject(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
     run_metadata_action(ctx, parsed.library.as_deref(), action, None).await
 }
 
-pub async fn advance(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let parsed: MetadataAdvanceParams = parse(params, "metadata.advance")?;
-    require_known_profile(
-        parsed.audit_profile.as_deref(),
-        bookrack_audit_profile::ALL_BUILT_IN_NAMES,
-    )
-    .map_err(input_err)?;
-    let profile = parsed.audit_profile;
-    let action = WriteMetadataAction::Advance { book: parsed.book };
-    run_metadata_action(ctx, parsed.library.as_deref(), action, profile).await
-}
-
 fn parse<T: serde::de::DeserializeOwned>(
     params: &Option<Value>,
     method: &str,
@@ -276,9 +247,9 @@ fn parse<T: serde::de::DeserializeOwned>(
 }
 
 /// Shared dispatch for every `metadata.*` write. `profile_name`
-/// reaches `cmd::metadata::run_write` only for actions that re-run the
-/// audit (`reaudit`, `advance`); the other variants are not audit
-/// callers, so their wrappers pass `None` to keep the override from
+/// reaches `cmd::metadata::run_write` only for `reaudit`, the action
+/// that re-runs the audit; the other variants are not audit callers,
+/// so their wrappers pass `None` to keep the override from
 /// looking like it applies on `set` / `clear` / `ack` / `approve` /
 /// `reject` / contributor edits where it would silently drop.
 async fn run_metadata_action(
@@ -289,9 +260,8 @@ async fn run_metadata_action(
 ) -> Result<Value, RpcError> {
     let handle = ctx.registry.get(library).map_err(registry_err)?;
     let cfg = handle.cfg_arc();
-    let daemon = Arc::clone(&ctx.daemon_config);
     run_write(ctx, handle.name(), move || async move {
-        let report = run_metadata(&cfg, &daemon, action, profile_name.as_deref())
+        let report = run_metadata(&cfg, action, profile_name.as_deref())
             .await
             .map_err(|e| handler_err("metadata.write", e))?;
         ok_reply(&report)
@@ -309,5 +279,4 @@ routed_params!(
     MetadataAckParams,
     MetadataApproveParams,
     MetadataRejectParams,
-    MetadataAdvanceParams,
 );

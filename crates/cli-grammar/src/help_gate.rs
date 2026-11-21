@@ -56,7 +56,6 @@ pub const GLOBAL_ARG_IDS: &[&str] = &[
 pub const EXAMPLES_OWED: &[&str] = &[
     "corpus rebuild",
     "metadata ack",
-    "metadata advance",
     "metadata approve",
     "metadata reaudit",
     "metadata reject",

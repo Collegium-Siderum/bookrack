@@ -107,9 +107,9 @@ exits `0`. `--no-wait` returns at queue-ack without awaiting, and so
 always exits `0`.
 
 `--hold-for-metadata` parks each book whose audit verdict is
-`needs_work` at the metadata gate instead of embedding it; a curator
-drives it past the gate with `bookrack metadata advance` (or
-`approve`) once the record is corrected.
+`needs_work` at the metadata gate instead of embedding it; ingesting
+the book again without the flag finishes it, keeping the field
+overrides and review decisions recorded in between.
 
 PDFium parses every PDF source, book or paper, inside the process that
 ingests it, with no sandbox around it. Advisories still open against

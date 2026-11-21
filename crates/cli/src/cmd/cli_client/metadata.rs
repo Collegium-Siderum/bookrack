@@ -1,6 +1,6 @@
 //! `bookrack metadata {set,clear,void,reaudit,contributor,ack,approve,
-//! reject,advance}` — route the matching write to the control-plane
-//! method and word its reply.
+//! reject}` — route the matching write to the control-plane method and
+//! word its reply.
 
 use std::path::PathBuf;
 
@@ -24,7 +24,7 @@ pub async fn run(
 }
 
 /// The control-plane method and params for one write. `audit_profile`
-/// rides only on the two actions that run the audit.
+/// rides only on `reaudit`, the one action that runs the audit.
 fn request(action: &WriteMetadataAction, audit_profile: Option<&str>) -> (&'static str, Value) {
     let with_profile = |mut params: Value| {
         if let Some(name) = audit_profile {
@@ -101,16 +101,13 @@ fn request(action: &WriteMetadataAction, audit_profile: Option<&str>) -> (&'stat
         WriteMetadataAction::Reject { book, reason } => {
             ("metadata.reject", json!({"book": book, "reason": reason}))
         }
-        WriteMetadataAction::Advance { book } => {
-            ("metadata.advance", with_profile(json!({ "book": book })))
-        }
     }
 }
 
 /// The human-mode sentence for one write's reply, or `None` when the
 /// reply lacks a field the sentence states. What is required depends
 /// on the action: an edit states its audit row, a re-audit its verdict,
-/// an advance its counts — and every sentence names the library.
+/// and every sentence names the library.
 fn sentence(action: &WriteMetadataAction, reply: &Value) -> Option<String> {
     let library = library_of(reply)?;
     let text = match action {
@@ -173,22 +170,11 @@ fn sentence(action: &WriteMetadataAction, reply: &Value) -> Option<String> {
         }
         WriteMetadataAction::Approve { book, .. } => {
             edited(reply)?;
-            let approved = format!("Approved metadata on book {book}. Library: {library}.");
-            return Some(match resumed_counts(reply) {
-                Some((chunks, batches)) => format!(
-                    "{approved}\nAdvanced book {book}: embedded {chunks} chunks across \
-                     {batches} batches."
-                ),
-                None => approved,
-            });
+            format!("Approved metadata on book {book}.")
         }
         WriteMetadataAction::Reject { book, .. } => {
             edited(reply)?;
             format!("Rejected book {book}.")
-        }
-        WriteMetadataAction::Advance { book } => {
-            let (chunks, batches) = counts(reply)?;
-            format!("Advanced book {book}: embedded {chunks} chunks across {batches} batches.")
         }
     };
     Some(format!("{text} Library: {library}."))
@@ -199,23 +185,6 @@ fn sentence(action: &WriteMetadataAction, reply: &Value) -> Option<String> {
 fn edited(reply: &Value) -> Option<bool> {
     reply.get("audit_id")?.as_i64()?;
     reply.get("changed")?.as_bool()
-}
-
-/// The resume counts a reply carries.
-fn counts(reply: &Value) -> Option<(u64, u64)> {
-    Some((
-        reply.get("chunks_written")?.as_u64()?,
-        reply.get("batches")?.as_u64()?,
-    ))
-}
-
-/// The resume counts of an approval that resumed the book.
-fn resumed_counts(reply: &Value) -> Option<(u64, u64)> {
-    if reply.get("resumed")?.as_bool()? {
-        counts(reply)
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]
@@ -321,49 +290,32 @@ mod tests {
         );
     }
 
-    /// An advance writes no audit row either; its sentence stands on
-    /// the counts.
-    #[test]
-    fn an_advance_reads_as_the_counts_without_an_audit_row() {
-        let reply = json!({
-            "ok": true, "library": "alpha", "book": 7, "resumed": true,
-            "chunks_written": 12, "batches": 2,
-        });
-        assert_eq!(
-            sentence(&WriteMetadataAction::Advance { book: 7 }, &reply).as_deref(),
-            Some("Advanced book 7: embedded 12 chunks across 2 batches. Library: alpha.")
-        );
+    fn approve() -> WriteMetadataAction {
+        WriteMetadataAction::Approve {
+            book: 7,
+            reason: None,
+        }
     }
 
     #[test]
-    fn an_approve_that_resumed_adds_the_counts() {
+    fn an_approve_reads_as_the_review_on_the_library() {
+        assert_eq!(
+            sentence(&approve(), &edit_reply(true)).as_deref(),
+            Some("Approved metadata on book 7. Library: alpha.")
+        );
+    }
+
+    /// A daemon that still resumes a parked book on approval answers
+    /// with fields this client does not read; the sentence is the
+    /// review's all the same.
+    #[test]
+    fn an_approve_reply_from_a_resuming_daemon_reads_as_the_review() {
         let mut reply = edit_reply(true);
         reply["resumed"] = json!(true);
         reply["chunks_written"] = json!(12);
         reply["batches"] = json!(2);
-        let approve = WriteMetadataAction::Approve {
-            book: 7,
-            reason: None,
-        };
         assert_eq!(
-            sentence(&approve, &reply).as_deref(),
-            Some(
-                "Approved metadata on book 7. Library: alpha.\n\
-                 Advanced book 7: embedded 12 chunks across 2 batches."
-            )
-        );
-    }
-
-    #[test]
-    fn an_approve_that_did_not_resume_is_the_edit_alone() {
-        let mut reply = edit_reply(true);
-        reply["resumed"] = json!(false);
-        let approve = WriteMetadataAction::Approve {
-            book: 7,
-            reason: None,
-        };
-        assert_eq!(
-            sentence(&approve, &reply).as_deref(),
+            sentence(&approve(), &reply).as_deref(),
             Some("Approved metadata on book 7. Library: alpha.")
         );
     }
@@ -372,8 +324,6 @@ mod tests {
     fn the_audit_profile_rides_only_on_the_audit_callers() {
         let (_, reaudit) = request(&WriteMetadataAction::Reaudit { book: 7 }, Some("strict"));
         assert_eq!(reaudit["audit_profile"], "strict");
-        let (_, advance) = request(&WriteMetadataAction::Advance { book: 7 }, Some("strict"));
-        assert_eq!(advance["audit_profile"], "strict");
         let (_, set) = request(&set(), Some("strict"));
         assert!(set.get("audit_profile").is_none(), "{set}");
     }

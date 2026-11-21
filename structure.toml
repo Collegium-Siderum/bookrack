@@ -166,7 +166,6 @@ paths = [
   "crates/runtime/src/cmd/index_profile.rs",
   "crates/runtime/src/cmd/ingest.rs",
   "crates/runtime/src/cmd/libraries.rs",
-  "crates/runtime/src/cmd/metadata.rs",
   "crates/runtime/src/cmd/papers_corpus.rs",
   "crates/runtime/src/cmd/papers_dryrun.rs",
   "crates/runtime/src/cmd/papers_stamps.rs",
@@ -382,10 +381,6 @@ site = "crates/runtime/src/cmd/ingest.rs::run"
 access = "write"
 
 [[write_door]]
-site = "crates/runtime/src/cmd/metadata.rs::advance"
-access = "write"
-
-[[write_door]]
 site = "crates/runtime/src/cmd/papers_corpus.rs::execute_rebuild_from_plan"
 access = "write"
 
@@ -587,7 +582,7 @@ sites = [
   "crates/runtime/src/control/methods/papers_metadata.rs",
 ]
 reason = "transitional"
-detail = "book handlers go through cmd::metadata::run_write on a catalog-only Ops; paper handlers call the handle's ops directly; advance exists only for books, reopen only for papers"
+detail = "book handlers go through cmd::metadata::run_write on a catalog-only Ops; paper handlers call the handle's ops directly; reopen exists only for papers"
 agreement = "divergent"
 exit = "one handler takes the kind as a parameter"
 

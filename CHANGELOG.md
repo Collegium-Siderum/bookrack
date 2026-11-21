@@ -313,6 +313,15 @@ release workflow extracts the matching section verbatim from this file.
   fails instead when `CI` is set. No variable of its own makes the
   library mandatory or optional.
 
+- **`metadata approve` records the review and nothing else.** On a book
+  an earlier build parked at the metadata gate it no longer runs CHUNK
+  and EMBED, and the `metadata.approve` reply drops `resumed`,
+  `chunks_written`, and `batches`: it carries the edit fields, as `ack`
+  and `reject` do. The book-side `approve` and the MCP
+  `library.metadata.approve` tool now mean the same thing. A parked
+  book is finished by ingesting its source again; `docs/UPGRADE.md`
+  covers it.
+
 ### Deprecated
 
 - **`bookrack doctor --install-pdfium` and `--install-reranker`** are
@@ -485,6 +494,11 @@ release workflow extracts the matching section verbatim from this file.
   arguments and runs the same pipeline. An `ingest` typed under any
   namespace opens its error with a tip naming the two submission
   verbs, `bookrack glean` and `bookrack ingest`.
+- **`bookrack metadata advance` and the control-plane method
+  `metadata.advance`.** Typing the subcommand is a usage error (exit
+  `2`); calling the method is `-32601`. A book parked at the metadata
+  gate is finished by ingesting its source again (`docs/UPGRADE.md`,
+  *Retiring the metadata hold*).
 
 ## [0.14.0] - 2026-11-07
 

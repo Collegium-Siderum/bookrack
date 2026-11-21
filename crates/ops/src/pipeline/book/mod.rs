@@ -453,9 +453,9 @@ pub struct IngestParams {
     /// EMBED tuning (operational; see [`EmbedConfig::from_env`]).
     pub embed: EmbedConfig,
     /// When true, an audit verdict of `needs_work` parks the book in
-    /// the metadata stage instead of running CHUNK and EMBED. The
-    /// caller resumes the run later with [`resume_from_chunk`].
-    /// Off by default: the audit is purely advisory.
+    /// the metadata stage instead of running CHUNK and EMBED; ingesting
+    /// the book again without the hold finishes it. Off by default: the
+    /// audit is purely advisory.
     pub hold_for_metadata: bool,
     /// Runtime-loaded data set the metadata audit consults. Defaults
     /// to [`bookrack_metadata::AuditData::default_data`]; load the
@@ -959,7 +959,8 @@ async fn finish_extraction_ingest<E: Embedder>(
 
     // Optional hold gate: when the caller asked for it AND the audit
     // flagged the record, park the book in the metadata stage and
-    // hand control back. CHUNK/EMBED run on a later `advance` call.
+    // hand control back. A later ingest of the same source runs
+    // CHUNK/EMBED.
     if hold_for_metadata && needs_work {
         set_state(
             catalog,
@@ -985,7 +986,7 @@ async fn finish_extraction_ingest<E: Embedder>(
         });
     }
 
-    let embed = resume_from_chunk(
+    let embed = chunk_and_embed(
         corpus,
         catalog,
         lancedb_dir,
@@ -1297,24 +1298,20 @@ fn remove_superseded_envelope(path: &Path, intake_id: i64) {
 }
 
 /// Run CHUNK and EMBED for a book whose corpus tree is already in
-/// place, then mark the intake `Embedded`. Shared by the steady-state
-/// [`ingest_book`] path and the `metadata advance` resume path, so a
-/// book held at the metadata gate finishes through the same
-/// CHUNK/EMBED code as a non-held book.
+/// place, then mark the intake `Embedded`.
 ///
 /// `parsed_at` is the timestamp [`ingest_book`] stamped on the book
-/// state when STRUCTURE completed; the resume preserves it rather
-/// than minting a new one.
+/// state when STRUCTURE completed; it is preserved rather than minted
+/// anew.
 ///
 /// The function does **not** rebuild the tree — it walks the existing
 /// prose leaves out of `corpus` and feeds them straight into the
-/// chunker. A book whose STRUCTURE never ran first cannot be advanced
-/// through this entry point.
+/// chunker, so STRUCTURE must have run first.
 ///
 /// `on_embed_batch` receives each EMBED batch once it is written; see
 /// [`OnEmbedBatch`].
 #[allow(clippy::too_many_arguments)]
-pub async fn resume_from_chunk<E: Embedder>(
+async fn chunk_and_embed<E: Embedder>(
     corpus: &mut Corpus,
     catalog: &mut Catalog,
     lancedb_dir: &Path,
@@ -5189,15 +5186,17 @@ pub(crate) mod book_pipeline_tests {
     }
 
     #[tokio::test]
-    async fn hold_for_metadata_parks_a_bare_book_at_the_metadata_stage() {
+    async fn a_held_book_finishes_when_ingested_again_without_the_hold() {
         // A bare .txt yields no biblio; with the hold gate on, ingest
-        // stops at metadata rather than chunking and embedding.
+        // stops at metadata rather than chunking and embedding. Ingesting
+        // the same source again without the hold finishes it on the same
+        // intake and keeps the curator's overrides.
         let dir = tempfile::tempdir().expect("tempdir");
         let file = write_sample(dir.path());
         let mut corpus = Corpus::open_in_memory().expect("corpus");
         let mut catalog = Catalog::open_in_memory().expect("catalog");
 
-        let params = IngestParams {
+        let held = IngestParams {
             hold_for_metadata: true,
             ..Default::default()
         };
@@ -5208,7 +5207,7 @@ pub(crate) mod book_pipeline_tests {
             dir.path(),
             dir.path(),
             &Fake { dim: 8 },
-            &params,
+            &held,
         )
         .await
         .expect("ingest");
@@ -5224,30 +5223,37 @@ pub(crate) mod book_pipeline_tests {
             .expect("present");
         assert_ne!(intake.status, IntakeStatus::Embedded);
 
-        // Now satisfy the gate (clean title + language) and resume.
-        let mut attrs =
-            bookrack_catalog::NewPublicationAttrs::new(report.intake_id, ItemKind::Book);
-        attrs.title = Some("A Title".to_string());
-        attrs.language = Some("en".to_string());
-        catalog.upsert_publication_attrs(&attrs).expect("attrs");
-        let resume = resume_from_chunk(
+        catalog
+            .set_override(&bookrack_catalog::NewOverride::new(
+                report.intake_id,
+                ItemKind::Book,
+                "title",
+                Some("A Curated Title".to_string()),
+                "curator",
+            ))
+            .expect("override");
+
+        let finished = ingest_book(
+            &file,
             &mut corpus,
             &mut catalog,
             dir.path(),
+            dir.path(),
             &Fake { dim: 8 },
-            &params,
-            report.intake_id,
-            report.book_root_id,
-            "advance-test",
-            "test-sha",
-            state.parsed_at.as_deref().unwrap_or("now"),
-            &|_, _| {},
+            &IngestParams::default(),
         )
         .await
-        .expect("resume");
-        assert!(resume.chunks_written > 0);
+        .expect("ingest again");
+        assert_eq!(
+            finished.intake_id, report.intake_id,
+            "the second ingest registered a new intake"
+        );
+        assert!(
+            finished.already_registered,
+            "the second ingest did not reuse the intake"
+        );
+        assert!(finished.chunks_written > 0);
 
-        // After resume the book is fully embedded.
         let intake = catalog
             .intake_by_id(report.intake_id)
             .expect("intake")
@@ -5255,6 +5261,15 @@ pub(crate) mod book_pipeline_tests {
         assert_eq!(intake.status, IntakeStatus::Embedded);
         let state = catalog.book_state(root).expect("state").expect("present");
         assert_eq!(state.current_stage, "embed");
+        let overrides = catalog
+            .overrides_for_address(report.intake_id, ItemKind::Book)
+            .expect("overrides");
+        assert!(
+            overrides
+                .iter()
+                .any(|o| o.field == "title" && o.value.as_deref() == Some("A Curated Title")),
+            "the second ingest dropped the curator's override: {overrides:?}"
+        );
     }
 
     #[tokio::test]

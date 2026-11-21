@@ -114,9 +114,9 @@ struct Cli {
     /// `<data_root>/audit-rules/audit_profile.local.toml` overlay is
     /// merged onto the shipped default; with it the overlay is
     /// bypassed and the named preset wins. Applies to `ingest`,
-    /// `dryrun`, `metadata reaudit`, `metadata advance`, and
-    /// `papers metadata reaudit`; passing the flag on any other
-    /// subcommand aborts before any RPC is sent.
+    /// `dryrun`, `metadata reaudit`, and `papers metadata reaudit`;
+    /// passing the flag on any other subcommand aborts before any RPC
+    /// is sent.
     #[arg(
         long,
         global = true,
@@ -1186,7 +1186,7 @@ async fn run() -> Result<()> {
     if audit_profile.is_some() && !accepts_audit_profile(&cli.command) {
         return Err(bookrack_cli::error::BookrackCliError::LocalUserError {
             message: "--audit-profile is only consumed by `ingest`, \
-                      `dryrun`, `metadata reaudit`, `metadata advance`, and \
+                      `dryrun`, `metadata reaudit`, and \
                       `papers metadata reaudit`; remove it for this subcommand"
                 .to_string(),
         }
@@ -1585,10 +1585,7 @@ fn accepts_audit_profile(command: &Command) -> bool {
         Command::Ingest(_) => true,
         Command::Glean(_) => true,
         Command::Dryrun(_) => true,
-        Command::Metadata { action } => matches!(
-            action,
-            WriteMetadataAction::Reaudit { .. } | WriteMetadataAction::Advance { .. }
-        ),
+        Command::Metadata { action } => matches!(action, WriteMetadataAction::Reaudit { .. }),
         Command::Papers { action } => matches!(
             action,
             PapersAction::Metadata {
@@ -2173,7 +2170,6 @@ mod tests {
             vec!["bookrack", "ingest", "/tmp/x.epub"],
             vec!["bookrack", "dryrun", "/tmp/x.epub"],
             vec!["bookrack", "metadata", "reaudit", "1"],
-            vec!["bookrack", "metadata", "advance", "1"],
             vec!["bookrack", "papers", "metadata", "reaudit", "1"],
         ];
         for argv in consumers {
@@ -2268,7 +2264,6 @@ mod tests {
                 "--reason",
                 "wrong file",
             ],
-            vec!["bookrack", "metadata", "advance", "1"],
         ] {
             Cli::try_parse_from(argv.iter().copied())
                 .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
@@ -2308,6 +2303,15 @@ mod tests {
                 "{argv:?} must be refused by the grammar",
             );
         }
+    }
+
+    /// `metadata advance` is not part of the grammar.
+    #[test]
+    fn metadata_advance_does_not_parse() {
+        assert!(
+            Cli::try_parse_from(["bookrack", "metadata", "advance", "1"]).is_err(),
+            "metadata advance must be refused by the grammar",
+        );
     }
 
     #[test]
@@ -2671,7 +2675,7 @@ mod tests {
         ("bookrack distill", 4),
         ("bookrack index-profile", 6),
         ("bookrack libraries", 12),
-        ("bookrack metadata", 10),
+        ("bookrack metadata", 9),
         ("bookrack papers", 12),
         ("bookrack papers corpus", 1),
         ("bookrack papers metadata", 10),

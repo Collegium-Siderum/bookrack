@@ -296,8 +296,6 @@ onto.
     outside the built-in set for the pipeline being addressed, an
     `index_profile` reference naming no defined profile;
   - a `dryrun` / `papers.dryrun` path holding no supported file;
-  - `metadata.advance` against an unknown intake, a book with no
-    state row, or a book whose structure pass has not run;
   - the `library.fork` input checks — an empty name, a relative
     `data_dir`, a parent directory that does not exist, a target that
     resolves onto the source library, a name the registry already
@@ -827,12 +825,12 @@ unchanged.
   structure → audit → embed). Directory paths are not expanded here.
 - `metadata.set` / `metadata.clear` / `metadata.void` /
   `metadata.reaudit` / `metadata.ack` / `metadata.approve` /
-  `metadata.reject` / `metadata.advance` — same params as the
+  `metadata.reject` — same params as the
   `bookrack metadata` REPL subcommands, plus `library?`. Each returns
   `ok: true`, `library`, and `book` with what the write recorded, in
   the field names the MCP write tools use:
   - `set` / `clear` / `void` → `{ field, audit_id, actor_kind,
-    actor_detail, changed }`; `ack` / `reject` /
+    actor_detail, changed }`; `ack` / `approve` / `reject` /
     `contributor_remove` → the same without `field`;
     `contributor_add` adds `contributor_id`. `audit_id` names the
     `metadata_audit` row the edit wrote; `changed` is false for an
@@ -840,22 +838,15 @@ unchanged.
   - `reaudit` → `{ verdict, previous_verdict, confidence,
     previous_confidence }`, the previous pair `null` when nothing was
     stored. A re-audit writes no audit row.
-  - `advance` → `{ resumed: true, chunks_written, batches }`, what the
-    resumed CHUNK→EMBED wrote.
-  - `approve` → the edit fields plus `resumed`, which says whether the
-    book was parked at the metadata gate and the approval resumed it;
-    when `true`, `chunks_written` and `batches` follow as for
-    `advance`.
 
-  `metadata.reaudit` and `metadata.advance` additionally
-  accept `audit_profile?`, which routes through the same built-in set
-  as `ingest.submit` for the re-audit they trigger, and is refused
-  with `-32602` when it names nothing in that set. The other writes
-  in this family do not call the audit and reject the field at the
-  CLI white-list; the daemon-side helper passes `None` for them.
-  `metadata.advance` resumes CHUNK→EMBED for a book held
-  at the metadata gate by `--hold-for-metadata`. `metadata.approve`
-  triggers the same resume implicitly when the book is parked. `metadata.void`
+  `metadata.reaudit` additionally accepts `audit_profile?`, which
+  routes through the same built-in set as `ingest.submit` for the
+  re-audit it triggers, and is refused with `-32602` when it names
+  nothing in that set. The other writes in this family do not call
+  the audit and reject the field at the CLI white-list; the
+  daemon-side helper passes `None` for them. `metadata.approve`
+  records the review and nothing else: a book parked at the metadata
+  gate stays there until it is ingested again. `metadata.void`
   (added post-Phase 5) writes a NULL override that suppresses a
   field's extracted value until a correct one is set;
   `metadata.clear` removes it. `metadata.reaudit` (same vintage)

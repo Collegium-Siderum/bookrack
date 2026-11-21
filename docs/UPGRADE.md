@@ -576,6 +576,33 @@ The knobs themselves are unchanged. Declare the listen address with
 Nothing about the resolved values changes — only where they may be
 written.
 
+## Retiring the metadata hold
+
+`bookrack metadata advance` and the control-plane method
+`metadata.advance` are gone, and `bookrack metadata approve` no longer
+resumes a book: it records the review and nothing else, as `ack` and
+`reject` do. Its reply drops `resumed`, `chunks_written`, and
+`batches`. An older client calling `metadata.advance` gets `-32601`.
+
+A book an earlier build parked at the metadata gate stays parked. It
+shows as `extracted` in the `status` column of `bookrack list`, and
+`bookrack rpc call library.stats` counts it under
+`book_state_counts_by_stage.metadata`. To finish it, ingest the same
+source again, from the path the book was ingested from:
+
+```
+bookrack ingest <path>
+```
+
+The source is already registered and not yet embedded, so the run
+reuses its intake and carries it through CHUNK and EMBED. Field
+overrides and review decisions recorded while the book was parked are
+kept.
+
+`bookrack vectors reset --resume` finishes parked books too, but it
+does not take a book: it re-chunks and re-embeds every intake of the
+library still at `Extracted`, parked or not.
+
 ## Diagnose bundle schema 6
 
 `manifest.json` moved from 5 to 6 because the shape of one file

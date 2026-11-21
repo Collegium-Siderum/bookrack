@@ -211,9 +211,9 @@ use glean::GleanSubmitParams;
 use ingest::IngestSubmitParams;
 use libraries::LibraryForkParams;
 use metadata::{
-    MetadataAckParams, MetadataAdvanceParams, MetadataApproveParams, MetadataClearParams,
-    MetadataContributorAddParams, MetadataContributorRemoveParams, MetadataReauditParams,
-    MetadataRejectParams, MetadataSetParams, MetadataVoidParams,
+    MetadataAckParams, MetadataApproveParams, MetadataClearParams, MetadataContributorAddParams,
+    MetadataContributorRemoveParams, MetadataReauditParams, MetadataRejectParams,
+    MetadataSetParams, MetadataVoidParams,
 };
 use papers_corpus::PapersCorpusRebuildParams;
 use papers_dryrun::PapersDryrunParams;
@@ -455,7 +455,6 @@ methods! {
     write no_queue async   routed(MetadataAckParams)  "metadata.ack" => metadata::ack,
     write no_queue async   routed(MetadataApproveParams) "metadata.approve" => metadata::approve,
     write no_queue async   routed(MetadataRejectParams) "metadata.reject" => metadata::reject,
-    write queue    async   routed(MetadataAdvanceParams) "metadata.advance" => metadata::advance,
 
     // book vectors / corpus / stamps
     write queue    async   routed(VectorsRebuildParams) "vectors.rebuild" => vectors::rebuild,
@@ -1125,7 +1124,6 @@ mod tests {
             "stamps.reconcile",
             "remove",
             "papers.remove",
-            "metadata.advance",
             "dryrun",
         ] {
             assert!(is_queue_bound_method(name), "{name} should be queue-bound");
@@ -1142,6 +1140,21 @@ mod tests {
             );
             assert!(!is_queue_bound_method(name), "{name} is still queue-bound");
         }
+    }
+
+    /// `metadata.advance` is not a method.
+    #[test]
+    fn the_metadata_advance_method_is_not_in_the_dispatch_table() {
+        assert!(
+            REGISTRY
+                .iter()
+                .all(|method| method.name != "metadata.advance"),
+            "metadata.advance is still dispatched"
+        );
+        assert!(
+            !is_queue_bound_method("metadata.advance"),
+            "metadata.advance is still queue-bound"
+        );
     }
 
     #[test]

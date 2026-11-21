@@ -651,7 +651,7 @@ bookrack audit-profile diff default strict
 
 The global `--audit-profile <name>` flag overrides the profile for a
 single audit-aware command — `ingest`, `dryrun`,
-`metadata reaudit` / `advance`, and `papers metadata reaudit`. Passing
+`metadata reaudit`, and `papers metadata reaudit`. Passing
 it on any other subcommand aborts before an RPC is sent, so the value
 cannot silently drop.
 

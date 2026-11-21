@@ -238,10 +238,6 @@ async fn an_unknown_audit_profile_is_refused_at_every_entry_point() -> Result<()
                 serde_json::json!({"book": 1, "audit_profile": "strictt"}),
             ),
             (
-                "metadata.advance",
-                serde_json::json!({"book": 1, "audit_profile": "strictt"}),
-            ),
-            (
                 "papers.metadata.reaudit",
                 serde_json::json!({"intake_id": 1, "audit_profile": "strictt"}),
             ),
@@ -261,11 +257,13 @@ async fn an_unknown_audit_profile_is_refused_at_every_entry_point() -> Result<()
                 Some(-32602),
                 "{method} must refuse an unknown audit_profile: {resp}"
             );
-            // The code alone does not discriminate here: four of these
-            // six answer `-32602` anyway, because book / intake `1`
-            // does not exist either. Quoting the rejected name is what
-            // proves the profile guard is the leg that ran. Do not
-            // weaken this to the code check.
+            // The code alone does not discriminate here: three of these
+            // five answer `-32602` without the profile too — the two
+            // re-audits name an intake `1` that does not exist, and the
+            // file-form submit names a directory, which the extension
+            // check refuses. Quoting the rejected name is what proves
+            // the profile guard is the leg that ran. Do not weaken this
+            // to the code check.
             let message = resp["error"]["message"].as_str().unwrap_or_default();
             assert!(
                 message.contains("strictt"),

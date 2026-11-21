@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The book-side metadata writes answer with what the ops layer
-//! recorded: the audit row an edit wrote, the verdict a re-audit
-//! stored, and — for `approve` on a book parked at the metadata gate,
-//! and for `advance` — what the resumed CHUNK→EMBED wrote. Each claim is
-//! read back from the store it describes.
+//! recorded: the audit row an edit wrote and the verdict a re-audit
+//! stored. Each claim is read back from the store it describes. An
+//! approval on a book parked at the metadata gate records the review
+//! and leaves the book parked; `metadata.advance` is not a method.
 //!
 //! A bare text with no bibliographic data audits as `needs_work`, so
 //! `ingest.submit { hold_for_metadata: true }` parks it at the gate
@@ -82,33 +82,25 @@ fn audit_row_exists(root: &Path, reply: &Value) -> Result<bool> {
         .any(|row| row.audit_id == audit_id))
 }
 
-/// The chunk rows the vector store holds for one book.
+/// The chunk rows the vector store holds for one book; none when the
+/// chunks table does not exist yet.
 async fn chunk_rows_of(root: &Path, book: i64) -> Result<usize> {
-    Ok(ChunkReader::open(&root.join("lancedb"))
-        .await?
-        .context("the chunks table exists")?
-        .scan_partition(PartitionIdx::new(book))
-        .await?
-        .len())
+    let Some(reader) = ChunkReader::open(&root.join("lancedb")).await? else {
+        return Ok(0);
+    };
+    Ok(reader.scan_partition(PartitionIdx::new(book)).await?.len())
 }
 
-/// Ingest a bare text with the metadata hold on, wait until the worker
-/// has parked it at the gate, and return its intake id.
-async fn park_one(reader: &mut Reader, w: &mut Writer, root: &Path, dir: &Path) -> Result<i64> {
-    let path = dir.join("bare-sample.txt");
-    std::fs::write(
-        &path,
-        "The first paragraph of a short synthetic document about birds.\n\
-         A second paragraph carrying more prose to chunk and embed.\n",
-    )?;
-    let submitted = ok_result(
-        reader,
-        w,
-        1,
-        "ingest.submit",
-        json!({ "paths": [path], "hold_for_metadata": true }),
-    )
-    .await?;
+/// Submit `params` to `ingest.submit`, wait until the worker has
+/// finished the one job it queued, and return the one intake the
+/// library then holds.
+async fn ingest_and_wait(
+    reader: &mut Reader,
+    w: &mut Writer,
+    root: &Path,
+    params: Value,
+) -> Result<i64> {
+    let submitted = ok_result(reader, w, 1, "ingest.submit", params).await?;
     let job = submitted["job_ids"][0]
         .as_str()
         .with_context(|| format!("no job id: {submitted}"))?
@@ -137,13 +129,39 @@ async fn park_one(reader: &mut Reader, w: &mut Writer, root: &Path, dir: &Path) 
     let [intake] = intakes.as_slice() else {
         return Err(eyre!("expected one intake, found {}", intakes.len()));
     };
-    let book = intake.intake_id;
+    Ok(intake.intake_id)
+}
+
+/// Write a bare text with no bibliographic data under `dir`.
+fn write_bare(dir: &Path) -> Result<PathBuf> {
+    let path = dir.join("bare-sample.txt");
+    std::fs::write(
+        &path,
+        "The first paragraph of a short synthetic document about birds.\n\
+         A second paragraph carrying more prose to chunk and embed.\n",
+    )?;
+    Ok(path)
+}
+
+/// Ingest a bare text with the metadata hold on, wait until the worker
+/// has parked it at the gate, and return its intake id.
+async fn park_one(reader: &mut Reader, w: &mut Writer, root: &Path, dir: &Path) -> Result<i64> {
+    let path = write_bare(dir)?;
+    let params = json!({ "paths": [path], "hold_for_metadata": true });
+    let book = ingest_and_wait(reader, w, root, params).await?;
     assert_eq!(
         stage_of(root, book)?.as_deref(),
         Some("metadata"),
         "a bare text must park at the metadata gate"
     );
     Ok(book)
+}
+
+/// Ingest a bare text through the real worker, without the hold, and
+/// return its intake id.
+async fn ingest_one(reader: &mut Reader, w: &mut Writer, root: &Path, dir: &Path) -> Result<i64> {
+    let path = write_bare(dir)?;
+    ingest_and_wait(reader, w, root, json!({ "paths": [path] })).await
 }
 
 /// Bring a daemon up on a fresh path-selected root, hand `body` the
@@ -181,10 +199,10 @@ where
     join_with_deadline(runtime, repl_handle, driver).await
 }
 
-/// An approval on a book that is not parked only records the review:
-/// `resumed` is false and no resume counts appear.
+/// An approval on a book that is not parked records the review and
+/// answers with the edit's fields.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_approve_off_the_gate_does_not_resume() -> Result<()> {
+async fn an_approve_off_the_gate_reports_the_edit() -> Result<()> {
     with_daemon(|sock, root| async move {
         let book = Catalog::open_for_write_unbacked(&root.join("catalog.db"))?
             .register_intake(
@@ -211,28 +229,24 @@ async fn an_approve_off_the_gate_does_not_resume() -> Result<()> {
                 "book",
                 "changed",
                 "library",
-                "ok",
-                "resumed"
+                "ok"
             ],
             "{reply}"
         );
-        assert_eq!(reply["resumed"], false);
         assert!(audit_row_exists(&root, &reply)?, "{reply}");
         Ok(())
     })
     .await
 }
 
-/// A re-audit reports the verdict it stored and writes no audit row of
-/// its own; an approval on the parked book records the review, resumes
-/// it, and reports the rows the resume wrote — the rows the store holds
-/// for that book afterwards.
+/// A re-audit reports the verdict it stored, beside the one it
+/// replaced, and writes no audit row of its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_approve_at_the_gate_resumes_and_reports_the_rows_it_wrote() -> Result<()> {
+async fn a_reaudit_reports_the_verdict_it_stored() -> Result<()> {
     with_daemon(|sock, root| async move {
         let sources = tempfile::tempdir()?;
         let (mut r, mut w) = connect(&sock).await?;
-        let book = park_one(&mut r, &mut w, &root, sources.path()).await?;
+        let book = ingest_one(&mut r, &mut w, &root, sources.path()).await?;
 
         let reaudit = ok_result(
             &mut r,
@@ -256,6 +270,20 @@ async fn an_approve_at_the_gate_resumes_and_reports_the_rows_it_wrote() -> Resul
             "{reaudit}"
         );
         assert!(reaudit["verdict"].is_string(), "{reaudit}");
+        Ok(())
+    })
+    .await
+}
+
+/// An approval on a book parked at the metadata gate only records the
+/// review: the reply is the edit's, the book stays at the gate, and no
+/// vectors are written for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_approve_at_the_gate_leaves_the_book_parked() -> Result<()> {
+    with_daemon(|sock, root| async move {
+        let sources = tempfile::tempdir()?;
+        let (mut r, mut w) = connect(&sock).await?;
+        let book = park_one(&mut r, &mut w, &root, sources.path()).await?;
 
         let approved = ok_result(
             &mut r,
@@ -265,59 +293,42 @@ async fn an_approve_at_the_gate_resumes_and_reports_the_rows_it_wrote() -> Resul
             json!({ "book": book }),
         )
         .await?;
-        assert_eq!(approved["ok"], true, "{approved}");
-        assert_eq!(approved["library"], "default", "{approved}");
-        assert_eq!(approved["resumed"], true, "{approved}");
-        assert!(audit_row_exists(&root, &approved)?, "{approved}");
-        let written = approved["chunks_written"]
-            .as_u64()
-            .with_context(|| format!("no chunks_written: {approved}"))?
-            as usize;
-        assert!(written > 0, "{approved}");
-        assert_eq!(written, chunk_rows_of(&root, book).await?, "{approved}");
-        assert!(
-            approved["batches"].as_u64().is_some_and(|n| n > 0),
+        assert_eq!(
+            keys(&approved),
+            [
+                "actor_detail",
+                "actor_kind",
+                "audit_id",
+                "book",
+                "changed",
+                "library",
+                "ok"
+            ],
             "{approved}"
         );
-        assert_ne!(stage_of(&root, book)?.as_deref(), Some("metadata"));
+        assert!(audit_row_exists(&root, &approved)?, "{approved}");
+        assert_eq!(
+            stage_of(&root, book)?.as_deref(),
+            Some("metadata"),
+            "an approval moved the book off the gate"
+        );
+        assert_eq!(
+            chunk_rows_of(&root, book).await?,
+            0,
+            "an approval wrote vectors for the parked book"
+        );
         Ok(())
     })
     .await
 }
 
-/// An advance reports the rows its resume wrote, which are the rows the
-/// store holds for that book afterwards.
+/// `metadata.advance` is not a method.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_advance_reports_the_rows_it_wrote() -> Result<()> {
-    with_daemon(|sock, root| async move {
-        let sources = tempfile::tempdir()?;
+async fn metadata_advance_is_not_a_method() -> Result<()> {
+    with_daemon(|sock, _root| async move {
         let (mut r, mut w) = connect(&sock).await?;
-        let book = park_one(&mut r, &mut w, &root, sources.path()).await?;
-
-        let reply = ok_result(
-            &mut r,
-            &mut w,
-            3,
-            "metadata.advance",
-            json!({ "book": book }),
-        )
-        .await?;
-        assert_eq!(
-            keys(&reply),
-            [
-                "batches",
-                "book",
-                "chunks_written",
-                "library",
-                "ok",
-                "resumed"
-            ],
-            "{reply}"
-        );
-        assert_eq!(reply["resumed"], true);
-        let written = reply["chunks_written"].as_u64().map(|n| n as usize);
-        assert_eq!(written, Some(chunk_rows_of(&root, book).await?), "{reply}");
-        assert!(written.is_some_and(|n| n > 0), "{reply}");
+        let resp = call(&mut r, &mut w, 1, "metadata.advance", json!({ "book": 1 })).await?;
+        assert_eq!(resp["error"]["code"].as_i64(), Some(-32601), "{resp}");
         Ok(())
     })
     .await

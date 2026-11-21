@@ -59,10 +59,9 @@ pub struct IngestSubmitParams {
     #[serde(default)]
     recursive: bool,
     /// When `true`, the worker parks each book at STRUCTURE if the
-    /// audit verdict is `needs_work`, skipping CHUNK and EMBED until
-    /// a curator drives the book past the metadata gate via
-    /// `metadata.approve` or `metadata.advance`. Off by default; the
-    /// audit remains advisory.
+    /// audit verdict is `needs_work`, skipping CHUNK and EMBED;
+    /// ingesting the book again without the hold finishes it. Off by
+    /// default; the audit remains advisory.
     #[serde(default)]
     hold_for_metadata: bool,
     /// Optional book-side audit profile name. When unset, the

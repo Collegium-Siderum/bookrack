@@ -1,23 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! REPL-side metadata edits and the `advance` resume-from-CHUNK path.
-//! Reads have moved to `bookrack rpc call library.show_metadata_audit`
-//! and its siblings; this module covers only the write surface.
+//! REPL-side metadata edits. Reads have moved to
+//! `bookrack rpc call library.show_metadata_audit` and its siblings;
+//! this module covers only the write surface.
 
-use bookrack_catalog::Catalog;
 use bookrack_config::Config;
-use bookrack_core::PartitionIdx;
-use bookrack_corpus::Corpus;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::Ops;
 use bookrack_ops::dto::writes::{AddContributorOutcome, ReauditOutcome, WriteOutcome};
-use bookrack_ops::pipeline::book::{EmbedRunReport, IngestParams, resume_from_chunk};
-use eyre::{Context, Result};
+use eyre::Result;
 use serde::Serialize;
 
 use crate::audit_helpers::load_audit_profile;
-use crate::cmd::input_error::CmdInputError;
-use crate::embed_helpers::embedder;
 use crate::ops_helpers::catalog_only_ops;
 
 pub use bookrack_cli_grammar::WriteMetadataAction;
@@ -28,9 +22,9 @@ pub use bookrack_cli_grammar::WriteMetadataAction;
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum MetadataWriteReport {
-    /// `set`, `clear`, `void`, `ack`, `reject`, `contributor_remove`:
-    /// the audit identity of the edit, and the field it touched when
-    /// the action names one.
+    /// `set`, `clear`, `void`, `ack`, `approve`, `reject`,
+    /// `contributor_remove`: the audit identity of the edit, and the
+    /// field it touched when the action names one.
     Edit {
         book: i64,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,43 +47,6 @@ pub enum MetadataWriteReport {
         confidence: String,
         previous_confidence: Option<String>,
     },
-    /// `advance`: what the resumed CHUNK→EMBED wrote.
-    Advanced {
-        book: i64,
-        /// Always `true`: an advance is a resume.
-        resumed: bool,
-        #[serde(flatten)]
-        resume: ResumeCounts,
-    },
-    /// `approve`: the edit's audit identity, and — when the book was
-    /// parked at the metadata gate and the approval resumed it — what
-    /// the resume wrote. `resumed` says which.
-    Approved {
-        book: i64,
-        #[serde(flatten)]
-        outcome: WriteOutcome,
-        resumed: bool,
-        #[serde(flatten)]
-        resume: Option<ResumeCounts>,
-    },
-}
-
-/// What a resumed CHUNK→EMBED wrote.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct ResumeCounts {
-    /// Chunk rows written to the vector store.
-    pub chunks_written: usize,
-    /// Embed requests issued.
-    pub batches: usize,
-}
-
-impl From<&EmbedRunReport> for ResumeCounts {
-    fn from(report: &EmbedRunReport) -> Self {
-        ResumeCounts {
-            chunks_written: report.chunks_written,
-            batches: report.batches,
-        }
-    }
 }
 
 /// REPL-side dispatch for the write actions. Opens no store itself:
@@ -97,18 +54,9 @@ impl From<&EmbedRunReport> for ResumeCounts {
 /// after its own argument checks. Returns what the write did.
 pub async fn run_write(
     cfg: &Config,
-    daemon: &bookrack_config::DaemonConfig,
     action: WriteMetadataAction,
     profile_name: Option<&str>,
 ) -> Result<MetadataWriteReport> {
-    if let WriteMetadataAction::Advance { book } = action {
-        let report = advance(cfg, daemon, book, profile_name).await?;
-        return Ok(MetadataWriteReport::Advanced {
-            book,
-            resumed: true,
-            resume: ResumeCounts::from(&report),
-        });
-    }
     let ops = catalog_only_ops(cfg);
     let edit =
         |book: i64, field: Option<String>, outcome: WriteOutcome| MetadataWriteReport::Edit {
@@ -173,47 +121,13 @@ pub async fn run_write(
         ),
         WriteMetadataAction::Ack { book, reason } => edit(book, None, ack(&ops, book, &reason)?),
         WriteMetadataAction::Approve { book, reason } => {
-            let outcome = approve(&ops, book, reason.as_deref())?;
-            let resume = if book_is_parked_at_metadata(cfg, book)? {
-                Some(ResumeCounts::from(
-                    &advance(cfg, daemon, book, profile_name).await?,
-                ))
-            } else {
-                None
-            };
-            MetadataWriteReport::Approved {
-                book,
-                outcome,
-                resumed: resume.is_some(),
-                resume,
-            }
+            edit(book, None, approve(&ops, book, reason.as_deref())?)
         }
         WriteMetadataAction::Reject { book, reason } => {
             edit(book, None, reject(&ops, book, &reason)?)
         }
-        WriteMetadataAction::Advance { .. } => unreachable!("handled above"),
     };
     Ok(report)
-}
-
-/// Read the book's pipeline stage and return `true` when the book is
-/// parked at the metadata gate (the state `ingest_book` writes when an
-/// audit verdict of `needs_work` lands with `hold_for_metadata` set).
-/// A read: a root with no catalog has no parked book, and none is
-/// created to say so.
-fn book_is_parked_at_metadata(cfg: &Config, book: i64) -> Result<bool> {
-    use bookrack_corpus::PartitionIdx;
-    let Some(catalog) = Catalog::open(&cfg.catalog_db()).context("open catalog")? else {
-        return Ok(false);
-    };
-    let book_root_id = PartitionIdx::new(book).root();
-    let Some(state) = catalog
-        .book_state(book_root_id.get())
-        .context("read book state")?
-    else {
-        return Ok(false);
-    };
-    Ok(state.current_stage == "metadata")
 }
 
 fn set(
@@ -437,74 +351,12 @@ fn reject(ops: &Ops<OllamaEmbedClient>, book: i64, reason: &str) -> Result<Write
     }
 }
 
-async fn advance(
-    cfg: &Config,
-    daemon: &bookrack_config::DaemonConfig,
-    book: i64,
-    profile_name: Option<&str>,
-) -> Result<EmbedRunReport> {
-    let embed_cfg = crate::profile::effective_embed_config(cfg, daemon)?;
-    let mut corpus = Corpus::open_for_write(&cfg.corpus_db()).context("open corpus")?;
-    let mut catalog =
-        Catalog::open_for_write(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
-    let audit_profile = load_audit_profile(cfg, profile_name);
-
-    let book_root_id = PartitionIdx::new(book).root();
-    let intake = catalog
-        .intake_by_id(book)
-        .context("look up intake")?
-        .ok_or(CmdInputError::UnknownIntake { intake_id: book })?;
-    let state = catalog
-        .book_state(book_root_id.get())
-        .context("read book state")?
-        .ok_or_else(|| CmdInputError::Refused {
-            summary: format!("no book state for book {book}"),
-            hint: Some("Ingest the book before advancing it.".to_string()),
-        })?;
-    let parsed_at = state
-        .parsed_at
-        .clone()
-        .ok_or_else(|| CmdInputError::Refused {
-            summary: format!("book {book} has no parsed_at"),
-            hint: Some("Run the STRUCTURE pass before advancing it.".to_string()),
-        })?;
-    // Mint a fresh run id so resume rows are distinguishable from the
-    // original ingest's; pin them to the same source_sha for traceability.
-    let run_id = format!(
-        "advance-{}-{book}",
-        &intake.source_sha256[..8.min(intake.source_sha256.len())]
-    );
-    let params = IngestParams {
-        embed: embed_cfg,
-        audit_profile,
-        ..Default::default()
-    };
-    let embedder = embedder(&params.embed)?;
-
-    let report = resume_from_chunk(
-        &mut corpus,
-        &mut catalog,
-        &cfg.lancedb_dir(),
-        &embedder,
-        &params,
-        book,
-        book_root_id,
-        &run_id,
-        &intake.source_sha256,
-        &parsed_at,
-        &|_, _| {},
-    )
-    .await
-    .context("resume CHUNK→EMBED")?;
-    Ok(report)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::control::error_map::handler_err;
     use crate::control::jsonrpc::INVALID_PARAMS;
-    use bookrack_catalog::NewIntake;
+    use bookrack_catalog::{Catalog, NewIntake};
     use bookrack_core::ItemKind;
     use bookrack_ops::Caller;
     use std::path::Path;
@@ -542,7 +394,7 @@ mod tests {
     /// Run one write through the cmd entry point and return its report
     /// as the control plane serializes it.
     async fn report(cfg: &Config, action: WriteMetadataAction) -> serde_json::Value {
-        let report = run_write(cfg, &crate::cmd::test_fixtures::test_daemon(), action, None)
+        let report = run_write(cfg, action, None)
             .await
             .expect("the write succeeds");
         serde_json::to_value(report).expect("the report serializes")
@@ -692,17 +544,13 @@ mod tests {
         audit_row(&cfg, &removed);
     }
 
-    /// A book not parked at the metadata gate is only approved: the
-    /// report says it did not resume and carries no resume counts.
+    /// An approval reports the review's audit row, as `ack` and
+    /// `reject` do.
     #[tokio::test]
-    async fn an_approve_off_the_gate_reports_no_resume() {
+    async fn an_approve_off_the_gate_reports_its_audit_row() {
         let (_tmp, cfg, book) = library_with_book();
         let value = report(&cfg, WriteMetadataAction::Approve { book, reason: None }).await;
-        let mut expected = REVIEW_KEYS.to_vec();
-        expected.push("resumed");
-        expected.sort_unstable();
-        assert_eq!(keys(&value), expected, "{value}");
-        assert_eq!(value["resumed"], false);
+        assert_eq!(keys(&value), REVIEW_KEYS, "{value}");
         audit_row(&cfg, &value);
     }
 
@@ -764,24 +612,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reading_the_metadata_gate_does_not_migrate_a_behind_catalog() {
-        use bookrack_catalog::fixtures;
-
-        let (_tmp, cfg) = crate::cmd::test_fixtures::temp_cfg();
-        let behind = fixtures::CURRENT_VERSION - 1;
-        fixtures::create_at_version(&cfg.catalog_db(), behind);
-
-        // Whether a behind catalog answers the question is not under test.
-        let _ = book_is_parked_at_metadata(&cfg, 1);
-
-        assert_eq!(
-            fixtures::user_version(&cfg.catalog_db()),
-            behind,
-            "reading a book's stage migrated the catalog",
-        );
-    }
-
     #[tokio::test]
     async fn a_write_naming_an_unknown_field_on_an_empty_root_creates_no_store() {
         use crate::cmd::test_fixtures::{store_files, temp_cfg};
@@ -790,7 +620,6 @@ mod tests {
 
         let err = run_write(
             &cfg,
-            &crate::cmd::test_fixtures::test_daemon(),
             WriteMetadataAction::Set {
                 book: 1,
                 field: "no_such_field".to_string(),

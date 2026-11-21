@@ -246,8 +246,8 @@ pub struct IngestArgs {
     #[arg(long, conflicts_with = "rule")]
     pub recursive: bool,
     /// Pause each book after EXTRACT so a curator can review the audit
-    /// verdict before CHUNK / EMBED. Resume with `metadata advance`,
-    /// `metadata approve`, or any of the other gate decisions.
+    /// verdict before CHUNK / EMBED. Ingest the book again without this
+    /// flag to finish it.
     #[arg(long, conflicts_with = "rule")]
     pub hold_for_metadata: bool,
     /// Ingest the book a rule file describes, in place of `<PATH>`. The
@@ -682,12 +682,6 @@ pub enum WriteMetadataAction {
         /// Why the book was rejected.
         #[arg(long)]
         reason: String,
-    },
-    /// Resume CHUNK→EMBED for a book held at the metadata gate.
-    Advance {
-        /// The intake id of the book.
-        #[arg(value_parser = book_intake_id)]
-        book: i64,
     },
 }
 
@@ -1930,7 +1924,6 @@ mod tests {
         (&["metadata", "ack"], &["--reason", "wrong source file"]),
         (&["metadata", "approve"], &[]),
         (&["metadata", "reject"], &["--reason", "wrong source file"]),
-        (&["metadata", "advance"], &[]),
         (
             &["metadata", "contributor-add"],
             &["--role", "author", "--name", "Doe, Jane"],
