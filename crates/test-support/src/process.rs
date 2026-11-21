@@ -21,7 +21,6 @@ use bookrack_config::{DATA_DIR_ENV, MCP_ADDR_ENV, NO_DOTENV_ENV, OLLAMA_URL_ENV,
 
 use crate::embed_stub::EmbedStub;
 use crate::sandbox::Sandbox;
-use crate::spawn::PASSTHROUGH_ENV;
 
 const BOOKRACK_PREFIX: &str = "BOOKRACK_";
 
@@ -35,6 +34,7 @@ static ENV: OnceLock<(ProcessEnv, Sandbox)> = OnceLock::new();
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessEnv {
     embedder: bool,
+    host_pdfium: bool,
     data_dir: bool,
     registry: RegistrySpec,
 }
@@ -51,21 +51,27 @@ enum RegistrySpec {
 impl ProcessEnv {
     /// Home, data root, registry, runtime directory, and daemon state
     /// directory all inside a sandbox. No embedder: the crates that
-    /// never open a library do not need one.
+    /// never open a library do not need one. No native library either:
+    /// the sandbox's managed directories are empty, whatever the host
+    /// has installed.
     pub fn isolated() -> ProcessEnv {
         ProcessEnv {
             embedder: false,
+            host_pdfium: false,
             data_dir: true,
             registry: RegistrySpec::Sandbox,
         }
     }
 
-    /// [`ProcessEnv::isolated`] plus a loopback embedder, for the
-    /// binaries that bring a daemon up: every library open probes the
-    /// configured embedder for its vector width.
+    /// [`ProcessEnv::isolated`] plus a loopback embedder and the host's
+    /// PDFium, for the binaries that bring a daemon up: every library
+    /// open probes the configured embedder for its vector width, and a
+    /// daemon that ingests a PDF binds the library from the sandbox's
+    /// managed directory (see [`Sandbox::with_host_pdfium`]).
     pub fn daemon() -> ProcessEnv {
         ProcessEnv {
             embedder: true,
+            host_pdfium: true,
             ..ProcessEnv::isolated()
         }
     }
@@ -99,8 +105,16 @@ impl ProcessEnv {
 /// would otherwise be discarded in silence.
 pub fn process_env(spec: ProcessEnv) -> &'static Sandbox {
     let (stored, sandbox) = ENV.get_or_init(|| {
+        // Read before `apply` moves the home directory: afterwards the
+        // platform data directory is the sandbox's own.
+        crate::host_slot::host_pdfium_root();
         let sandbox = Sandbox::new();
         apply(&spec, &sandbox);
+        let sandbox = if spec.host_pdfium {
+            sandbox.with_host_pdfium()
+        } else {
+            sandbox
+        };
         (spec.clone(), sandbox)
     });
     assert_eq!(
@@ -132,7 +146,6 @@ fn apply(spec: &ProcessEnv, sandbox: &Sandbox) {
     let mut installed: Vec<&str> = vars.iter().map(|(name, _)| *name).collect();
     installed.push(NO_DOTENV_ENV);
     installed.push(MCP_ADDR_ENV);
-    installed.extend(PASSTHROUGH_ENV);
     if spec.embedder {
         installed.push(OLLAMA_URL_ENV);
     }
@@ -229,7 +242,7 @@ mod tests {
         assert_eq!(child_side, expected, "the child side's locations");
     }
 
-    /// The presets differ in exactly one bit, and the deviations are
+    /// The presets differ, and the deviations are
     /// distinguishable — the equality the `OnceLock` guard compares has
     /// to be able to tell them apart.
     #[test]

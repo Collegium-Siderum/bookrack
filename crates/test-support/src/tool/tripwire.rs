@@ -1076,7 +1076,11 @@ mod tests {
         );
     }
 
-    /// The PDFium variables a test binary inherits stop at the tool: a
+    /// The two PDFium variables earlier releases read, written out so
+    /// the tests over them cannot degrade into an empty loop.
+    const HOST_PDFIUM_VARIABLES: [&str; 2] = ["BOOKRACK_PDFIUM_LIB", "BOOKRACK_REQUIRE_PDFIUM"];
+
+    /// The PDFium variables a host may still export stop at the tool: a
     /// sandbox child finds the library beside its binary or in its own
     /// managed directory, as on an operator's machine, never through a
     /// pointer the host carries.
@@ -1084,7 +1088,7 @@ mod tests {
     fn the_host_pdfium_variables_do_not_reach_the_child() {
         let host: Vec<OsString> = hostile_host().into_iter().map(|(k, _)| k).collect();
         let fixture = Fixture::new();
-        for key in crate::spawn::PASSTHROUGH_ENV {
+        for key in HOST_PDFIUM_VARIABLES {
             assert!(
                 host.iter().any(|k| k == key),
                 "premise: the hostile host carries {key}"
@@ -1101,7 +1105,7 @@ mod tests {
     /// a child is a host value in the sandbox like any other.
     #[test]
     fn a_pdfium_variable_on_the_child_trips() {
-        for key in crate::spawn::PASSTHROUGH_ENV {
+        for key in HOST_PDFIUM_VARIABLES {
             let mut fixture = Fixture::new();
             set(&mut fixture.env, key, "/host/pdfium");
             assert_trips(&fixture.check(), Rule::T1Environment, key);

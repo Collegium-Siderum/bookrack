@@ -213,8 +213,10 @@ instruction set. And `cargo test` is not how the suite runs: it needs
 `cargo-nextest` (`cargo install cargo-nextest --locked`), because every
 test gets its own process.
 
-Set `BOOKRACK_PDFIUM_LIB` to a directory holding the platform's
-PDFium library (see
+A source build carries no PDFium library. Run `bookrack setup pdfium`
+to install the pinned build into the per-user managed directory, or
+`bookrack setup pdfium --from <ARCHIVE>` with a copy of the pinned
+release archive on a host with no network (see
 [crates/extract/PDFIUM_VERSION.md](crates/extract/PDFIUM_VERSION.md)
 for the pinned version and per-platform download). Without it, PDF
 ingest is unavailable but EPUB and TXT still work.

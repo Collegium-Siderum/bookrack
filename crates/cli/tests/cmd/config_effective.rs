@@ -245,33 +245,50 @@ async fn a_data_root_a_flag_outranked_is_reported_where_it_was_set() -> Result<(
 /// A variable outside the admitted set is read out of the file and
 /// then dropped, rather than installed in the process.
 ///
-/// `CI` is the case with a consequence this report can show: the PDFium
-/// gate reads it, so a `CI` that reached the environment turns up as
-/// the winning layer of the `pdfium.required` row. The row is the
-/// independent witness here — the reach section alone would only be
-/// the loader repeating its own claim.
+/// The home directory is the case with a consequence this report can
+/// show: the daemon state directory derives from it, so a `HOME` or an
+/// `XDG_DATA_HOME` that reached the environment turns up as the prefix
+/// of the `daemon_state_dir` row. The row is the independent witness
+/// here — the reach section alone would only be the loader repeating
+/// its own claim.
 #[tokio::test]
 async fn a_variable_outside_the_admitted_set_never_reaches_the_process() -> Result<()> {
     let sandbox = Sandbox::new();
     let root = sandbox.data_root("main");
+    let evil_home = sandbox.path().join("evil-home");
+    let evil_xdg = sandbox.path().join("evil-xdg");
     std::fs::write(
         sandbox.cwd().join(".env"),
         format!(
-            "BOOKRACK_DATA_DIR={}\nCI=1\nEXAMPLE_FOREIGN_KNOB=from-the-file\n",
-            root.display()
+            "BOOKRACK_DATA_DIR={}
+HOME={}
+XDG_DATA_HOME={}
+CI=1
+             EXAMPLE_FOREIGN_KNOB=from-the-file
+",
+            root.display(),
+            evil_home.display(),
+            evil_xdg.display(),
         ),
     )?;
 
-    // Removed rather than left alone: on a host that exports `CI`, the
-    // file's line would lose to the environment and this would pass
-    // without the admission rule doing anything. `BOOKRACK_REQUIRE_PDFIUM`
-    // goes with it — it is a passthrough name that outranks `CI` on the
-    // same row, so a host that sets it decides the row's value before the
-    // file's line is ever weighed.
-    let mut spawn = bookrack_cmd!(&sandbox).without_data_dir().without_env("CI");
-    spawn = spawn
+    // Removed rather than left alone: a variable the child already
+    // carries outranks the file's line, and this would pass without the
+    // admission rule doing anything. The state directory's own variable
+    // goes, so the row falls to the platform directory; then the one
+    // variable that directory derives from on this platform goes too,
+    // so the file's line is the only candidate left for it.
+    let platform_home = if cfg!(target_os = "macos") {
+        "HOME"
+    } else {
+        "XDG_DATA_HOME"
+    };
+    let spawn = bookrack_cmd!(&sandbox)
+        .without_data_dir()
+        .without_env("CI")
         .without_env("EXAMPLE_FOREIGN_KNOB")
-        .without_env("BOOKRACK_REQUIRE_PDFIUM");
+        .without_env(bookrack_config::DAEMON_STATE_DIR_ENV)
+        .without_env(platform_home);
     let out = tokio::process::Command::from(spawn.build())
         .args(["config", "effective", "--json"])
         .stdin(Stdio::null())
@@ -281,17 +298,20 @@ async fn a_variable_outside_the_admitted_set_never_reaches_the_process() -> Resu
         .await?;
     let report = report(&out)?;
 
-    let pdfium = row(&report, "pdfium.required").expect("no pdfium.required row");
-    assert_ne!(
-        pdfium["site"], "CI",
-        "the file's CI line reached the process: {pdfium}"
+    let state_dir = row(&report, "daemon_state_dir").expect("no daemon_state_dir row");
+    let value = state_dir["value"].as_str().unwrap_or_default();
+    assert!(
+        !value.is_empty(),
+        "premise: the state directory resolves: {state_dir}"
     );
-    assert_eq!(
-        pdfium["value"], "false",
-        "the file's CI line reached the process and flipped the gate: {pdfium}"
-    );
+    for evil in [&evil_home, &evil_xdg] {
+        assert!(
+            !std::path::Path::new(value).starts_with(evil),
+            "the file's home directory reached the process: {state_dir}"
+        );
+    }
 
-    for key in ["CI", "EXAMPLE_FOREIGN_KNOB"] {
+    for key in ["HOME", "XDG_DATA_HOME", "CI", "EXAMPLE_FOREIGN_KNOB"] {
         assert_eq!(
             foreign_status(&report, key).as_deref(),
             Some("rejected"),
@@ -299,6 +319,114 @@ async fn a_variable_outside_the_admitted_set_never_reaches_the_process() -> Resu
         );
     }
 
+    Ok(())
+}
+
+/// No variable redirects the search for a native component. With a
+/// stand-in in each managed directory and every retired override
+/// pointing somewhere else, the report finds the managed copies, names
+/// no override, and lists the variables as retired.
+#[tokio::test]
+async fn the_native_search_ignores_the_retired_override_variables() -> Result<()> {
+    let sandbox = Sandbox::new();
+    let library = super::setup_cmd::seed_pdfium(&sandbox);
+    let llama = bookrack_config::llama_server_pin::pinned_llama_server().map(|pin| {
+        let path = sandbox
+            .managed_data_dir()
+            .join("bookrack")
+            .join("llama-server")
+            .join(bookrack_config::llama_server_pin::LLAMA_SERVER_RELEASE_TAG)
+            .join(pin.exe_in_archive);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("managed directory");
+        std::fs::write(&path, b"stand-in").expect("stand-in executable");
+        path
+    });
+    let elsewhere = sandbox.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere)?;
+    let elsewhere = elsewhere.display().to_string();
+    let env = [
+        ("BOOKRACK_PDFIUM_LIB", elsewhere.as_str()),
+        ("BOOKRACK_LLAMA_SERVER_BIN", elsewhere.as_str()),
+        ("BOOKRACK_RERANKER_MODEL", elsewhere.as_str()),
+        ("BOOKRACK_REQUIRE_PDFIUM", "1"),
+    ];
+
+    let out = run(&sandbox, &["--json"], &env).await?;
+    let report = report(&out)?;
+    let deps = report["native_dependencies"]
+        .as_array()
+        .expect("native_dependencies is an array");
+    let dep = |name: &str| {
+        deps.iter()
+            .find(|d| d["name"] == name)
+            .unwrap_or_else(|| panic!("no {name} entry: {report}"))
+    };
+    for name in ["pdfium", "llama_server", "reranker_model"] {
+        assert!(
+            dep(name)["override_site"].is_null(),
+            "{name} still names an override: {}",
+            dep(name)
+        );
+    }
+
+    let pdfium = dep("pdfium");
+    assert_eq!(
+        pdfium["path"],
+        library.parent().expect("parent").display().to_string(),
+        "the variable moved the PDFium search: {pdfium}"
+    );
+    assert_eq!(pdfium["layer"], "platform", "{pdfium}");
+    assert_eq!(pdfium["site"], "managed directory", "{pdfium}");
+    if let Some(llama) = llama {
+        let found = dep("llama_server");
+        assert_eq!(
+            found["path"],
+            llama.display().to_string(),
+            "the variable moved the llama-server search: {found}"
+        );
+        assert_eq!(found["layer"], "platform", "{found}");
+    }
+
+    assert!(
+        row(&report, "pdfium.required").is_none(),
+        "the test-harness row is still reported: {report}"
+    );
+    let retired: Vec<&str> = report["retired_variables"]
+        .as_array()
+        .expect("retired_variables is an array")
+        .iter()
+        .filter_map(|var| var["key"].as_str())
+        .collect();
+    for (name, _) in env {
+        assert!(
+            retired.contains(&name),
+            "{name} is set and not reported as retired: {report}"
+        );
+    }
+    assert_eq!(
+        report["unclaimed_variables"],
+        serde_json::json!([]),
+        "{report}"
+    );
+
+    let human = run(&sandbox, &[], &env).await?;
+    let text = String::from_utf8_lossy(&human.stdout);
+    let cells = |line: &str| -> Vec<String> {
+        line.trim_matches(|c: char| !c.is_ascii_graphic())
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    };
+    let line = text
+        .lines()
+        .map(cells)
+        .find(|cells| cells.first().is_some_and(|c| c == "pdfium"))
+        .unwrap_or_else(|| panic!("no pdfium line:\n{text}"));
+    assert_eq!(
+        line.last().map(String::as_str),
+        Some("-"),
+        "the override column still names something: {line:?}"
+    );
     Ok(())
 }
 

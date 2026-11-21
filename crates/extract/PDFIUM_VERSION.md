@@ -61,16 +61,19 @@ archive at `lib/libpdfium.so`; the macOS archives at
 
 ## How the library is found
 
-The adapter searches a chain of directories, first hit wins:
+The adapter searches two directories, first hit wins:
 
-1. `BOOKRACK_PDFIUM_LIB` — authoritative when set; no fallback, so a
-   typo surfaces as a miss instead of being papered over.
-2. The running executable's own directory (the release-archive
+1. The running executable's own directory (the release-archive
    layout, where the library ships next to the binaries).
-3. The per-user managed directory of the pinned build
+2. The per-user managed directory of the pinned build
    (`<platform data dir>/bookrack/pdfium/<release tag>/`, one directory
    per pinned build), which `bookrack setup pdfium` and the
    first-run wizard's download offer populate with that build.
+
+No variable names a third: both stops hold the build this binary
+binds, and a directory the environment supplied could hold any. On a
+host with no network, `bookrack setup pdfium --from <ARCHIVE>` installs
+from a copy of the archive above after the same checksum.
 
 `src/pdfium_pin.rs` carries the values in the tables above as
 constants for that installer.

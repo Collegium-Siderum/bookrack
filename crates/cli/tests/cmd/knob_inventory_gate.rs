@@ -212,8 +212,8 @@ fn every_knob_reporting_crate_is_named_by_a_collector() -> Result<()> {
 
         // Matched per line rather than as one token, because a crate
         // may expose its reporter from a module
-        // (`bookrack_extract::pdfium_gate::knob_origins`) and a rule
-        // keyed to the crate path alone would then miss it.
+        // (`crate::render::confirm::knob_origins`) and a rule keyed to
+        // the crate path alone would then miss it.
         for (fname, (which, source)) in [("knob_origins", origins_in), ("knob_catalog", catalog_in)]
         {
             let named = source
@@ -225,9 +225,9 @@ fn every_knob_reporting_crate_is_named_by_a_collector() -> Result<()> {
         }
     }
 
-    // `config`, `session`, `extract`, and `cli`.
+    // `config`, `session`, and `cli`.
     assert!(
-        checked >= 4,
+        checked >= 3,
         "the scan found only {checked} knob-reporting crates, so it is no \
          longer looking where they live"
     );

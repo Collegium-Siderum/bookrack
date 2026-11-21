@@ -5,14 +5,14 @@
 //!
 //! The managed installer downloads only the pinned models, so a tag with
 //! no pin is never fixed by `setup reranker`; the refusal has
-//! to point at the two routes that do serve it — an explicit model file,
-//! or an operator-run server behind `BOOKRACK_RERANKER_URL`.
+//! to point at the one route that does serve it — an operator-run
+//! server behind `BOOKRACK_RERANKER_URL`.
 
 #![cfg(unix)]
 
 use bookrack_config::{
     Config, DEFAULT_EMBED_MODEL, DaemonConfig, DaemonFlags, EnvSnapshot, LibraryKind,
-    ManifestIdentitySeed, RERANKER_MODEL_ENV, set_manifest_index_profile,
+    ManifestIdentitySeed, set_manifest_index_profile,
 };
 use bookrack_index_profile::USER_PROFILE_DIR_NAME;
 use bookrack_runtime::rerank_supervisor::{RerankerModelRefusal, RerankerModelState};
@@ -99,6 +99,9 @@ async fn an_unpinned_reranker_model_is_not_sent_to_the_installer() {
         !text.contains("--install-reranker") && !text.contains("setup reranker"),
         "the installer cannot provide an unpinned model: {text}"
     );
-    assert!(text.contains(RERANKER_MODEL_ENV), "{text}");
+    assert!(
+        !text.contains("BOOKRACK_RERANKER_MODEL"),
+        "no search reads a variable naming a model file: {text}"
+    );
     assert!(text.contains(bookrack_config::RERANKER_URL_ENV), "{text}");
 }

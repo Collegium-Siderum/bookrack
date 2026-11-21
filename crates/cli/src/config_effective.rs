@@ -848,7 +848,7 @@ fn print_human(report: &ReportOut<'_>, daemon: &DaemonView, shown: &[ShownRow<'_
             dep.name.as_str(),
             dep.path.as_deref().unwrap_or("(not found)"),
             dep.site.as_deref().unwrap_or("-"),
-            dep.override_site.as_str(),
+            dep.override_site.as_deref().unwrap_or("-"),
         ]);
     }
     println!("{}", deps.render());

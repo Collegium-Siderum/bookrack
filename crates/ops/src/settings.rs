@@ -45,13 +45,7 @@ pub struct Contributor {
 /// `bookrack-config` is absent by design: its report needs the resolved
 /// `Config` that no other contributor takes, so it is called directly
 /// by each surface.
-pub const KNOB_CONTRIBUTORS: &[Contributor] = &[
-    Contributor {
-        report: bookrack_session::knob_origins,
-        catalog: bookrack_session::knob_catalog,
-    },
-    Contributor {
-        report: bookrack_extract::pdfium_gate::knob_origins,
-        catalog: bookrack_extract::pdfium_gate::knob_catalog,
-    },
-];
+pub const KNOB_CONTRIBUTORS: &[Contributor] = &[Contributor {
+    report: bookrack_session::knob_origins,
+    catalog: bookrack_session::knob_catalog,
+}];

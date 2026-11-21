@@ -190,9 +190,8 @@ impl WizardDriver for CliWizardDriver {
             }
         }
         console.line(
-            "            Run `bookrack setup pdfium` later, or set \
-             BOOKRACK_PDFIUM_LIB. PDF ingest will fail until the library is \
-             present; EPUB and TXT still work.",
+            "            Run `bookrack setup pdfium` later. PDF ingest will fail \
+             until the library is present; EPUB and TXT still work.",
         );
         Ok(PdfiumChoice::Continue)
     }

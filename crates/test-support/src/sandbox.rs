@@ -171,6 +171,26 @@ impl Sandbox {
         }
     }
 
+    /// Link the PDFium builds installed on the host into this sandbox's
+    /// managed directory, so a process running in it finds the library
+    /// through its ordinary search. For a test that extracts a PDF; a
+    /// sandbox that does not call this holds no library, whatever the
+    /// host has. A host with none installed leaves the sandbox as it
+    /// was, and the test's own PDFium gate decides what that means.
+    pub fn with_host_pdfium(self) -> Sandbox {
+        match crate::host_slot::host_pdfium_root() {
+            Some(root) => self.with_pdfium_from(root),
+            None => self,
+        }
+    }
+
+    /// [`Sandbox::with_host_pdfium`] with the host's root passed in.
+    pub(crate) fn with_pdfium_from(self, host_root: &Path) -> Sandbox {
+        let target = self.managed_data_dir().join("bookrack").join("pdfium");
+        crate::host_slot::link_tree(host_root, &target).expect("link the host's PDFium");
+        self
+    }
+
     /// Directory the child sees as `XDG_CACHE_HOME`.
     pub fn cache_home(&self) -> PathBuf {
         self.home().join(".cache")

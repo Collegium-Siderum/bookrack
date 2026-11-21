@@ -41,16 +41,21 @@
 //! exit.
 //!
 //! What this crate does **not** do is start from an empty environment:
-//! it isolates relative to the parent process, keeping `PATH`, `CI`,
-//! and the PDFium pointer that turn a missing native library into a
-//! loud failure. Starting from nothing is `scripts/test-clean.sh`. The
-//! sandbox tool's children do not get the PDFium pointer: a sandbox
-//! stands in for an operator's machine, which finds the library by its
-//! own search.
+//! it isolates relative to the parent process, keeping `PATH` and the
+//! `CI` that turns a missing native library into a loud failure.
+//! Starting from nothing is `scripts/test-clean.sh`.
+//!
+//! A sandbox carries no native library unless a test asks: the PDFium
+//! build installed on the host is linked in by
+//! [`Sandbox::with_host_pdfium`] and by the [`ProcessEnv::daemon`]
+//! preset, and found there by the product's own search. The sandbox
+//! tool's sandboxes never ask: one stands in for an operator's machine,
+//! and installs the library the way an operator does.
 
 mod child;
 mod embed_stub;
 pub mod fixtures;
+mod host_slot;
 mod process;
 mod sandbox;
 mod spawn;
@@ -65,6 +70,7 @@ pub use child::{
     SpawnOpts, Stage, StreamStats, TEARDOWN_BUDGET,
 };
 pub use embed_stub::{EmbedFailure, EmbedStub, StubSpec, StubSpecError, Vectors};
+pub use host_slot::host_pdfium_root;
 pub use process::{ProcessEnv, process_env};
 pub use sandbox::Sandbox;
-pub use spawn::{EnvPlan, PASSTHROUGH_ENV, Spawn};
+pub use spawn::{EnvPlan, Spawn};

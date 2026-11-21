@@ -450,9 +450,12 @@ home directory, its registry, whatever `BOOKRACK_*` variables the shell
 exports, and the `.env` above the package root. That is the right loop
 for development. `scripts/test-clean.sh` is the contract underneath it:
 it starts from an empty environment and lets through only what cargo
-itself needs, plus `CI` and the two PDFium variables — those, because
-dropping them would turn the PDF tests from a loud failure into a
-silent skip, which is the outcome the script exists to prevent.
+itself needs, plus `CI` — that one, because dropping it would turn the
+PDF tests from a loud failure into a silent skip, which is the outcome
+the script exists to prevent. The home directory it runs under is an
+empty one, into which it links the PDFium library `bookrack setup
+pdfium` installed in the real one, file by file, so the PDF tests find
+it where the product does.
 
 Both are worth running. A difference between them is a test reading the
 machine rather than its fixtures. CI runs the scrubbed form as its own

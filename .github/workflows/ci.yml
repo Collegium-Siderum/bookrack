@@ -69,38 +69,37 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
-      - name: Cache PDFium archive
-        # The cache key is tied to the pinned chromium build, so a hit
-        # always carries the right ABI for the pdfium_NNNN cargo feature
-        # in extract/Cargo.toml. Bump the key when PDFIUM_VERSION.md
-        # bumps; otherwise stale binaries persist.
+      - name: Check where the managed directory is
+        # The cache path below is the per-user data directory only while
+        # the runner leaves XDG_DATA_HOME unset.
+        run: test -z "${XDG_DATA_HOME:-}"
+      - name: Cache PDFium managed directory
+        # The directory `bookrack setup pdfium` installs into, which is
+        # where the PDF tests find the library. The cache key is tied to
+        # the pinned chromium build, so a hit always carries the right
+        # ABI for the pdfium_NNNN cargo feature in extract/Cargo.toml.
+        # Bump the key when PDFIUM_VERSION.md bumps; otherwise stale
+        # binaries persist.
         id: pdfium-cache
         uses: actions/cache@v5
         with:
-          path: .pdfium
-          key: pdfium-chromium-8125-linux-x64
-      - name: Fetch pinned PDFium
+          path: ~/.local/share/bookrack/pdfium
+          key: pdfium-chromium-8125-linux-x64-slot
+      - name: Install pinned PDFium
         # The PDF adapter binds PDFium at runtime, so its tests need the
         # native library. Pinned to one build — see
         # crates/extract/PDFIUM_VERSION.md. The sha256 check makes a
         # corrupt download or a silently re-cut upstream asset fail
-        # loudly here, so PDF test coverage is never quietly lost.
+        # loudly here, and `setup pdfium --from` verifies the archive
+        # again before it installs. The runner sets `CI`, so a library
+        # the tests cannot find fails them instead of skipping them.
         if: steps.pdfium-cache.outputs.cache-hit != 'true'
         run: |
           curl -L -o pdfium.tgz \
             https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8125/pdfium-linux-x64.tgz
           echo "e1c3ce6e270cb5e0c20816b379ad9f2c1309972697c505f508de92bf5e7d6659  pdfium.tgz" | sha256sum -c -
-          mkdir -p "$GITHUB_WORKSPACE/.pdfium"
-          tar -xzf pdfium.tgz -C "$GITHUB_WORKSPACE/.pdfium" lib/libpdfium.so
-      - name: Export PDFium lib path
-        # BOOKRACK_REQUIRE_PDFIUM turns the PDF tests' skip-when-absent
-        # gate into a hard failure: this job downloads the binary, so a
-        # library the tests cannot load means broken coverage, not an
-        # unequipped machine. Runners that cannot supply the binary set
-        # it to 0 to opt back into skipping.
-        run: |
-          echo "BOOKRACK_PDFIUM_LIB=$GITHUB_WORKSPACE/.pdfium/lib" >> "$GITHUB_ENV"
-          echo "BOOKRACK_REQUIRE_PDFIUM=1" >> "$GITHUB_ENV"
+          cargo run -p bookrack-cli --bin bookrack -- setup pdfium --from pdfium.tgz
+          rm pdfium.tgz
       - name: Install cargo-nextest
         # Prebuilt binary, pinned. nextest runs every test in its own
         # process, which some tests rely on for sound environment
@@ -133,28 +132,26 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
-      - name: Cache PDFium archive
+      - name: Check where the managed directory is
+        run: test -z "${XDG_DATA_HOME:-}"
+      - name: Cache PDFium managed directory
         # The same key as the `test` job, so the two share one download.
         id: pdfium-cache
         uses: actions/cache@v5
         with:
-          path: .pdfium
-          key: pdfium-chromium-8125-linux-x64
-      - name: Fetch pinned PDFium
+          path: ~/.local/share/bookrack/pdfium
+          key: pdfium-chromium-8125-linux-x64-slot
+      - name: Install pinned PDFium
+        # Installed into the runner's own home; the script mirrors it
+        # into the scrubbed one and forwards `CI`, so the PDF tests stay
+        # mandatory here too.
         if: steps.pdfium-cache.outputs.cache-hit != 'true'
         run: |
           curl -L -o pdfium.tgz \
             https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8125/pdfium-linux-x64.tgz
           echo "e1c3ce6e270cb5e0c20816b379ad9f2c1309972697c505f508de92bf5e7d6659  pdfium.tgz" | sha256sum -c -
-          mkdir -p "$GITHUB_WORKSPACE/.pdfium"
-          tar -xzf pdfium.tgz -C "$GITHUB_WORKSPACE/.pdfium" lib/libpdfium.so
-      - name: Export PDFium lib path
-        # The scrubbed environment forwards both of these, so the PDF
-        # tests stay mandatory here too. A gate that scrubbed them away
-        # would manufacture the silent skip it exists to prevent.
-        run: |
-          echo "BOOKRACK_PDFIUM_LIB=$GITHUB_WORKSPACE/.pdfium/lib" >> "$GITHUB_ENV"
-          echo "BOOKRACK_REQUIRE_PDFIUM=1" >> "$GITHUB_ENV"
+          cargo run -p bookrack-cli --bin bookrack -- setup pdfium --from pdfium.tgz
+          rm pdfium.tgz
       - name: Install cargo-nextest
         run: |
           curl -LsSf https://get.nexte.st/0.9.140/linux | \

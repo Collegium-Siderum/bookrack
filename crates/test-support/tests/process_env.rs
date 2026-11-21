@@ -115,3 +115,33 @@ fn the_same_spec_returns_the_same_sandbox() {
     let second = process_env(ProcessEnv::daemon());
     assert_eq!(first.path(), second.path());
 }
+
+/// The host's managed PDFium directory is read before the home
+/// directory moves, and the product's own search moves with it.
+///
+/// Both halves go through the real resolvers. A lookup deferred until
+/// the first sandbox asks for the host's library would run after the
+/// redirection and name a directory inside the sandbox, so the opt-in
+/// would link the sandbox to itself; and a `managed_data_dir` that
+/// disagreed with the platform rule would link the library to a place
+/// the product never searches.
+#[test]
+fn the_host_directory_is_fixed_before_the_environment_moves() {
+    let sandbox = process_env(ProcessEnv::daemon());
+
+    let host = bookrack_test_support::host_pdfium_root()
+        .expect("the host's platform data directory resolves");
+    assert!(
+        !host.starts_with(sandbox.path()),
+        "the host directory was read after the redirection: {}",
+        host.display(),
+    );
+
+    let product = bookrack_config::pdfium_managed_root()
+        .expect("the platform data directory resolves under the sandbox home");
+    assert_eq!(
+        product,
+        sandbox.managed_data_dir().join("bookrack").join("pdfium"),
+        "the sandbox links the library somewhere the product does not search",
+    );
+}

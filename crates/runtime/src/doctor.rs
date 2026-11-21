@@ -542,9 +542,7 @@ fn push_pdfium_row(rows: &mut Vec<Row>) {
                 value: format!("(missing) searched {searched}"),
                 status: Status::Fail {
                     note: format!(
-                        "run `bookrack setup pdfium` to download \
-                         the pinned build, or set BOOKRACK_PDFIUM_LIB to a \
-                         directory containing {filename}"
+                        "run `bookrack setup pdfium` to install the pinned build of {filename}"
                     ),
                 },
             });
@@ -1752,11 +1750,6 @@ fn reranker_model_row(
             value: format!("{model_tag} ({})", path.display()),
             status: Status::Ok { note: None },
         },
-        RerankerModelState::ExplicitPathMissing(path) => missing(format!(
-            "{} names {}, which does not exist; fix or unset it",
-            bookrack_config::RERANKER_MODEL_ENV,
-            path.display()
-        )),
         // The size comes from the pin the installer downloads, so an
         // operator on a metered link or a full volume learns what the
         // command costs before running it.
@@ -1770,8 +1763,7 @@ fn reranker_model_row(
             },
         ),
         RerankerModelState::Unpinned { .. } => missing(format!(
-            "no pinned download; point {} at its GGUF file, or serve it and set {}",
-            bookrack_config::RERANKER_MODEL_ENV,
+            "no pinned download; serve it from a rerank server of your own and set {}",
             bookrack_config::RERANKER_URL_ENV
         )),
     }
@@ -3027,24 +3019,22 @@ mod tests {
     fn a_reranker_model_the_installer_cannot_provide_is_not_sent_to_it() {
         use crate::rerank_supervisor::RerankerModelState;
         let tag = "synthetic-reranker:unpinned";
-        for state in [
-            RerankerModelState::Unpinned {
-                tag: tag.to_string(),
-            },
-            RerankerModelState::ExplicitPathMissing(std::path::PathBuf::from(
-                "explicit/model.gguf",
-            )),
-        ] {
-            let row = reranker_model_row(tag, &state);
-            let Status::Fail { note } = &row.status else {
-                panic!("a missing model fails the row: {row:?}");
-            };
-            assert!(
-                !note.contains("--install-reranker") && !note.contains("setup reranker"),
-                "the installer downloads only pinned models into the managed directory: {note}"
-            );
-            assert!(note.contains(bookrack_config::RERANKER_MODEL_ENV), "{note}");
-        }
+        let state = RerankerModelState::Unpinned {
+            tag: tag.to_string(),
+        };
+        let row = reranker_model_row(tag, &state);
+        let Status::Fail { note } = &row.status else {
+            panic!("a missing model fails the row: {row:?}");
+        };
+        assert!(
+            !note.contains("--install-reranker") && !note.contains("setup reranker"),
+            "the installer downloads only pinned models into the managed directory: {note}"
+        );
+        assert!(
+            note.contains(bookrack_config::RERANKER_URL_ENV)
+                && !note.contains("BOOKRACK_RERANKER_MODEL"),
+            "{note}"
+        );
         let row = reranker_model_row(
             "Qwen3-Reranker-0.6B",
             &RerankerModelState::NotInstalled {

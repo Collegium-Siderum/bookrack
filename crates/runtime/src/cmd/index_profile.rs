@@ -877,9 +877,8 @@ pub fn advice_line(advice: &Advice) -> String {
         ),
         Advice::UnlistedReranker { model } => format!(
             "note: reranker model '{model}' is not in the model registry and has no pinned \
-             download; serve it and set {}, or set {} to its GGUF file",
-            bookrack_config::RERANKER_URL_ENV,
-            bookrack_config::RERANKER_MODEL_ENV
+             download; serve it from a rerank server of your own and set {}",
+            bookrack_config::RERANKER_URL_ENV
         ),
         Advice::CrossFamilyPair {
             embed_family,

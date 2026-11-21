@@ -34,8 +34,8 @@ use bookrack_config::reranker_model_pin::{
     RerankerModelLocation, locate_reranker_model, reranker_model_pin,
 };
 use bookrack_config::{
-    Config, DEFAULT_RERANKER_CTX, DaemonConfig, RERANKER_MODEL_ENV, RERANKER_SERVER_BATCH_SIZE,
-    RERANKER_URL_ENV, RerankerConfig,
+    Config, DEFAULT_RERANKER_CTX, DaemonConfig, RERANKER_SERVER_BATCH_SIZE, RERANKER_URL_ENV,
+    RerankerConfig,
 };
 use bookrack_core::{Explain, Problem};
 use bookrack_index_profile::{RerankerKind, RerankerSpec};
@@ -442,7 +442,7 @@ pub async fn bring_up_reranker(
 }
 
 /// Whether the GGUF file a reranker tag needs was found, and when not,
-/// which of the three ways it is missing: each has a different way out,
+/// which of the two ways it is missing: each has a different way out,
 /// and only one of them is the managed installer.
 ///
 /// One judgement, two consumers: bring-up refuses on it through
@@ -451,15 +451,14 @@ pub async fn bring_up_reranker(
 pub enum RerankerModelState {
     /// The file to load.
     Found(PathBuf),
-    /// [`RERANKER_MODEL_ENV`] names a file that is not there. It
-    /// overrides the managed install, so no install repairs it.
-    ExplicitPathMissing(PathBuf),
     /// The tag has a pinned download and the managed file is absent.
     NotInstalled {
         /// The reranker model tag.
         tag: String,
     },
-    /// The tag has no pinned download, so nothing can install it.
+    /// The tag has no pinned download, so nothing can install it and
+    /// the supervised server has no file to load: only a server the
+    /// operator runs serves it.
     Unpinned {
         /// The reranker model tag.
         tag: String,
@@ -470,11 +469,6 @@ pub enum RerankerModelState {
 pub fn reranker_model_state(tag: &str, location: RerankerModelLocation) -> RerankerModelState {
     if let Some(path) = location.path {
         return RerankerModelState::Found(path);
-    }
-    if location.explicit {
-        return RerankerModelState::ExplicitPathMissing(
-            location.probed.into_iter().next().unwrap_or_default(),
-        );
     }
     if reranker_model_pin(tag).is_some() {
         RerankerModelState::NotInstalled {
@@ -494,13 +488,6 @@ impl Explain for RerankerModelState {
                 "reranker model file \"{}\" is present",
                 path.display()
             )),
-            RerankerModelState::ExplicitPathMissing(path) => Problem::new(format!(
-                "reranker model file \"{}\" does not exist",
-                path.display()
-            ))
-            .hint(format!(
-                "Fix or unset {RERANKER_MODEL_ENV}; it overrides the managed install."
-            )),
             RerankerModelState::NotInstalled { tag } => {
                 Problem::new(format!("reranker model '{tag}' is not installed"))
                     .hint("Run `bookrack setup reranker`.")
@@ -509,8 +496,7 @@ impl Explain for RerankerModelState {
                 "reranker model '{tag}' has no pinned download"
             ))
             .hint(format!(
-                "Point {RERANKER_MODEL_ENV} at its GGUF file, or serve it and set \
-                         {RERANKER_URL_ENV}."
+                "Serve it from a rerank server of your own and set {RERANKER_URL_ENV}."
             )),
         }
     }
@@ -1311,48 +1297,47 @@ mod tests {
     #[test]
     fn a_reranker_model_search_is_classified_by_its_way_out() {
         use bookrack_config::reranker_model_pin::RerankerModelLocation;
-        let location = |path: Option<&str>, probed: &[&str], explicit| RerankerModelLocation {
+        let location = |path: Option<&str>, probed: &[&str]| RerankerModelLocation {
             path: path.map(PathBuf::from),
             probed: probed.iter().map(PathBuf::from).collect(),
-            explicit,
         };
         let pinned = "Qwen3-Reranker-0.6B";
         let unpinned = "synthetic-reranker:unpinned";
 
         assert_eq!(
-            reranker_model_state(pinned, location(Some("m.gguf"), &["m.gguf"], false)),
+            reranker_model_state(pinned, location(Some("m.gguf"), &["m.gguf"])),
             RerankerModelState::Found(PathBuf::from("m.gguf"))
         );
-        // A broken explicit path wins over the pin: the install it would
-        // otherwise point at writes a file the override hides.
         assert_eq!(
-            reranker_model_state(pinned, location(None, &["explicit.gguf"], true)),
-            RerankerModelState::ExplicitPathMissing(PathBuf::from("explicit.gguf"))
-        );
-        assert_eq!(
-            reranker_model_state(pinned, location(None, &["managed.gguf"], false)),
+            reranker_model_state(pinned, location(None, &["managed.gguf"])),
             RerankerModelState::NotInstalled {
                 tag: pinned.to_string()
             }
         );
         assert_eq!(
-            reranker_model_state(unpinned, location(None, &[], false)),
+            reranker_model_state(unpinned, location(None, &[])),
             RerankerModelState::Unpinned {
                 tag: unpinned.to_string()
             }
         );
-        for state in [
-            reranker_model_state(pinned, location(None, &["explicit.gguf"], true)),
-            reranker_model_state(unpinned, location(None, &[], false)),
-        ] {
-            let problem = state.explain();
-            let hint = problem.data.hint.unwrap_or_default();
-            assert!(
-                !hint.contains("--install-reranker") && !hint.contains("setup reranker"),
-                "{state:?}: {hint}"
-            );
-            assert!(hint.contains(RERANKER_MODEL_ENV), "{state:?}: {hint}");
-        }
+    }
+
+    /// A model with no pin has one way out, and it is neither the
+    /// installer, which downloads only pinned models, nor a variable
+    /// naming a file, which no search reads.
+    #[test]
+    fn an_unpinned_reranker_model_points_only_at_an_operator_run_server() {
+        let state = RerankerModelState::Unpinned {
+            tag: "synthetic-reranker:unpinned".to_string(),
+        };
+        let hint = state.explain().data.hint.unwrap_or_default();
+        assert!(hint.contains(RERANKER_URL_ENV), "{hint}");
+        assert!(
+            !hint.contains("BOOKRACK_RERANKER_MODEL")
+                && !hint.contains("--install-reranker")
+                && !hint.contains("setup reranker"),
+            "{hint}"
+        );
     }
 
     #[tokio::test]

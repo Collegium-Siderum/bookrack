@@ -154,47 +154,44 @@ pub struct NativeDependencyOrigin {
     pub layer: Option<Layer>,
     /// The stop that held it, named for a reader.
     pub site: Option<String>,
-    /// The variable that overrides the search entirely.
-    ///
-    /// Always present, including when nothing was found — that is
-    /// exactly when an operator needs it, since it is the one handle
-    /// they can reach for. It names where the dependency *can* be
-    /// pointed at, never where this run found it.
-    pub override_site: String,
+    /// The variable that overrides the search entirely, for a
+    /// dependency that has one. No dependency of this build does, so
+    /// the key serializes as `null`.
+    pub override_site: Option<String>,
     /// Every location checked, in search order.
     pub probed: Vec<String>,
 }
 
 /// One native dependency as an inventory names it: what it is called,
-/// and the variable that points at it.
+/// and the variable that points at it, when one does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct NativeDependencyKnob {
     /// The dependency, e.g. `pdfium`.
     pub name: &'static str,
-    /// The variable that overrides its search chain entirely.
-    pub override_site: &'static str,
+    /// The variable that overrides its search chain entirely, if any.
+    pub override_site: Option<&'static str>,
 }
 
-/// Every native dependency this crate locates, with the variable that
-/// overrides each one's search chain.
+/// Every native dependency this crate locates. None has a variable
+/// that overrides its search chain: each is found beside the
+/// executable or in this build's managed directory.
 ///
-/// Touches nothing: an inventory answers where a dependency *can* be
-/// pointed at, while where one sits today is
-/// [`native_dependency_origins`]'s question. Both read this list, so a
-/// dependency cannot be locatable at runtime and absent from the
-/// inventory.
+/// Touches nothing: an inventory answers which dependencies exist,
+/// while where one sits today is [`native_dependency_origins`]'s
+/// question. Both read this list, so a dependency cannot be locatable
+/// at runtime and absent from the inventory.
 pub const NATIVE_DEPENDENCY_KNOBS: &[NativeDependencyKnob] = &[
     NativeDependencyKnob {
         name: "pdfium",
-        override_site: crate::PDFIUM_LIB_ENV,
+        override_site: None,
     },
     NativeDependencyKnob {
         name: "llama_server",
-        override_site: crate::LLAMA_SERVER_BIN_ENV,
+        override_site: None,
     },
     NativeDependencyKnob {
         name: "reranker_model",
-        override_site: crate::RERANKER_MODEL_ENV,
+        override_site: None,
     },
 ];
 
@@ -214,21 +211,18 @@ pub fn native_dependency_origins(
     vec![
         native_origin(
             "pdfium",
-            std::env::var(crate::PDFIUM_LIB_ENV).ok(),
             pdfium.dir.as_deref(),
             &pdfium.probed,
             &["beside the executable", "managed directory"],
         ),
         native_origin(
             "llama_server",
-            std::env::var(crate::LLAMA_SERVER_BIN_ENV).ok(),
             llama.path.as_deref(),
             &llama.probed,
             &["beside the executable", "managed directory"],
         ),
         native_origin(
             "reranker_model",
-            std::env::var(crate::RERANKER_MODEL_ENV).ok(),
             model.path.as_deref(),
             &model.probed,
             &["managed directory"],
@@ -238,53 +232,34 @@ pub fn native_dependency_origins(
 
 /// Assemble one dependency's entry.
 ///
-/// An override collapses the chain to a single stop, so the layer is
-/// the environment; otherwise the winning stop's position in the probe
-/// list names it, `stops` giving those positions their words.
+/// The winning stop's position in the probe list names it, `stops`
+/// giving those positions their words.
 fn native_origin(
     name: &str,
-    override_env: Option<String>,
     resolved: Option<&std::path::Path>,
     probed: &[std::path::PathBuf],
     stops: &[&str],
 ) -> NativeDependencyOrigin {
-    let overridden = override_env.is_some_and(|v| !v.trim().is_empty());
     let index = resolved.and_then(|r| probed.iter().position(|p| p == r));
-
-    let (layer, site) = match (overridden, index) {
-        (_, None) => (None, None),
-        (true, Some(_)) => (
-            Some(Layer::Environment),
-            Some(override_site(name).to_string()),
-        ),
-        (false, Some(i)) => (
-            Some(Layer::Platform),
-            Some(stops.get(i).copied().unwrap_or("unnamed stop").to_string()),
-        ),
-    };
+    let site = index.map(|i| stops.get(i).copied().unwrap_or("unnamed stop").to_string());
 
     NativeDependencyOrigin {
         name: name.to_string(),
         path: resolved.map(|p| p.display().to_string()),
-        layer,
+        layer: site.as_ref().map(|_| Layer::Platform),
         site,
-        override_site: override_site(name).to_string(),
+        override_site: override_site(name).map(str::to_string),
         probed: probed.iter().map(|p| p.display().to_string()).collect(),
     }
 }
 
-/// The variable that overrides one dependency's search chain.
-///
-/// A name absent from [`NATIVE_DEPENDENCY_KNOBS`] yields an empty site
-/// rather than a plausible wrong one:
-/// `every_located_dependency_is_named_in_the_inventory` holds the two
-/// lists together, so an empty site here means that test has been
-/// bypassed and should read as broken.
-fn override_site(name: &str) -> &'static str {
+/// The variable that overrides one dependency's search chain, as
+/// [`NATIVE_DEPENDENCY_KNOBS`] records it.
+fn override_site(name: &str) -> Option<&'static str> {
     NATIVE_DEPENDENCY_KNOBS
         .iter()
         .find(|knob| knob.name == name)
-        .map_or("", |knob| knob.override_site)
+        .and_then(|knob| knob.override_site)
 }
 
 /// The data-root row. Either way it carries the whole ladder, so the
@@ -730,9 +705,8 @@ mod tests {
     }
 
     /// The inventory of native dependencies and the runtime search agree
-    /// on which dependencies exist. Without this the empty-site fallback
-    /// in `override_site` becomes reachable, and a report would name a
-    /// dependency with no variable to point it at.
+    /// on which dependencies exist, so a located dependency cannot be
+    /// missing from the list of what this build locates.
     #[test]
     fn every_located_dependency_is_named_in_the_inventory() {
         let located: Vec<String> = native_dependency_origins("chromium/7881", "")
@@ -743,14 +717,25 @@ mod tests {
 
         assert_eq!(
             located, inventoried,
-            "the located set and the inventory disagree, so a located \
-             dependency can lose the variable that overrides it"
+            "the located set and the inventory disagree"
         );
+    }
+
+    /// No dependency names a variable, in the inventory or in a report:
+    /// a path the environment supplies is not the build this binary
+    /// pins.
+    #[test]
+    fn no_native_dependency_names_an_override() {
         for knob in NATIVE_DEPENDENCY_KNOBS {
-            assert!(
-                !override_site(knob.name).is_empty(),
-                "{} resolves to no override site",
-                knob.name
+            assert_eq!(knob.override_site, None, "{}", knob.name);
+        }
+        for origin in native_dependency_origins("chromium/7881", "") {
+            assert_eq!(origin.override_site, None, "{}", origin.name);
+            assert_ne!(
+                origin.layer,
+                Some(Layer::Environment),
+                "{} was located through the environment",
+                origin.name
             );
         }
     }
@@ -1114,7 +1099,6 @@ mod tests {
         let entry = native_origin(
             "pdfium",
             None,
-            None,
             &probed,
             &["beside the executable", "managed directory"],
         );
@@ -1123,41 +1107,16 @@ mod tests {
         assert_eq!(entry.layer, None, "nothing held it, so no layer did");
         assert_eq!(entry.site, None);
         assert_eq!(entry.probed, vec!["/beside/exe", "/managed"]);
-        assert_eq!(
-            entry.override_site,
-            crate::PDFIUM_LIB_ENV,
-            "an empty-handed search must still name the one handle an \
-             operator can reach for"
-        );
+        assert_eq!(entry.override_site, None);
     }
 
-    /// An override collapses the chain to the one path the operator
-    /// vouched for, and the entry says so rather than calling it a
-    /// platform location.
-    #[test]
-    fn an_overridden_dependency_reports_the_environment_layer() {
-        let probed = [PathBuf::from("/vouched/for")];
-        let entry = native_origin(
-            "pdfium",
-            Some("/vouched/for".to_string()),
-            Some(&probed[0]),
-            &probed,
-            &["beside the executable", "managed directory"],
-        );
-
-        assert_eq!(entry.layer, Some(Layer::Environment));
-        assert_eq!(entry.site.as_deref(), Some(crate::PDFIUM_LIB_ENV));
-        assert_eq!(entry.path.as_deref(), Some("/vouched/for"));
-    }
-
-    /// Without an override the winning stop is named by its position,
-    /// so the second stop is not reported as the first.
+    /// The winning stop is named by its position, so the second stop is
+    /// not reported as the first.
     #[test]
     fn a_later_stop_is_named_for_its_own_position() {
         let probed = [PathBuf::from("/beside/exe"), PathBuf::from("/managed")];
         let entry = native_origin(
             "llama_server",
-            None,
             Some(&probed[1]),
             &probed,
             &["beside the executable", "managed directory"],

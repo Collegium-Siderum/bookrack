@@ -56,11 +56,11 @@ directory it searched.
   `bookrack/pdfium/`; only they read that file, and it can be deleted
   once none is left. Delete the file alone, not the directory: the
   directories the newer builds install into sit inside it.
-- **`BOOKRACK_PDFIUM_LIB`.** When set, it is the only directory
-  searched: point it at a directory holding the pinned build. Unsetting
-  it sends the search to the executable's directory and then to the
-  managed copy, so make sure one of those holds the pinned build first,
-  running `setup pdfium` if neither does.
+- **`BOOKRACK_PDFIUM_LIB`.** Retired: a build from 0.15.0 on ignores
+  it and searches the executable's directory and then the managed copy.
+  Make sure one of those holds the pinned build, running `setup pdfium`
+  if neither does (`setup pdfium --from <ARCHIVE>` installs from a
+  local copy of the pinned release archive), then unset the variable.
 
 Restart the daemon afterwards. Once a load has failed, a running daemon
 does not try again.

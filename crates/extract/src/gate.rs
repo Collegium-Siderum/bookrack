@@ -13,12 +13,12 @@
 //! An absent one depends on the environment: where the resource is
 //! optional, the absence is explained on stderr and the test returns
 //! early; where the environment declares it mandatory, the absence is a
-//! panic. Which of the two applies is that resource's own `REQUIRE`
-//! variable, falling back to `CI` — the variable every provider sets —
-//! when it says nothing. A resource that is found and cannot be used is
-//! a panic in every environment: the opt-out is for a machine that does
-//! not carry the resource, and a machine that carries an unusable one
-//! is misconfigured rather than exempt.
+//! panic. Which of the two applies is `CI`, the variable every
+//! provider sets: a runner is where the resource was meant to be
+//! present. A resource that is found and cannot be used is a panic in
+//! every environment: the skip is for a machine that does not carry the
+//! resource, and a machine that carries an unusable one is
+//! misconfigured rather than exempt.
 
 /// Why a probed resource cannot be used.
 #[derive(Debug, PartialEq, Eq)]
@@ -32,8 +32,7 @@ pub enum Unavailable {
 /// One host resource a test needs, and what its absence means.
 ///
 /// The three names are separate because they appear in different
-/// sentences, and both sentences are read by someone trying to work out
-/// what went wrong.
+/// sentences, each read by someone trying to work out what went wrong.
 pub struct Gate {
     /// The resource as the mandatory-environment panic names it, e.g.
     /// `"PDFium"`.
@@ -43,23 +42,15 @@ pub struct Gate {
     subject: &'static str,
     /// What is being skipped, e.g. `"PDF test"`.
     skipped: &'static str,
-    /// Variable declaring whether this resource is mandatory here.
-    require_env: &'static str,
 }
 
 impl Gate {
     /// Declare a gate. `const` so a consumer can hold one in a `static`.
-    pub const fn new(
-        resource: &'static str,
-        subject: &'static str,
-        skipped: &'static str,
-        require_env: &'static str,
-    ) -> Gate {
+    pub const fn new(resource: &'static str, subject: &'static str, skipped: &'static str) -> Gate {
         Gate {
             resource,
             subject,
             skipped,
-            require_env,
         }
     }
 
@@ -95,14 +86,14 @@ impl Gate {
         }
     }
 
-    /// Resolve the broken case: a panic in every environment, naming
-    /// the variable that excuses an absence so the reader knows it does
-    /// not excuse this.
+    /// Resolve the broken case: a panic in every environment, saying
+    /// that the skip an unset `CI` allows covers an absence and not
+    /// this.
     fn broken(&self, reason: &str) -> ! {
         panic!(
-            "{} was found but cannot be used ({reason}); {} / CI only excuses a {} \
-             that is absent, so this fails whatever they declare",
-            self.resource, self.require_env, self.subject,
+            "{} was found but cannot be used ({reason}); only a {} that is absent is \
+             skipped where CI is unset, so this fails whether or not it is set",
+            self.resource, self.subject,
         )
     }
 
@@ -111,9 +102,9 @@ impl Gate {
     fn unavailable(&self, reason: &str, required: bool) -> bool {
         assert!(
             !required,
-            "{} is unavailable ({reason}), and {} / CI declares it mandatory here, \
+            "{} is unavailable ({reason}), and CI declares it mandatory here, \
              so the tests that need it must not be skipped",
-            self.resource, self.require_env,
+            self.resource,
         );
         eprintln!(
             "skipping {}: {} unavailable ({reason})",
@@ -124,59 +115,38 @@ impl Gate {
 
     /// Whether the environment declares this resource mandatory.
     fn required(&self) -> bool {
-        required_from(
-            std::env::var(self.require_env).ok(),
-            std::env::var("CI").ok(),
-        )
+        required_from(std::env::var("CI").ok())
     }
 }
 
-/// Pure policy behind [`Gate::required`], factored out so both branches
-/// can be tested without mutating process-global environment variables.
-///
-/// `require` is authoritative when it carries a non-blank value, so a
-/// runner that genuinely cannot supply the resource can opt out of the
-/// requirement; otherwise a non-blank `ci` — the variable every CI
-/// provider sets — makes it mandatory.
-fn required_from(require: Option<String>, ci: Option<String>) -> bool {
-    match require {
-        Some(v) if !v.trim().is_empty() => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
-        ),
-        _ => ci.is_some_and(|v| !v.trim().is_empty()),
-    }
+/// Pure policy behind [`Gate::required`], factored out so every case
+/// can be tested without mutating process-global environment variables:
+/// a non-blank `ci` — the variable every CI provider sets — makes the
+/// resource mandatory, and nothing else does.
+fn required_from(ci: Option<String>) -> bool {
+    ci.is_some_and(|v| !v.trim().is_empty())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const TEST_GATE: Gate = Gate::new(
-        "Widgetron",
-        "Widgetron runtime",
-        "widget test",
-        "BOOKRACK_REQUIRE_WIDGETRON",
-    );
+    const TEST_GATE: Gate = Gate::new("Widgetron", "Widgetron runtime", "widget test");
 
+    /// Any non-blank value counts, the falsy words included: `CI` says
+    /// where the run is, and has no spelling for "here, but optional".
     #[test]
-    fn the_override_decides_whenever_it_carries_a_value() {
-        assert!(required_from(Some("1".into()), None));
-        assert!(required_from(Some("true".into()), None));
-        assert!(required_from(Some("yes".into()), None));
-        // A falsy override wins over a CI runner.
-        assert!(!required_from(Some("0".into()), Some("true".into())));
-        assert!(!required_from(Some("False".into()), Some("true".into())));
-        assert!(!required_from(Some("off".into()), Some("1".into())));
+    fn a_non_blank_ci_makes_the_resource_mandatory() {
+        assert!(required_from(Some("true".into())));
+        assert!(required_from(Some("1".into())));
+        assert!(required_from(Some("false".into())));
     }
 
     #[test]
-    fn ci_decides_when_the_override_is_absent_or_blank() {
-        assert!(required_from(None, Some("true".into())));
-        assert!(required_from(Some("   ".into()), Some("1".into())));
-        assert!(!required_from(None, None));
-        assert!(!required_from(None, Some("".into())));
-        assert!(!required_from(Some(" ".into()), Some("  ".into())));
+    fn an_absent_or_blank_ci_leaves_it_optional() {
+        assert!(!required_from(None));
+        assert!(!required_from(Some("".into())));
+        assert!(!required_from(Some("  ".into())));
     }
 
     /// The optional half: the caller is told, and the test returns
@@ -187,9 +157,9 @@ mod tests {
         assert!(!TEST_GATE.unavailable("nothing found", false));
     }
 
-    /// The mandatory half, and the reason both names are carried: the
-    /// panic has to say which resource and which variable, or the
-    /// reader has neither the diagnosis nor the opt-out.
+    /// The mandatory half: the panic has to say which resource and
+    /// which variable made it mandatory, or the reader has neither the
+    /// diagnosis nor the reason it was not skipped.
     #[test]
     #[should_panic(expected = "Widgetron is unavailable (nothing found)")]
     fn a_mandatory_environment_panics_instead_of_skipping() {
@@ -197,8 +167,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "BOOKRACK_REQUIRE_WIDGETRON / CI declares it mandatory")]
-    fn the_panic_names_the_variable_that_opts_out() {
+    #[should_panic(expected = "and CI declares it mandatory here")]
+    fn the_panic_names_the_variable_that_made_it_mandatory() {
         TEST_GATE.unavailable("nothing found", true);
     }
 
@@ -214,8 +184,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "BOOKRACK_REQUIRE_WIDGETRON / CI only excuses")]
-    fn a_broken_resource_names_the_variable_that_does_not_excuse_it() {
+    #[should_panic(expected = "fails whether or not it is set")]
+    fn a_broken_resource_says_that_ci_does_not_decide_it() {
         TEST_GATE.resolve(Unavailable::Broken("bad build".into()), false);
     }
 

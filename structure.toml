@@ -1173,7 +1173,7 @@ exit = "one fetch-and-verify function serves every installer"
 
 [[parallel]]
 id = "managed-lookup-chain"
-summary = "locating a native artifact: override, beside the executable, managed directory"
+summary = "locating a native artifact: beside the executable, managed directory"
 sites = [
   "crates/config/src/lib.rs::locate_pdfium_from",
   "crates/config/src/llama_server_pin.rs::locate_llama_server_from",

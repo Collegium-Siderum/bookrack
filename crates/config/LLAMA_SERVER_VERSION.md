@@ -69,25 +69,27 @@ https://huggingface.co/<repo>/resolve/main/<file>
 
 ## How the artifacts are found
 
-Both chains stop at the first hit; an explicit override is
-authoritative, with no fallback behind it, and is trusted without a
-checksum.
+Both chains stop at the first hit, and no variable replaces either
+one: what a chain finds is the pinned artifact a release archive ships
+or `bookrack setup reranker` installed and verified.
 
 The `llama-server` executable:
 
-1. `BOOKRACK_LLAMA_SERVER_BIN` — names the executable itself.
-2. `llama-server` in the running executable's own directory (the
+1. `llama-server` in the running executable's own directory (the
    release-archive layout).
-3. The per-user managed directory
+2. The per-user managed directory
    (`<platform data dir>/bookrack/llama-server/<tag>/`), which
    `bookrack setup reranker` populates.
 
 The model file:
 
-1. `BOOKRACK_RERANKER_MODEL` — names the `.gguf` file itself.
-2. `<platform data dir>/bookrack/models/<file>`, which the same
-   doctor verb populates. Model weights do not ship in release
-   archives, so there is no executable-adjacent stop.
+1. `<platform data dir>/bookrack/models/<file>`, which the same
+   command populates. Model weights do not ship in release archives,
+   so there is no executable-adjacent stop.
+
+A model with no pin has no file name in that directory, so the
+supervised server cannot load it: serve it from a rerank server of
+your own and name that with `BOOKRACK_RERANKER_URL`.
 
 ## When this changes
 

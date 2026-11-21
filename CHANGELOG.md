@@ -289,6 +289,30 @@ release workflow extracts the matching section verbatim from this file.
   declaration and churn count of a table that was left in place. The
   file is now removed only with the table itself.
 
+- **A native component is found beside the executable or in this
+  build's managed directory, and nowhere else.** The PDFium library,
+  the llama-server executable, and the reranker model file each had a
+  variable that replaced the whole search with one path, for every
+  build on the machine at once. The search is now the release-archive
+  layout first, then the directory `bookrack setup` installs this
+  build's pin into (the model file has only the second). In
+  `config effective --json` every `native_dependencies[].override_site`
+  is `null`, and in `config knobs --json` every
+  `native_dependencies[].variable` is `null`; the human tables print
+  `-` in that column. Both keys go in the next minor release.
+- **A reranker model with no pinned download is served only by an
+  operator-run server.** `BOOKRACK_RERANKER_MODEL` was the one way to
+  hand the supervised llama-server a model file the installer does not
+  know. A profile naming such a model now needs a rerank server the
+  operator runs, named by `BOOKRACK_RERANKER_URL`; the refusal at
+  start, the `reranker model` row of `bookrack doctor`, and the note
+  `index-profile` prints all say so.
+- **A source build finds PDFium through `bookrack setup pdfium`.** The
+  test suite follows the same search: a test that needs PDFium reads
+  the managed directory, skips visibly when the library is absent, and
+  fails instead when `CI` is set. No variable of its own makes the
+  library mandatory or optional.
+
 ### Deprecated
 
 - **`bookrack doctor --install-pdfium` and `--install-reranker`** are
@@ -315,6 +339,16 @@ release workflow extracts the matching section verbatim from this file.
   retired.** A set one is ignored and listed under `retired_variables`.
   Set the value per library with `bookrack libraries config <name>
   search.top_k=<n>` or `search.weak_threshold=<x>`.
+- **`BOOKRACK_PDFIUM_LIB`, `BOOKRACK_LLAMA_SERVER_BIN`,
+  `BOOKRACK_RERANKER_MODEL`, and `BOOKRACK_REQUIRE_PDFIUM` are
+  retired.** A set one is ignored and listed under `retired_variables`;
+  none of the first three redirects a search any longer. A deployment
+  that pointed `BOOKRACK_PDFIUM_LIB` at a library, or the other two at
+  a llama-server or a model file, installs the pinned build instead:
+  `bookrack setup pdfium` (`--from <ARCHIVE>` with no network) and
+  `bookrack setup reranker`. Until it does, PDF ingest fails and a
+  library whose profile enables the reranker is skipped at start; unset
+  the variable afterwards.
 - The retired keys and variables stay recognised, with their notices,
   for this release, and are dropped from the tables in the next.
 
@@ -428,6 +462,9 @@ release workflow extracts the matching section verbatim from this file.
   among the variables no knob reads, `bookrack doctor` shows a
   `retired variables` row, and the daemon logs a warning when it
   starts.
+- **The `pdfium.required` row of `config knobs` and `config
+  effective`.** It reported `BOOKRACK_REQUIRE_PDFIUM`, which only the
+  test suite read; the variable is retired and the suite reads `CI`.
 - **The `bookrack intake` command group; use `bookrack ingest --rule`
   and `bookrack find --awaiting-text`.** `intake ocr` and
   `intake list-ocr-pending` are no longer part of the grammar: typing

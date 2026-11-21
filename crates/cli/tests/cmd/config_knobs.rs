@@ -178,12 +178,13 @@ async fn every_knob_names_at_least_one_place_it_can_be_set() -> Result<()> {
     Ok(())
 }
 
-/// The native dependencies carry the variable that points at each one.
-/// They have no priority chain, so they are not rows — but an operator
-/// asking what can be configured needs them, and leaving them out sends
-/// that reader to the source.
+/// The native dependencies are listed, and no variable points at any of
+/// them: each is found beside the executable or in this build's managed
+/// directory. They have no priority chain, so they are not rows — but a
+/// reader asking what this build locates needs them. The test-harness
+/// row that read `BOOKRACK_REQUIRE_PDFIUM` is gone with the variable.
 #[tokio::test]
-async fn the_inventory_names_every_native_dependency_and_its_variable() -> Result<()> {
+async fn the_inventory_names_every_native_dependency_and_no_variable() -> Result<()> {
     let sandbox = Sandbox::new();
     let inventory = inventory(&run(&sandbox, &["--json"], &[]).await?)?;
 
@@ -195,13 +196,19 @@ async fn the_inventory_names_every_native_dependency_and_its_variable() -> Resul
 
     for dep in deps {
         assert!(
-            dep["variable"]
-                .as_str()
-                .is_some_and(|v| v.starts_with("BOOKRACK_")),
-            "dependency {} names no variable to point it at: {dep}",
+            dep.as_object().is_some_and(|d| d.contains_key("variable")),
+            "the key stays for one release: {dep}"
+        );
+        assert!(
+            dep["variable"].is_null(),
+            "dependency {} still names a variable: {dep}",
             dep["name"]
         );
     }
+    assert!(
+        knob(&inventory, "pdfium.required").is_none(),
+        "the test-harness knob is still in the inventory"
+    );
 
     Ok(())
 }

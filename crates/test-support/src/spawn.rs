@@ -21,20 +21,6 @@ use crate::sandbox::Sandbox;
 /// Prefix every variable this project reads shares.
 const BOOKRACK_PREFIX: &str = "BOOKRACK_";
 
-/// Variables the sweep lets through from the parent process.
-///
-/// Both name the PDFium binary the extraction tests bind at runtime.
-/// CI exports them, and `bookrack_extract::pdfium_gate` turns a missing
-/// library into a loud failure only while `BOOKRACK_REQUIRE_PDFIUM`
-/// (or `CI`) says the environment was meant to carry it — sweeping them
-/// away would turn that loud failure back into a silent skip. The
-/// second name is spelled out rather than imported because
-/// `bookrack-extract` pulls the whole PDF stack in with it.
-///
-/// The list serves tests only: the sandbox tool's preset removes both
-/// names from every child it runs.
-pub const PASSTHROUGH_ENV: [&str; 2] = ["BOOKRACK_PDFIUM_LIB", "BOOKRACK_REQUIRE_PDFIUM"];
-
 /// Name the `bookrack` binary under test and start an isolated
 /// [`Spawn`] against `$sandbox` (anything that derefs to a
 /// [`Sandbox`]).
@@ -93,15 +79,9 @@ impl Spawn {
 
     /// The sandbox tool's preset: the same isolation as a test's, routed
     /// through the registry rather than a data root, so a sandbox can
-    /// serve several libraries, and with [`PASSTHROUGH_ENV`] removed
-    /// rather than inherited, so a sandbox child finds PDFium the way a
-    /// binary on an operator's machine does: beside the executable or in
-    /// the managed directory under the sandbox's own home.
+    /// serve several libraries.
     pub(crate) fn for_tool(bin: &Path, sandbox: &Sandbox) -> Spawn {
-        PASSTHROUGH_ENV.iter().fold(
-            Spawn::__with_bin(bin, sandbox).without_data_dir(),
-            |spawn, key| spawn.without_env(key),
-        )
+        Spawn::__with_bin(bin, sandbox).without_data_dir()
     }
 
     /// Leave the data root unset, so the child resolves one through the
@@ -186,16 +166,16 @@ impl Spawn {
     /// Three rules carry the isolation:
     ///
     /// 1. **Sweep, do not list.** Every `BOOKRACK_*` variable the
-    ///    parent carries that this builder did not set and
-    ///    [`PASSTHROUGH_ENV`] does not name is removed from the child.
+    ///    parent carries that this builder did not set is removed from
+    ///    the child, with no exception.
     ///    A fixed override list would already miss the backup
     ///    directory, the reranker URL, the llama-server path, the log
     ///    directives, and the vector and search knobs — and the set of
     ///    names keeps growing, so a list rots by construction.
     /// 2. **No `env_clear`.** Clearing everything would drop `PATH`,
     ///    `TMPDIR`, `CI`, and `RUST_BACKTRACE` along with the hostile
-    ///    variables; losing `CI` and the PDFium pointer turns the PDF
-    ///    tests from a loud failure into a silent skip. What this
+    ///    variables; losing `CI` turns the PDF tests from a loud
+    ///    failure into a silent skip. What this
     ///    builder promises is isolation *relative to the parent*;
     ///    starting from an empty environment is `scripts/test-clean.sh`.
     /// 3. **A working directory inside the sandbox.** `dotenvy`
@@ -226,7 +206,7 @@ impl Spawn {
     /// registry and embedder, then [`Spawn::extra_env`]. A key named by
     /// [`Spawn::without_env`] is taken out of `set` and put in `remove`,
     /// and so is every `BOOKRACK_*` variable `host` carries that `set`
-    /// does not name and [`PASSTHROUGH_ENV`] does not pass.
+    /// does not name.
     pub fn plan(self, host: impl Iterator<Item = (OsString, OsString)>) -> EnvPlan {
         let mut set: BTreeMap<OsString, OsString> = BTreeMap::new();
         let mut order: Vec<OsString> = Vec::new();
@@ -267,9 +247,7 @@ impl Spawn {
             }
         }
         for (key, _) in host {
-            let swept = key
-                .to_str()
-                .is_some_and(|k| k.starts_with(BOOKRACK_PREFIX) && !PASSTHROUGH_ENV.contains(&k));
+            let swept = key.to_str().is_some_and(|k| k.starts_with(BOOKRACK_PREFIX));
             if swept && !set.contains_key(&key) && removed_keys.insert(key.clone()) {
                 remove.push(key);
             }
@@ -462,17 +440,18 @@ mod tests {
         assert_eq!(envs.get("CI"), Some(&None));
     }
 
-    /// The passthrough list is exactly the two PDFium names: they are
-    /// not swept, so a child still finds the library CI exported.
+    /// The sweep has no exception. The two PDFium names a host may
+    /// still export are removed like any other: a child finds the
+    /// library in its sandbox's managed directory or not at all.
     #[test]
-    fn the_passthrough_allowlist_is_two_names() {
+    fn the_sweep_lets_no_host_variable_through() {
         let sandbox = Sandbox::new();
         let envs = envs(&spawn(&sandbox).build_from(hostile_host()));
-        assert_eq!(PASSTHROUGH_ENV.len(), 2);
-        for key in PASSTHROUGH_ENV {
-            assert!(
-                !envs.contains_key(key),
-                "{key} was overridden or swept instead of inherited",
+        for key in ["BOOKRACK_PDFIUM_LIB", "BOOKRACK_REQUIRE_PDFIUM"] {
+            assert_eq!(
+                envs.get(key),
+                Some(&None),
+                "{key} reaches the child from the host",
             );
         }
     }

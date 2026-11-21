@@ -158,9 +158,8 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then bin_suffix=".exe"; fi
           cp "target/${{ matrix.target }}/release/bookrack${bin_suffix}" "${payload_dir}/"
 
-          # PDFium loaded by the adapter from the binary's own directory
-          # when BOOKRACK_PDFIUM_LIB is unset, so place it beside the
-          # binary inside the tarball.
+          # The adapter looks for PDFium in the binary's own directory
+          # first, so place it beside the binary inside the tarball.
           cp "pdfium-extracted/${{ matrix.pdfium_path_in_archive }}" \
              "${payload_dir}/${{ matrix.pdfium_lib_name }}"
 

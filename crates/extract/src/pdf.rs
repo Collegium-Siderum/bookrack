@@ -428,7 +428,7 @@ fn load_pdfium() -> Result<Pdfium, LoadFailure> {
 }
 
 /// Compose the not-found report: the directories searched plus the
-/// remedies, so the operator never sees a raw dynamic-loader trace.
+/// remedy, so the operator never sees a raw dynamic-loader trace.
 fn missing_library_message(probed: &[std::path::PathBuf]) -> String {
     let searched = probed
         .iter()
@@ -437,10 +437,8 @@ fn missing_library_message(probed: &[std::path::PathBuf]) -> String {
         .join(", ");
     format!(
         "PDFium library {filename} not found; searched: {searched}. \
-         Run `bookrack setup pdfium` to download the pinned build, \
-         or set {env} to a directory containing it.",
+         Run `bookrack setup pdfium` to install the pinned build.",
         filename = bookrack_config::pdfium_library_filename(),
-        env = bookrack_config::PDFIUM_LIB_ENV,
     )
 }
 

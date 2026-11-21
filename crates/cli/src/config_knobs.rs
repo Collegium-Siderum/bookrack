@@ -55,12 +55,13 @@ struct SiteOut<'a> {
 }
 
 /// One native dependency: not a knob with a priority chain, but a thing
-/// an operator configures, so an inventory that omitted it would send
-/// them back to the source to find the variable.
+/// this build locates, so an inventory that omitted it would send a
+/// reader back to the source to learn it exists. `variable` is `null`
+/// for a dependency no variable points at.
 #[derive(Serialize)]
 struct DependencyOut<'a> {
     name: &'a str,
-    variable: &'a str,
+    variable: Option<&'a str>,
 }
 
 /// The whole inventory.
@@ -115,7 +116,8 @@ pub fn catalog() -> Vec<KnobOrigin> {
 }
 
 /// Every `BOOKRACK_…` variable this build reads: each knob's
-/// environment sites, and each native dependency's override.
+/// environment sites, and the override of each native dependency that
+/// has one.
 ///
 /// A prefixed variable outside this set moves nothing in this build,
 /// which is what `config effective` reports it as. `.env.example`
@@ -130,7 +132,7 @@ pub fn claimed_variables() -> BTreeSet<String> {
     names.extend(
         bookrack_config::NATIVE_DEPENDENCY_KNOBS
             .iter()
-            .map(|dep| dep.override_site.to_string()),
+            .filter_map(|dep| dep.override_site.map(str::to_string)),
     );
     names
 }
@@ -157,10 +159,9 @@ fn knob_out(row: &KnobOrigin) -> KnobOut<'_> {
 
 /// The `BOOKRACK_…` variable a knob draws on, when it draws on one.
 ///
-/// A knob may have two environment sites — `pdfium.required` reads its
-/// own variable and falls back to `CI` — so the first is taken rather
-/// than joining them: the first is the one the inventory is naming, and
-/// the rest stay visible in `settable_at`.
+/// The first environment site is taken rather than joining them: it is
+/// the one the inventory is naming, and any other stays visible in
+/// `settable_at`.
 fn environment_site(row: &KnobOrigin) -> Option<&str> {
     row.chain
         .iter()
@@ -185,8 +186,8 @@ fn print_human(knobs: &[KnobOut<'_>], deps: &[DependencyOut<'_>]) {
     // A continuation line per site the table does not already name, so
     // a knob that also has a file key, a flag, or a second variable
     // says so. Only the one site the `variable` column carries is
-    // dropped: filtering the whole environment layer would hide the
-    // `CI` fallback that decides `pdfium.required`.
+    // dropped: filtering the whole environment layer would hide a
+    // second variable a knob falls back to.
     for knob in knobs {
         for site in &knob.settable_at {
             if Some(site.site) != knob.variable {
@@ -203,7 +204,7 @@ fn print_human(knobs: &[KnobOut<'_>], deps: &[DependencyOut<'_>]) {
     println!();
     let mut table = RowTable::new(["dependency", "point at it with"]);
     for dep in deps {
-        table.push_row([dep.name, dep.variable]);
+        table.push_row([dep.name, dep.variable.unwrap_or("-")]);
     }
     println!("{}", table.render());
 

@@ -81,22 +81,6 @@ pub const OLLAMA_URL_ENV: &str = "BOOKRACK_OLLAMA_URL";
 /// Ollama endpoint used when [`OLLAMA_URL_ENV`] is unset.
 pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 
-/// Environment variable naming the directory that holds the PDFium
-/// dynamic library. When unset, the directory of the running executable
-/// is used — the layout of a shipped bookrack build, which places the
-/// library beside the binary.
-pub const PDFIUM_LIB_ENV: &str = "BOOKRACK_PDFIUM_LIB";
-
-/// Environment variable naming the `llama-server` executable the
-/// reranker backend spawns. Authoritative when set; see
-/// [`llama_server_pin::locate_llama_server`].
-pub const LLAMA_SERVER_BIN_ENV: &str = "BOOKRACK_LLAMA_SERVER_BIN";
-
-/// Environment variable naming the reranker GGUF model file.
-/// Authoritative when set; see
-/// [`reranker_model_pin::locate_reranker_model`].
-pub const RERANKER_MODEL_ENV: &str = "BOOKRACK_RERANKER_MODEL";
-
 /// Environment variable naming an operator-run rerank server. Setting
 /// it (or `reranker.url` in `config.toml`) switches the daemon from
 /// spawning a supervised llama-server to probing the named endpoint.
@@ -148,8 +132,7 @@ pub const DAEMON_STATE_DIR_ENV: &str = "BOOKRACK_DAEMON_STATE_DIR";
 /// Environment variable that suppresses loading `.env`.
 ///
 /// A non-blank value turns loading off, except `0`, `false`, `no`, and
-/// `off`, which turn it back on; blank is treated as unset. The same
-/// rule `BOOKRACK_REQUIRE_PDFIUM` follows.
+/// `off`, which turn it back on; blank is treated as unset.
 ///
 /// It has to come from the real environment: a value written inside
 /// `.env` is only read once the file has been loaded, which is the
@@ -186,6 +169,29 @@ pub fn load_dotenv() -> Option<DotenvLoad> {
         .filter_map(Result::ok)
         .collect();
 
+    let load = sort_dotenv_entries(path, entries, &before, &mut |key, value| {
+        // SAFETY: this runs as the entry point's first statement,
+        // before the program spawns a thread or a task and before
+        // anything reads a variable. That placement is the whole
+        // contract of this function and is why it may not be
+        // called from a library.
+        unsafe { std::env::set_var(key, value) };
+    });
+    let _ = DOTENV_LOAD.set(load.clone());
+    Some(load)
+}
+
+/// Sort the lines of a `.env` into supplied, eclipsed, and rejected,
+/// calling `install` for each one supplied and for no other: `before`
+/// is the set of names the environment already carried. Factored out of
+/// [`load_dotenv`] so the one place a variable is written can be
+/// watched without mutating the process environment.
+fn sort_dotenv_entries(
+    path: PathBuf,
+    entries: Vec<(String, String)>,
+    before: &BTreeSet<String>,
+    install: &mut dyn FnMut(&str, &str),
+) -> DotenvLoad {
     let mut supplied: BTreeSet<String> = BTreeSet::new();
     let mut rejected: BTreeSet<String> = BTreeSet::new();
     let mut eclipsed: Vec<(String, String)> = Vec::new();
@@ -202,25 +208,18 @@ pub fn load_dotenv() -> Option<DotenvLoad> {
         // is seen the environment already holds the first, which is
         // the same rule a gap-filling load follows anywhere else.
         if supplied.insert(key.clone()) {
-            // SAFETY: this runs as the entry point's first statement,
-            // before the program spawns a thread or a task and before
-            // anything reads a variable. That placement is the whole
-            // contract of this function and is why it may not be
-            // called from a library.
-            unsafe { std::env::set_var(&key, &value) };
+            install(&key, &value);
         }
     }
     eclipsed.sort();
     eclipsed.dedup_by(|a, b| a.0 == b.0);
 
-    let load = DotenvLoad {
+    DotenvLoad {
         path,
         supplied: supplied.into_iter().collect(),
         eclipsed,
         rejected: rejected.into_iter().collect(),
-    };
-    let _ = DOTENV_LOAD.set(load.clone());
-    Some(load)
+    }
 }
 
 /// The nearest `.env` at or above `from`, as `dotenvy` would find it.
@@ -1198,6 +1197,29 @@ pub const RETIRED_ENV_VARS: &[RetiredVariable] = &[
         help: "the weak-match threshold is a library's own preference -- set it per library \
                with `bookrack libraries config <name> search.weak_threshold=<x>`, then unset \
                the variable",
+    },
+    RetiredVariable {
+        name: "BOOKRACK_PDFIUM_LIB",
+        help: "no variable points at the PDFium library -- it is found beside the executable \
+               or in this build's managed directory; run `bookrack setup pdfium` (`--from \
+               <archive>` with no network), then unset the variable",
+    },
+    RetiredVariable {
+        name: "BOOKRACK_LLAMA_SERVER_BIN",
+        help: "no variable points at the llama-server executable -- it is found beside the \
+               executable or in this build's managed directory; run `bookrack setup \
+               reranker`, then unset the variable",
+    },
+    RetiredVariable {
+        name: "BOOKRACK_RERANKER_MODEL",
+        help: "no variable points at a reranker model file -- `bookrack setup reranker` \
+               installs a pinned model, and any other is served by a rerank server of your \
+               own named by BOOKRACK_RERANKER_URL; unset the variable",
+    },
+    RetiredVariable {
+        name: "BOOKRACK_REQUIRE_PDFIUM",
+        help: "only the test suite read it, and the suite now treats PDFium as mandatory \
+               exactly when `CI` is set -- unset the variable",
     },
 ];
 
@@ -4026,6 +4048,13 @@ pub fn pdfium_managed_dir(tag: &str) -> Option<PathBuf> {
     pdfium_managed_dir_from(dirs::data_dir(), tag)
 }
 
+/// The directory every build's [`pdfium_managed_dir`] sits under:
+/// `<platform data dir>/bookrack/pdfium`. `None` when the platform data
+/// directory cannot be located.
+pub fn pdfium_managed_root() -> Option<PathBuf> {
+    dirs::data_dir().map(|dir| dir.join("bookrack").join("pdfium"))
+}
+
 /// Pure form of [`pdfium_managed_dir`], factored out so the join shape
 /// can be tested without depending on the host's data directory.
 fn pdfium_managed_dir_from(data_dir: Option<PathBuf>, tag: &str) -> Option<PathBuf> {
@@ -4052,13 +4081,12 @@ pub struct PdfiumLocation {
 
 /// Locate the directory to load the PDFium dynamic library from.
 ///
-/// `BOOKRACK_PDFIUM_LIB`, when set, is authoritative: only that
-/// directory is checked, so a typo in the override surfaces as a miss
-/// instead of being papered over by a fallback. When unset, the running
-/// executable's own directory (the release-archive layout) is checked
-/// first, then the managed directory of the build `tag` names (see
-/// [`pdfium_managed_dir`]); a tag with no managed directory leaves the
-/// executable's directory as the only stop.
+/// The running executable's own directory (the release-archive layout)
+/// is checked first, then the managed directory of the build `tag`
+/// names (see [`pdfium_managed_dir`]); a tag with no managed directory
+/// leaves the executable's directory as the only stop. Nothing in the
+/// environment moves the search: both stops hold the build this binary
+/// pins, which a path an operator names cannot promise.
 ///
 /// This is a free function, not a [`Config`] method: the PDF adapter
 /// needs the directory but takes no `Config`, and threading one through
@@ -4067,31 +4095,20 @@ pub fn locate_pdfium(tag: &str) -> PdfiumLocation {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf));
-    locate_pdfium_from(
-        std::env::var(PDFIUM_LIB_ENV).ok(),
-        exe_dir,
-        pdfium_managed_dir(tag),
-        &|dir| dir.join(pdfium_library_filename()).is_file(),
-    )
+    locate_pdfium_from(exe_dir, pdfium_managed_dir(tag), &|dir| {
+        dir.join(pdfium_library_filename()).is_file()
+    })
 }
 
 /// Pure search logic for [`locate_pdfium`], factored out so the chain
-/// can be tested without mutating process-global environment variables
-/// or touching the filesystem.
+/// can be tested without touching the filesystem.
 // Parallel implementation: managed-lookup-chain.
 fn locate_pdfium_from(
-    override_dir: Option<String>,
     exe_dir: Option<PathBuf>,
     managed_dir: Option<PathBuf>,
     has_library: &dyn Fn(&Path) -> bool,
 ) -> PdfiumLocation {
-    let candidates: Vec<PathBuf> = match override_dir
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        Some(dir) => vec![PathBuf::from(dir)],
-        None => [exe_dir, managed_dir].into_iter().flatten().collect(),
-    };
+    let candidates: Vec<PathBuf> = [exe_dir, managed_dir].into_iter().flatten().collect();
     let dir = candidates.iter().find(|d| has_library(d)).cloned();
     PdfiumLocation {
         dir,
@@ -5374,50 +5391,31 @@ mod tests {
     }
 
     #[test]
-    fn locate_pdfium_only_checks_the_override_when_set() {
-        let pinned = PathBuf::from("a/pinned/pdfium/dir");
+    fn locate_pdfium_checks_the_exe_directory_then_the_managed_one() {
         let exe = PathBuf::from("exe/dir");
         let managed = PathBuf::from("managed/dir");
 
-        let found = locate_pdfium_from(
-            Some(pinned.display().to_string()),
-            Some(exe.clone()),
-            Some(managed.clone()),
-            &|_| true,
-        );
-        assert_eq!(found.dir, Some(pinned.clone()));
-        assert_eq!(found.probed, vec![pinned.clone()]);
-
-        // An override without the library is a miss, not a fallthrough:
-        // the other candidates must not even be probed.
-        let missing = locate_pdfium_from(
-            Some(pinned.display().to_string()),
-            Some(exe),
-            Some(managed),
-            &|_| false,
-        );
-        assert_eq!(missing.dir, None);
-        assert_eq!(missing.probed, vec![pinned]);
-    }
-
-    #[test]
-    fn locate_pdfium_checks_exe_then_managed_dir_without_an_override() {
-        let exe = PathBuf::from("exe/dir");
-        let managed = PathBuf::from("managed/dir");
-
-        // Whitespace-only override counts as unset.
-        let hit = locate_pdfium_from(
-            Some("   ".to_string()),
-            Some(exe.clone()),
-            Some(managed.clone()),
-            &|d| d == managed.as_path(),
-        );
+        let hit = locate_pdfium_from(Some(exe.clone()), Some(managed.clone()), &|d| {
+            d == managed.as_path()
+        });
         assert_eq!(hit.dir, Some(managed.clone()));
         assert_eq!(hit.probed, vec![exe.clone(), managed.clone()]);
 
-        let miss = locate_pdfium_from(None, Some(exe.clone()), Some(managed.clone()), &|_| false);
+        // Both hold one: the executable's own directory is first.
+        let both = locate_pdfium_from(Some(exe.clone()), Some(managed.clone()), &|_| true);
+        assert_eq!(both.dir, Some(exe.clone()));
+
+        let miss = locate_pdfium_from(Some(exe.clone()), Some(managed.clone()), &|_| false);
         assert_eq!(miss.dir, None);
         assert_eq!(miss.probed, vec![exe, managed]);
+    }
+
+    #[test]
+    fn the_managed_root_is_the_parent_of_every_build_directory() {
+        let (Some(root), Some(build)) = (pdfium_managed_root(), pdfium_managed_dir("a/b")) else {
+            return;
+        };
+        assert_eq!(build, root.join("a").join("b"));
     }
 
     #[test]
@@ -5725,8 +5723,7 @@ mod tests {
     }
 
     /// The four falsy words turn it back on, case- and
-    /// whitespace-insensitively — the same set `BOOKRACK_REQUIRE_PDFIUM`
-    /// accepts, so an operator does not have to remember two spellings.
+    /// whitespace-insensitively.
     #[test]
     fn no_dotenv_falsy_words_keep_loading() {
         for value in ["0", "false", "no", "off", "FALSE", "  Off  "] {
@@ -5745,6 +5742,40 @@ mod tests {
             assert!(should_load_dotenv(|_| Some(value.to_string())));
         }
         assert!(should_load_dotenv(|_| None));
+    }
+
+    /// A line outside the admitted set is never written to the
+    /// environment: `CI`, a home directory, and a name nobody knows are
+    /// recorded as rejected, and the only installs are the admitted
+    /// names the environment did not already carry, first line winning.
+    #[test]
+    fn a_refused_line_is_never_installed() {
+        let entry = |key: &str, value: &str| (key.to_string(), value.to_string());
+        let before: BTreeSet<String> = ["BOOKRACK_LOG".to_string()].into();
+        let mut installed: Vec<(String, String)> = Vec::new();
+
+        let load = sort_dotenv_entries(
+            PathBuf::from("/sandbox/.env"),
+            vec![
+                entry("CI", "1"),
+                entry("HOME", "/evil"),
+                entry("EXAMPLE_FOREIGN_KNOB", "from-the-file"),
+                entry("BOOKRACK_DATA_DIR", "/first"),
+                entry("BOOKRACK_DATA_DIR", "/second"),
+                entry("BOOKRACK_LOG", "debug"),
+                entry("NO_COLOR", "1"),
+            ],
+            &before,
+            &mut |key, value| installed.push((key.to_string(), value.to_string())),
+        );
+
+        assert_eq!(
+            installed,
+            [entry("BOOKRACK_DATA_DIR", "/first"), entry("NO_COLOR", "1")],
+        );
+        assert_eq!(load.rejected, ["CI", "EXAMPLE_FOREIGN_KNOB", "HOME"]);
+        assert_eq!(load.supplied, ["BOOKRACK_DATA_DIR", "NO_COLOR"]);
+        assert_eq!(load.eclipsed, [entry("BOOKRACK_LOG", "debug")]);
     }
 
     /// A load reports each of its three outcomes outside the

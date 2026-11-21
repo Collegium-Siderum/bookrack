@@ -64,58 +64,36 @@ pub struct RerankerModelLocation {
     pub path: Option<PathBuf>,
     /// Every candidate that was checked, in search order.
     pub probed: Vec<PathBuf>,
-    /// Whether [`crate::RERANKER_MODEL_ENV`] named the one candidate. A
-    /// miss then lies with that path, which no install can repair.
-    pub explicit: bool,
 }
 
 /// Locate the GGUF file for a registry model tag.
 ///
-/// [`crate::RERANKER_MODEL_ENV`], when set, is authoritative: it names
-/// the `.gguf` file itself and only that path is checked, so a typo
-/// surfaces as a miss instead of being papered over by a fallback. The
-/// operator vouches for an explicit path, so no checksum applies to it
-/// — and it wins for every tag, which is the point of an escape hatch.
-/// When unset, the per-user managed directory that `bookrack setup
-/// reranker` populates is checked. There is no
-/// executable-adjacent stop: model weights do not ship in release
-/// archives.
+/// The per-user managed directory that `bookrack setup reranker`
+/// populates is the one stop, and the file name in it comes from the
+/// tag's pin: a tag with no pin has no candidate. There is no
+/// executable-adjacent stop, because model weights do not ship in
+/// release archives, and nothing in the environment names a file.
 pub fn locate_reranker_model(tag: &str) -> RerankerModelLocation {
-    locate_reranker_model_from(
-        std::env::var(crate::RERANKER_MODEL_ENV).ok(),
-        models_managed_dir(),
-        tag,
-        &|path| path.is_file(),
-    )
+    locate_reranker_model_from(models_managed_dir(), tag, &|path| path.is_file())
 }
 
 /// Pure search logic for [`locate_reranker_model`], factored out so
-/// the chain can be tested without mutating process-global environment
-/// variables or touching the filesystem.
+/// the chain can be tested without touching the filesystem.
 // Parallel implementation: managed-lookup-chain.
 fn locate_reranker_model_from(
-    override_path: Option<String>,
     managed_dir: Option<PathBuf>,
     tag: &str,
     is_file: &dyn Fn(&std::path::Path) -> bool,
 ) -> RerankerModelLocation {
-    let override_path = override_path
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let explicit = override_path.is_some();
-    let candidates: Vec<PathBuf> = match override_path {
-        Some(path) => vec![PathBuf::from(path)],
-        None => managed_dir
-            .zip(reranker_model_pin(tag))
-            .map(|(d, pin)| d.join(pin.hf_file))
-            .into_iter()
-            .collect(),
-    };
+    let candidates: Vec<PathBuf> = managed_dir
+        .zip(reranker_model_pin(tag))
+        .map(|(d, pin)| d.join(pin.hf_file))
+        .into_iter()
+        .collect();
     let path = candidates.iter().find(|p| is_file(p)).cloned();
     RerankerModelLocation {
         path,
         probed: candidates,
-        explicit,
     }
 }
 
@@ -156,46 +134,8 @@ mod tests {
     }
 
     #[test]
-    fn locate_only_checks_the_override_when_set() {
-        let found = locate_reranker_model_from(
-            Some("override/model.gguf".into()),
-            Some(PathBuf::from("managed")),
-            "Qwen3-Reranker-0.6B",
-            &|_| true,
-        );
-        assert_eq!(
-            found.path.as_deref(),
-            Some(std::path::Path::new("override/model.gguf"))
-        );
-        assert_eq!(found.probed.len(), 1);
-
-        let missing = locate_reranker_model_from(
-            Some("override/model.gguf".into()),
-            Some(PathBuf::from("managed")),
-            "Qwen3-Reranker-0.6B",
-            &|_| false,
-        );
-        assert!(missing.path.is_none());
-        assert_eq!(missing.probed.len(), 1, "no fallback behind the override");
-        assert!(missing.explicit, "the miss lies with the override");
-    }
-
-    #[test]
-    fn a_blank_override_is_not_explicit() {
-        let found = locate_reranker_model_from(
-            Some("  ".into()),
-            Some(PathBuf::from("managed")),
-            "Qwen3-Reranker-0.6B",
-            &|_| false,
-        );
-        assert!(!found.explicit);
-        assert_eq!(found.probed.len(), 1, "the managed candidate is checked");
-    }
-
-    #[test]
     fn managed_candidate_is_the_pinned_filename() {
         let found = locate_reranker_model_from(
-            None,
             Some(PathBuf::from("managed")),
             "Qwen3-Reranker-0.6B",
             &|_| false,
@@ -204,12 +144,19 @@ mod tests {
             found.probed,
             vec![PathBuf::from("managed").join("qwen3-reranker-0.6b-q8_0.gguf")]
         );
+        assert!(found.path.is_none());
+
+        let present = locate_reranker_model_from(
+            Some(PathBuf::from("managed")),
+            "Qwen3-Reranker-0.6B",
+            &|_| true,
+        );
+        assert_eq!(present.path, present.probed.first().cloned());
     }
 
     #[test]
     fn unknown_tag_has_no_managed_candidate() {
         let found = locate_reranker_model_from(
-            None,
             Some(PathBuf::from("managed")),
             "Qwen3-Reranker-4B",
             &|_| true,

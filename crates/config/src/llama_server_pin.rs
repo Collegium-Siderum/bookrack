@@ -96,50 +96,34 @@ pub struct LlamaServerLocation {
 
 /// Locate the `llama-server` executable to spawn.
 ///
-/// [`crate::LLAMA_SERVER_BIN_ENV`], when set, is authoritative: it
-/// names the executable itself and only that path is checked, so a
-/// typo surfaces as a miss instead of being papered over by a
-/// fallback. The operator vouches for an explicit path, so no checksum
-/// applies to it. When unset, the running executable's own directory
-/// (the release-archive layout) is checked, then the per-user managed
-/// directory that `bookrack setup reranker` populates.
+/// The running executable's own directory (the release-archive layout)
+/// is checked, then the per-user managed directory that `bookrack setup
+/// reranker` populates. Nothing in the environment moves the search:
+/// both stops hold the pinned build.
 pub fn locate_llama_server() -> LlamaServerLocation {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|p| p.to_path_buf()));
-    locate_llama_server_from(
-        std::env::var(crate::LLAMA_SERVER_BIN_ENV).ok(),
-        exe_dir,
-        llama_server_managed_dir(),
-        &|path| path.is_file(),
-    )
+    locate_llama_server_from(exe_dir, llama_server_managed_dir(), &|path| path.is_file())
 }
 
 /// Pure search logic for [`locate_llama_server`], factored out so the
-/// chain can be tested without mutating process-global environment
-/// variables or touching the filesystem.
+/// chain can be tested without touching the filesystem.
 // Parallel implementation: managed-lookup-chain.
 fn locate_llama_server_from(
-    override_path: Option<String>,
     exe_dir: Option<PathBuf>,
     managed_dir: Option<PathBuf>,
     is_file: &dyn Fn(&std::path::Path) -> bool,
 ) -> LlamaServerLocation {
-    let candidates: Vec<PathBuf> = match override_path
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        Some(path) => vec![PathBuf::from(path)],
-        None => [
-            exe_dir.map(|d| d.join("llama-server")),
-            managed_dir
-                .zip(pinned_llama_server())
-                .map(|(d, pin)| d.join(pin.exe_in_archive)),
-        ]
-        .into_iter()
-        .flatten()
-        .collect(),
-    };
+    let candidates: Vec<PathBuf> = [
+        exe_dir.map(|d| d.join("llama-server")),
+        managed_dir
+            .zip(pinned_llama_server())
+            .map(|(d, pin)| d.join(pin.exe_in_archive)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let path = candidates.iter().find(|p| is_file(p)).cloned();
     LlamaServerLocation {
         path,
@@ -179,48 +163,22 @@ mod tests {
     }
 
     #[test]
-    fn locate_only_checks_the_override_when_set() {
+    fn the_exe_directory_is_checked_before_the_managed_one() {
+        let exe_side = PathBuf::from("exe/dir/llama-server");
         let found = locate_llama_server_from(
-            Some("override/llama-server".into()),
             Some(PathBuf::from("exe/dir")),
             Some(PathBuf::from("managed/dir")),
             &|_| true,
         );
-        assert_eq!(
-            found.path.as_deref(),
-            Some(std::path::Path::new("override/llama-server"))
-        );
-        assert_eq!(found.probed.len(), 1);
-
-        let missing = locate_llama_server_from(
-            Some("override/llama-server".into()),
-            Some(PathBuf::from("exe/dir")),
-            Some(PathBuf::from("managed/dir")),
-            &|_| false,
-        );
-        assert!(missing.path.is_none());
-        assert_eq!(missing.probed.len(), 1, "no fallback behind the override");
-    }
-
-    #[test]
-    fn blank_override_falls_through_to_the_chain() {
-        let exe_side = PathBuf::from("exe/dir/llama-server");
-        let found = locate_llama_server_from(
-            Some("  ".into()),
-            Some(PathBuf::from("exe/dir")),
-            Some(PathBuf::from("managed/dir")),
-            &|p| p == exe_side,
-        );
-        assert_eq!(found.path, Some(exe_side));
-        assert!(!found.probed.is_empty());
+        assert_eq!(found.path.as_ref(), Some(&exe_side));
+        assert_eq!(found.probed.first(), Some(&exe_side));
     }
 
     #[test]
     fn managed_candidate_carries_the_archive_layout() {
         // Only meaningful on targets with a pin; elsewhere the chain
         // has no managed candidate at all.
-        let found =
-            locate_llama_server_from(None, None, Some(PathBuf::from("managed")), &|_| false);
+        let found = locate_llama_server_from(None, Some(PathBuf::from("managed")), &|_| false);
         match pinned_llama_server() {
             Some(pin) => {
                 assert_eq!(

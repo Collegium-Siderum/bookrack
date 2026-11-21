@@ -39,6 +39,34 @@ FAKE=$(mktemp -d)
 trap 'rm -rf "$FAKE"' EXIT
 mkdir -p "$FAKE/.config" "$FAKE/.local/share" "$FAKE/.cache"
 
+# The PDF tests find PDFium where the product does: in the managed
+# directory under the home directory, which `bookrack setup pdfium`
+# populates. The scrubbed home starts empty, so the builds installed in
+# the real one are mirrored into it: a directory made for every
+# directory, a link for every file. No directory is ever linked — a
+# test that writes into the managed tree under this script then writes
+# into the scrubbed home, never into the real one. A host with nothing
+# installed mirrors nothing, and the PDF tests skip or, under `CI`,
+# fail.
+case "$(uname -s)" in
+  Darwin)
+    SLOT_SRC="$REAL_HOME/Library/Application Support/bookrack/pdfium"
+    SLOT_DST="$FAKE/Library/Application Support/bookrack/pdfium"
+    ;;
+  *)
+    SLOT_SRC="${XDG_DATA_HOME:-$REAL_HOME/.local/share}/bookrack/pdfium"
+    SLOT_DST="$FAKE/.local/share/bookrack/pdfium"
+    ;;
+esac
+if [ -d "$SLOT_SRC" ]; then
+  (cd "$SLOT_SRC" && find -L . -type d) | while IFS= read -r dir; do
+    mkdir -p "$SLOT_DST/$dir"
+  done
+  (cd "$SLOT_SRC" && find -L . -type f) | while IFS= read -r file; do
+    ln -s "$SLOT_SRC/$file" "$SLOT_DST/$file"
+  done
+fi
+
 # The pass list, and why each entry is on it:
 #
 #   PATH, TMPDIR, CARGO_HOME, RUSTUP_HOME, CARGO_TARGET_DIR
@@ -47,14 +75,11 @@ mkdir -p "$FAKE/.config" "$FAKE/.local/share" "$FAKE/.cache"
 #     so a contributor who keeps build artifacts elsewhere gets one
 #     tree rather than two.
 #
-#   CI, BOOKRACK_PDFIUM_LIB, BOOKRACK_REQUIRE_PDFIUM
+#   CI
 #     `bookrack_extract::pdfium_gate` turns a missing PDFium into a
-#     loud failure only in an environment that declared it mandatory,
-#     and into a visible skip otherwise. Scrubbing these three would
-#     make this gate manufacture the silent skip the project is trying
-#     to eliminate. This is the same pass list
-#     `bookrack_test_support::PASSTHROUGH_ENV` carries, plus `CI`; the
-#     two must move together.
+#     loud failure only where `CI` is set, and into a visible skip
+#     otherwise. Scrubbing it would make this gate manufacture the
+#     silent skip the project is trying to eliminate.
 #
 #   BOOKRACK_NO_DOTENV=1
 #     `env -i` does not reach `.env`. Cargo runs every test binary with
@@ -85,7 +110,5 @@ env -i \
   RUST_BACKTRACE="${RUST_BACKTRACE:-0}" \
   ${CARGO_TARGET_DIR:+CARGO_TARGET_DIR="$CARGO_TARGET_DIR"} \
   ${CI:+CI="$CI"} \
-  ${BOOKRACK_PDFIUM_LIB:+BOOKRACK_PDFIUM_LIB="$BOOKRACK_PDFIUM_LIB"} \
-  ${BOOKRACK_REQUIRE_PDFIUM:+BOOKRACK_REQUIRE_PDFIUM="$BOOKRACK_REQUIRE_PDFIUM"} \
   BOOKRACK_NO_DOTENV=1 \
   cargo nextest run --no-fail-fast "$@"

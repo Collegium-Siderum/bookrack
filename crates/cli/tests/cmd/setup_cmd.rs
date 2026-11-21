@@ -25,7 +25,7 @@ async fn bookrack(sandbox: &Sandbox, args: &[&str]) -> Output {
 
 /// Put a stand-in library where this build's managed PDFium lives in
 /// the sandbox, and return its path.
-fn seed_pdfium(sandbox: &Sandbox) -> PathBuf {
+pub(super) fn seed_pdfium(sandbox: &Sandbox) -> PathBuf {
     let mut dir = sandbox.managed_data_dir().join("bookrack").join("pdfium");
     for segment in bookrack_ops::PDFIUM_RELEASE_TAG.split('/') {
         dir.push(segment);
