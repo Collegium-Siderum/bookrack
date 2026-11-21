@@ -14,9 +14,10 @@ use super::MethodContext;
 pub struct MethodSignature {
     pub name: &'static str,
     pub kind: &'static str,
-    /// `true` iff the runtime routes the method through the persistent
-    /// queue worker. A host that spawns no queue worker short-circuits
-    /// these to `-32002 not_ready`.
+    /// `true` iff a host that spawns no queue worker refuses the method
+    /// with `-32002 not_ready` before it runs. Not every such method
+    /// runs on the worker: some run synchronously on the control plane,
+    /// alongside whatever job the worker is running.
     pub queue_bound: bool,
     /// How an explicit library selection reaches the method:
     /// `"routed"` — it takes one, under [`Self::library_key`];

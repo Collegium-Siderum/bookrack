@@ -534,8 +534,8 @@ unchanged.
   that is not bookrack answers there, or when nothing answers at an
   address the daemon reports serving.
 - `daemon.methods` — the live method table: every name this daemon
-  dispatches, with its read/write class, whether the queue worker
-  carries it, and how a library selection reaches it. Authoritative at
+  dispatches, with its read/write class, whether a daemon without a
+  queue worker refuses it, and how a library selection reaches it. Authoritative at
   runtime where this document is authoritative at review time.
 
   The selection field is one of three values, and `library_key` names

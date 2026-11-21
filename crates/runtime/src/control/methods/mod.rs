@@ -246,9 +246,12 @@ use verify::VerifyParams;
 ///
 /// 1. `kind` — `read`, `write`, or `stream`; reflected in
 ///    `daemon.methods` so clients can pick the right call surface.
-/// 2. `queue` — `queue` if the runtime routes the call through the
-///    persistent queue worker (and so a host that spawns no queue
-///    worker must short-circuit it); otherwise `no_queue`.
+/// 2. `queue` — a host that spawns no queue worker refuses the method
+///    with `-32002` before it runs. Some of these methods enqueue work
+///    for the worker (`ingest.submit`, `glean.submit`) or act on its
+///    jobs (`ingest.cancel`, `queue.retry`); the others run
+///    synchronously on the control plane, alongside whatever job the
+///    worker is running. `no_queue` methods are served on every host.
 /// 3. `shape` — handler signature: `sync` for `fn(_, _) -> Result`,
 ///    `async` for `async fn(_, _) -> Result`, `sidebar` for methods
 ///    intercepted before `dispatch_normal` (the handler is left to a
@@ -577,8 +580,8 @@ fn unknown_method_message(method: &str, mcp_tools: &[meta::McpToolInfo]) -> Stri
 // setting: internal -- a JSON-RPC application code callers match on, not a value to tune
 pub const QUEUE_WORKER_DISABLED: i32 = -32002;
 
-/// Returns `true` when the method routes work through the persistent
-/// queue worker. Backed by `REGISTRY.queue_bound`, which the
+/// Returns `true` when a host that spawns no queue worker refuses the
+/// method before it runs. Backed by `REGISTRY.queue_bound`, which the
 /// `methods!` macro emits in lockstep with the dispatch arm — the two
 /// cannot drift.
 fn is_queue_bound_method(method: &str) -> bool {

@@ -902,7 +902,7 @@ async fn count_chunks(lancedb_dir: &Path) -> Option<usize> {
 
 /// Print an apply plan, one section per pipeline. `queue_busy` carries
 /// the daemon's pending+running job count when the caller is connected;
-/// non-zero adds the queueing note.
+/// non-zero adds the queue-busy note.
 pub fn render_apply_plan(plan: &ApplyPlan, queue_busy: Option<u32>) {
     println!(
         "library: {} ({})",
@@ -937,14 +937,21 @@ pub fn render_apply_plan(plan: &ApplyPlan, queue_busy: Option<u32>) {
             }
         }
     }
-    if let Some(busy) = queue_busy
-        && busy > 0
-    {
-        println!(
-            "note: the daemon queue has {busy} job(s) pending or running; apply actions \
-             queue behind them (`bookrack queue list`)"
-        );
+    if let Some(note) = queue_busy.and_then(queue_busy_note) {
+        println!("{note}");
     }
+}
+
+/// The note an apply plan prints when the daemon queue holds `busy`
+/// pending or running jobs, or `None` when it holds none.
+fn queue_busy_note(busy: u32) -> Option<String> {
+    (busy > 0).then(|| {
+        format!(
+            "note: the daemon queue has {busy} job(s) pending or running; apply runs its \
+             actions now, alongside them, and both write the same stores. Wait for the \
+             queue to drain first (`bookrack queue wait`)."
+        )
+    })
 }
 
 /// One plan line for an action: the CLI verb it maps to plus what it
@@ -990,6 +997,19 @@ fn describe_action(
 mod tests {
     use super::*;
     use bookrack_index_profile::{PROFILE_QWEN3_4B_QUALITY, PROFILE_QWEN3_06B_DEFAULT};
+
+    #[test]
+    fn an_idle_queue_adds_no_note() {
+        assert_eq!(queue_busy_note(0), None);
+    }
+
+    #[test]
+    fn a_busy_queue_note_says_apply_runs_alongside_the_jobs() {
+        let note = queue_busy_note(3).expect("a busy queue adds a note");
+        assert!(note.contains("3 job(s)"), "{note}");
+        assert!(note.contains("`bookrack queue wait`"), "{note}");
+        assert!(!note.contains("queue behind"), "{note}");
+    }
 
     #[test]
     fn pipeline_filter_selects_what_it_names() {
