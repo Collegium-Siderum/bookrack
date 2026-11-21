@@ -20,7 +20,7 @@ use crate::{ItemKind, Problem};
 /// Schema version embedded in the persisted document. Bumped whenever
 /// any field shape, enum variant, or invariant changes.
 // setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
-pub const QUEUE_SCHEMA_VERSION: u32 = 8;
+pub const QUEUE_SCHEMA_VERSION: u32 = 9;
 
 /// What a reader does with a persisted document, given the
 /// `schema_version` it carries.
@@ -136,10 +136,6 @@ pub struct IngestJob {
     /// Force a fresh ingest even when the source's noop-if-up-to-date
     /// check would otherwise short-circuit.
     pub force: bool,
-    /// Park the book at STRUCTURE when the audit verdict is
-    /// `needs_work`, skipping CHUNK and EMBED until a curator resumes
-    /// it.
-    pub hold_for_metadata: bool,
     /// Book-side audit profile override for this job. When `None`, the
     /// worker uses the daemon's default profile baked into the queue
     /// params template at startup. When `Some(name)`, the worker
@@ -153,13 +149,12 @@ pub struct IngestJob {
 }
 
 impl IngestJob {
-    /// An ingest of the source file at `path`: not forced, not held,
-    /// under the daemon's default audit profile.
+    /// An ingest of the source file at `path`: not forced, under the
+    /// daemon's default audit profile.
     pub fn file(path: impl Into<PathBuf>) -> Self {
         IngestJob {
             path: path.into(),
             force: false,
-            hold_for_metadata: false,
             audit_profile: None,
             input: JobInput::File,
         }
@@ -259,6 +254,24 @@ pub fn retired_hold_problem() -> Problem {
         )
 }
 
+/// `job` as it loads when an earlier document records it queued with the
+/// retired metadata hold. Only a job the worker would run on its own —
+/// pending, or running when the daemon stopped — becomes the
+/// retired-hold failure, finished at the latest time the row records;
+/// every other job keeps its record, since running it again is an
+/// operator's explicit retry, which runs it without the hold.
+fn retire_hold(mut job: QueueJob, hold: bool) -> QueueJob {
+    if !hold || !matches!(job.state, JobState::Pending | JobState::Running) {
+        return job;
+    }
+    job.state = JobState::Failed;
+    job.finished_at = job.finished_at.or(job.started_at).or(Some(job.queued_at));
+    job.error = Some(RETIRED_HOLD.to_string());
+    job.problem = Some(retired_hold_problem());
+    job.merged_into = None;
+    job
+}
+
 /// The summary and flattened text recorded on a job an earlier binary
 /// queued for the OCR intake path.
 const OCR_PATH_REMOVED: &str = "cannot run a job queued for the removed OCR intake path";
@@ -301,13 +314,16 @@ struct FlatQueueJob {
 }
 
 impl FlatQueueJob {
-    /// The same job as a current row. A plain ingest keeps every value.
-    /// An OCR-intake job loses its sidecar: one that finished or was
-    /// cancelled keeps the rest of its record, and one that could still
-    /// run — pending, running, failed, or parked for OCR — becomes a
-    /// failure naming the removed path, finished at the latest time the
-    /// row records.
+    /// The same job as a current row. A plain ingest keeps every value
+    /// but the retired hold, which [`retire_hold`] judges. An OCR-intake
+    /// job loses its sidecar: one that finished or was cancelled keeps
+    /// the rest of its record, and one that could still run — pending,
+    /// running, failed, or parked for OCR — becomes a failure naming the
+    /// removed path, finished at the latest time the row records. That
+    /// failure takes precedence over the hold's, since the job's whole
+    /// path is gone.
     fn into_current(self) -> QueueJob {
+        let hold = self.hold_for_metadata;
         let mut job = QueueJob {
             id: self.id,
             library: self.library,
@@ -316,7 +332,6 @@ impl FlatQueueJob {
             op: JobOp::Ingest(IngestJob {
                 path: self.path,
                 force: self.force,
-                hold_for_metadata: self.hold_for_metadata,
                 audit_profile: self.audit_profile,
                 input: JobInput::File,
             }),
@@ -329,7 +344,7 @@ impl FlatQueueJob {
             merged_into: self.merged_into,
         };
         let Some(ocr) = self.intake_ocr else {
-            return job;
+            return retire_hold(job, hold);
         };
         if matches!(
             job.state,
@@ -355,6 +370,81 @@ impl FlatQueueJob {
         job.merged_into = None;
         job
     }
+}
+
+/// A queue row as a version 8 document holds it: the current row's
+/// shape, with the metadata hold inside `op`.
+#[derive(Deserialize)]
+struct V8QueueJob {
+    id: String,
+    library: String,
+    kind: ItemKind,
+    priority: Priority,
+    op: V8JobOp,
+    state: JobState,
+    queued_at: DateTime<Utc>,
+    started_at: Option<DateTime<Utc>>,
+    finished_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    problem: Option<Problem>,
+    #[serde(default)]
+    merged_into: Option<i64>,
+}
+
+/// [`JobOp`] as a version 8 document holds it.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum V8JobOp {
+    Ingest(V8IngestJob),
+}
+
+/// [`IngestJob`] as a version 8 document holds it.
+#[derive(Deserialize)]
+struct V8IngestJob {
+    path: PathBuf,
+    force: bool,
+    #[serde(default)]
+    hold_for_metadata: bool,
+    audit_profile: Option<String>,
+    input: JobInput,
+}
+
+impl V8QueueJob {
+    /// The same job as a current row: every value but the retired hold,
+    /// which [`retire_hold`] judges.
+    fn into_current(self) -> QueueJob {
+        let V8JobOp::Ingest(ingest) = self.op;
+        let job = QueueJob {
+            id: self.id,
+            library: self.library,
+            kind: self.kind,
+            priority: self.priority,
+            op: JobOp::Ingest(IngestJob {
+                path: ingest.path,
+                force: ingest.force,
+                audit_profile: ingest.audit_profile,
+                input: ingest.input,
+            }),
+            state: self.state,
+            queued_at: self.queued_at,
+            started_at: self.started_at,
+            finished_at: self.finished_at,
+            error: self.error,
+            problem: self.problem,
+            merged_into: self.merged_into,
+        };
+        retire_hold(job, ingest.hold_for_metadata)
+    }
+}
+
+/// A whole version 8 document.
+#[derive(Deserialize)]
+struct V8QueueState {
+    schema_version: u32,
+    paused: bool,
+    jobs: Vec<V8QueueJob>,
 }
 
 /// A whole document below schema version 8.
@@ -393,10 +483,12 @@ pub enum QueueReadError<E> {
 /// Read a persisted document that records schema version `found`,
 /// in the shape that version wrote.
 ///
-/// A document above [`QUEUE_SCHEMA_VERSION`] is refused. One below
-/// version 8 holds flat rows, each converted to a current row. The
-/// returned state keeps `found` as its `schema_version`: reading does
-/// not relabel a document, the next write does.
+/// A document above [`QUEUE_SCHEMA_VERSION`] is refused. A version 8
+/// one holds the current rows with the metadata hold inside `op`, and
+/// one below version 8 holds flat rows; each row of either is converted
+/// to a current row. The returned state keeps `found` as its
+/// `schema_version`: reading does not relabel a document, the next
+/// write does.
 pub fn read_document<'de, D>(
     found: u32,
     deserializer: D,
@@ -407,8 +499,16 @@ where
     if queue_open_decision(found) == QueueOpenDecision::Refuse {
         return Err(QueueReadError::TooNew);
     }
-    if found >= FIRST_OP_SCHEMA_VERSION {
+    if found >= HOLD_RETIRED_SCHEMA_VERSION {
         return QueueState::deserialize(deserializer).map_err(QueueReadError::Malformed);
+    }
+    if found >= FIRST_OP_SCHEMA_VERSION {
+        let v8 = V8QueueState::deserialize(deserializer).map_err(QueueReadError::Malformed)?;
+        return Ok(QueueState {
+            schema_version: v8.schema_version,
+            paused: v8.paused,
+            jobs: v8.jobs.into_iter().map(V8QueueJob::into_current).collect(),
+        });
     }
     let flat = FlatQueueState::deserialize(deserializer).map_err(QueueReadError::Malformed)?;
     Ok(QueueState {
@@ -426,6 +526,11 @@ where
 /// below it holds flat rows.
 // setting: internal -- a fixed point in the document format's history, not a tunable
 const FIRST_OP_SCHEMA_VERSION: u32 = 8;
+
+/// The first schema version whose `op` carries no metadata hold; every
+/// document below it may hold a job queued with one.
+// setting: internal -- a fixed point in the document format's history, not a tunable
+const HOLD_RETIRED_SCHEMA_VERSION: u32 = 9;
 
 /// The full document persisted to disk.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -546,6 +651,46 @@ mod tests {
         row
     }
 
+    /// A row in the shape version 8 wrote: `op` carries the metadata
+    /// hold beside the fields the current shape keeps.
+    fn v8_row(hold: bool, state: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": "0",
+            "library": "default",
+            "kind": "book",
+            "priority": "normal",
+            "op": {
+                "type": "ingest",
+                "path": "/srv/books/example.epub",
+                "force": false,
+                "hold_for_metadata": hold,
+                "audit_profile": null,
+                "input": { "type": "file" }
+            },
+            "state": state,
+            "queued_at": "2026-01-02T03:04:05Z",
+            "started_at": null,
+            "finished_at": null,
+            "error": null,
+            "problem": null,
+            "merged_into": null
+        })
+    }
+
+    /// `row` with `extra`'s keys set over it.
+    fn with(mut row: serde_json::Value, extra: serde_json::Value) -> serde_json::Value {
+        for (key, value) in extra.as_object().expect("an object of overrides") {
+            row[key] = value.clone();
+        }
+        row
+    }
+
+    /// Whether `job` serializes with the retired hold key in its `op`.
+    fn writes_the_hold(job: &QueueJob) -> bool {
+        serde_json::to_value(&job.op).expect("serialize")["hold_for_metadata"]
+            != serde_json::Value::Null
+    }
+
     fn job_with(id: &str, state: JobState) -> QueueJob {
         QueueJob {
             id: id.to_string(),
@@ -662,7 +807,6 @@ mod tests {
                     op: JobOp::Ingest(IngestJob {
                         path: "/srv/books/example.epub".into(),
                         force: true,
-                        hold_for_metadata: true,
                         audit_profile: Some("strict".to_string()),
                         input: JobInput::File,
                     }),
@@ -751,6 +895,113 @@ mod tests {
         }
     }
 
+    /// A held job the worker would run on its own — pending, or running
+    /// when the daemon stopped — loads as the retired-hold failure,
+    /// finished at the latest time the row records.
+    #[test]
+    fn a_held_job_that_could_still_run_loads_as_the_retired_hold_failure() {
+        let cases = [
+            (
+                serde_json::json!({ "state": "pending" }),
+                "2026-01-02T03:04:05Z",
+            ),
+            (
+                serde_json::json!({ "state": "running", "started_at": "2026-01-02T03:04:06Z" }),
+                "2026-01-02T03:04:06Z",
+            ),
+        ];
+        for (extra, finished) in cases {
+            for (version, row) in [
+                (8, with(v8_row(true, "pending"), extra.clone())),
+                (
+                    7,
+                    flat_row_with(with(
+                        serde_json::json!({ "hold_for_metadata": true }),
+                        extra.clone(),
+                    )),
+                ),
+            ] {
+                let job = read_row(version, row);
+                assert_eq!(job.state, JobState::Failed, "v{version} {extra}");
+                assert_eq!(job.finished_at, Some(at(finished)), "v{version} {extra}");
+                assert_eq!(
+                    job.error.as_deref(),
+                    Some(RETIRED_HOLD),
+                    "v{version} {extra}"
+                );
+                assert_eq!(
+                    job.problem,
+                    Some(retired_hold_problem()),
+                    "v{version} {extra}"
+                );
+                assert_eq!(job.merged_into, None, "v{version} {extra}");
+                assert!(!writes_the_hold(&job), "v{version} {extra}");
+            }
+        }
+    }
+
+    /// A held job that ended, or that only an operator's retry would run
+    /// again, keeps its record and loses only the hold.
+    #[test]
+    fn a_held_job_that_ended_keeps_its_record() {
+        let cases = [
+            serde_json::json!({ "state": "done", "finished_at": "2026-01-02T03:04:07Z" }),
+            serde_json::json!({ "state": "needs_ocr", "merged_into": 9,
+                                "finished_at": "2026-01-02T03:04:07Z" }),
+            serde_json::json!({ "state": "failed", "finished_at": "2026-01-02T03:04:07Z",
+                                "error": "ingest: embed backend unreachable",
+                                "problem": { "summary": "could not reach the embed backend",
+                                             "hint": "Run `bookrack queue retry`.",
+                                             "retryable": true } }),
+            serde_json::json!({ "state": "cancelled", "finished_at": "2026-01-02T03:04:07Z" }),
+        ];
+        for extra in cases {
+            let held = read_row(8, with(v8_row(true, "pending"), extra.clone()));
+            let plain = read_row(8, with(v8_row(false, "pending"), extra.clone()));
+            assert_eq!(held, plain, "the hold is not the only difference: {extra}");
+            assert!(!writes_the_hold(&held), "{extra}");
+            assert_eq!(Some(held.state.as_wire_str()), extra["state"].as_str());
+            assert_eq!(held.merged_into, extra["merged_into"].as_i64(), "{extra}");
+            assert_eq!(
+                held.problem.map(|p| p.summary),
+                extra["problem"]["summary"].as_str().map(str::to_string),
+                "{extra}"
+            );
+        }
+    }
+
+    /// A version 8 row without the hold loads as the same job, written
+    /// back without the key.
+    #[test]
+    fn a_version_8_row_without_the_hold_loads_as_it_was() {
+        let row = v8_row(false, "pending");
+        let job = read_row(8, row.clone());
+        assert_eq!(job.state, JobState::Pending);
+        assert!(job.error.is_none() && job.problem.is_none());
+        let mut expected = row;
+        expected["op"]
+            .as_object_mut()
+            .expect("op is an object")
+            .remove("hold_for_metadata");
+        assert_eq!(serde_json::to_value(&job).expect("serialize"), expected);
+    }
+
+    /// A flat OCR-intake job that also carries the hold loads as the OCR
+    /// failure: its whole path is gone, not only the gate.
+    #[test]
+    fn a_held_ocr_job_loads_as_the_ocr_failure() {
+        let job = read_row(
+            7,
+            flat_ocr_row(serde_json::json!({ "state": "pending", "hold_for_metadata": true })),
+        );
+        assert_eq!(job.state, JobState::Failed);
+        assert_eq!(
+            job.error.as_deref(),
+            Some("cannot run a job queued for the removed OCR intake path")
+        );
+        assert!(!writes_the_hold(&job));
+    }
+
     /// An OCR-intake job that finished or was cancelled keeps its
     /// record and loses only the sidecar.
     #[test]
@@ -778,9 +1029,13 @@ mod tests {
     /// its shape is looked at.
     #[test]
     fn reading_keeps_the_recorded_version_and_refuses_a_later_one() {
-        for version in [1, 7] {
+        for (version, row) in [
+            (1, flat_row()),
+            (7, flat_row()),
+            (8, v8_row(false, "pending")),
+        ] {
             let document = serde_json::json!({
-                "schema_version": version, "paused": true, "jobs": [flat_row()]
+                "schema_version": version, "paused": true, "jobs": [row]
             });
             let state = read(&document).expect("an earlier document loads");
             assert_eq!(state.schema_version, version);
@@ -823,6 +1078,13 @@ mod tests {
             read(&current_as_flat),
             Err(QueueReadError::Malformed(_))
         ));
+        let flat_as_v8 = serde_json::json!({
+            "schema_version": 8, "paused": false, "jobs": [flat_row()]
+        });
+        assert!(matches!(
+            read(&flat_as_v8),
+            Err(QueueReadError::Malformed(_))
+        ));
     }
 
     #[test]
@@ -854,7 +1116,6 @@ mod tests {
             op: JobOp::Ingest(IngestJob {
                 path: "/tmp/example.md".into(),
                 force: true,
-                hold_for_metadata: true,
                 audit_profile: Some("strict".to_string()),
                 input: JobInput::File,
             }),
@@ -868,7 +1129,6 @@ mod tests {
         assert_eq!(json["op"]["type"], "ingest");
         assert_eq!(json["op"]["path"], "/tmp/example.md");
         assert_eq!(json["op"]["force"], true);
-        assert_eq!(json["op"]["hold_for_metadata"], true);
         assert_eq!(json["op"]["audit_profile"], "strict");
         assert_eq!(json["op"]["input"]["type"], "file");
         assert_eq!(read_row(QUEUE_SCHEMA_VERSION, json), job);
@@ -938,8 +1198,8 @@ mod tests {
         }
 
         assert_eq!(
-            QUEUE_SCHEMA_VERSION, 8,
-            "the key sets below describe version 8 of the document"
+            QUEUE_SCHEMA_VERSION, 9,
+            "the key sets below describe version 9 of the document"
         );
 
         let job = job_with("0", JobState::Pending);
@@ -971,14 +1231,7 @@ mod tests {
         assert_eq!(state["jobs"][0]["op"]["type"], "ingest");
         assert_eq!(
             keys_of(&state["jobs"][0]["op"]),
-            [
-                "audit_profile",
-                "force",
-                "hold_for_metadata",
-                "input",
-                "path",
-                "type",
-            ]
+            ["audit_profile", "force", "input", "path", "type",]
         );
         assert_eq!(state["jobs"][0]["op"]["input"]["type"], "file");
         assert_eq!(keys_of(&state["jobs"][0]["op"]["input"]), ["type"]);
@@ -991,7 +1244,7 @@ mod tests {
         assert_eq!(keys_of(&rule), ["allow_partial", "source_pdf", "type"]);
     }
 
-    /// A version 8 row written while the row still carried an
+    /// A row in the current shape written while the row still carried an
     /// `intake_ocr` key loads as the same job without it.
     #[test]
     fn a_current_row_with_a_leftover_intake_ocr_key_still_loads() {

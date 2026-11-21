@@ -145,17 +145,19 @@ release workflow extracts the matching section verbatim from this file.
   `bookrack libraries remove <name> --purge`, since nothing repairs
   the catalog in place. [UPGRADE.md](docs/UPGRADE.md) gives the two
   ways forward.
-- **The queue document moves to schema 8, and a job row holds its
-  operation under `op`.** `path`, `force`, `hold_for_metadata` and
-  `audit_profile` moved from the row into `op`, beside an `input` that
-  says whether the path is a source file or a rule file; `queue.list`
-  and `bookrack queue list --json` report the row in that shape. An
-  earlier document is converted as it loads. A job queued by
-  `bookrack intake ocr` that had not finished loads as `failed`, with a
-  hint naming `bookrack ingest --rule`. An earlier release refuses a
-  schema 8 document.
-- **The diagnose bundle manifest moves to schema 6**, because
-  `queue/queue.json` inside it carries the schema 8 rows.
+- **The queue document moves to schema 9, and a job row holds its
+  operation under `op`.** `path`, `force` and `audit_profile` moved
+  from the row into `op`, beside an `input` that says whether the path
+  is a source file or a rule file; `hold_for_metadata` is not part of
+  it. `queue.list` and `bookrack queue list --json` report the row in
+  that shape. An earlier document is converted as it loads. A job
+  queued by `bookrack intake ocr` that had not finished loads as
+  `failed`, with a hint naming `bookrack ingest --rule`, and so does a
+  pending or running job queued with the metadata hold, with a hint
+  naming `bookrack queue retry`. An earlier release refuses a schema 9
+  document.
+- **The diagnose bundle manifest moves to schema 7**, because
+  `queue/queue.json` inside it carries the schema 9 rows.
 - **A dependency's source location is shown as the dependency printed
   it.** A LanceDB error names the source file it was raised in by its
   absolute path on the machine that built the binary. Since 0.13.0
@@ -324,9 +326,8 @@ release workflow extracts the matching section verbatim from this file.
 - **`ingest.submit` refuses `hold_for_metadata: true`.** The parameter
   is retired in both submission forms: `true` is `-32602` before a job
   is queued, and `false`, which every earlier client sends, is accepted
-  and ignored. A job queued with the hold before the upgrade fails when
-  the worker reaches it, and `bookrack queue retry` runs it without the
-  hold.
+  and ignored. A job queued with the hold before the upgrade loads as
+  `failed`, and `bookrack queue retry` runs it without the hold.
 
 ### Deprecated
 

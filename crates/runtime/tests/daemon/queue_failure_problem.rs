@@ -191,9 +191,9 @@ async fn a_failed_job_lists_its_problem_and_the_tick_carries_the_same() -> Resul
     .await
 }
 
-/// A pending job queued with the retired metadata hold fails when the
-/// worker picks it up, naming the hold and what replaces it; a retry
-/// runs it as a plain ingest.
+/// A pending job a version 8 document records with the retired
+/// metadata hold loads as a failure naming the hold and what replaces
+/// it; a retry runs it as a plain ingest.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_job_queued_with_the_retired_hold_fails_and_a_retry_runs_it() -> Result<()> {
     let sandbox = process_env(ProcessEnv::daemon());
@@ -209,7 +209,7 @@ async fn a_job_queued_with_the_retired_hold_fails_and_a_retry_runs_it() -> Resul
     )?;
     let id = "01900000-0000-7000-8000-0000000000aa";
     let document = json!({
-        "schema_version": bookrack_runtime::queue::QUEUE_SCHEMA_VERSION,
+        "schema_version": 8,
         "paused": false,
         "jobs": [{
             "id": id,

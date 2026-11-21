@@ -73,7 +73,6 @@ fn rule_row(id: &str, kind: &str, rule: &std::path::Path) -> Value {
             "type": "ingest",
             "path": rule,
             "force": false,
-            "hold_for_metadata": false,
             "audit_profile": null,
             "input": { "type": "rule", "source_pdf": null, "allow_partial": false },
         },

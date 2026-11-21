@@ -943,23 +943,10 @@ impl DaemonRuntime {
                             let queue::JobOp::Ingest(queue::IngestJob {
                                 path,
                                 force,
-                                hold_for_metadata,
                                 audit_profile,
                                 input,
                             }) = job.op.clone();
                             runtime.block_on(async move {
-                                // A job queued with the retired
-                                // metadata hold fails before any
-                                // pipeline runs, whatever its side or
-                                // input, rather than embedding a book
-                                // its submitter asked to hold back.
-                                // `queue retry` clears the hold.
-                                if hold_for_metadata {
-                                    return Err(queue::JobError::Book(queue::JobFailure {
-                                        message: bookrack_core::queue::RETIRED_HOLD.to_string(),
-                                        problem: Some(bookrack_core::queue::retired_hold_problem()),
-                                    }));
-                                }
                                 if library.is_empty() {
                                     return Err(queue::JobError::Book(queue::JobFailure::text(
                                         "this job names no library, so it cannot be routed; \

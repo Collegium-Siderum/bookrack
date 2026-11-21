@@ -355,12 +355,8 @@ pub fn fail_jobs_against(state: &mut QueueState, library: &str, failure: &JobFai
 /// Return a terminal row to `Pending` as a fresh submission: the state
 /// flips and the five fields a run writes — `started_at`,
 /// `finished_at`, `error`, `problem`, `merged_into` — are cleared. The id,
-/// position, `queued_at`, and every submit-time flag stay, except the
-/// retired metadata hold, which is cleared so the rerun is a plain
-/// ingest.
+/// position, `queued_at`, and every submit-time flag stay.
 fn reset_for_retry(job: &mut QueueJob) {
-    let JobOp::Ingest(ingest) = &mut job.op;
-    ingest.hold_for_metadata = false;
     job.state = JobState::Pending;
     job.started_at = None;
     job.finished_at = None;
@@ -617,7 +613,6 @@ pub fn enqueue_files(
             op: JobOp::Ingest(IngestJob {
                 path: path.clone(),
                 force,
-                hold_for_metadata: false,
                 audit_profile: book_audit_profile.clone(),
                 input: JobInput::File,
             }),
@@ -660,7 +655,6 @@ pub fn enqueue_rule(
         op: JobOp::Ingest(IngestJob {
             path: rule,
             force,
-            hold_for_metadata: false,
             audit_profile: book_audit_profile,
             input: JobInput::Rule {
                 source_pdf,
@@ -1412,7 +1406,7 @@ mod tests {
     fn trailing_bytes_after_the_document_are_malformed() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("queue.json");
-        for version in [7, QUEUE_SCHEMA_VERSION] {
+        for version in [7, 8, QUEUE_SCHEMA_VERSION] {
             std::fs::write(
                 &path,
                 format!(
@@ -2122,18 +2116,6 @@ mod tests {
             apply_outcome(&mut state, "xx", outcome);
             assert!(state.jobs[0].problem.is_none(), "{label} keeps the problem");
         }
-    }
-
-    /// A retry runs a job queued with the retired hold as a plain
-    /// ingest.
-    #[test]
-    fn reset_for_retry_clears_the_retired_hold() {
-        let mut row = job("xx", Priority::Normal, JobState::Failed);
-        let JobOp::Ingest(ingest) = &mut row.op;
-        ingest.hold_for_metadata = true;
-        reset_for_retry(&mut row);
-        let JobOp::Ingest(ingest) = &row.op;
-        assert!(!ingest.hold_for_metadata, "the retry kept the hold");
     }
 
     #[test]

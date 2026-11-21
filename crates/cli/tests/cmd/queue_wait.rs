@@ -50,7 +50,6 @@ fn row(id: &str, state: &str, error: Option<&str>) -> Value {
             "type": "ingest",
             "path": format!("/nonexistent/{id}.epub"),
             "force": false,
-            "hold_for_metadata": false,
             "audit_profile": null,
             "input": { "type": "file" },
         },

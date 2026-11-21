@@ -588,7 +588,6 @@ pub(super) mod testing {
                 "type": "ingest",
                 "path": format!("/books/{id}.epub"),
                 "force": false,
-                "hold_for_metadata": false,
                 "audit_profile": null,
                 "input": { "type": "file" },
             },

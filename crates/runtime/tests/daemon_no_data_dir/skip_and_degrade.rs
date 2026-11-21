@@ -192,7 +192,6 @@ fn unnamed_row(id: &str, library: &str, state: &str) -> Value {
             "type": "ingest",
             "path": format!("/disk/nowhere/{id}.txt"),
             "force": false,
-            "hold_for_metadata": false,
             "audit_profile": null,
             "input": { "type": "file" },
         },

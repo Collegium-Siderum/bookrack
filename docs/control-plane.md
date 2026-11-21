@@ -568,10 +568,10 @@ unchanged.
   `params.limit` optionally caps the jobs slice. Each `jobs` entry is
   the persisted row: `{ id, library, kind, priority, op,
   state, queued_at, started_at, finished_at, error, problem,
-  merged_into }`. The persistent queue schema is `v8`.
+  merged_into }`. The persistent queue schema is `v9`.
   `op` says what the job does and holds everything only that operation
-  reads — `{ type: "ingest", path, force, hold_for_metadata,
-  audit_profile, input }` for an ingest — so a client reads the source
+  reads — `{ type: "ingest", path, force, audit_profile, input }` for
+  an ingest — so a client reads the source
   path at `op.path`. `input` says what that path is: `{ type: "file" }`
   for a source the pipeline extracts directly, or `{ type: "rule",
   source_pdf, allow_partial }` for a rule file describing how plain-text

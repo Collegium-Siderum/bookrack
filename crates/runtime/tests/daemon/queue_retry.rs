@@ -54,7 +54,6 @@ fn row(id: &str, state: &str, error: Option<&str>, merged_into: Option<i64>) -> 
             "type": "ingest",
             "path": format!("/nonexistent/{id}.epub"),
             "force": false,
-            "hold_for_metadata": false,
             "audit_profile": null,
             "input": { "type": "file" },
         },

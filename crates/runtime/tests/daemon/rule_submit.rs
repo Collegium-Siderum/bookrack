@@ -216,7 +216,7 @@ async fn a_rule_submission_is_checked_then_queued_as_one_rule_job() -> Result<()
         assert_eq!(job["priority"], "high", "{job}");
         assert_eq!(job["op"]["type"], "ingest", "{job}");
         assert_eq!(job["op"]["path"], json!(rule), "{job}");
-        assert_eq!(job["op"]["hold_for_metadata"], false, "{job}");
+        assert!(job["op"].get("hold_for_metadata").is_none(), "{job}");
         assert_eq!(
             job["op"]["input"],
             json!({ "type": "rule", "source_pdf": null, "allow_partial": false }),

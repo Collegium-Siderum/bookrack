@@ -416,7 +416,7 @@ fn shared_logs_fold_every_mounted_root_and_the_state_dir() {
 
     let manifest: serde_json::Value =
         serde_json::from_slice(&read_archive_file(&report.out_path, "manifest.json")).unwrap();
-    assert_eq!(manifest["schema_version"], 6, "{manifest}");
+    assert_eq!(manifest["schema_version"], 7, "{manifest}");
     assert_eq!(manifest["library"], "beta", "{manifest}");
     let env = String::from_utf8(read_archive_file(&report.out_path, "env.txt")).unwrap();
     assert!(
@@ -981,6 +981,56 @@ fn collect_snapshots_the_queue_document_and_reports_a_refused_one() {
             bookrack_diagnose::DATA_DIR_PLACEHOLDER
         )) && !detail.contains(&fx.cfg.data_dir().display().to_string()),
         "the data root in the recorded failure is folded as well: {detail}"
+    );
+
+    // A version 8 document is read in its own shape: a pending job
+    // queued with the retired metadata hold reads as the failure the
+    // daemon records, and the row is written without the hold.
+    let held = serde_json::json!({
+        "schema_version": 8,
+        "paused": false,
+        "jobs": [{
+            "id": "0190f9b0-0000-7000-8000-000000000004",
+            "library": "fixture-library",
+            "kind": "book",
+            "priority": "normal",
+            "op": {
+                "type": "ingest",
+                "path": inbox.join("held.epub"),
+                "force": false,
+                "hold_for_metadata": true,
+                "audit_profile": null,
+                "input": { "type": "file" }
+            },
+            "state": "pending",
+            "queued_at": "2026-01-02T03:04:05Z",
+            "started_at": null,
+            "finished_at": null,
+            "error": null,
+            "problem": null,
+            "merged_into": null
+        }]
+    });
+    std::fs::write(&queue_path, held.to_string()).unwrap();
+    let report = collect(&fx.cfg, &opts, &Scope::default()).expect("collect");
+    let bytes = read_archive_file(&report.out_path, "queue/queue.json");
+    let snapshot: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(snapshot["schema_version"], 8, "{snapshot}");
+    let job = &snapshot["jobs"][0];
+    assert_eq!(job["state"], "failed", "{snapshot}");
+    assert!(job["op"].get("hold_for_metadata").is_none(), "{snapshot}");
+    assert_eq!(
+        job["problem"]["summary"].as_str(),
+        Some(bookrack_core::queue::RETIRED_HOLD),
+        "{snapshot}"
+    );
+    let path = job["op"]["path"].as_str().expect("a path under op");
+    assert!(
+        path.starts_with(folded(
+            fx.cfg.data_dir(),
+            bookrack_diagnose::DATA_DIR_PLACEHOLDER
+        )) && !path.contains("held"),
+        "{path}"
     );
 
     // A document a newer binary wrote is left alone by the daemon and

@@ -135,11 +135,17 @@ it.
 Some version dimensions move without invalidating anything on disk, so
 they carry no runbook step:
 
-- **Queue document schema** (`QUEUE_SCHEMA_VERSION`, now `8`) — the
+- **Queue document schema** (`QUEUE_SCHEMA_VERSION`, now `9`) — the
   persistent ingest queue is versioned on its own track. An older
   document loads in a newer binary, and the first write (with a queue
   worker, the worker's start-up save) rewrites it at the newer version.
-  Version 8 splits a job row into what every job has — `id`, `library`,
+  Version 9 drops `hold_for_metadata` from `op`. A version 8 or earlier
+  document loads with one change for the hold: a job queued with it
+  that the worker would run on its own — pending, or running when the
+  daemon stopped — loads as `failed`, naming the retired hold, and
+  `bookrack queue retry` runs it as a plain ingest; every other job
+  keeps its record and loses only the field (see *Retiring the
+  metadata hold* below). Version 8 splits a job row into what every job has — `id`, `library`,
   `kind`, `priority`, the lifecycle fields — and an `op` object holding
   what one operation reads: for `"type": "ingest"`, the `path`, `force`,
   `hold_for_metadata`, and `audit_profile` that sat on the row itself
@@ -593,10 +599,10 @@ served: `false`, which an earlier `bookrack ingest` sends on every
 call, is accepted and ignored, and `true` is refused with `-32602`. An
 earlier client calling `metadata.advance` gets `-32601`.
 
-A job queued with the hold before the upgrade and not yet run fails
-when the worker reaches it: `bookrack queue list` shows it `failed`,
-naming the retired hold, and `bookrack queue retry --job <id>` runs it
-as a plain ingest.
+A job queued with the hold before the upgrade and not yet run loads as
+`failed`: `bookrack queue list` shows it naming the retired hold, and
+`bookrack queue retry --job <id>` runs it as a plain ingest. A held job
+that had already ended, or failed for another reason, keeps its record.
 
 A book an earlier build parked at the metadata gate stays parked. It
 shows as `extracted` in the `status` column of `bookrack list`, and
@@ -616,6 +622,19 @@ kept.
 `bookrack vectors reset --resume` finishes parked books too, but it
 does not take a book: it re-chunks and re-embeds every intake of the
 library still at `Extracted`, parked or not.
+
+## Diagnose bundle schema 7
+
+`manifest.json` moved from 6 to 7 because the shape of one file
+changed: `queue/queue.json` now holds each job in the version 9 shape of
+the queue document, whose `op` has no `hold_for_metadata`. As with 6,
+the rows are written in this build's shape whatever version wrote the
+document on disk, and `schema_version` inside the file stays the one
+found on disk. A pending job queued with the retired hold appears as the
+`failed` row the daemon would load it as. The scrubbing contract is
+unchanged.
+
+Nothing on disk goes stale and there is no refresh command.
 
 ## Diagnose bundle schema 6
 
