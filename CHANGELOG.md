@@ -511,6 +511,21 @@ release workflow extracts the matching section verbatim from this file.
   source's audit verdict before it enters the library, run
   `bookrack dryrun` on it.
 
+### Security
+
+- **deps: `zstd` moves from 0.13.3 to 0.13.5 and `zstd-safe` from 7.2.4
+  to 7.4.1, clearing RUSTSEC-2026-0391, -0398, and -0403.** The two
+  releases carry the fixes back to the 0.13 and 7 series that LanceDB's
+  Arrow IPC and Lance encoding paths pull in. None of the affected APIs
+  is called or compiled on those paths, so this clears lockfile
+  advisories rather than fixing anything that reaches a binary, and the
+  three exceptions `deny.toml` held for them go.
+- **deps: `rustix` moves from 1.1.4 to 1.1.6, clearing
+  RUSTSEC-2026-0486.** The advisory covers the extended-attribute reads
+  given a zero-length buffer. bookrack calls `rustix` for process
+  signals and waits only, and the `tar` reader the installers use reads
+  no extended attributes, so nothing here reaches it.
+
 ## [0.14.0] - 2026-11-07
 
 ### Known issues

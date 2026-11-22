@@ -22,9 +22,9 @@ yanked = "deny"
 # advisory stands; an entry goes once a release that clears it is in
 # the lockfile.
 ignore = [
-    { id = "RUSTSEC-2026-0391", reason = "zstd 0.13 through arrow-ipc and lance-encoding under lancedb; neither constructs a raw encoder or decoder with `with_context`. zstd 0.14 needs arrow-ipc 60 and lance-encoding 14 in the lockfile together." },
-    { id = "RUSTSEC-2026-0398", reason = "zstd-safe 7 through zstd 0.13, on the same two paths, without the `seekable` feature, so the affected seekable API is not compiled. zstd-safe 8.2 arrives only with zstd 0.14." },
-    { id = "RUSTSEC-2026-0403", reason = "zstd-safe 7 through zstd 0.13, on the same two paths; the callers decompress through the bulk API and read-side decoders, which the advisory leaves unaffected, and none uses `write::Decoder`. zstd-safe 8.2 arrives only with zstd 0.14." },
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained; a proc-macro reached through datafusion under lancedb, with no direct use in the workspace." },
     { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained; it reads tokenizer configuration in lindera under lancedb's full-text search, which bookrack does not build." },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained, with no vulnerability; the workspace uses it for timestamps, and arrow and datafusion under lancedb depend on it as well, so it stays in the lockfile until those do not." },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz is unmaintained, with no vulnerability; reached through arrow-array under lancedb, with no direct use in the workspace." },
+    { id = "RUSTSEC-2026-0542", reason = "humantime is unmaintained, with no vulnerability; reached through lance and object_store under lancedb, with no direct use in the workspace." },
 ]
