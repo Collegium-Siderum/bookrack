@@ -23,10 +23,11 @@ use bookrack_obs::{LogEvent, LogStreamHandle};
 use bookrack_ops::dto::{
     BookFilter, MetadataFilter, PaperFilter, UnknownFilterValue, parse_statuses,
 };
-use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::write_session::{ChangeSet, Region, SessionRunError, WriteSession};
-use bookrack_ops::{Caller, OpsError, SearchOptions, reads, with_caller_override, writes};
+use bookrack_ops::{
+    Caller, OpsError, SearchOptions, audit_overlay, reads, with_caller_override, writes,
+};
 use bookrack_runtime::control::events::EventStreamHandle;
 use eyre::WrapErr;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -953,13 +954,26 @@ impl ReferenceOverlaySetArgs {
     }
 }
 
+/// The two endpoints of the daemon process the tools report: where
+/// this listener answers and where the embedder is reached. Neither
+/// belongs to a library; everything a tool reports about a library
+/// comes from that library's handle.
+#[derive(Debug, Clone)]
+pub struct ProcessEndpoints {
+    /// MCP listener address in `host:port` form, or `disabled` when the
+    /// daemon runs without `/mcp`.
+    pub mcp_addr: String,
+    /// Ollama HTTP endpoint the daemon reaches.
+    pub ollama_url: String,
+}
+
 /// MCP request handler. The streamable-HTTP service clones it per
 /// session; the heavy state sits behind an `Arc`, so a clone is cheap
 /// and every session shares one warm library registry.
 #[derive(Clone)]
 pub struct BookrackServer {
     registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
-    info_context: LibraryInfoContext,
+    endpoints: ProcessEndpoints,
     started_at: Instant,
     identity: DaemonIdentity,
     log_stream: LogStreamHandle,
@@ -971,12 +985,11 @@ pub struct BookrackServer {
 
 #[tool_router(router = tool_router)]
 impl BookrackServer {
-    /// Build a handler over the given library registry. `info_context`
-    /// is the daemon's bring-up snapshot; only its process-level facts
-    /// are read here. `session.info` reports its MCP address and ollama
-    /// url and takes every library's name and root from the registry;
-    /// `library.info` takes only the MCP address from it and builds the
-    /// rest from the selected library's handle. `started_at` stamps the daemon's birth so
+    /// Build a handler over the given library registry. `endpoints`
+    /// are the process's listener address and Ollama endpoint, which
+    /// `session.info` and `library.info` report; every library's name,
+    /// root, and status come from the registry and the selected
+    /// handle. `started_at` stamps the daemon's birth so
     /// `session.info` can report uptime; `identity` is the daemon's
     /// own, reported by the same tool. `log_stream` is the shared
     /// in-process log fan-out the `session.logs_tail` tool reads its
@@ -993,7 +1006,7 @@ impl BookrackServer {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
-        info_context: LibraryInfoContext,
+        endpoints: ProcessEndpoints,
         started_at: Instant,
         identity: DaemonIdentity,
         log_stream: LogStreamHandle,
@@ -1003,7 +1016,7 @@ impl BookrackServer {
     ) -> BookrackServer {
         BookrackServer {
             registry,
-            info_context,
+            endpoints,
             started_at,
             identity,
             log_stream,
@@ -1846,15 +1859,14 @@ impl BookrackServer {
         Parameters(args): Parameters<LibraryOnlyArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
-        // The card's identity comes from the library the handle names,
-        // not from the bring-up snapshot: the counts below are this
-        // handle's, and the two halves of one card describe one root.
-        // The Ollama endpoint and the MCP address are properties of the
-        // process and are carried over from the snapshot.
+        // The card's identity comes from the library the handle names:
+        // the counts below are this handle's, and the two halves of one
+        // card describe one root. The Ollama endpoint and the MCP
+        // address are properties of the process.
         let ctx = bookrack_runtime::daemon::library_info_context_for(
             handle.cfg(),
-            &self.info_context.ollama_url,
-            &self.info_context.mcp_addr,
+            &self.endpoints.ollama_url,
+            &self.endpoints.mcp_addr,
         )
         .map_err(|e| report_to_mcp("library.info", e))?;
         let info = reads::info::show_library_info(handle.ops(), ctx)
@@ -1923,8 +1935,8 @@ impl BookrackServer {
             libraries,
             default_library,
             unmounted,
-            mcp_addr: self.info_context.mcp_addr.clone(),
-            ollama_url: self.info_context.ollama_url.clone(),
+            mcp_addr: self.endpoints.mcp_addr.clone(),
+            ollama_url: self.endpoints.ollama_url.clone(),
         };
         respond_with(&result)
     }
@@ -2233,9 +2245,10 @@ impl BookrackServer {
                        its cached extraction, refreshing the stored verdict and \
                        confidence so they reflect the current effective metadata \
                        (overrides included). Use after correcting fields so the \
-                       stored `needs_work` / `low` can catch up. Runs the default \
-                       audit profile; the review status is untouched. Returns the \
-                       previous and new verdict / confidence pair."
+                       stored `needs_work` / `low` can catch up. Grades under the \
+                       library's audit profile and audit data overlays; the review \
+                       status is untouched. Returns the previous and new verdict / \
+                       confidence pair."
     )]
     async fn library_metadata_reaudit(
         &self,
@@ -2246,10 +2259,14 @@ impl BookrackServer {
         let req = bookrack_ops::dto::writes::ReauditMetadataRequest {
             intake_id: args.intake_id,
         };
-        let audit_data = bookrack_ops::AuditData::default_data();
-        let audit_profile = bookrack_ops::AuditProfile::default();
+        // The overlays are read inside the session, from the library
+        // the session writes, so an edited overlay applies to the next
+        // call without a remount.
         let outcome = self
             .metadata_write(&handle, intake_id, move |s| {
+                let cfg = s.handle().cfg();
+                let audit_data = audit_overlay::load_audit_data(cfg);
+                let audit_profile = audit_overlay::load_audit_profile(cfg, None);
                 writes::metadata::reaudit_metadata(s, req, &audit_data, &audit_profile)
             })
             .await?;
@@ -2475,6 +2492,9 @@ impl ServerHandler for BookrackServer {
 ///   the stream stays open until the client disconnects or the
 ///   daemon shuts down.
 ///
+/// `endpoints` are the listener address and Ollama endpoint the
+/// `session.info` and `library.info` tools report.
+///
 /// `started_at` stamps the wall-clock instant the host daemon
 /// considers itself "up"; `session.info` reports the elapsed seconds
 /// against it. Callers typically capture this at the very top of their
@@ -2496,7 +2516,7 @@ impl ServerHandler for BookrackServer {
 /// publishing the `stopping` state on `event_stream`; this function also subscribes through `shutdown_rx` (the
 /// receiver side of the same broadcast) for its own listener loop.
 // Eight separate handles are the natural shape here: each is owned by a
-// distinct subsystem (registry, info, log fan-out, queue, shutdown
+// distinct subsystem (registry, endpoints, log fan-out, queue, shutdown
 // fan-in/out, listener address) that the caller threaded through its
 // own state machine. Bundling them into a struct buys nothing — the
 // only two call sites are already passing each handle exactly once —
@@ -2504,7 +2524,7 @@ impl ServerHandler for BookrackServer {
 #[allow(clippy::too_many_arguments)]
 pub async fn serve(
     registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
-    info_context: LibraryInfoContext,
+    endpoints: ProcessEndpoints,
     started_at: Instant,
     identity: DaemonIdentity,
     log_stream: LogStreamHandle,
@@ -2519,7 +2539,7 @@ pub async fn serve(
         move || {
             Ok(BookrackServer::new(
                 registry.clone(),
-                info_context.clone(),
+                endpoints.clone(),
                 started_at,
                 identity.clone(),
                 log_stream.clone(),
@@ -2606,7 +2626,10 @@ pub fn spawn_listener(
         return None;
     };
     let registry = Arc::clone(&runtime.registry);
-    let info_context = runtime.info_context.clone();
+    let endpoints = ProcessEndpoints {
+        mcp_addr: runtime.mcp_label.clone(),
+        ollama_url: runtime.daemon_config.ollama_url.clone(),
+    };
     let started_at = runtime.started_at;
     let identity = runtime.identity.clone();
     let log_stream = runtime.log_stream.clone();
@@ -2617,7 +2640,7 @@ pub fn spawn_listener(
     Some(tokio::spawn(async move {
         serve(
             registry,
-            info_context,
+            endpoints,
             started_at,
             identity,
             log_stream,

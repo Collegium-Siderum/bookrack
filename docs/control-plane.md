@@ -1343,7 +1343,12 @@ The read set includes `library.show_paper_metadata_report`,
 the built-in default audit profile rather than the overlay-resolved
 one, matching the book-side tool; the control-plane method resolves the
 overlay, so the two surfaces can grade the same paper differently and
-the tool description says which one it ran.
+the tool description says which one it ran. The write tool
+`library.metadata.reaudit` does not share that rule: like the
+control-plane `metadata.reaudit`, it grades under the library's audit
+data and audit profile overlays, read when the call arrives. So on this
+surface the report `library.show_metadata_report` returns can differ
+from the rollup a re-audit of the same book then stores.
 
 The read tools are not side-effect free: the four search tools append
 a `retrieval_calls` row (and its hits) per call, so a read-only data
@@ -1361,6 +1366,13 @@ way; a metadata write tool judges them once it holds the mutex, as the
 control-plane methods do. A write that lands pauses MCP for its
 duration and announces `library.changed`, as a control-plane write
 does.
+
+A client built on version 1 of the MCP TypeScript SDK sees `-32001` for
+two different things: the daemon's busy refusal, and the SDK's own
+request timeout (`ErrorCode.RequestTimeout`), which it raises locally
+when no reply arrives in time. Only the daemon's refusal carries
+`data.retryable`; such a client reads that, not the code, to decide
+whether the write was refused or its answer was lost.
 
 ## Events (Phase 2)
 

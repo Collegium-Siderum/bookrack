@@ -890,6 +890,7 @@ dependencies = [
  "bookrack-core",
  "bookrack-dbkit",
  "bookrack-embed",
+ "bookrack-extract",
  "bookrack-obs",
  "bookrack-ops",
  "bookrack-query",

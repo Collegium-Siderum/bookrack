@@ -22,6 +22,8 @@
 //! * `library.info` for a selected library reports that library's
 //!   root and name, not the ones of the library the daemon came up
 //!   on;
+//! * `library.metadata.reaudit` grades under the library's audit data
+//!   and audit profile overlays, read when the call arrives;
 //! * `session.info` lists each mounted library with its own root and
 //!   default mark, and its default name follows the registry's pointer;
 //! * `session.queue_status` filters `recent` on a state before capping
@@ -48,8 +50,10 @@ use bookrack_config::{Config, LibrarySelection};
 use bookrack_core::queue::{IngestJob, JobOp, JobState, Priority, QueueJob, QueueState};
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_embed::OllamaEmbedClient;
+use bookrack_extract::{Biblio, Block, BlockKind, Extraction, Provenance, TextLayerQuality, Toc};
+use bookrack_extract::{envelope_filename, write_envelope};
+use bookrack_mcp::ProcessEndpoints;
 use bookrack_obs::LogStreamHandle;
-use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::write_session::{ChangeSink, WriteIntent};
 use bookrack_ops::{Caller, Ops};
@@ -142,17 +146,9 @@ impl Fixture {
         let addr = listener.local_addr().expect("local addr");
 
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(4);
-        // The bring-up snapshot names the default library, as the
-        // daemon's does.
-        let info_context = LibraryInfoContext {
-            data_dir: root.display().to_string(),
-            library_name: Some("fixture".to_string()),
-            resolution_source: "test fixture".to_string(),
-            shadowed_default: None,
-            library_identification: None,
-            ollama_url: "http://127.0.0.1:1".to_string(),
-            embed_model_configured: "unused".to_string(),
+        let endpoints = ProcessEndpoints {
             mcp_addr: addr.to_string(),
+            ollama_url: "http://127.0.0.1:1".to_string(),
         };
         let serve_tx = shutdown_tx.clone();
         let serve_registry = registry.clone();
@@ -161,7 +157,7 @@ impl Fixture {
         let server = tokio::spawn(async move {
             bookrack_mcp::serve(
                 serve_registry,
-                info_context,
+                endpoints,
                 Instant::now(),
                 test_identity(),
                 LogStreamHandle::default(),
@@ -213,6 +209,56 @@ impl Fixture {
             .set_intake_status(ItemKind::Book, intake_id, status)
             .expect("set status");
         intake_id
+    }
+
+    /// Register one book with a cached extraction envelope, so a
+    /// re-audit has something to grade, and return its intake id.
+    fn seed_audited_book(&self, sha: &str) -> i64 {
+        let books_dir = self.root.join("books");
+        std::fs::create_dir_all(&books_dir).expect("books dir");
+        let mut catalog = Catalog::open_for_write_unbacked(&self.catalog_db).expect("open catalog");
+        let intake_id = catalog
+            .register_intake(
+                ItemKind::Book,
+                &NewIntake::new(sha).format("txt").byte_size(1),
+            )
+            .expect("register intake")
+            .into_intake()
+            .intake_id;
+        let path = books_dir.join(envelope_filename(ItemKind::Book, intake_id));
+        write_envelope(&path, &sample_extraction(), intake_id, sha).expect("write envelope");
+        catalog
+            .set_stored_path(ItemKind::Book, intake_id, &path.to_string_lossy())
+            .expect("stored path");
+        intake_id
+    }
+
+    /// Write `contents` as `file` under the default library's
+    /// `audit-rules/` overlay directory.
+    fn write_audit_rule(&self, file: &str, contents: &str) {
+        let rules = self.root.join("audit-rules");
+        std::fs::create_dir_all(&rules).expect("audit-rules dir");
+        std::fs::write(rules.join(file), contents).expect("write overlay");
+    }
+
+    /// The `flagged` count of the newest re-audit row on `intake_id`'s
+    /// pipeline trail: how many fields that re-audit flagged.
+    fn last_reaudit_flagged(&self, intake_id: i64) -> u64 {
+        let rows = Catalog::open_for_write_unbacked(&self.catalog_db)
+            .expect("reopen catalog")
+            .pipeline_audit_for_book(PartitionIdx::new(intake_id).root().get())
+            .expect("pipeline trail");
+        let summary = rows
+            .iter()
+            .rev()
+            .find(|row| row.pipeline_run_id.starts_with("reaudit-"))
+            .and_then(|row| row.metric_summary.clone())
+            .expect("a re-audit row with a metric summary");
+        let summary: serde_json::Value =
+            serde_json::from_str(&summary).expect("metric summary is JSON");
+        summary["flagged"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("no flagged count: {summary}"))
     }
 
     /// Replace the queue snapshot with `jobs`, in enqueue order.
@@ -289,6 +335,40 @@ fn handle(name: &str, cfg: Arc<Config>) -> Arc<LibraryHandle<OllamaEmbedClient>>
         Caller::cli(),
     );
     LibraryHandle::new(name, cfg, ops)
+}
+
+/// A two-block extraction with no bibliographic fields, so every
+/// field the audit grades comes from the catalog's effective view.
+fn sample_extraction() -> Extraction {
+    Extraction {
+        blocks: vec![
+            Block {
+                kind: BlockKind::Heading { level: 1 },
+                text: "Chapter One".into(),
+                source_unit: 0,
+                style: None,
+            },
+            Block {
+                kind: BlockKind::Body,
+                text: "Some sample prose for the audit body sample.".into(),
+                source_unit: 0,
+                style: None,
+            },
+        ],
+        toc: Toc::default(),
+        biblio: Biblio::default(),
+        provenance: Provenance {
+            adapter: "txt".into(),
+            extractor_version: 1,
+            text_layer_quality: TextLayerQuality::BornDigital,
+            skipped_units: vec![],
+            derived_from_sha256: None,
+            partial_pages: None,
+            source_of_structure: None,
+            fallbacks: Vec::new(),
+            rule: None,
+        },
+    }
 }
 
 /// A finished book job `job-<n>` in `state`, enqueued `n` seconds after
@@ -1025,6 +1105,90 @@ async fn a_metadata_write_announces_its_library_and_a_refused_one_does_not() {
         .await
         .expect_err("an unknown metadata field must be rejected");
     assert_eq!(fx.changes.take(), ["started fixture", "ended fixture"]);
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+/// A `library.metadata.reaudit` call on `intake_id`.
+fn reaudit(intake_id: i64) -> CallToolRequestParams {
+    call(
+        "library.metadata.reaudit",
+        serde_json::json!({ "library": "fixture", "intake_id": intake_id }),
+    )
+}
+
+/// A re-audit grades under the library's own audit data overlay, read
+/// when the call arrives: once the overlay names the book's title as a
+/// placeholder word, the same re-audit flags one more field.
+#[tokio::test]
+async fn a_reaudit_grades_under_the_librarys_audit_data_overlay() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+    let book = fx.seed_audited_book("sha-reaudit-data");
+    client
+        .call_tool(set_title(book, "Zorblat"))
+        .await
+        .expect("library.metadata.set");
+    client
+        .call_tool(reaudit(book))
+        .await
+        .expect("re-audit under the shipped data");
+    let before = fx.last_reaudit_flagged(book);
+
+    fx.write_audit_rule(
+        "audit_data.toml",
+        "schema_version = 1\n\n[title]\nplaceholder_words = [\"zorblat\"]\n",
+    );
+    client
+        .call_tool(reaudit(book))
+        .await
+        .expect("re-audit under the overlay");
+    assert_eq!(
+        fx.last_reaudit_flagged(book),
+        before + 1,
+        "the overlay's placeholder word must flag the title on re-audit"
+    );
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+/// A re-audit grades under the library's own audit profile overlay,
+/// read when the call arrives: once the overlay turns the placeholder
+/// check off, a title the shipped word list names is flagged no more.
+#[tokio::test]
+async fn a_reaudit_grades_under_the_librarys_audit_profile_overlay() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+    let book = fx.seed_audited_book("sha-reaudit-profile");
+    client
+        .call_tool(set_title(book, "Untitled"))
+        .await
+        .expect("library.metadata.set");
+    client
+        .call_tool(reaudit(book))
+        .await
+        .expect("re-audit under the shipped profile");
+    let before = fx.last_reaudit_flagged(book);
+    assert!(
+        before > 0,
+        "a placeholder title must be flagged to begin with"
+    );
+
+    fx.write_audit_rule(
+        "audit_profile.local.toml",
+        "schema_version = 1\n\n[title]\nplaceholder_check = false\n",
+    );
+    client
+        .call_tool(reaudit(book))
+        .await
+        .expect("re-audit under the overlay");
+    assert_eq!(
+        fx.last_reaudit_flagged(book),
+        before - 1,
+        "with the placeholder check off the title must no longer be flagged"
+    );
 
     let _ = client.cancel().await;
     fx.stop().await;

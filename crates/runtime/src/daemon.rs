@@ -1744,8 +1744,7 @@ pub fn library_info_context(
 /// end serving `library.info` for a selected library builds the card's
 /// identity through this one function, so the identity and the counts
 /// on one card always describe the same root. `ollama_url` and
-/// `mcp_addr` are process-wide and are passed in from the bring-up
-/// snapshot.
+/// `mcp_addr` are process-wide and are passed in by the caller.
 ///
 /// Fails when the library's index profile does not resolve; the error
 /// classifies as caller input through the control-plane error map.

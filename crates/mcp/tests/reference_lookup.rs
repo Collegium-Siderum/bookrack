@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use bookrack_config::{Config, LibrarySelection};
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
+use bookrack_mcp::ProcessEndpoints;
 use bookrack_obs::LogStreamHandle;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
@@ -98,11 +99,14 @@ impl Fixture {
         let serve_tx = shutdown_tx.clone();
         let serve_registry = registry.clone();
         let serve_queue = queue_state.clone();
-        let info_context = info_context(&with_root, addr);
+        let endpoints = ProcessEndpoints {
+            mcp_addr: addr.to_string(),
+            ollama_url: "http://127.0.0.1:1".to_string(),
+        };
         let server = tokio::spawn(async move {
             bookrack_mcp::serve(
                 serve_registry,
-                info_context,
+                endpoints,
                 Instant::now(),
                 test_identity(),
                 LogStreamHandle::default(),

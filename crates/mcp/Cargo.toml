@@ -34,6 +34,8 @@ tracing.workspace = true
 bookrack-refs.workspace = true
 # Catalog fixtures and error values the mapping tests build by hand.
 bookrack-catalog = { path = "../catalog" }
+# The cached extraction envelope a re-audit test grades a book from.
+bookrack-extract = { path = "../extract" }
 # Stamp a `user_version` the build does not read onto a fixture
 # reference store, so the schema-mismatch mapping is exercised end to
 # end.

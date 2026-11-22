@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use bookrack_config::Config;
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
+use bookrack_mcp::ProcessEndpoints;
 use bookrack_obs::LogStreamHandle;
-use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, Ops};
 use bookrack_runtime::mcp_endpoint::{McpEndpointState, probe_endpoint};
@@ -46,16 +46,10 @@ fn stub_registry() -> Arc<LibraryRegistry<OllamaEmbedClient>> {
     LibraryRegistry::single(LibraryHandle::new("identity-stub", cfg, ops))
 }
 
-fn stub_info_context(addr: &str) -> LibraryInfoContext {
-    LibraryInfoContext {
-        data_dir: "unused".to_string(),
-        library_name: Some("identity-stub".to_string()),
-        resolution_source: "test fixture".to_string(),
-        shadowed_default: None,
-        library_identification: None,
-        ollama_url: "http://127.0.0.1:1".to_string(),
-        embed_model_configured: "unused".to_string(),
+fn stub_endpoints(addr: &str) -> ProcessEndpoints {
+    ProcessEndpoints {
         mcp_addr: addr.to_string(),
+        ollama_url: "http://127.0.0.1:1".to_string(),
     }
 }
 
@@ -66,11 +60,11 @@ async fn the_health_probe_recognises_a_real_bookrack_server() {
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(4);
 
     let serve_tx = shutdown_tx.clone();
-    let info_context = stub_info_context(&addr);
+    let endpoints = stub_endpoints(&addr);
     let server = tokio::spawn(async move {
         bookrack_mcp::serve(
             stub_registry(),
-            info_context,
+            endpoints,
             Instant::now(),
             test_identity(),
             LogStreamHandle::default(),

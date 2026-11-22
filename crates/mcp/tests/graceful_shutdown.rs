@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 use bookrack_config::Config;
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
+use bookrack_mcp::ProcessEndpoints;
 use bookrack_obs::LogStreamHandle;
-use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, Ops};
 use tokio::net::{TcpListener, TcpStream};
@@ -53,16 +53,10 @@ fn stub_registry() -> Arc<LibraryRegistry<OllamaEmbedClient>> {
     LibraryRegistry::single(LibraryHandle::new("shutdown-stub", cfg, ops))
 }
 
-fn stub_info_context(mcp_addr: &SocketAddr) -> LibraryInfoContext {
-    LibraryInfoContext {
-        data_dir: "unused".to_string(),
-        library_name: Some("shutdown-stub".to_string()),
-        resolution_source: "test fixture".to_string(),
-        shadowed_default: None,
-        library_identification: None,
-        ollama_url: "http://127.0.0.1:1".to_string(),
-        embed_model_configured: "unused".to_string(),
+fn stub_endpoints(mcp_addr: &SocketAddr) -> ProcessEndpoints {
+    ProcessEndpoints {
         mcp_addr: mcp_addr.to_string(),
+        ollama_url: "http://127.0.0.1:1".to_string(),
     }
 }
 
@@ -72,12 +66,12 @@ async fn shutdown_broadcast_stops_serve_and_releases_the_listening_port() {
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(4);
 
     let registry = stub_registry();
-    let info_context = stub_info_context(&addr);
+    let endpoints = stub_endpoints(&addr);
     let serve_tx = shutdown_tx.clone();
     let server = tokio::spawn(async move {
         bookrack_mcp::serve(
             registry,
-            info_context,
+            endpoints,
             Instant::now(),
             test_identity(),
             LogStreamHandle::default(),
@@ -142,12 +136,12 @@ async fn session_shutdown_publishes_stopping_before_broadcast() {
     let mut observer = shutdown_tx.subscribe();
 
     let registry = stub_registry();
-    let info_context = stub_info_context(&addr);
+    let endpoints = stub_endpoints(&addr);
     let serve_tx = shutdown_tx.clone();
     let server = tokio::spawn(async move {
         bookrack_mcp::serve(
             registry,
-            info_context,
+            endpoints,
             Instant::now(),
             test_identity(),
             LogStreamHandle::default(),

@@ -423,14 +423,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
-- **A book-side re-audit over the control plane grades under the
-  library's audit data overlay.** `bookrack metadata reaudit` and the
-  control-plane `metadata.reaudit` honoured the library's audit profile
-  but graded against the shipped data lists, ignoring
-  `audit-rules/audit_data.toml`, so a placeholder word, a
-  whitelisted imprint, or a watermark token the operator had added
-  counted at ingest and not on re-audit. The overlay is now read when
-  the re-audit runs.
+- **A book-side re-audit grades under the library's overlays.**
+  `bookrack metadata reaudit` and the control-plane `metadata.reaudit`
+  honoured the library's audit profile but graded against the shipped
+  data lists, ignoring `audit-rules/audit_data.toml`, so a placeholder
+  word, a whitelisted imprint, or a watermark token the operator had
+  added counted at ingest and not on re-audit. The MCP
+  `library.metadata.reaudit` tool ignored both overlays and ran the
+  shipped profile. Both overlays are now read when the re-audit runs,
+  on either surface.
 - **`doctor --rename-envelopes` no longer overwrites an envelope that
   already has its kind-prefixed name.** When an item's legacy envelope
   and its prefixed one were both present, the legacy file was renamed
