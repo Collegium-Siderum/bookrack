@@ -352,3 +352,122 @@ async fn metadata_advance_is_not_a_method() -> Result<()> {
     })
     .await
 }
+
+/// A write and a read arriving over the control socket are attributed
+/// to the control plane: the reply, the audit row, and both call rows
+/// carry `control_plane`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn control_socket_calls_are_attributed_to_the_control_plane() -> Result<()> {
+    with_daemon(|sock, root| async move {
+        let catalog_db = root.join("catalog.db");
+        let book = Catalog::open_for_write_unbacked(&catalog_db)?
+            .register_intake(
+                ItemKind::Book,
+                &NewIntake::new("sha-attributed").format("epub"),
+            )?
+            .into_intake()
+            .intake_id;
+        let (mut r, mut w) = connect(&sock).await?;
+        let reply = ok_result(
+            &mut r,
+            &mut w,
+            1,
+            "metadata.approve",
+            json!({ "book": book }),
+        )
+        .await?;
+        assert_eq!(reply["actor_kind"], "human", "{reply}");
+        assert_eq!(reply["actor_detail"], "control_plane", "{reply}");
+        ok_result(&mut r, &mut w, 2, "library.list_books", json!({})).await?;
+
+        let catalog = Catalog::open_for_write_unbacked(&catalog_db)?;
+        let audit_id = reply["audit_id"].as_i64().context("no audit_id")?;
+        let row = catalog
+            .recent_metadata_audit("", 1000)?
+            .into_iter()
+            .find(|row| row.audit_id == audit_id)
+            .context("the reply's audit row")?;
+        assert_eq!(row.actor_detail.as_deref(), Some("control_plane"));
+        for tool in ["library.metadata.approve", "library.list_books"] {
+            let sources: Vec<String> = catalog
+                .tool_calls_for_tool(tool)?
+                .into_iter()
+                .map(|call| call.source)
+                .collect();
+            assert_eq!(sources, ["control_plane"], "{tool}");
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// The `flagged` count of the newest re-audit row the book's pipeline
+/// trail holds.
+fn last_reaudit_flagged(root: &Path, book: i64) -> Result<u64> {
+    let rows = Catalog::open_for_write_unbacked(&root.join("catalog.db"))?
+        .pipeline_audit_for_book(PartitionIdx::new(book).root().get())?;
+    let summary = rows
+        .iter()
+        .rev()
+        .find(|row| row.pipeline_run_id.starts_with("reaudit-"))
+        .and_then(|row| row.metric_summary.clone())
+        .context("no re-audit row in the trail")?;
+    let summary: Value = serde_json::from_str(&summary)?;
+    summary["flagged"]
+        .as_u64()
+        .with_context(|| format!("no flagged count: {summary}"))
+}
+
+/// A re-audit grades under the library's own audit data overlay, read
+/// when the call arrives: once the overlay names the book's title as a
+/// placeholder word, the same re-audit flags one more field.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reaudit_grades_under_the_librarys_audit_data_overlay() -> Result<()> {
+    with_daemon(|sock, root| async move {
+        let sources = tempfile::tempdir()?;
+        let (mut r, mut w) = connect(&sock).await?;
+        let book = ingest_one(&mut r, &mut w, &root, sources.path()).await?;
+        ok_result(
+            &mut r,
+            &mut w,
+            3,
+            "metadata.set",
+            json!({ "book": book, "field": "title", "value": "Zorblat" }),
+        )
+        .await?;
+
+        ok_result(
+            &mut r,
+            &mut w,
+            4,
+            "metadata.reaudit",
+            json!({ "book": book }),
+        )
+        .await?;
+        let before = last_reaudit_flagged(&root, book)?;
+
+        let rules = root.join("audit-rules");
+        std::fs::create_dir_all(&rules)?;
+        std::fs::write(
+            rules.join("audit_data.toml"),
+            "schema_version = 1\n\n[title]\nplaceholder_words = [\"zorblat\"]\n",
+        )?;
+        ok_result(
+            &mut r,
+            &mut w,
+            5,
+            "metadata.reaudit",
+            json!({ "book": book }),
+        )
+        .await?;
+        let after = last_reaudit_flagged(&root, book)?;
+
+        assert_eq!(
+            after,
+            before + 1,
+            "the overlay's placeholder word must flag the title on re-audit"
+        );
+        Ok(())
+    })
+    .await
+}

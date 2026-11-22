@@ -11,15 +11,16 @@ use serde::Serialize;
 use bookrack_catalog::{ActorKind, ItemPipelineAudit, MetadataAudit};
 
 /// Who (or what) initiated an op, with the optional bookkeeping every
-/// write op forwards to `metadata_audit`. CLI builds this with
-/// [`crate::Caller::cli`]; the MCP server builds it with
-/// [`crate::Caller::mcp`].
+/// write op forwards to `metadata_audit`. The daemon builds this with
+/// [`crate::Caller::control_plane`] for calls over its control socket
+/// and with [`crate::Caller::mcp`] for MCP tool calls; an in-process
+/// CLI host uses [`crate::Caller::cli`].
 #[derive(Debug, Clone)]
 pub struct Caller {
     /// The closed-set kind enforced by the audit-table `CHECK` constraint.
     pub actor_kind: ActorKind,
-    /// Free-form identifier of the surface ("cli", "mcp", or a richer
-    /// label set by the caller).
+    /// Free-form identifier of the surface ("control_plane", "mcp",
+    /// "cli", or a richer label set by the caller).
     pub actor_detail: Option<String>,
     /// Session id for grouping a sequence of edits.
     pub session_id: Option<String>,

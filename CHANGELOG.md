@@ -103,6 +103,12 @@ release workflow extracts the matching section verbatim from this file.
   nothing, instead of writing alongside it. A write that lands pauses
   MCP for its duration and announces `library.changed` for its
   library, as a control-plane write does.
+- **Calls over the control socket are recorded as the control
+  plane's.** The audit rows a control-plane write leaves, and the
+  `actor_detail` its reply reports, carry `control_plane` instead of
+  `cli`, and each control-plane call's row in the tool-call log carries
+  `source = control_plane`. Rows an earlier build wrote keep `cli` and
+  are read back as written. See [UPGRADE.md](docs/UPGRADE.md).
 - **A busy refusal says it is retryable.** The `-32001` a write gets
   while another holds the write mutex carries `retryable: true` in
   `data`, with a detail and a hint, instead of a bare message.
@@ -417,6 +423,14 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A book-side re-audit over the control plane grades under the
+  library's audit data overlay.** `bookrack metadata reaudit` and the
+  control-plane `metadata.reaudit` honoured the library's audit profile
+  but graded against the shipped data lists, ignoring
+  `audit-rules/audit_data.toml`, so a placeholder word, a
+  whitelisted imprint, or a watermark token the operator had added
+  counted at ingest and not on re-audit. The overlay is now read when
+  the re-audit runs.
 - **`doctor --rename-envelopes` no longer overwrites an envelope that
   already has its kind-prefixed name.** When an item's legacy envelope
   and its prefixed one were both present, the legacy file was renamed

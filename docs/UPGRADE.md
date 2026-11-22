@@ -625,6 +625,24 @@ kept.
 does not take a book: it re-chunks and re-embeds every intake of the
 library still at `Extracted`, parked or not.
 
+## Control-socket calls recorded as the control plane
+
+A call that reaches the daemon over its control socket — any `bookrack`
+command that routes through a running daemon, and `bookrack rpc call` —
+is recorded as the control plane's: the `metadata_audit` rows its edits
+leave carry `actor_detail = control_plane`, and its rows in
+`mcp_tool_calls` carry `source = control_plane`. An earlier build
+recorded the same calls as `cli`. `actor_kind` stays `human`, and MCP
+tool calls stay `llm` / `mcp`.
+
+Rows an earlier build wrote are not rewritten, so a library curated
+before and after the upgrade holds both values for the same surface.
+`library.show_audit_trail` and `library.show_paper_audit_trail` report
+each row as it was written. A query that picks out control-socket calls
+by `source` or `actor_detail` matches both `cli` and `control_plane`.
+
+Nothing on disk goes stale and there is no refresh command.
+
 ## Diagnose bundle schema 7
 
 `manifest.json` moved from 6 to 7 because the shape of one file

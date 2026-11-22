@@ -20,6 +20,7 @@ use bookrack_ops::dto::writes::{
     SetMetadataFieldRequest, VoidMetadataFieldRequest,
 };
 use bookrack_ops::reads::books::{find_books, show_book};
+use bookrack_ops::reads::metadata::show_audit_trail;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::write_session::{Region, WriteSession};
 use bookrack_ops::writes::metadata::{
@@ -611,6 +612,54 @@ fn the_session_caller_labels_a_write_whatever_the_ops_caller_and_override() {
         .map(|c| c.source)
         .collect();
     assert_eq!(sources, ["control_plane"]);
+}
+
+#[test]
+fn the_audit_trail_reads_cli_and_control_plane_rows_back_as_written() {
+    // A library curated over the control socket before and after the
+    // surface was renamed holds both values for it. The trail reports
+    // each row with the attribution it was written under.
+    let fx = Fixture::build();
+    let id = fx.seed_intake("sha-two-labels");
+    for (caller, value) in [
+        (Caller::cli(), "Written as cli"),
+        (Caller::control_plane(), "Written as control_plane"),
+    ] {
+        set_metadata_field(
+            &mut fx.session_as(caller),
+            SetMetadataFieldRequest {
+                intake_id: id,
+                field: "title".to_string(),
+                value: value.to_string(),
+                reason: None,
+                confirmed: false,
+            },
+        )
+        .expect("set");
+    }
+
+    let trail = show_audit_trail(fx.ops(), id).expect("trail");
+    let rows: Vec<(&str, Option<&str>, Option<&str>)> = trail
+        .iter()
+        .map(|e| {
+            (
+                e.actor_kind.as_str(),
+                e.actor_detail.as_deref(),
+                e.new_value.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("human", Some("cli"), Some("Written as cli")),
+            (
+                "human",
+                Some("control_plane"),
+                Some("Written as control_plane")
+            ),
+        ]
+    );
 }
 
 #[test]

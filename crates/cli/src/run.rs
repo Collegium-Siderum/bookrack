@@ -91,7 +91,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
         daemon_config,
         claimed_variables: Some(bookrack_cli::config_knobs::claimed_variables()),
         spawn_queue_worker: true,
-        caller: Caller::cli(),
+        caller: Caller::control_plane(),
         mcp_tools: bookrack_mcp::list_tools(),
     };
 

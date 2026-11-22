@@ -92,11 +92,11 @@ pub struct RuntimeOpts {
     ///
     /// [`headless`]: RuntimeOpts::headless
     pub spawn_queue_worker: bool,
-    /// [`Caller`] baked into the shared [`Ops`]: the attribution for
-    /// writes that arrive without a task-scope override, i.e. through
-    /// the control socket. Tool calls arriving over MCP are attributed
-    /// per-call to `Caller::mcp()` by the MCP server's dispatch wrap
-    /// and never read this value.
+    /// [`Caller`] baked into each served library's [`Ops`]: the
+    /// attribution for calls that arrive through the control socket,
+    /// [`Caller::control_plane`] unless a host says otherwise. Tool
+    /// calls arriving over MCP are attributed per call to
+    /// `Caller::mcp()` and never read this value.
     pub caller: Caller,
     /// Every `BOOKRACK_…` variable some knob of this build reads,
     /// supplied by a host that links the whole knob inventory.
@@ -144,7 +144,7 @@ impl RuntimeOpts {
             daemon_config: DaemonConfig::resolve(&EnvSnapshot::capture(), &flags),
             claimed_variables: None,
             spawn_queue_worker: false,
-            caller: Caller::cli(),
+            caller: Caller::control_plane(),
             mcp_tools: Vec::new(),
         }
     }

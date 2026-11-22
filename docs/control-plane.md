@@ -1071,6 +1071,14 @@ reports the source library there, next to `new_name`;
 and `library`. A daemon serving a root selected by path rather than
 by registry name reports it as `default`.
 
+Every call over the control socket is attributed to the control plane:
+the audit rows a write leaves carry `actor_kind = human` and
+`actor_detail = control_plane`, as does the `actor_detail` a write
+reply reports, and each call's row in the tool-call log carries
+`source = control_plane`. An earlier build recorded the same calls as
+`cli`; those rows are not rewritten, and the audit-trail reads report
+each row with the attribution it was written under.
+
 `diagnose.run` and `doctor.gather` take the same optional `library`,
 although neither is a write: half of what each gathers belongs to one
 library — the catalog snapshot, the audit overlay, and the bundle's

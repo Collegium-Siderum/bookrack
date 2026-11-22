@@ -1288,6 +1288,10 @@ async fn the_paper_audit_trail_reports_what_the_curation_writes_recorded() -> Re
         )
         .await?;
         assert!(resp["error"].is_null(), "the set must succeed: {resp}");
+        assert_eq!(
+            resp["result"]["actor_detail"], "control_plane",
+            "a write over the control socket is the control plane's: {resp}"
+        );
 
         let trail = call(
             &mut reader,
@@ -1306,6 +1310,7 @@ async fn the_paper_audit_trail_reports_what_the_curation_writes_recorded() -> Re
         assert_eq!(rows[0]["old_value"], "Synthetic Findings in Test Spaces");
         assert_eq!(rows[0]["reason"], "checked against the published version");
         assert_eq!(rows[0]["actor_kind"], "human");
+        assert_eq!(rows[0]["actor_detail"], "control_plane");
 
         // The book-side trail must not answer for a paper id: the two
         // catalogs number independently, and one answering for the

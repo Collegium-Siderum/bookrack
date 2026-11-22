@@ -2436,9 +2436,9 @@ impl ServerHandler for BookrackServer {
     /// Override the `#[tool_handler]`-generated dispatch so every tool
     /// call runs attributed to [`Caller::mcp`], regardless of the
     /// [`Caller`] baked into the shared [`Ops`] handle. The daemon
-    /// builds one [`Ops`] tagged with its launch surface
-    /// (`Caller::cli()`) and shares it across REPL,
-    /// HTTP, and queue worker; without this wrap, both the recorded
+    /// builds one [`Ops`] per library tagged with the control plane
+    /// (`Caller::control_plane()`) and shares it across the control
+    /// socket, HTTP, and queue worker; without this wrap, both the recorded
     /// tool-call `source` and the `actor_kind` / `actor_detail` on
     /// write audit rows would carry the host surface's identity
     /// instead of `llm` / `mcp`.

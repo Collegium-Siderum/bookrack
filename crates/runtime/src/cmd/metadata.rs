@@ -5,7 +5,7 @@
 //! this module covers only the write surface.
 
 use bookrack_embed::OllamaEmbedClient;
-use bookrack_ops::audit_overlay::load_audit_profile;
+use bookrack_ops::audit_overlay::{load_audit_data, load_audit_profile};
 use bookrack_ops::dto::writes::{AddContributorOutcome, ReauditOutcome, WriteOutcome};
 use bookrack_ops::write_session::WriteSession;
 use eyre::Result;
@@ -213,9 +213,12 @@ fn void(
     }
 }
 
+/// Re-audit `book` under the session library's own overlays: the
+/// audit data overlay, and the profile `profile_name` names or the
+/// profile overlay when it names none.
 fn reaudit(session: &mut Session, book: i64, profile_name: Option<&str>) -> Result<ReauditOutcome> {
     let audit_profile = load_audit_profile(session.handle().cfg(), profile_name);
-    let audit_data = bookrack_ops::pipeline::book::AuditData::default_data();
+    let audit_data = load_audit_data(session.handle().cfg());
     let req = bookrack_ops::dto::writes::ReauditMetadataRequest { intake_id: book };
     match bookrack_ops::writes::metadata::reaudit_metadata(
         session,
