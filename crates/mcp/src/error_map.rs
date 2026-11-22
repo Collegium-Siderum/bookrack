@@ -19,13 +19,11 @@
 use bookrack_core::{Explain, Problem};
 use bookrack_ops::OpsError;
 use bookrack_ops::dto::UnknownFilterValue;
-use bookrack_ops::reads::reference::ReferenceLookupError;
+use bookrack_ops::reads::reference::ReferenceError;
 use bookrack_ops::registry::RegistryError;
 use rmcp::ErrorData;
 use rmcp::model::{CallToolResult, ContentBlock, ErrorCode};
 use serde::Serialize;
-
-use crate::reference;
 
 /// Encode `value` to a JSON string and wrap it as the body of a successful
 /// tool response. Centralises serialization so every tool returns the same
@@ -137,31 +135,15 @@ pub(crate) fn report_to_mcp(method: &str, e: eyre::Report) -> ErrorData {
     envelope(ErrorCode(rpc.code), rpc.message, rpc.data)
 }
 
-/// Map a reference lookup failure onto the MCP envelope through the
-/// control plane's classifier, as [`ops_error_to_mcp`] does: the code
-/// is decided once, in
-/// [`bookrack_runtime::control::error_map::reference_lookup_err`], so
-/// the `reference.lookup` tool and the control-plane method of the
-/// same name answer one failure with one code.
-pub(crate) fn reference_lookup_error_to_mcp(e: ReferenceLookupError) -> ErrorData {
-    let rpc = bookrack_runtime::control::error_map::reference_lookup_err(e);
+/// Map a reference read or write failure onto the MCP envelope
+/// through the control plane's classifier, as [`ops_error_to_mcp`]
+/// does: the code is decided once, in
+/// [`bookrack_runtime::control::error_map::reference_err`], so the
+/// `reference.lookup` and `reference.overlay_set` tools and the
+/// control-plane method answer one failure with one code.
+pub(crate) fn reference_error_to_mcp(e: ReferenceError) -> ErrorData {
+    let rpc = bookrack_runtime::control::error_map::reference_err(e);
     envelope(ErrorCode(rpc.code), rpc.message, rpc.data)
-}
-
-/// Map a [`reference::ReferenceError`] to an MCP error: the
-/// catalog / argument-shape variants are caller-input problems and
-/// surface as `invalid_params`, the refs-store and catalog-load
-/// variants are environmental and surface as `internal_error`.
-pub(crate) fn reference_error_to_mcp(e: reference::ReferenceError) -> ErrorData {
-    match e {
-        reference::ReferenceError::InvalidArgument(_)
-        | reference::ReferenceError::UnknownOverlayProperty { .. } => invalid_params_err(&e),
-        reference::ReferenceError::Refs(_)
-        | reference::ReferenceError::Io { .. }
-        | reference::ReferenceError::Catalog(_) => {
-            mcp_from_problem(ErrorCode::INTERNAL_ERROR, Problem::from_error_chain(&e))
-        }
-    }
 }
 
 #[cfg(test)]

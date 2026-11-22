@@ -88,6 +88,12 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **The `reference.overlay_set` MCP tool takes the daemon's write
+  mutex.** While another write holds it, the tool answers `-32001` with
+  `retryable: true` and writes nothing, instead of writing alongside it.
+  Its arguments are still judged first, so a malformed overlay is
+  `-32602` whatever else is running. Each call now leaves a row in the
+  tool-call log, as the other write tools do, attributed to `mcp`.
 - **`bookrack doctor` names a PDFium library a build before 0.14.0 left
   behind.** Those builds installed the library file directly under
   `<platform data dir>/bookrack/pdfium/`, where no later build looks.

@@ -76,7 +76,7 @@ use bookrack_ops::OpsError;
 use bookrack_ops::dto::UnknownFilterValue;
 use bookrack_ops::pipeline::book::IngestError;
 use bookrack_ops::pipeline::paper::GleanError;
-use bookrack_ops::reads::reference::ReferenceLookupError;
+use bookrack_ops::reads::reference::ReferenceError;
 use bookrack_ops::registry::RegistryError;
 use bookrack_query::QueryError;
 use bookrack_refs::RefsError;
@@ -335,23 +335,28 @@ pub fn ops_err(e: OpsError) -> RpcError {
     from_ops(&e)
 }
 
-/// Map a reference lookup failure onto its wire code. The control
-/// plane's `reference.lookup` and the MCP tool of the same name both
-/// come here, so one failure takes one code on both surfaces.
+/// Map a reference read or write failure onto its wire code. The
+/// control plane's `reference.lookup` and the MCP `reference.lookup`
+/// and `reference.overlay_set` tools all come here, so one failure
+/// takes one code on every surface.
 ///
-/// A request field outside what the lookup accepts is caller input
-/// (`-32602`); its message already names the field. A store whose
+/// A request field outside what the call accepts, and an overlay key
+/// outside the property catalog, are caller input (`-32602`); the
+/// message already names the field or key. A store whose
 /// schema this build does not read is a state the operator has to
 /// change (`-32018`), with the direction of the mismatch deciding the
 /// hint. Everything else — a path that could not be inspected, a
 /// damaged store, a query fault, a catalog that did not parse — is an
 /// internal error carrying its full cause chain.
-pub fn reference_lookup_err(e: ReferenceLookupError) -> RpcError {
+pub fn reference_err(e: ReferenceError) -> RpcError {
     match &e {
-        ReferenceLookupError::InvalidArgument(message) => {
+        ReferenceError::InvalidArgument(message) => {
             rpc_from_problem(INVALID_PARAMS, Problem::new(message.as_str()))
         }
-        ReferenceLookupError::Open {
+        ReferenceError::UnknownOverlayProperty { .. } => {
+            rpc_from_problem(INVALID_PARAMS, Problem::from_error_chain(&e))
+        }
+        ReferenceError::Open {
             path,
             source: RefsError::SchemaTooNew { found, supported },
         } => rpc_from_problem(
@@ -361,7 +366,7 @@ pub fn reference_lookup_err(e: ReferenceLookupError) -> RpcError {
                  or a newer one.",
             ),
         ),
-        ReferenceLookupError::Open {
+        ReferenceError::Open {
             path,
             source: RefsError::SchemaTooOld { found, supported },
         } => rpc_from_problem(
@@ -371,7 +376,7 @@ pub fn reference_lookup_err(e: ReferenceLookupError) -> RpcError {
                  with `bookrack run`: either one migrates the store to this build's schema.",
             ),
         ),
-        ReferenceLookupError::Open {
+        ReferenceError::Open {
             path,
             source: RefsError::ReaderTooOld { required, current },
         } => rpc_from_problem(
@@ -386,10 +391,10 @@ pub fn reference_lookup_err(e: ReferenceLookupError) -> RpcError {
                     "Run a bookrack build at reader version v{required} or newer."
                 )),
         ),
-        ReferenceLookupError::Open { .. }
-        | ReferenceLookupError::Store(_)
-        | ReferenceLookupError::Io { .. }
-        | ReferenceLookupError::Catalog(_) => {
+        ReferenceError::Open { .. }
+        | ReferenceError::Store(_)
+        | ReferenceError::Io { .. }
+        | ReferenceError::Catalog(_) => {
             rpc_from_problem(INTERNAL_ERROR, Problem::from_error_chain(&e))
         }
     }
@@ -2067,7 +2072,7 @@ mod tests {
     /// reader with the state code and says which reader it needs.
     #[test]
     fn a_lookup_on_a_store_stamped_for_a_newer_reader_takes_the_state_code() {
-        let rpc = reference_lookup_err(ReferenceLookupError::Open {
+        let rpc = reference_err(ReferenceError::Open {
             path: std::path::PathBuf::from("/some/where/reference.db"),
             source: RefsError::ReaderTooOld {
                 required: 9,
@@ -2092,7 +2097,7 @@ mod tests {
     /// mounting the library; the lookup's hint names both.
     #[test]
     fn a_lookup_on_a_store_behind_this_build_names_both_steps_that_migrate_it() {
-        let rpc = reference_lookup_err(ReferenceLookupError::Open {
+        let rpc = reference_err(ReferenceError::Open {
             path: std::path::PathBuf::from("/some/where/reference.db"),
             source: RefsError::SchemaTooOld {
                 found: 1,

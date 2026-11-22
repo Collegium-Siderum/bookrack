@@ -13,6 +13,7 @@
 
 pub mod metadata;
 pub mod papers_metadata;
+pub mod reference;
 
 use bookrack_catalog::{Catalog, NewMetadataAudit, NewReview};
 use bookrack_core::{ItemKind, PartitionIdx};

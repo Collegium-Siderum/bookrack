@@ -40,9 +40,9 @@ pub struct ReferenceLookup {
     pub exclude_books: Option<Vec<String>>,
 }
 
-/// Why a lookup failed.
+/// Why a reference read or write failed.
 #[derive(Debug, thiserror::Error)]
-pub enum ReferenceLookupError {
+pub enum ReferenceError {
     /// A request field is outside what the lookup accepts. The message
     /// names the field.
     #[error("invalid argument: {0}")]
@@ -74,6 +74,13 @@ pub enum ReferenceLookupError {
     /// parse.
     #[error("catalog error: {0}")]
     Catalog(#[from] ParseError),
+
+    /// An overlay payload key is not a property-catalog key.
+    #[error("overlay property {key:?} is not in property_catalog.toml")]
+    UnknownOverlayProperty {
+        /// The key the payload carried.
+        key: String,
+    },
 }
 
 /// The storage-independent part of a request, checked by
@@ -91,7 +98,7 @@ pub struct Validated<'a> {
 /// The process-wide controlled vocabulary triad, loaded on first use.
 /// A load failure is returned rather than cached, so a later call
 /// retries and a corrected catalog recovers without a restart.
-pub fn catalogs() -> Result<&'static Catalogs, ReferenceLookupError> {
+pub fn catalogs() -> Result<&'static Catalogs, ReferenceError> {
     static CELL: OnceLock<Catalogs> = OnceLock::new();
     if let Some(c) = CELL.get() {
         return Ok(c);
@@ -103,7 +110,7 @@ pub fn catalogs() -> Result<&'static Catalogs, ReferenceLookupError> {
 /// Check everything about `req` that does not need the store: the
 /// scope, the exclusion list against the scope, and the severity
 /// word.
-pub fn validate(req: &ReferenceLookup) -> Result<Validated<'_>, ReferenceLookupError> {
+pub fn validate(req: &ReferenceLookup) -> Result<Validated<'_>, ReferenceError> {
     let book = scope(req)?;
     let exclude = exclusions(req, book)?;
     let min_severity = severity_floor(req)?;
@@ -123,7 +130,7 @@ pub fn lookup(
     refs: &Refs,
     catalogs: &Catalogs,
     req: &ReferenceLookup,
-) -> Result<LookupResult, ReferenceLookupError> {
+) -> Result<LookupResult, ReferenceError> {
     let book = scope(req)?;
     let exclude = exclusions(req, book)?;
 
@@ -160,7 +167,7 @@ pub fn lookup_at(
     path: &Path,
     catalogs: &Catalogs,
     req: &ReferenceLookup,
-) -> Result<LookupResult, ReferenceLookupError> {
+) -> Result<LookupResult, ReferenceError> {
     validate(req)?;
     match std::fs::metadata(path) {
         Ok(_) => {}
@@ -173,24 +180,24 @@ pub fn lookup_at(
             });
         }
         Err(source) => {
-            return Err(ReferenceLookupError::Io {
+            return Err(ReferenceError::Io {
                 path: path.to_path_buf(),
                 source,
             });
         }
     }
-    let refs = Refs::open_read_only(path).map_err(|source| ReferenceLookupError::Open {
+    let refs = Refs::open_read_only(path).map_err(|source| ReferenceError::Open {
         path: path.to_path_buf(),
         source,
     })?;
     lookup(&refs, catalogs, req)
 }
 
-fn scope(req: &ReferenceLookup) -> Result<Option<&str>, ReferenceLookupError> {
+fn scope(req: &ReferenceLookup) -> Result<Option<&str>, ReferenceError> {
     if req.book == "*" {
         Ok(None)
     } else if req.book.is_empty() {
-        Err(ReferenceLookupError::InvalidArgument(
+        Err(ReferenceError::InvalidArgument(
             "`book` must be a slug or `*`; got empty string".to_string(),
         ))
     } else {
@@ -201,10 +208,10 @@ fn scope(req: &ReferenceLookup) -> Result<Option<&str>, ReferenceLookupError> {
 fn exclusions<'a>(
     req: &'a ReferenceLookup,
     book: Option<&str>,
-) -> Result<&'a [String], ReferenceLookupError> {
+) -> Result<&'a [String], ReferenceError> {
     let exclude = req.exclude_books.as_deref().unwrap_or(&[]);
     if !exclude.is_empty() && book.is_some() {
-        return Err(ReferenceLookupError::InvalidArgument(format!(
+        return Err(ReferenceError::InvalidArgument(format!(
             "`exclude_books` only applies with book=\"*\"; got book={:?}",
             req.book
         )));
@@ -212,12 +219,12 @@ fn exclusions<'a>(
     Ok(exclude)
 }
 
-fn severity_floor(req: &ReferenceLookup) -> Result<Option<u8>, ReferenceLookupError> {
+fn severity_floor(req: &ReferenceLookup) -> Result<Option<u8>, ReferenceError> {
     req.min_severity
         .as_deref()
         .map(|word| {
             severity_level(word).ok_or_else(|| {
-                ReferenceLookupError::InvalidArgument(format!(
+                ReferenceError::InvalidArgument(format!(
                     "unknown min_severity {word:?}; \
                      expected ok | info | warn | error"
                 ))
@@ -256,6 +263,8 @@ fn severity_level(s: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bookrack_refs::{NewBook, NewEntry};
+    use serde_json::json;
 
     fn request(book: &str, entry_key: &str) -> ReferenceLookup {
         ReferenceLookup {
@@ -267,9 +276,9 @@ mod tests {
         }
     }
 
-    fn invalid_argument(err: ReferenceLookupError) -> String {
+    fn invalid_argument(err: ReferenceError) -> String {
         match err {
-            ReferenceLookupError::InvalidArgument(message) => message,
+            ReferenceError::InvalidArgument(message) => message,
             other => panic!("expected InvalidArgument, got {other:?}"),
         }
     }
@@ -316,5 +325,205 @@ mod tests {
             assert_eq!(validated.book, None);
             assert!(validated.exclude.is_empty());
         }
+    }
+
+    fn book(slug: &str, rank: i64, built_at: &str) -> NewBook {
+        NewBook {
+            book_slug: slug.to_string(),
+            schema_name: "name_translation".to_string(),
+            schema_version: 1,
+            parser_version: "0.1.0".to_string(),
+            title_zh: format!("book {slug}"),
+            title_en: None,
+            edition: None,
+            publisher: None,
+            year: None,
+            isbn: None,
+            authority_rank: rank,
+            built_at: built_at.to_string(),
+            intake_id: None,
+        }
+    }
+
+    fn entry(
+        slug: &str,
+        key: &str,
+        payload: serde_json::Value,
+        quality_flags: Vec<&str>,
+    ) -> NewEntry {
+        NewEntry {
+            book_slug: slug.to_string(),
+            entry_key: key.to_string(),
+            headword: key.to_string(),
+            aliases: vec![],
+            payload,
+            fts_text: key.to_string(),
+            source: json!({
+                "book_slug": slug,
+                "page": 1,
+                "sheet": 1,
+                "distill_run_id": "2026-06-25T00:00:00Z",
+            }),
+            quality_flags: quality_flags.into_iter().map(String::from).collect(),
+        }
+    }
+
+    /// [`request`] with an exclusion list attached.
+    fn lookup_excluding(book: &str, entry_key: &str, exclude: &[&str]) -> ReferenceLookup {
+        ReferenceLookup {
+            exclude_books: Some(exclude.iter().map(|s| s.to_string()).collect()),
+            ..request(book, entry_key)
+        }
+    }
+
+    #[test]
+    fn cross_book_lookup_orders_hits_by_authority_rank() {
+        let refs = Refs::open_in_memory().expect("refs");
+        refs.upsert_book(&book("high_authority", 10, "2026-06-25T00:00:00Z"))
+            .unwrap();
+        refs.upsert_book(&book("low_authority", 3, "2026-06-25T00:01:00Z"))
+            .unwrap();
+        refs.upsert_entry(&entry(
+            "high_authority",
+            "smith",
+            json!({"country": "USA"}),
+            vec![],
+        ))
+        .unwrap();
+        refs.upsert_entry(&entry(
+            "low_authority",
+            "smith",
+            json!({"country": "UK"}),
+            vec![],
+        ))
+        .unwrap();
+
+        let cats = Catalogs::load_all().unwrap();
+        let result = lookup(&refs, &cats, &request("*", "smith")).unwrap();
+        assert_eq!(result.hits.len(), 2);
+        assert_eq!(result.hits[0].book_slug, "high_authority");
+        assert_eq!(result.primary_by_authority, Some(0));
+        assert_eq!(result.redirect_followed, None);
+    }
+
+    #[test]
+    fn lookup_follows_redirect_and_surfaces_the_original_key() {
+        let refs = Refs::open_in_memory().expect("refs");
+        refs.upsert_book(&book("book_a", 10, "2026-06-25T00:00:00Z"))
+            .unwrap();
+        refs.upsert_entry(&entry(
+            "book_a",
+            "redirect_source",
+            json!({"redirect_to": "target"}),
+            vec![],
+        ))
+        .unwrap();
+        refs.upsert_entry(&entry(
+            "book_a",
+            "target",
+            json!({"country": "USA"}),
+            vec![],
+        ))
+        .unwrap();
+
+        let cats = Catalogs::load_all().unwrap();
+        let result = lookup(&refs, &cats, &request("book_a", "redirect_source")).unwrap();
+        assert_eq!(result.entry_key, "redirect_source");
+        assert_eq!(result.redirect_followed.as_deref(), Some("redirect_source"));
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].entry_key, "target");
+    }
+
+    #[test]
+    fn wildcard_lookup_drops_the_excluded_books() {
+        let refs = Refs::open_in_memory().expect("refs");
+        refs.upsert_book(&book("high_authority", 10, "2026-06-25T00:00:00Z"))
+            .unwrap();
+        refs.upsert_book(&book("low_authority", 3, "2026-06-25T00:01:00Z"))
+            .unwrap();
+        refs.upsert_entry(&entry(
+            "high_authority",
+            "smith",
+            json!({"country": "USA"}),
+            vec![],
+        ))
+        .unwrap();
+        refs.upsert_entry(&entry(
+            "low_authority",
+            "smith",
+            json!({"country": "UK"}),
+            vec![],
+        ))
+        .unwrap();
+
+        let cats = Catalogs::load_all().unwrap();
+        // Excluding the top-ranked book leaves the other one, and the
+        // primary index follows it rather than pointing past the end.
+        let result = lookup(
+            &refs,
+            &cats,
+            &lookup_excluding("*", "smith", &["high_authority"]),
+        )
+        .unwrap();
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].book_slug, "low_authority");
+        assert_eq!(result.primary_by_authority, Some(0));
+    }
+
+    #[test]
+    fn min_severity_warn_drops_info_only_hits_and_keeps_warn_hits() {
+        let refs = Refs::open_in_memory().expect("refs");
+        refs.upsert_book(&book("book_low", 10, "2026-06-25T00:00:00Z"))
+            .unwrap();
+        refs.upsert_book(&book("book_high", 5, "2026-06-25T00:01:00Z"))
+            .unwrap();
+        // book_low's hit has only an info-severity flag; book_high's
+        // hit has a warn-severity flag. min_severity=warn must drop
+        // the first and keep the second.
+        refs.upsert_entry(&entry(
+            "book_low",
+            "smith",
+            json!({"country": "USA"}),
+            vec!["spliced_from_orphan"],
+        ))
+        .unwrap();
+        refs.upsert_entry(&entry(
+            "book_high",
+            "smith",
+            json!({"country": "UK"}),
+            vec!["pair_mismatch"],
+        ))
+        .unwrap();
+
+        let cats = Catalogs::load_all().unwrap();
+        let mut args = request("*", "smith");
+        args.min_severity = Some("warn".to_string());
+        let result = lookup(&refs, &cats, &args).unwrap();
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].book_slug, "book_high");
+        assert_eq!(result.primary_by_authority, Some(0));
+    }
+
+    #[test]
+    fn fields_whitelist_strips_unrequested_payload_keys() {
+        let refs = Refs::open_in_memory().expect("refs");
+        refs.upsert_book(&book("book_a", 10, "2026-06-25T00:00:00Z"))
+            .unwrap();
+        refs.upsert_entry(&entry(
+            "book_a",
+            "smith",
+            json!({"country": "USA", "year_span": {"birth": 1900}, "bio_annotation": "extra"}),
+            vec![],
+        ))
+        .unwrap();
+
+        let cats = Catalogs::load_all().unwrap();
+        let mut args = request("book_a", "smith");
+        args.fields = Some(vec!["country".to_string()]);
+        let result = lookup(&refs, &cats, &args).unwrap();
+        let payload = result.hits[0].payload.as_object().unwrap();
+        assert!(payload.contains_key("country"));
+        assert!(!payload.contains_key("year_span"));
+        assert!(!payload.contains_key("bio_annotation"));
     }
 }

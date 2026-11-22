@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use super::MethodContext;
 use super::reads_library::{parse, resolve, to_value};
-use crate::control::error_map::reference_lookup_err;
+use crate::control::error_map::reference_err;
 use crate::control::jsonrpc::RpcError;
 
 /// The `reference.lookup` params: the library selector beside the
@@ -30,9 +30,9 @@ routed_params!(ReferenceLookupParams);
 pub fn lookup(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: ReferenceLookupParams = parse(params, "reference.lookup")?;
     let handle = resolve(ctx, p.library.as_deref())?;
-    let catalogs = reference::catalogs().map_err(reference_lookup_err)?;
+    let catalogs = reference::catalogs().map_err(reference_err)?;
     let result = reference::lookup_at(&handle.ops().reference_db_path(), catalogs, &p.lookup)
-        .map_err(reference_lookup_err)?;
+        .map_err(reference_err)?;
     to_value(&result)
 }
 

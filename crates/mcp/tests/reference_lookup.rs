@@ -14,7 +14,9 @@
 //! * a reference store at a schema newer than this build is
 //!   `state unusable` from the `reference.overlay_set` tool as it is
 //!   from the lookup tool, with the same summary, and the overlay is not
-//!   written.
+//!   written;
+//! * the overlay tool is answered busy and retryable while another
+//!   write session holds the write mutex, and writes nothing.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -30,7 +32,7 @@ use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, Ops};
 use bookrack_refs::{NewBook, NewEntry, Refs};
-use bookrack_runtime::control::jsonrpc::{INVALID_PARAMS, Request, STATE_UNUSABLE};
+use bookrack_runtime::control::jsonrpc::{BUSY, INVALID_PARAMS, Request, STATE_UNUSABLE};
 use bookrack_runtime::control::methods::{DispatchOutcome, MethodContext, dispatch};
 use bookrack_runtime::control::plan_registry::PlanRegistry;
 use bookrack_runtime::control::{DaemonState, DaemonStateFlag, EventStreamHandle};
@@ -527,6 +529,57 @@ fn reference_snapshots(root: &Path) -> Vec<String> {
         })
         .filter(|name| name.starts_with("reference-") && name.ends_with(".bak"))
         .collect()
+}
+
+/// The `country` the control plane's lookup reads for `smith` of
+/// `book_a` in `with`.
+async fn smith_country(fx: &Fixture) -> Value {
+    let body = fx
+        .control_plane(json!({ "library": "with", "book": "book_a", "entry_key": "smith" }))
+        .await
+        .expect("lookup");
+    body["hits"][0]["payload"]["country"].clone()
+}
+
+/// While another write session holds the write mutex, the overlay tool
+/// is answered busy and retryable and writes nothing; once the session
+/// ends, the same call goes through.
+#[tokio::test]
+async fn overlay_set_is_busy_while_another_write_session_is_open() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+
+    let held = fx
+        .registry
+        .begin_host_write(Caller::cli(), "with", None)
+        .expect("hold the write mutex");
+    let busy = rpc_error(
+        client
+            .call_tool(overlay_call("with", json!({ "country": "United Kingdom" })))
+            .await
+            .expect_err("the overlay must wait its turn"),
+    );
+    assert_eq!(busy.code, ErrorCode(BUSY), "{busy:?}");
+    assert_eq!(
+        busy.data.as_ref().map(|data| data["retryable"].clone()),
+        Some(json!(true)),
+        "{busy:?}"
+    );
+    assert_eq!(
+        smith_country(&fx).await,
+        json!("UK"),
+        "a busy overlay must not have been written"
+    );
+
+    drop(held);
+    client
+        .call_tool(overlay_call("with", json!({ "country": "United Kingdom" })))
+        .await
+        .expect("the overlay goes through once the session ends");
+    assert_eq!(smith_country(&fx).await, json!("United Kingdom"));
+
+    client.cancel().await.expect("client shutdown");
+    fx.stop().await;
 }
 
 /// An overlay whose arguments are refused is refused before the store

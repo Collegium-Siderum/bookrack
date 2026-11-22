@@ -1339,11 +1339,15 @@ the tool description says which one it ran.
 - **The read tools are not side-effect free.** The four search tools
   append a `retrieval_calls` row (and its hits) per call, so a
   read-only data root cannot serve them.
-- **Write tools do not take the runtime write mutex.** That mutex is
-  held by control-plane write methods only (`run_write`), and
-  `mcp.availability` is an advisory broadcast, not enforcement — the
-  daemon does not reject an MCP write tool issued while an RPC write
-  session is open.
+- **The metadata write tools do not take the runtime write mutex.**
+  That mutex is held by control-plane write methods (`run_write`) and
+  by `reference.overlay_set`, and `mcp.availability` is an advisory
+  broadcast, not enforcement — the daemon does not reject a
+  `library.metadata.*` tool issued while an RPC write session is open.
+  `reference.overlay_set` is refused instead: while another write holds
+  the mutex it answers `-32001` with `retryable: true` and writes
+  nothing. It judges its arguments before it asks for the mutex, so a
+  malformed overlay is `-32602` either way.
 
 ## Events (Phase 2)
 

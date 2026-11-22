@@ -43,18 +43,6 @@ exit = "diagnose is called through ops"
 
 [[edge]]
 from = "mcp"
-to = "refs"
-reason = "transitional"
-exit = "reference reads and writes go through ops and the write session"
-
-[[edge]]
-from = "mcp"
-to = "distill"
-reason = "transitional"
-exit = "reference reads and writes go through ops and the write session"
-
-[[edge]]
-from = "mcp"
 to = "query"
 reason = "transitional"
 exit = "ops supplies the context radius and the embedding client type"
@@ -152,10 +140,9 @@ exit = "diagnose is called through ops"
 [[file]]
 paths = [
   "crates/mcp/src/lib.rs",
-  "crates/mcp/src/reference.rs",
 ]
 reason = "transitional"
-exit = "reference reads and writes go through ops and the write session; ops supplies the context radius and the embedding client type"
+exit = "ops supplies the context radius and the embedding client type"
 
 [[file]]
 paths = [
@@ -264,7 +251,7 @@ site = "crates/ops/src/pipeline/book/reset.rs::reset_and_rechunk"
 access = "write"
 
 [[write_door]]
-site = "crates/mcp/src/lib.rs::reference_overlay_set"
+site = "crates/ops/src/writes/reference.rs::write_overlay"
 access = "write"
 
 [[write_door]]
@@ -1031,11 +1018,10 @@ id = "frontend-error-map"
 summary = "mapping ops and store errors to wire errors"
 sites = [
   "crates/mcp/src/error_map.rs",
-  "crates/mcp/src/reference.rs::ReferenceError",
   "crates/runtime/src/control/error_map.rs::classify",
 ]
 reason = "transitional"
-detail = "MCP answers every registry error as invalid params and folds a reference schema mismatch into an internal error; the control plane gives each its own code"
+detail = "MCP answers every registry error as invalid params; the control plane gives each its own code"
 agreement = "divergent"
 exit = "both transports map errors in one place"
 

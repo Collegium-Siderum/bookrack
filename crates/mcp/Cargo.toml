@@ -13,18 +13,8 @@ bookrack-embed = { path = "../embed" }
 bookrack-obs = { path = "../obs" }
 bookrack-ops = { path = "../ops" }
 bookrack-runtime = { path = "../runtime" }
-# The reference-book read store opened on every `reference.lookup`
-# / `reference.overlay_set` call; phase 9 of the v2 distill rollout.
-bookrack-refs.workspace = true
-# Property-catalog validation for `reference.overlay_set` and the
-# quality-flag catalog used by `reference.lookup`'s `min_severity`
-# filter.
-bookrack-distill.workspace = true
-# RFC 3339 timestamps stamped on the `edited_at` overlay column.
+# The `finished_at` timestamp on the queue-status job rows.
 chrono.workspace = true
-# `#[derive(thiserror::Error)]` on the `reference` module's error
-# enum; mapped to MCP errors at the tool-method layer.
-thiserror.workspace = true
 rmcp.workspace = true
 axum.workspace = true
 # `BroadcastStream` adapter to fan the LogStreamHandle broadcast
@@ -39,6 +29,9 @@ serde_json.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# Reference-store fixtures and error values the reference tool tests
+# build by hand.
+bookrack-refs.workspace = true
 # Catalog fixtures and error values the mapping tests build by hand.
 bookrack-catalog = { path = "../catalog" }
 # Stamp a `user_version` the build does not read onto a fixture

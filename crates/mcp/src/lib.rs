@@ -25,6 +25,7 @@ use bookrack_ops::dto::{
 };
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
+use bookrack_ops::write_session::{Region, SessionRunError};
 use bookrack_ops::{Caller, OpsError, SearchOptions, reads, with_caller_override, writes};
 use bookrack_runtime::control::events::EventStreamHandle;
 use eyre::WrapErr;
@@ -37,11 +38,10 @@ use rmcp::transport::streamable_http_server::{
 use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
 
 mod error_map;
-mod reference;
 use error_map::{
-    internal_message, invalid_params_err, invalid_params_message, ops_error_to_mcp,
-    reference_error_to_mcp, reference_lookup_error_to_mcp, registry_err, report_to_mcp,
-    respond_with, unknown_filter_value_to_mcp,
+    internal_message, invalid_params_err, invalid_params_message, mcp_from_problem,
+    ops_error_to_mcp, reference_error_to_mcp, registry_err, report_to_mcp, respond_with,
+    unknown_filter_value_to_mcp,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -881,6 +881,76 @@ pub struct MetadataRejectArgs {
     /// explicit selector so a misrouted call never silently lands on
     /// the wrong library's catalog.
     pub library: String,
+}
+
+/// Arguments for the `reference.lookup` tool. `library` is
+/// `Option<String>` to honour the same default-or-explicit semantics
+/// used by every other read tool.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct ReferenceLookupArgs {
+    pub library: Option<String>,
+    /// Book slug to scope the lookup to. Pass `"*"` to query every
+    /// registered book and rank cross-book hits by `authority_rank`.
+    pub book: String,
+    /// The lookup key; resolves directly against
+    /// `reference_entries.entry_key`.
+    pub entry_key: String,
+    /// Optional payload-key whitelist. When `Some`, payload keys
+    /// outside the list are stripped from each hit.
+    pub fields: Option<Vec<String>>,
+    /// Optional quality_flag-severity floor. When set, hits whose
+    /// flags do not include at least one flag at or above this
+    /// severity drop out. Recognised values: `ok`, `info`, `warn`,
+    /// `error`.
+    pub min_severity: Option<String>,
+    /// Book slugs whose entries must not be returned. Only meaningful
+    /// with `book = "*"`, where the lookup spans every registered
+    /// book; passing it alongside a single-book scope is an error
+    /// rather than a no-op. An excluded book is also skipped as a
+    /// redirect target, so it cannot re-enter the result that way.
+    pub exclude_books: Option<Vec<String>>,
+}
+
+impl ReferenceLookupArgs {
+    /// The request without the library selector, in the shape the
+    /// ops layer runs.
+    pub fn to_lookup(&self) -> reads::reference::ReferenceLookup {
+        reads::reference::ReferenceLookup {
+            book: self.book.clone(),
+            entry_key: self.entry_key.clone(),
+            fields: self.fields.clone(),
+            min_severity: self.min_severity.clone(),
+            exclude_books: self.exclude_books.clone(),
+        }
+    }
+}
+
+/// Arguments for the `reference.overlay_set` tool. `library` is
+/// required for write tools, so this carries a bare `String` rather
+/// than `Option<String>`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct ReferenceOverlaySetArgs {
+    pub library: String,
+    pub book_slug: String,
+    pub entry_key: String,
+    /// JSON object whose keys must be present in the property
+    /// catalog (`crates/distill/data/property_catalog.toml`).
+    pub overlay: serde_json::Value,
+    /// Free-text edit summary recorded on the overlay row.
+    pub reason: String,
+}
+
+impl ReferenceOverlaySetArgs {
+    /// The edit without the library selector, in the shape the ops
+    /// layer writes.
+    pub fn to_request(&self) -> writes::reference::ReferenceOverlaySetRequest {
+        writes::reference::ReferenceOverlaySetRequest {
+            book_slug: self.book_slug.clone(),
+            entry_key: self.entry_key.clone(),
+            overlay: self.overlay.clone(),
+            reason: self.reason.clone(),
+        }
+    }
 }
 
 /// MCP request handler. The streamable-HTTP service clones it per
@@ -2208,22 +2278,25 @@ impl BookrackServer {
     )]
     async fn reference_lookup(
         &self,
-        Parameters(args): Parameters<reference::ReferenceLookupArgs>,
+        Parameters(args): Parameters<ReferenceLookupArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
-        let catalogs = reads::reference::catalogs().map_err(reference_lookup_error_to_mcp)?;
+        let catalogs = reads::reference::catalogs().map_err(reference_error_to_mcp)?;
         let result = reads::reference::lookup_at(
             &handle.ops().reference_db_path(),
             catalogs,
             &args.to_lookup(),
         )
-        .map_err(reference_lookup_error_to_mcp)?;
+        .map_err(reference_error_to_mcp)?;
         respond_with(&result)
     }
 
     /// Layer or replace one entry's overlay. The overlay JSON's keys
-    /// are validated against the property catalog before the row is
-    /// written; mismatches raise `invalid_params`.
+    /// are validated against the property catalog before a write
+    /// session is opened, so a refused payload neither waits on another
+    /// write nor creates the store; mismatches raise `invalid_params`.
+    /// The write itself runs in the library's write session, so a
+    /// concurrent write is answered busy.
     #[tool(
         name = "reference.overlay_set",
         description = "Layer a user edit on top of one reference entry. Every key \
@@ -2233,28 +2306,29 @@ impl BookrackServer {
     )]
     async fn reference_overlay_set(
         &self,
-        Parameters(args): Parameters<reference::ReferenceOverlaySetArgs>,
+        Parameters(args): Parameters<ReferenceOverlaySetArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(Some(args.library.as_str()))?;
-        // The arguments are judged before the store is opened: the
-        // write door creates a missing store, and a refused call leaves
-        // nothing behind.
-        let catalogs = reference::catalogs().map_err(reference_error_to_mcp)?;
-        reference::validate_overlay_args(catalogs, &args).map_err(reference_error_to_mcp)?;
-        let refs_path = handle.ops().reference_db_path();
-        // The write door refuses a store this build cannot serve before
-        // it migrates anything; such a refusal is mapped as the lookup
-        // maps it.
-        let refs = bookrack_refs::Refs::open_for_write(&refs_path, handle.ops().backup_dir())
-            .map_err(|source| {
-                reference_lookup_error_to_mcp(reads::reference::ReferenceLookupError::Open {
-                    path: refs_path.clone(),
-                    source,
-                })
+        let request = args.to_request();
+        let catalogs = reads::reference::catalogs().map_err(reference_error_to_mcp)?;
+        writes::reference::validate_overlay(catalogs, &request).map_err(reference_error_to_mcp)?;
+        let region = Region::Reference {
+            book_slug: request.book_slug.clone(),
+        };
+        let session = self
+            .registry
+            .begin_write(&handle, region, Caller::mcp())
+            .map_err(|busy| ops_error_to_mcp(OpsError::WriteBusy(busy)))?;
+        let receipt = session
+            .run_blocking(async move |s| writes::reference::set_overlay(s, &request))
+            .await
+            .map_err(|e| match e {
+                SessionRunError::Op(e) => reference_error_to_mcp(e),
+                other => mcp_from_problem(
+                    ErrorCode::INTERNAL_ERROR,
+                    bookrack_core::Problem::from_error_chain(&other),
+                ),
             })?;
-        let edited_at = chrono::Utc::now().to_rfc3339();
-        let receipt = reference::reference_overlay_set_logic(&refs, &args, edited_at)
-            .map_err(reference_error_to_mcp)?;
         respond_with(&receipt)
     }
 }
@@ -2894,11 +2968,14 @@ mod tests {
         assert_eq!(args.kind, ItemKind::Book);
     }
 
+    /// The overlay tool's failures are classified by the same mapper as
+    /// the lookup's: caller input, a store this build cannot serve, and
+    /// a residual fault each keep their own code.
     #[test]
-    fn reference_errors_split_into_caller_input_and_environmental() {
+    fn reference_errors_split_into_caller_input_state_and_fault() {
+        use bookrack_ops::reads::reference::ReferenceError;
+        use bookrack_runtime::control::jsonrpc::STATE_UNUSABLE;
         use rmcp::model::ErrorCode;
-
-        use super::reference::ReferenceError;
 
         let invalid = [
             ReferenceError::InvalidArgument("bad".to_string()),
@@ -2910,13 +2987,19 @@ mod tests {
             let mapped = super::reference_error_to_mcp(err);
             assert_eq!(mapped.code, ErrorCode::INVALID_PARAMS, "{}", mapped.message);
         }
-        let mapped = super::reference_error_to_mcp(ReferenceError::Refs(
-            bookrack_refs::RefsError::SchemaTooNew {
+        let newer = super::reference_error_to_mcp(ReferenceError::Open {
+            path: "/data/reference.db".into(),
+            source: bookrack_refs::RefsError::SchemaTooNew {
                 found: 99,
                 supported: 1,
             },
-        ));
-        assert_eq!(mapped.code, ErrorCode::INTERNAL_ERROR);
+        });
+        assert_eq!(newer.code, ErrorCode(STATE_UNUSABLE), "{}", newer.message);
+        let fault = super::reference_error_to_mcp(ReferenceError::Io {
+            path: "/data/reference.db".into(),
+            source: std::io::Error::other("permission denied"),
+        });
+        assert_eq!(fault.code, ErrorCode::INTERNAL_ERROR, "{}", fault.message);
     }
 
     #[test]
