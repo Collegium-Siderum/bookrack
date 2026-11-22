@@ -18,6 +18,9 @@ bookrack_core::fixed_settings! {
     "control.plan_ttl" = crate::control::plan_registry::DEFAULT_PLAN_TTL,
         "how long a dry-run plan stays presentable before it must be re-planned",
         acts on "every destructive method's execute leg, which fails with plan not found";
+    "daemon.fd_pressure_percent" = crate::rlimit::FD_PRESSURE_PERCENT,
+        "share of the soft limit, in percent, at which open descriptors count as high",
+        acts on "the status card's hint and doctor's fd limit row, which ask for a restart";
     "daemon.nofile_target" = crate::rlimit::NOFILE_TARGET,
         "open files the daemon raises its soft limit to at startup",
         acts on "a large batch ingest, which holds a file per index fragment";

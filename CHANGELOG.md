@@ -74,6 +74,15 @@ release workflow extracts the matching section verbatim from this file.
   once a book derived from it is in the library; `--status needs_ocr`
   still lists it. `library.find_books` takes the same filter as
   `awaiting_text`, on the control plane and as an MCP tool argument.
+- **A running daemon reports its open file descriptors against its
+  limit.** `daemon.status` carries an `fds` object with the open count,
+  the soft limit (`null` for none), and a `pressure` that reads `high`
+  once the count reaches 75% of the limit. `bookrack doctor`, answered
+  by a daemon, prints the count on its `fd limit` row
+  (`412 of 8192 open`) and warns at the same share. Descriptors can
+  accumulate across a long session of ingests into a library with a
+  vector index; restarting the daemon releases them. See
+  [control-plane.md](docs/control-plane.md).
 
 ### Changed
 

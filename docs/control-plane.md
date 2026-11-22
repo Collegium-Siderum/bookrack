@@ -474,8 +474,8 @@ unchanged.
   process, not to the daemon.
 - `daemon.status` — `{ state, queue_pending, queue_running,
   queue_worker_enabled, library, data_dir, served, unmounted,
-  auto_registered }`, plus the six identity fields of `daemon.version`
-  at the top level, with the same values.
+  auto_registered, fds }`, plus the six identity fields of
+  `daemon.version` at the top level, with the same values.
   The canonical name; `status` is a compatibility alias answered by
   the same handler.
   `state` is one of
@@ -520,6 +520,16 @@ unchanged.
   registry did not know — and is `[]` when it recorded nothing. It is
   a fact about this session, not persisted: the next start on the same
   root finds the entry in place and reports an empty list.
+
+  `fds` is the daemon's own file descriptors, `{ open, soft_limit,
+  pressure }`, read when the call is answered. `open` is the count of
+  descriptors the process holds, `null` when it could not be counted;
+  `soft_limit` is its soft `RLIMIT_NOFILE`, `null` meaning unlimited.
+  `pressure` is `high` once `open` reaches 75% of `soft_limit`
+  (`daemon.fd_pressure_percent` in `config fixed`), `normal` below that
+  or with no limit, and `unknown` when `open` is `null`. Descriptors
+  can accumulate across a long session of ingests into a library with a
+  vector index, and a restart releases them; `high` is the cue for one.
 - `doctor.gather` — `{ library? }` → JSON serialisation of the same
   report the `bookrack doctor` subcommand prints. The library-level
   rows — data root, store files and their stamps, open pipeline runs,
@@ -530,7 +540,10 @@ unchanged.
   the `MCP endpoint` row probes the address this session bound and not
   the one the caller's environment names, and is `fail` when a service
   that is not bookrack answers there, or when nothing answers at an
-  address the daemon reports serving.
+  address the daemon reports serving. The `fd limit` row likewise
+  counts the daemon's own open descriptors against its soft limit
+  (`412 of 8192 open`) and is `warn` when `daemon.status` would report
+  `fds.pressure` as `high`.
 - `daemon.methods` — the live method table: every name this daemon
   dispatches, with its read/write class, whether a daemon without a
   queue worker refuses it, and how a library selection reaches it. Authoritative at

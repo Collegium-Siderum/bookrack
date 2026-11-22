@@ -182,6 +182,10 @@ pub fn status(ctx: &MethodContext) -> Value {
         // empty when nothing was. Not persisted: a restart on the same
         // root finds it registered and reports nothing here.
         "auto_registered": ctx.auto_registered,
+        // This process's open descriptors against its soft limit, read
+        // now: they accumulate while the daemon runs, so a value cached
+        // at bring-up would say nothing.
+        "fds": crate::rlimit::FdUsage::current(),
     });
     // Which daemon is answering: the same six fields, with the same
     // values, as `daemon.version`.

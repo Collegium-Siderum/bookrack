@@ -214,7 +214,7 @@ pub async fn gather_with(
     push_reporter_row(&mut rows, &reporter);
     let cfg = push_data_root_row(&mut rows, resolved);
     push_pdfium_row(&mut rows);
-    push_fd_limit_row(&mut rows);
+    push_fd_limit_row(&mut rows, &reporter);
     if let Some(cfg) = &cfg {
         push_root_config_row(&mut rows, cfg.config_notices(), daemon);
         push_retired_variables_row(&mut rows, daemon.retired_seen());
@@ -552,37 +552,63 @@ fn push_pdfium_row(rows: &mut Vec<Row>) {
 
 /// Report the soft `RLIMIT_NOFILE` after attempting the same raise the
 /// daemon performs at startup, so the row shows the limit a daemon
-/// launched from this environment would actually run with.
-fn push_fd_limit_row(rows: &mut Vec<Row>) {
-    let label = "fd limit".to_string();
-    match crate::rlimit::raise_nofile() {
-        Ok(None) => rows.push(Row {
-            label,
-            value: "unlimited".to_string(),
-            status: Status::Ok { note: None },
-        }),
-        Ok(Some(soft)) if soft >= crate::rlimit::NOFILE_TARGET => rows.push(Row {
-            label,
-            value: soft.to_string(),
-            status: Status::Ok { note: None },
-        }),
-        Ok(Some(soft)) => rows.push(Row {
-            label,
-            value: soft.to_string(),
-            status: Status::Warn {
-                note: format!(
-                    "below {}; a large ingest batch may hit `Too many open files`",
-                    crate::rlimit::NOFILE_TARGET
-                ),
-            },
-        }),
-        Err(e) => rows.push(Row {
-            label,
-            value: "(unknown)".to_string(),
-            status: Status::Warn {
-                note: format!("could not raise RLIMIT_NOFILE: {e}"),
-            },
-        }),
+/// launched from this environment would actually run with. Gathered
+/// inside the daemon, the row also counts the descriptors the daemon
+/// holds; the in-process path has no daemon's descriptors to count.
+fn push_fd_limit_row(rows: &mut Vec<Row>, reporter: &Reporter<'_>) {
+    let usage = match reporter {
+        Reporter::Daemon { .. } => Some(crate::rlimit::FdUsage::current()),
+        Reporter::InProcess { .. } => None,
+    };
+    rows.push(fd_limit_row(crate::rlimit::raise_nofile(), usage));
+}
+
+/// The `fd limit` row for the outcome of the raise and, gathered inside
+/// the daemon, the daemon's own descriptor count. High pressure outranks
+/// a limit below target: it is the condition already reached, and the
+/// one a restart clears.
+fn fd_limit_row(
+    raised: std::io::Result<Option<u64>>,
+    usage: Option<crate::rlimit::FdUsage>,
+) -> Row {
+    use crate::rlimit::{FD_PRESSURE_PERCENT, FdPressure, NOFILE_TARGET};
+
+    let limit = match &raised {
+        Ok(None) => "unlimited".to_string(),
+        Ok(Some(soft)) => soft.to_string(),
+        Err(_) => "(unknown)".to_string(),
+    };
+    let value = match (usage.and_then(|u| u.open), &raised) {
+        (Some(open), Ok(Some(soft))) => format!("{open} of {soft} open"),
+        (Some(open), Ok(None)) => format!("{open} open, unlimited"),
+        (Some(open), Err(_)) => format!("{open} open, limit (unknown)"),
+        (None, _) => limit,
+    };
+    let status = match (&raised, usage) {
+        (_, Some(u)) if u.pressure == FdPressure::High => Status::Warn {
+            note: format!(
+                "at or above {FD_PRESSURE_PERCENT}% of the soft limit; ingests into a library \
+                 with a vector index accumulate descriptors -- restart the daemon \
+                 (`bookrack quit`, then `bookrack run`) to release them"
+            ),
+        },
+        (Err(e), _) => Status::Warn {
+            note: format!("could not raise RLIMIT_NOFILE: {e}"),
+        },
+        (Ok(Some(soft)), _) if *soft < NOFILE_TARGET => Status::Warn {
+            note: format!(
+                "below {NOFILE_TARGET}; a large ingest batch may hit `Too many open files`"
+            ),
+        },
+        (Ok(_), Some(u)) if u.pressure == FdPressure::Unknown => Status::Ok {
+            note: Some("could not count the daemon's open descriptors".to_string()),
+        },
+        (Ok(_), _) => Status::Ok { note: None },
+    };
+    Row {
+        label: "fd limit".to_string(),
+        value,
+        status,
     }
 }
 
@@ -2062,6 +2088,78 @@ mod tests {
     use bookrack_core::Explain;
 
     use super::*;
+    use crate::rlimit::{FdUsage, NOFILE_TARGET};
+
+    #[test]
+    fn the_fd_row_from_the_daemon_counts_its_open_descriptors() {
+        let row = fd_limit_row(
+            Ok(Some(NOFILE_TARGET)),
+            Some(FdUsage::grade(Some(412), Some(NOFILE_TARGET))),
+        );
+        assert_eq!(row.label, "fd limit");
+        assert_eq!(row.value, "412 of 8192 open");
+        assert!(matches!(row.status, Status::Ok { note: None }), "{row:?}");
+
+        let row = fd_limit_row(Ok(None), Some(FdUsage::grade(Some(412), None)));
+        assert_eq!(row.value, "412 open, unlimited");
+        assert!(matches!(row.status, Status::Ok { note: None }), "{row:?}");
+    }
+
+    #[test]
+    fn the_fd_row_warns_with_a_restart_at_high_pressure() {
+        let row = fd_limit_row(
+            Ok(Some(NOFILE_TARGET)),
+            Some(FdUsage::grade(Some(7000), Some(NOFILE_TARGET))),
+        );
+        assert_eq!(row.value, "7000 of 8192 open");
+        let Status::Warn { note } = &row.status else {
+            panic!("high pressure must warn: {row:?}");
+        };
+        assert!(
+            note.starts_with("at or above 75% of the soft limit"),
+            "{note}"
+        );
+        assert!(
+            note.contains("restart the daemon (`bookrack quit`, then `bookrack run`)"),
+            "{note}"
+        );
+        // A limit below target with the count at high pressure: the
+        // pressure is what to act on, so its note is the one shown.
+        let row = fd_limit_row(Ok(Some(256)), Some(FdUsage::grade(Some(250), Some(256))));
+        assert_eq!(row.value, "250 of 256 open");
+        let Status::Warn { note } = &row.status else {
+            panic!("high pressure must warn: {row:?}");
+        };
+        assert!(note.contains("restart the daemon"), "{note}");
+    }
+
+    #[test]
+    fn the_fd_row_from_the_daemon_says_when_it_could_not_count() {
+        let row = fd_limit_row(
+            Ok(Some(NOFILE_TARGET)),
+            Some(FdUsage::grade(None, Some(NOFILE_TARGET))),
+        );
+        assert_eq!(row.value, "8192");
+        assert!(
+            matches!(&row.status, Status::Ok { note: Some(n) } if n == "could not count the daemon's open descriptors"),
+            "{row:?}"
+        );
+    }
+
+    #[test]
+    fn the_fd_row_in_process_reports_the_limit_alone() {
+        let row = fd_limit_row(Ok(Some(NOFILE_TARGET)), None);
+        assert_eq!(row.value, "8192");
+        assert!(matches!(row.status, Status::Ok { note: None }), "{row:?}");
+        let row = fd_limit_row(Ok(Some(256)), None);
+        assert_eq!(row.value, "256");
+        assert!(
+            matches!(&row.status, Status::Warn { note } if note.starts_with("below 8192")),
+            "{row:?}"
+        );
+        let row = fd_limit_row(Ok(None), None);
+        assert_eq!(row.value, "unlimited");
+    }
 
     /// Every note the two Ollama rows can carry, transcribed from the
     /// table as it stood before the judgement moved out. Pinning the
