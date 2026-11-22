@@ -22,6 +22,7 @@ mod mcp_endpoint;
 mod metadata_write_reports;
 mod papers_maintenance;
 mod papers_metadata_writes;
+mod queue_announcements;
 mod queue_document_gate;
 mod queue_failure_problem;
 mod queue_lifecycle;

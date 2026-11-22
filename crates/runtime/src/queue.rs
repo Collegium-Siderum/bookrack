@@ -959,6 +959,15 @@ where
 
         announce_outcome(&job, &outcome);
 
+        // Announce the job's library once its run has returned, ahead of
+        // the closing tick and whether or not the queue document saves.
+        // A row naming no library was refused before it was routed.
+        if !job.library.is_empty() {
+            events.publish(Event::LibraryChanged {
+                library: job.library.clone(),
+            });
+        }
+
         {
             let mut guard = state.lock().expect("queue state mutex poisoned");
             if pause_queue {
@@ -2328,14 +2337,191 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
 
         let mut ticks = 0;
+        let mut changed = Vec::new();
         while let Ok(event) = subscriber.try_recv() {
-            if matches!(event, Event::QueueTick(_)) {
-                ticks += 1;
+            match event {
+                Event::QueueTick(_) => ticks += 1,
+                Event::LibraryChanged { library } => changed.push(library),
+                _ => {}
             }
         }
         assert_eq!(
             ticks, 0,
             "a queue.tick was published without a successful persist"
+        );
+        // The library the job wrote is announced whatever became of the
+        // queue document.
+        assert_eq!(changed, ["default"]);
+    }
+
+    /// Runs the jobs in `state` through [`worker_loop`] with `runner`
+    /// until a `queue.tick` closing each of `ids` has been published,
+    /// then returns every event the loop published, in order.
+    async fn drive_worker<R, Fut>(
+        state: Arc<Mutex<QueueState>>,
+        ids: &[&str],
+        runner: R,
+    ) -> Vec<Event>
+    where
+        R: Fn(QueueJob) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = std::result::Result<JobSuccess, JobError>> + Send + 'static,
+    {
+        use crate::control::events::{DaemonState, DaemonStateFlag};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.json");
+        let events = EventStreamHandle::new(256, Arc::new(DaemonStateFlag::new(DaemonState::Idle)));
+        let mut subscriber = events.subscribe();
+        let (tx, rx) = broadcast::channel::<()>(2);
+        let handle = tokio::spawn(worker_loop(
+            path,
+            state,
+            rx,
+            runner,
+            events,
+            Arc::new(AtomicBool::new(false)),
+        ));
+        let mut seen = Vec::new();
+        let collect = async {
+            while !ids.iter().all(|id| closing_tick_at(&seen, id).is_some()) {
+                seen.push(subscriber.recv().await.expect("event stream open"));
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), collect)
+            .await
+            .expect("the worker did not close every job within 5 s");
+        tx.send(()).expect("send shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        seen
+    }
+
+    /// A queue holding `jobs`, in enqueue order.
+    fn queue_of(jobs: Vec<QueueJob>) -> Arc<Mutex<QueueState>> {
+        Arc::new(Mutex::new(QueueState {
+            jobs,
+            ..QueueState::default()
+        }))
+    }
+
+    /// A pending book job `id` against `library`.
+    fn pending_on(id: &str, library: &str) -> QueueJob {
+        let mut job = job(id, Priority::Normal, JobState::Pending);
+        job.library = library.to_string();
+        job
+    }
+
+    /// The position of the `queue.tick` that closes job `id`, if any.
+    fn closing_tick_at(events: &[Event], id: &str) -> Option<usize> {
+        events.iter().position(|event| {
+            matches!(event, Event::QueueTick(tick)
+                if tick.last_finished.as_ref().is_some_and(|f| f.job_id == id))
+        })
+    }
+
+    /// The positions of every `library.changed` naming `library`.
+    fn announcements(events: &[Event], library: &str) -> Vec<usize> {
+        events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| {
+                matches!(event, Event::LibraryChanged { library: named } if named == library)
+            })
+            .map(|(at, _)| at)
+            .collect()
+    }
+
+    /// Every job the worker settles announces its library once, ahead
+    /// of the tick that closes it, whatever the outcome: done, skipped
+    /// as a duplicate, parked as needing OCR, or failed.
+    #[tokio::test]
+    async fn worker_loop_announces_a_settled_jobs_library_before_its_closing_tick() {
+        let state = queue_of(vec![
+            pending_on("done", "lib-done"),
+            pending_on("skip", "lib-skip"),
+            pending_on("ocr", "lib-ocr"),
+            pending_on("fail", "lib-fail"),
+        ]);
+        let ids = ["done", "skip", "ocr", "fail"];
+        let events = drive_worker(state, &ids, |job| async move {
+            match job.id.as_str() {
+                "done" => Ok(JobSuccess::done()),
+                "skip" => Ok(JobSuccess {
+                    no_op: true,
+                    needs_ocr: false,
+                    intake_id: Some(1),
+                }),
+                "ocr" => Ok(JobSuccess {
+                    no_op: false,
+                    needs_ocr: true,
+                    intake_id: Some(2),
+                }),
+                _ => Err(JobError::Book(JobFailure::text("boom"))),
+            }
+        })
+        .await;
+        for (id, library) in [
+            ("done", "lib-done"),
+            ("skip", "lib-skip"),
+            ("ocr", "lib-ocr"),
+            ("fail", "lib-fail"),
+        ] {
+            let announced = announcements(&events, library);
+            assert_eq!(
+                announced.len(),
+                1,
+                "job {id} must announce {library} exactly once: {events:?}"
+            );
+            assert!(
+                Some(announced[0]) < closing_tick_at(&events, id),
+                "job {id} must announce {library} before its closing tick: {events:?}"
+            );
+        }
+    }
+
+    /// A job marked cancelled while it runs still wrote what it wrote
+    /// by the time the runner returns, and announces its library.
+    #[tokio::test]
+    async fn worker_loop_announces_a_job_cancelled_while_it_ran() {
+        let state = queue_of(vec![pending_on("ran", "lib-ran")]);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let runner = {
+            let (started, release) = (Arc::clone(&started), Arc::clone(&release));
+            move |_job| {
+                let (started, release) = (Arc::clone(&started), Arc::clone(&release));
+                async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok(JobSuccess::done())
+                }
+            }
+        };
+        let driver = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { drive_worker(state, &["ran"], runner).await }
+        });
+        started.notified().await;
+        let cancelled = cancel_matching(&mut state.lock().unwrap(), "ran").expect("cancel");
+        assert_eq!(cancelled, "ran");
+        release.notify_one();
+        let events = driver.await.expect("driver task");
+        assert_eq!(announcements(&events, "lib-ran").len(), 1, "{events:?}");
+    }
+
+    /// A job naming no library cannot be routed and touched nothing, so
+    /// it closes with its tick and no announcement.
+    #[tokio::test]
+    async fn worker_loop_announces_nothing_for_a_job_naming_no_library() {
+        let state = queue_of(vec![pending_on("unnamed", "")]);
+        let events = drive_worker(state, &["unnamed"], |_job| async {
+            Err(JobError::Book(JobFailure::text("names no library")))
+        })
+        .await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::LibraryChanged { .. })),
+            "{events:?}"
         );
     }
 

@@ -1438,6 +1438,16 @@ whether the write was refused or its answer was lost.
   library set to be. A dry-run leg publishes none: it holds the write
   mutex but leaves every library as it found it, so a subscriber that
   refreshed would find nothing changed.
+
+  The queue worker publishes it as well, once for every job it settles
+  that names a library, whatever the outcome — `done`,
+  `skipped_duplicate`, `needs_ocr`, or `failed`, and a job marked
+  cancelled while it ran — once the job's run returns and before the
+  `queue.tick` that closes the job. It does not depend on that tick: a
+  job whose closing state could not be saved to the queue document
+  still announces its library. A queue job takes no write session, so
+  no `mcp.availability` accompanies it. A job cancelled while it is
+  still pending never reaches the worker and announces nothing.
 - `mcp.availability` — `{ paused }` published `true` at the start of
   every write session — every control-plane write command, dry-run
   legs included, and every MCP write tool — and `false` after it ends,

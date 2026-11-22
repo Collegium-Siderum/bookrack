@@ -116,6 +116,12 @@ release workflow extracts the matching section verbatim from this file.
   library, the fork now publishes `library.changed` for the clone when
   it is served on the same call, so a subscriber sees the library set
   grow without waiting for something else to change.
+- **A queue job announces the library it worked on.** The queue worker
+  publishes `library.changed` for a job's library once it settles the
+  job, whatever the outcome, ahead of the `queue.tick` that closes it,
+  so a subscriber refreshes after an ingest or a glean as it does after
+  a control-plane write. The announcement does not pause MCP. A job
+  cancelled while still pending announces nothing.
 - **`bookrack doctor` names a PDFium library a build before 0.14.0 left
   behind.** Those builds installed the library file directly under
   `<platform data dir>/bookrack/pdfium/`, where no later build looks.
