@@ -547,12 +547,35 @@ fn data_root_status(
 fn push_pdfium_row(rows: &mut Vec<Row>) {
     let filename = pdfium_library_filename();
     let location = locate_pdfium(bookrack_extract::pdfium_pin::PDFIUM_RELEASE_TAG);
+    let flat = bookrack_config::pdfium_managed_root()
+        .map(|root| root.join(filename))
+        .filter(|path| path.is_file());
+    rows.push(pdfium_row(filename, location, flat));
+}
+
+/// The `PDFium library` row for the outcome of the search. `flat` is a
+/// library file sitting directly under the managed root, where builds
+/// before 0.14.0 installed it; the search never reads it, so the row
+/// names it for what it is whichever way the search went.
+fn pdfium_row(
+    filename: &str,
+    location: bookrack_config::PdfiumLocation,
+    flat: Option<std::path::PathBuf>,
+) -> Row {
+    let flat_note = flat.map(|path| {
+        format!(
+            "{} is the copy builds before 0.14.0 installed; this build does not load it, \
+             and once no such build is left it can be deleted -- the file alone, not the \
+             directory",
+            path.display()
+        )
+    });
     match location.dir {
-        Some(dir) => rows.push(Row {
+        Some(dir) => Row {
             label: "PDFium library".to_string(),
             value: dir.join(filename).display().to_string(),
-            status: Status::Ok { note: None },
-        }),
+            status: Status::Ok { note: flat_note },
+        },
         None => {
             let searched = location
                 .probed
@@ -560,15 +583,18 @@ fn push_pdfium_row(rows: &mut Vec<Row>) {
                 .map(|d| d.display().to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
-            rows.push(Row {
+            let install =
+                format!("run `bookrack setup pdfium` to install the pinned build of {filename}");
+            Row {
                 label: "PDFium library".to_string(),
                 value: format!("(missing) searched {searched}"),
                 status: Status::Fail {
-                    note: format!(
-                        "run `bookrack setup pdfium` to install the pinned build of {filename}"
-                    ),
+                    note: match flat_note {
+                        Some(flat) => format!("{install}; {flat}"),
+                        None => install,
+                    },
                 },
-            });
+            }
         }
     }
 }
@@ -2112,6 +2138,67 @@ mod tests {
 
     use super::*;
     use crate::rlimit::{FdUsage, NOFILE_TARGET};
+
+    fn pdfium_location(dir: Option<&str>) -> bookrack_config::PdfiumLocation {
+        bookrack_config::PdfiumLocation {
+            dir: dir.map(std::path::PathBuf::from),
+            probed: vec![
+                std::path::PathBuf::from("/opt/bookrack/bin"),
+                std::path::PathBuf::from("/data/bookrack/pdfium/chromium/8125"),
+            ],
+        }
+    }
+
+    #[test]
+    fn the_pdfium_row_names_a_flat_copy_an_earlier_build_left() {
+        let flat = std::path::PathBuf::from("/data/bookrack/pdfium/libpdfium.dylib");
+        let row = pdfium_row(
+            "libpdfium.dylib",
+            pdfium_location(Some("/data/bookrack/pdfium/chromium/8125")),
+            Some(flat.clone()),
+        );
+        assert_eq!(
+            row.value,
+            "/data/bookrack/pdfium/chromium/8125/libpdfium.dylib"
+        );
+        let Status::Ok { note: Some(note) } = &row.status else {
+            panic!("a found library with a flat copy beside it is OK with a note: {row:?}");
+        };
+        assert!(
+            note.starts_with(
+                "/data/bookrack/pdfium/libpdfium.dylib is the copy builds before 0.14.0 installed"
+            ),
+            "{note}"
+        );
+        assert!(note.contains("the file alone, not the directory"), "{note}");
+
+        // Missing library: the install remedy stays first, the flat
+        // copy follows it, so it is not mistaken for the library found.
+        let row = pdfium_row("libpdfium.dylib", pdfium_location(None), Some(flat));
+        let Status::Fail { note } = &row.status else {
+            panic!("a missing library fails: {row:?}");
+        };
+        assert!(note.starts_with("run `bookrack setup pdfium`"), "{note}");
+        assert!(
+            note.contains("is the copy builds before 0.14.0 installed"),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn the_pdfium_row_says_nothing_of_a_flat_copy_that_is_not_there() {
+        let row = pdfium_row(
+            "libpdfium.dylib",
+            pdfium_location(Some("/data/bookrack/pdfium/chromium/8125")),
+            None,
+        );
+        assert!(matches!(row.status, Status::Ok { note: None }), "{row:?}");
+        let row = pdfium_row("libpdfium.dylib", pdfium_location(None), None);
+        assert!(
+            matches!(&row.status, Status::Fail { note } if note == "run `bookrack setup pdfium` to install the pinned build of libpdfium.dylib"),
+            "{row:?}"
+        );
+    }
 
     #[test]
     fn the_fd_row_from_the_daemon_counts_its_open_descriptors() {

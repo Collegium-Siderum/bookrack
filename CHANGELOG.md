@@ -88,6 +88,12 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **`bookrack doctor` names a PDFium library a build before 0.14.0 left
+  behind.** Those builds installed the library file directly under
+  `<platform data dir>/bookrack/pdfium/`, where no later build looks.
+  While that file is there, the `PDFium library` row says what it is
+  and that it can be deleted once no such build is left — the file
+  alone, not the directory.
 - **`config effective` shows what a running daemon is using.** The
   command reported what the calling shell would resolve, which is not
   what a daemon started elsewhere, or earlier, runs under. With a daemon

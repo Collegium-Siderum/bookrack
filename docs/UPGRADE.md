@@ -55,7 +55,9 @@ directory it searched.
   own. Builds before 0.14.0 installed the library file directly into
   `bookrack/pdfium/`; only they read that file, and it can be deleted
   once none is left. Delete the file alone, not the directory: the
-  directories the newer builds install into sit inside it.
+  directories the newer builds install into sit inside it. `bookrack
+  doctor` names that file on its `PDFium library` row while it is
+  there.
 - **`BOOKRACK_PDFIUM_LIB`.** Retired: a build from 0.15.0 on ignores
   it and searches the executable's directory and then the managed copy.
   Make sure one of those holds the pinned build, running `setup pdfium`
