@@ -389,6 +389,12 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **`doctor --rename-envelopes` no longer overwrites an envelope that
+  already has its kind-prefixed name.** When an item's legacy envelope
+  and its prefixed one were both present, the legacy file was renamed
+  over the other. It is now left in place beside it and reported as
+  skipped: on a `SKIPPED` line of the text report, and under
+  `target_exists` in `--json`, the dry run included.
 - **`config effective` reports the embed model the library's index
   profile declares.** The `embed.model` row always showed the
   compiled-in default, whatever profile the selected library referenced.

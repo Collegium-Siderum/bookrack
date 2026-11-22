@@ -252,6 +252,10 @@ pub struct RenameReport {
     /// Per-file failures, in scan order. A failure on one file does
     /// not stop the rest of the batch.
     pub failures: Vec<RenameFailure>,
+    /// Per-file moves not carried out because a file already holds the
+    /// kinded name, in scan order. Neither file is touched: a rename
+    /// would replace the kinded file with the legacy one.
+    pub target_exists: Vec<RenameAction>,
 }
 
 impl RenameReport {
@@ -280,7 +284,9 @@ pub struct RenameFailure {
 /// envelopes (`{intake_id}.bookrack-extraction.v2.json`) to the
 /// kinded form produced by `envelope_filename(kind, intake_id)`.
 /// Files already carrying a `book-` or `paper-` prefix are skipped;
-/// the operation is idempotent.
+/// the operation is idempotent. A legacy file whose kinded name is
+/// already taken is left in place beside it and listed under
+/// [`RenameReport::target_exists`].
 ///
 /// With `dry_run = true` the plan is computed and returned without
 /// touching the disk.
@@ -369,12 +375,20 @@ fn scan_envelopes(
         };
         let to_name = bookrack_extract::envelope_filename(kind, intake_id);
         let to = from.with_file_name(&to_name);
-
-        report.renamed.push(RenameAction {
+        let action = RenameAction {
             kind: kind.as_scope_str().to_string(),
             from: from.display().to_string(),
             to: to.display().to_string(),
-        });
+        };
+        // `rename` replaces an existing target. A taken name, a dangling
+        // link included, is reported and both files are left as they are;
+        // the check and the rename are two calls, not one atomic step.
+        if std::fs::symlink_metadata(&to).is_ok() {
+            report.target_exists.push(action);
+            continue;
+        }
+
+        report.renamed.push(action);
         if !dry_run && let Err(e) = std::fs::rename(&from, &to) {
             let last = report.renamed.pop().expect("pushed above");
             report.failures.push(RenameFailure {
@@ -396,9 +410,10 @@ pub fn render_rename_report(report: &RenameReport, json: bool) {
     }
     let mode = if report.dry_run { "(plan)" } else { "" };
     println!(
-        "envelope rename {mode}: {} planned, {} already prefixed, {} failed",
+        "envelope rename {mode}: {} planned, {} already prefixed, {} skipped, {} failed",
         report.renamed.len(),
         report.already_prefixed,
+        report.target_exists.len(),
         report.failures.len(),
     );
     for action in &report.renamed {
@@ -409,6 +424,14 @@ pub fn render_rename_report(report: &RenameReport, json: bool) {
         };
         println!(
             "  {verb} [{kind}] {from}  ->  {to}",
+            kind = action.kind,
+            from = action.from,
+            to = action.to,
+        );
+    }
+    for action in &report.target_exists {
+        println!(
+            "  SKIPPED [{kind}] {from}  ->  {to} (a file already has the new name)",
             kind = action.kind,
             from = action.from,
             to = action.to,
@@ -3822,6 +3845,43 @@ mod tests {
             "second pass should find nothing to rename"
         );
         assert_eq!(second.already_prefixed, 1);
+    }
+
+    #[test]
+    fn rename_envelopes_leaves_a_taken_kinded_name_alone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let books = tmp.path().join("books");
+        let papers = tmp.path().join("papers");
+        std::fs::create_dir_all(&books).unwrap();
+        std::fs::create_dir_all(&papers).unwrap();
+        let legacy = write_legacy_envelope(&books, 3);
+        let kinded = books.join(bookrack_extract::envelope_filename(
+            bookrack_core::ItemKind::Book,
+            3,
+        ));
+        std::fs::write(&kinded, b"{\"schema_version\":3}").unwrap();
+
+        let applied = rename_envelopes_in(&books, &papers, false);
+        assert_eq!(
+            std::fs::read(&kinded).unwrap(),
+            b"{\"schema_version\":3}",
+            "the kinded envelope was overwritten by the legacy one"
+        );
+        assert!(legacy.exists(), "the legacy envelope was moved");
+        assert!(applied.renamed.is_empty(), "{applied:?}");
+        assert!(applied.failures.is_empty(), "{applied:?}");
+        let skipped: Vec<_> = applied
+            .target_exists
+            .iter()
+            .map(|a| (a.from.as_str(), a.to.as_str()))
+            .collect();
+        let (from, to) = (legacy.display().to_string(), kinded.display().to_string());
+        assert_eq!(skipped, [(from.as_str(), to.as_str())]);
+
+        // The plan says the same before anything is touched.
+        let plan = rename_envelopes_in(&books, &papers, true);
+        assert!(plan.renamed.is_empty(), "{plan:?}");
+        assert_eq!(plan.target_exists.len(), 1, "{plan:?}");
     }
 
     #[test]
