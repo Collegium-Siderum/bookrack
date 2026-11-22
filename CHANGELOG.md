@@ -328,6 +328,14 @@ release workflow extracts the matching section verbatim from this file.
   is queued, and `false`, which every earlier client sends, is accepted
   and ignored. A job queued with the hold before the upgrade loads as
   `failed`, and `bookrack queue retry` runs it without the hold.
+- **An MCP client asking for prompts, resources, or completions is
+  answered method-not-found.** The server advertises the tools
+  capability alone, yet through `rmcp` 3.6.0 `prompts/list`,
+  `resources/list`, `resources/templates/list`, and
+  `completion/complete` answered with empty results, which a client
+  could read as support. `rmcp` 3.11.0 answers each with JSON-RPC
+  `-32601`. A client that reads the capabilities `initialize` returns
+  does not send them.
 
 ### Deprecated
 
@@ -525,6 +533,14 @@ release workflow extracts the matching section verbatim from this file.
   given a zero-length buffer. bookrack calls `rustix` for process
   signals and waits only, and the `tar` reader the installers use reads
   no extended attributes, so nothing here reaches it.
+- **deps: `rmcp` moves from 3.6.0 to 3.11.0, clearing RUSTSEC-2026-0457
+  and -0462.** Both sit in the client half of the SDK: the OAuth
+  client's address filter, behind the `auth` feature the workspace does
+  not enable, and unbounded response buffering in the streamable-HTTP
+  client, which compiles into the binary but which only the `mcp`
+  crate's tests construct. Neither reaches the server bookrack runs, so
+  this clears lockfile advisories. The move also changes what the
+  server answers for an unadvertised capability (see *Changed*).
 
 ## [0.14.0] - 2026-11-07
 

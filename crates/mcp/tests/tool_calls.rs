@@ -30,7 +30,10 @@
 //! * a client on protocol version 2026-07-28, served one request at a
 //!   time, receives a tool's `invalid_params` in band under HTTP 200,
 //!   and a request that neither initializes nor names a session is
-//!   answered HTTP 400.
+//!   answered HTTP 400;
+//! * `initialize` advertises the tools capability alone, and the list
+//!   and completion methods of the capabilities it leaves out are
+//!   answered method-not-found.
 //!
 //! The registry carries two libraries on two roots so a card whose
 //! identity and counts came from different libraries is observable.
@@ -648,6 +651,70 @@ async fn a_session_less_request_that_is_not_initialize_is_bad_request() {
         "the refusal must name the missing session: {text}"
     );
 
+    fx.stop().await;
+}
+
+/// `initialize` advertises the tools capability alone, and a method
+/// of a capability left out is answered method-not-found rather than
+/// with an empty result a client could read as support.
+#[tokio::test]
+async fn a_method_of_an_unadvertised_capability_is_method_not_found() {
+    use rmcp::model::{ArgumentInfo, CompleteRequestParams, Reference};
+
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+
+    let capabilities = &client.peer_info().expect("initialize result").capabilities;
+    assert!(
+        capabilities.tools.is_some(),
+        "the tools capability must be advertised: {capabilities:?}"
+    );
+    assert!(
+        capabilities.prompts.is_none()
+            && capabilities.resources.is_none()
+            && capabilities.completions.is_none(),
+        "only the tools capability may be advertised: {capabilities:?}"
+    );
+
+    let completion = CompleteRequestParams::new(
+        Reference::for_prompt("unadvertised"),
+        ArgumentInfo::new("argument", ""),
+    );
+    let outcomes = [
+        ("prompts/list", client.list_prompts(None).await.map(drop)),
+        (
+            "resources/list",
+            client.list_resources(None).await.map(drop),
+        ),
+        (
+            "resources/templates/list",
+            client.list_resource_templates(None).await.map(drop),
+        ),
+        (
+            "completion/complete",
+            client.complete(completion).await.map(drop),
+        ),
+    ];
+    for (method, outcome) in outcomes {
+        let Err(err) = outcome else {
+            panic!("{method} must be refused, not answered with an empty result");
+        };
+        let data = rpc_error(err);
+        assert_eq!(
+            data.code,
+            ErrorCode::METHOD_NOT_FOUND,
+            "{method} must be method-not-found: {}",
+            data.message
+        );
+    }
+
+    let tools = client.list_all_tools().await.expect("tools/list");
+    assert!(
+        tools.iter().any(|tool| tool.name == "library.stats"),
+        "tools/list must still list the tools"
+    );
+
+    let _ = client.cancel().await;
     fx.stop().await;
 }
 
