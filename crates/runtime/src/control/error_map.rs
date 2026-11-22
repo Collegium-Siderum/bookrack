@@ -84,7 +84,7 @@ use bookrack_vectors::{TrainingLimit, VectorsError};
 use eyre::Report;
 
 use super::jsonrpc::{
-    BACKEND_UNAVAILABLE, INTERNAL_ERROR, INVALID_LIBRARY, INVALID_PARAMS, PLAN_KIND_MISMATCH,
+    BACKEND_UNAVAILABLE, BUSY, INTERNAL_ERROR, INVALID_LIBRARY, INVALID_PARAMS, PLAN_KIND_MISMATCH,
     PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND, PLAN_TARGET_DRIFTED, RpcError, STATE_UNUSABLE,
 };
 use super::plan_registry::PlanLookupError;
@@ -615,7 +615,9 @@ fn from_ops(e: &OpsError) -> RpcError {
         | NotALeaf { .. }
         | NotOrganizing { .. }
         | NoPassagesForKind { .. }
-        | SourceNotArchived { .. } => INVALID_PARAMS,
+        | SourceNotArchived { .. }
+        | UnknownAuditProfile { .. } => INVALID_PARAMS,
+        WriteBusy(_) => BUSY,
         _ => INTERNAL_ERROR,
     };
     rpc_from_problem(code, e.explain())
@@ -2168,6 +2170,18 @@ mod tests {
                 .is_some_and(|h| h.contains("reference.lookup")),
             "{data}"
         );
+    }
+
+    /// A write session refused because another holds the write mutex
+    /// is the busy code the control plane already answers a colliding
+    /// write with, and it says the same call may succeed once retried.
+    #[test]
+    fn a_busy_write_session_is_busy_and_retryable_through_ops_err() {
+        let rpc = ops_err(OpsError::WriteBusy(bookrack_ops::write_session::WriteBusy));
+        assert_eq!(rpc.code, BUSY);
+        assert_eq!(rpc.message, "another write command is already in progress");
+        let data = rpc.data.expect("problem data");
+        assert_eq!(data["retryable"], serde_json::json!(true), "{data}");
     }
 
     #[test]

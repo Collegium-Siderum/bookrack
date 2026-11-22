@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Audit-rule loaders shared by every command that builds an
-//! `IngestParams`. Each loader falls back to the shipped default on a
-//! missing or malformed overlay so a partial install does not refuse
-//! to start.
+//! Audit-rule loaders: a library's audit profile, audit data, and
+//! heading patterns, each read from the overlays under its data root.
+//! Every command that builds pipeline parameters, and every read that
+//! grades a record the way a write would, loads through here. Each
+//! loader falls back to the shipped default on a missing or malformed
+//! overlay so a partial install does not refuse to start.
 
 use bookrack_config::Config;
 use bookrack_metadata::AuditData;
-use bookrack_ops::{
-    PAPER_PROFILE_DEFAULT, PAPER_PROFILE_STRICT, PAPER_PROFILE_TRUST_SOURCE, PaperAuditData,
-    PaperAuditProfile,
-};
 
-use crate::cmd::input_error::CmdInputError;
+use crate::{
+    OpsError, PAPER_PROFILE_DEFAULT, PAPER_PROFILE_STRICT, PAPER_PROFILE_TRUST_SOURCE,
+    PaperAuditData, PaperAuditProfile,
+};
 
 /// Refuse an audit-profile name that matches no built-in in `names`.
 ///
@@ -22,19 +23,21 @@ use crate::cmd::input_error::CmdInputError;
 ///
 /// The built-in set is a parameter, not a constant this function
 /// picks. The book side is `bookrack_audit_profile::ALL_BUILT_IN_NAMES`
-/// and the paper side `bookrack_ops::PAPER_AUDIT_BUILT_IN_NAMES`;
+/// and the paper side [`crate::PAPER_AUDIT_BUILT_IN_NAMES`];
 /// the two hold the same three names today but are separate constants,
 /// and a function that chose one of them would start rejecting legal
 /// names on the other side the day it grows a profile — silently, with
 /// the tests still green.
-pub fn require_known_profile(name: Option<&str>, names: &[&str]) -> Result<(), CmdInputError> {
+///
+/// A refusal is [`OpsError::UnknownAuditProfile`], carrying the name
+/// sent and the set it was measured against.
+pub fn require_known_profile(name: Option<&str>, names: &[&str]) -> crate::Result<()> {
     match name {
         None => Ok(()),
         Some(n) if names.contains(&n) => Ok(()),
-        Some(n) => Err(CmdInputError::BadArgument {
-            arg: "audit_profile",
+        Some(n) => Err(OpsError::UnknownAuditProfile {
             value: n.to_string(),
-            expected: names.join(", "),
+            expected: names.iter().map(|name| name.to_string()).collect(),
         }),
     }
 }
@@ -185,6 +188,11 @@ mod tests {
     fn a_near_miss_is_refused_and_names_both_sides() {
         let err = require_known_profile(Some("strictt"), NAMES)
             .expect_err("a name outside the set must be refused");
+        let OpsError::UnknownAuditProfile { value, expected } = &err else {
+            panic!("the refusal is the unknown-profile variant: {err:?}");
+        };
+        assert_eq!(value, "strictt");
+        assert_eq!(expected, NAMES, "the set it was measured against");
         let problem = bookrack_core::Explain::explain(&err);
         assert!(
             problem.summary.contains("\"strictt\""),
@@ -208,5 +216,72 @@ mod tests {
     fn the_accepted_set_is_the_one_that_was_passed_in() {
         assert!(require_known_profile(Some("paper-only"), NAMES).is_err());
         assert!(require_known_profile(Some("paper-only"), &["paper-only"]).is_ok());
+    }
+
+    /// A configuration whose audit-rules directory holds `files`.
+    fn library_with_rules(files: &[(&str, &str)]) -> (tempfile::TempDir, Config) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(tmp.path().to_path_buf());
+        std::fs::create_dir_all(cfg.audit_rules_dir()).expect("audit-rules dir");
+        for (name, body) in files {
+            std::fs::write(cfg.audit_rules_dir().join(name), body).expect("write overlay");
+        }
+        (tmp, cfg)
+    }
+
+    #[test]
+    fn a_library_profile_overlay_is_what_the_unnamed_profile_loads() {
+        let (_tmp, cfg) = library_with_rules(&[(
+            "audit_profile.local.toml",
+            "schema_version = 1\n\n[year]\nmin = 1100\nmax = 2200\n",
+        )]);
+        let loaded = load_audit_profile(&cfg, None);
+        assert_eq!((loaded.year.min, loaded.year.max), (1100, 2200));
+        assert_ne!(
+            loaded,
+            bookrack_metadata::AuditProfile::default_profile(),
+            "the overlay must take effect"
+        );
+    }
+
+    #[test]
+    fn a_malformed_profile_overlay_falls_back_to_the_shipped_default() {
+        let (_tmp, cfg) =
+            library_with_rules(&[("audit_profile.local.toml", "schema_version = [not toml")]);
+        assert_eq!(
+            load_audit_profile(&cfg, None),
+            bookrack_metadata::AuditProfile::default_profile()
+        );
+    }
+
+    /// A named built-in wins over the library's overlay.
+    #[test]
+    fn a_named_built_in_ignores_the_library_overlay() {
+        let (_tmp, cfg) = library_with_rules(&[(
+            "audit_profile.local.toml",
+            "schema_version = 1\n\n[year]\nmin = 1100\nmax = 2200\n",
+        )]);
+        assert_eq!(
+            load_audit_profile(&cfg, Some("strict")),
+            bookrack_metadata::AuditProfile::from_named("strict").expect("built-in")
+        );
+    }
+
+    #[test]
+    fn a_library_data_overlay_is_what_the_data_loader_returns() {
+        let (_tmp, cfg) = library_with_rules(&[(
+            "audit_data.toml",
+            "schema_version = 1\n[publishers]\nwhitelist = [\"Acme University Press\"]\n",
+        )]);
+        assert_eq!(
+            load_audit_data(&cfg).publisher_whitelist,
+            ["Acme University Press"]
+        );
+    }
+
+    #[test]
+    fn a_malformed_data_overlay_falls_back_to_the_shipped_default() {
+        let (_tmp, cfg) = library_with_rules(&[("audit_data.toml", "[[[ not toml")]);
+        assert_eq!(load_audit_data(&cfg), AuditData::default_data());
     }
 }

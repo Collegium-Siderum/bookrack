@@ -8,13 +8,13 @@
 
 use std::path::PathBuf;
 
+use bookrack_ops::audit_overlay::require_known_profile;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{MethodContext, input_err, run_dry_run};
-use crate::audit_helpers::require_known_profile;
+use super::{MethodContext, run_dry_run};
 use crate::cmd::dryrun;
-use crate::control::error_map::{handler_err, registry_err};
+use crate::control::error_map::{handler_err, ops_err, registry_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Deserialize)]
@@ -50,7 +50,7 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
         parsed.audit_profile.as_deref(),
         bookrack_audit_profile::ALL_BUILT_IN_NAMES,
     )
-    .map_err(input_err)?;
+    .map_err(ops_err)?;
     let handle = ctx
         .registry
         .get(parsed.library.as_deref())

@@ -159,7 +159,6 @@ exit = "reference reads and writes go through ops and the write session; ops sup
 
 [[file]]
 paths = [
-  "crates/runtime/src/audit_helpers.rs",
   "crates/runtime/src/cmd/corpus.rs",
   "crates/runtime/src/cmd/diagnose.rs",
   "crates/runtime/src/cmd/dryrun.rs",
@@ -269,7 +268,7 @@ site = "crates/mcp/src/lib.rs::reference_overlay_set"
 access = "write"
 
 [[write_door]]
-site = "crates/ops/src/recorder.rs::finish_with_retrieval"
+site = "crates/ops/src/recorder.rs::write_row"
 access = "bookkeeping"
 
 [[write_door]]
@@ -641,10 +640,10 @@ exit = "handlers are generated from one method table"
 id = "runtime-audit-helpers"
 summary = "audit profile and audit data loaders, one per kind"
 sites = [
-  "crates/runtime/src/audit_helpers.rs::load_audit_data",
-  "crates/runtime/src/audit_helpers.rs::load_paper_audit_data",
-  "crates/runtime/src/audit_helpers.rs::load_audit_profile",
-  "crates/runtime/src/audit_helpers.rs::load_paper_audit_profile",
+  "crates/ops/src/audit_overlay.rs::load_audit_data",
+  "crates/ops/src/audit_overlay.rs::load_paper_audit_data",
+  "crates/ops/src/audit_overlay.rs::load_audit_profile",
+  "crates/ops/src/audit_overlay.rs::load_paper_audit_profile",
 ]
 reason = "transitional"
 agreement = "unverified"

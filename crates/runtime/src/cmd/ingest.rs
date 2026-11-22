@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use bookrack_catalog::Catalog;
 use bookrack_config::Config;
 use bookrack_corpus::Corpus;
+use bookrack_ops::audit_overlay::{load_audit_data, load_audit_profile, load_heading_patterns};
 use bookrack_ops::pipeline::book::{IngestParams, ingest_book};
 use eyre::{Context, Result};
 
-use crate::audit_helpers::{load_audit_data, load_audit_profile, load_heading_patterns};
 use crate::embed_helpers::embedder;
 use crate::pipeline_run_helpers::{close_run, open_run};
 use crate::render;

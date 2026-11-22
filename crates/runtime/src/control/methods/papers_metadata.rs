@@ -16,6 +16,9 @@
 
 // Parallel implementation: control-metadata.
 
+use bookrack_ops::audit_overlay::{
+    load_paper_audit_data, load_paper_audit_profile, require_known_profile,
+};
 use bookrack_ops::dto::writes::{
     PaperClearMetadataFieldRequest, PaperContributorAddRequest, PaperContributorRemoveRequest,
     PaperReviewRequest, PaperSetMetadataFieldRequest, PaperVoidMetadataFieldRequest,
@@ -24,11 +27,8 @@ use bookrack_ops::writes::papers_metadata as ops_papers;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{MethodContext, input_err, run_write};
-use crate::audit_helpers::{
-    load_paper_audit_data, load_paper_audit_profile, require_known_profile,
-};
-use crate::control::error_map::{handler_err, registry_err};
+use super::{MethodContext, run_write};
+use crate::control::error_map::{handler_err, ops_err, registry_err};
 use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 
 fn parse<T: for<'de> Deserialize<'de>>(
@@ -115,7 +115,7 @@ pub async fn reaudit(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         parsed.audit_profile.as_deref(),
         bookrack_ops::PAPER_AUDIT_BUILT_IN_NAMES,
     )
-    .map_err(input_err)?;
+    .map_err(ops_err)?;
     let library_name = handle.name().to_string();
     let PapersMetadataReauditParams {
         intake_id,

@@ -2,7 +2,7 @@
 
 //! Per-command implementations. Each submodule owns one CLI command
 //! and exposes a `run` entry point that the `main.rs` dispatch router
-//! calls into. The shared loaders (`audit_helpers`, `embed_helpers`,
+//! calls into. The shared loaders (`embed_helpers`,
 //! `ops_helpers`) and small utilities (`util`) live one level up so
 //! commands depend on them through `crate::*`, not on each other.
 

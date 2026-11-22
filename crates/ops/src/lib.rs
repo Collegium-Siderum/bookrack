@@ -23,6 +23,7 @@
 //! [`bookrack_catalog::MetadataAudit`] row tagged with the [`Caller`]
 //! this [`Ops`] was built with.
 
+pub mod audit_overlay;
 pub mod dto;
 pub mod pipeline;
 pub mod reads;
@@ -30,6 +31,7 @@ pub(crate) mod recorder;
 pub mod registry;
 pub mod rule;
 pub mod settings;
+pub mod write_session;
 pub mod writes;
 
 use std::path::{Path, PathBuf};
@@ -173,6 +175,22 @@ pub enum OpsError {
         intake_id: i64,
     },
 
+    /// An audit-profile name matched no built-in profile of the side
+    /// it was sent to.
+    #[error("audit_profile {value:?} is not a supported value")]
+    UnknownAuditProfile {
+        /// The name the caller sent.
+        value: String,
+        /// The built-in names that side accepts, in their declared
+        /// order.
+        expected: Vec<String>,
+    },
+
+    /// An exclusive write session was asked for while another one
+    /// holds the write mutex.
+    #[error(transparent)]
+    WriteBusy(#[from] crate::write_session::WriteBusy),
+
     /// Catch-all for ad-hoc errors that have no dedicated variant.
     #[error(transparent)]
     Other(eyre::Report),
@@ -185,6 +203,11 @@ impl bookrack_core::Explain for OpsError {
             // remaining variants are leaves or have none yet.
             OpsError::Query(e) => e.explain(),
             OpsError::Rerank(e) => e.explain(),
+            OpsError::WriteBusy(e) => e.explain(),
+            OpsError::UnknownAuditProfile { expected, .. } => {
+                bookrack_core::Problem::new(self.to_string())
+                    .detail(format!("Supported values: {}.", expected.join(", ")))
+            }
             OpsError::NoPassagesForKind { .. } => bookrack_core::Problem::new(self.to_string())
                 .detail(
                     "Passage reads are anchored on corpus nodes, and only books and papers \

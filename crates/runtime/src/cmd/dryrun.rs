@@ -122,7 +122,7 @@ fn run_inner(
     no_chunk: bool,
     profile_name: Option<&str>,
 ) -> Result<DryrunRunOutcome> {
-    let audit_data = crate::audit_helpers::load_audit_data(cfg);
+    let audit_data = bookrack_ops::audit_overlay::load_audit_data(cfg);
     let files = collect_files(path, &audit_data.book_extensions);
     if files.is_empty() {
         return Err(CmdInputError::NothingToDo {
@@ -143,8 +143,8 @@ fn run_inner(
     let params = DryrunParams {
         skip_chunks: no_chunk,
         audit_data,
-        audit_profile: crate::audit_helpers::load_audit_profile(cfg, profile_name),
-        heading_patterns: crate::audit_helpers::load_heading_patterns(cfg),
+        audit_profile: bookrack_ops::audit_overlay::load_audit_profile(cfg, profile_name),
+        heading_patterns: bookrack_ops::audit_overlay::load_heading_patterns(cfg),
         ..Default::default()
     };
 

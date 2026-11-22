@@ -11,14 +11,14 @@
 
 // Parallel implementation: control-metadata.
 
+use bookrack_ops::audit_overlay::require_known_profile;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{MethodContext, input_err, ok_reply, run_write};
-use crate::audit_helpers::require_known_profile;
+use super::{MethodContext, ok_reply, run_write};
 
 use crate::cmd::metadata::{WriteMetadataAction, run_write as run_metadata};
-use crate::control::error_map::{handler_err, registry_err};
+use crate::control::error_map::{handler_err, ops_err, registry_err};
 use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Deserialize)]
@@ -171,7 +171,7 @@ pub async fn reaudit(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         parsed.audit_profile.as_deref(),
         bookrack_audit_profile::ALL_BUILT_IN_NAMES,
     )
-    .map_err(input_err)?;
+    .map_err(ops_err)?;
     let profile = parsed.audit_profile;
     let action = WriteMetadataAction::Reaudit { book: parsed.book };
     run_metadata_action(ctx, parsed.library.as_deref(), action, profile).await

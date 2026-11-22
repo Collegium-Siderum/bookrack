@@ -39,10 +39,15 @@ use bookrack_core::{DaemonIdentity, Problem};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::WorkerGuard;
 use bookrack_obs::stream::LogStreamHandle;
+use bookrack_ops::audit_overlay::{
+    load_audit_data, load_audit_profile, load_heading_patterns, load_paper_audit_data,
+    load_paper_audit_profile,
+};
 use bookrack_ops::pipeline::book::IngestParams;
 use bookrack_ops::pipeline::paper::GleanParams;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{JobTemplates, LibraryHandle, LibraryRegistry, MountGuard};
+use bookrack_ops::write_session::NoopChangeSink;
 use bookrack_ops::{Caller, Ops, PapersPaths};
 use bookrack_query::Library;
 use bookrack_session::{
@@ -52,10 +57,6 @@ use eyre::{Context, Result};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
-use crate::audit_helpers::{
-    load_audit_data, load_audit_profile, load_heading_patterns, load_paper_audit_data,
-    load_paper_audit_profile,
-};
 use crate::control::events::{
     DEFAULT_EVENT_CHANNEL_CAPACITY, DaemonState, DaemonStateFlag, DegradedCause, Event,
     EventStreamHandle, Stage,
@@ -821,8 +822,17 @@ impl DaemonRuntime {
             return Err(skips.into_refusal());
         }
         let served = handles.len();
-        let registry = LibraryRegistry::from_handles(handles, plan.default_name.clone())
-            .context("assemble the library registry")?;
+        // One write mutex for the daemon: the control plane's write
+        // path holds it through `MethodContext`, and the registry's
+        // write sessions take the same one.
+        let write_guard = Arc::new(tokio::sync::Mutex::new(()));
+        let registry = LibraryRegistry::from_handles_with_sink(
+            handles,
+            plan.default_name.clone(),
+            Arc::new(NoopChangeSink),
+            Arc::clone(&write_guard),
+        )
+        .context("assemble the library registry")?;
         for skip in skips.iter() {
             registry
                 .record_unmounted(skip.library.clone())
@@ -908,7 +918,6 @@ impl DaemonRuntime {
         }
         let queue_paused = Arc::new(AtomicBool::new(initial_queue_state.paused));
         let queue_state = Arc::new(Mutex::new(initial_queue_state));
-        let write_guard = Arc::new(tokio::sync::Mutex::new(()));
         let selection_for_doctor = LibrarySelection {
             data_dir: opts.selection.data_dir.clone(),
             library: opts.selection.library.clone(),

@@ -17,13 +17,13 @@
 
 use std::path::PathBuf;
 
+use bookrack_ops::audit_overlay::require_known_profile;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{MethodContext, input_err};
-use crate::audit_helpers::require_known_profile;
 use crate::cmd::input_error::CmdInputError;
-use crate::control::error_map::handler_err;
+use crate::control::error_map::{handler_err, ops_err};
 use crate::control::events::Event;
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::queue::{self, Priority};
@@ -112,7 +112,7 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         parsed.audit_profile.as_deref(),
         bookrack_audit_profile::ALL_BUILT_IN_NAMES,
     )
-    .map_err(input_err)?;
+    .map_err(ops_err)?;
     let library = super::resolve_submit_target(ctx, parsed.library.as_deref())?;
     let priority = parsed
         .priority

@@ -7,11 +7,11 @@
 use bookrack_config::Config;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::Ops;
+use bookrack_ops::audit_overlay::load_audit_profile;
 use bookrack_ops::dto::writes::{AddContributorOutcome, ReauditOutcome, WriteOutcome};
 use eyre::Result;
 use serde::Serialize;
 
-use crate::audit_helpers::load_audit_profile;
 use crate::ops_helpers::catalog_only_ops;
 
 pub use bookrack_cli_grammar::WriteMetadataAction;

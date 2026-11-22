@@ -91,9 +91,24 @@ impl<'a> Recorder<'a> {
         tool: &'static str,
         args: serde_json::Value,
     ) -> Recorder<'a> {
-        let caller = ops.effective_caller();
+        Recorder::start_with_caller(ops.catalog_db(), &ops.effective_caller(), tool, args)
+    }
+
+    /// Start timing one call of `tool` attributed to `caller`, whose row
+    /// lands in the catalog at `catalog_db`, carrying `args` as
+    /// [`Recorder::start`] does.
+    ///
+    /// The recorded `source` is the caller's `actor_detail`, or its
+    /// actor kind when it has none.
+    pub fn start_with_caller(
+        catalog_db: &'a Path,
+        caller: &Caller,
+        tool: &'static str,
+        args: serde_json::Value,
+    ) -> Recorder<'a> {
         let source = caller
             .actor_detail
+            .clone()
             .unwrap_or_else(|| caller.actor_kind.as_str().to_string());
         let args = if args.is_null() {
             None
@@ -101,7 +116,7 @@ impl<'a> Recorder<'a> {
             Some(args.to_string())
         };
         Recorder {
-            catalog_db: ops.catalog_db(),
+            catalog_db,
             source,
             tool,
             args,
@@ -131,7 +146,18 @@ impl<'a> Recorder<'a> {
     /// catalog write failure is logged at `warn` and swallowed —
     /// `finish` never panics and never alters `result`.
     pub fn finish<T>(self, result: &crate::Result<T>) {
-        self.finish_with_retrieval(result, None)
+        self.finish_with_kind(result, error_kind)
+    }
+
+    /// Like [`Recorder::finish`], for an op whose error type is not
+    /// [`OpsError`]: `kind` names the stable error class of a failure,
+    /// and the error's `Display` is the recorded message.
+    pub fn finish_with_kind<T, Er: std::fmt::Display>(
+        self,
+        result: &std::result::Result<T, Er>,
+        kind: fn(&Er) -> &'static str,
+    ) {
+        self.write_row(failure(result, kind), None)
     }
 
     /// Like [`Recorder::finish`], but when `retrieval` is set the row
@@ -146,14 +172,20 @@ impl<'a> Recorder<'a> {
         result: &crate::Result<T>,
         retrieval: Option<NewRetrievalCall>,
     ) {
+        self.write_row(failure(result, error_kind), retrieval)
+    }
+
+    /// Write the row: `ok` when `failure` is `None`, otherwise `error`
+    /// with its class and message.
+    fn write_row(
+        self,
+        failure: Option<(&'static str, String)>,
+        retrieval: Option<NewRetrievalCall>,
+    ) {
         let duration_ms = self.started_at.elapsed().as_secs_f64() * 1000.0;
-        let (status, error_type, error_msg) = match result {
-            Ok(_) => ("ok", None, None),
-            Err(e) => (
-                "error",
-                Some(error_kind(e).to_string()),
-                Some(e.to_string()),
-            ),
+        let (status, error_type, error_msg) = match failure {
+            None => ("ok", None, None),
+            Some((kind, message)) => ("error", Some(kind.to_string()), Some(message)),
         };
 
         let mut row = NewMcpToolCall::new(self.source, self.tool, status);
@@ -187,6 +219,15 @@ impl<'a> Recorder<'a> {
     }
 }
 
+/// The class and message a failed `result` records, `None` when it
+/// succeeded.
+fn failure<T, Er: std::fmt::Display>(
+    result: &std::result::Result<T, Er>,
+    kind: fn(&Er) -> &'static str,
+) -> Option<(&'static str, String)> {
+    result.as_ref().err().map(|e| (kind(e), e.to_string()))
+}
+
 /// Stable error-class name for `error_type` on a failed row. The string
 /// is part of the observability surface — a downstream diagnose tarball
 /// groups rows by it — and must not be changed without bumping the
@@ -209,6 +250,8 @@ fn error_kind(err: &OpsError) -> &'static str {
         OpsError::SearchUnavailable => "search_unavailable",
         OpsError::PapersBackendNotConfigured => "papers_backend_not_configured",
         OpsError::SourceNotArchived { .. } => "source_not_archived",
+        OpsError::UnknownAuditProfile { .. } => "unknown_audit_profile",
+        OpsError::WriteBusy(_) => "write_busy",
         OpsError::Other(_) => "other",
     }
 }
@@ -234,7 +277,24 @@ pub(crate) const DEFAULT_SOURCE: &str = crate::ACTOR_DETAIL_CLI;
 /// ```
 macro_rules! record_call_sync {
     ($ops:expr, $tool:expr, $args:expr, $body:block) => {{
-        let __recorder = $crate::recorder::Recorder::start($ops, $tool, $args);
+        let __ops = $ops;
+        $crate::recorder::record_call_with_caller_sync!(
+            __ops,
+            &__ops.effective_caller(),
+            $tool,
+            $args,
+            $body
+        )
+    }};
+}
+
+/// [`record_call_sync!`] for a call attributed to an explicit
+/// `$caller` (a `&Caller`) rather than to the caller `$ops` resolves.
+/// The row lands in `$ops`'s catalog.
+macro_rules! record_call_with_caller_sync {
+    ($ops:expr, $caller:expr, $tool:expr, $args:expr, $body:block) => {{
+        let __recorder =
+            $crate::recorder::Recorder::start_with_caller($ops.catalog_db(), $caller, $tool, $args);
         // Wrap the body in an IIFE so `?` and `return` inside it land
         // in `__result` (and get recorded) rather than escaping the
         // surrounding function before `finish` runs.
@@ -262,7 +322,28 @@ macro_rules! record_call_sync {
 /// ```
 macro_rules! record_call_async {
     ($ops:expr, $tool:expr, $args:expr, $body:block) => {{
-        let __recorder = $crate::recorder::Recorder::start($ops, $tool, $args);
+        let __ops = $ops;
+        $crate::recorder::record_call_with_caller_async!(
+            __ops,
+            &__ops.effective_caller(),
+            $tool,
+            $args,
+            $body
+        )
+    }};
+}
+
+/// [`record_call_async!`] for a call attributed to an explicit
+/// `$caller` (a `&Caller`) rather than to the caller `$ops` resolves.
+/// The row lands in `$ops`'s catalog.
+macro_rules! record_call_with_caller_async {
+    ($ops:expr, $caller:expr, $tool:expr, $args:expr, $body:block) => {{
+        let __recorder = $crate::recorder::Recorder::start_with_caller(
+            $ops.catalog_db(),
+            $caller,
+            $tool,
+            $args,
+        );
         let __result = async $body.await;
         __recorder.finish(&__result);
         __result
@@ -271,6 +352,8 @@ macro_rules! record_call_async {
 
 pub(crate) use record_call_async;
 pub(crate) use record_call_sync;
+pub(crate) use record_call_with_caller_async;
+pub(crate) use record_call_with_caller_sync;
 
 #[cfg(test)]
 mod tests {

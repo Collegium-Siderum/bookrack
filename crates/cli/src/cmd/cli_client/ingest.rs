@@ -18,8 +18,8 @@ use bookrack_cli::render::progress::SurfaceKind;
 use bookrack_cli_grammar::IngestArgs;
 use bookrack_config::{Config, ConfigError, LibrarySelection};
 use bookrack_core::Explain;
+use bookrack_ops::audit_overlay;
 use bookrack_ops::rule::RuleDryrunReport;
-use bookrack_runtime::audit_helpers;
 use eyre::{Context, Result};
 use serde_json::json;
 
@@ -124,7 +124,7 @@ pub fn dry_run(
         .rule
         .as_deref()
         .expect("clap requires --rule with --dry-run");
-    audit_helpers::require_known_profile(
+    audit_overlay::require_known_profile(
         audit_profile.as_deref(),
         bookrack_audit_profile::ALL_BUILT_IN_NAMES,
     )
@@ -142,9 +142,9 @@ pub fn dry_run(
     let (rules, data, profile, headings) = match overlay {
         Some(cfg) => (
             AuditRules::Library(cfg.audit_rules_dir()),
-            audit_helpers::load_audit_data(cfg),
-            audit_helpers::load_audit_profile(cfg, audit_profile.as_deref()),
-            audit_helpers::load_heading_patterns(cfg),
+            audit_overlay::load_audit_data(cfg),
+            audit_overlay::load_audit_profile(cfg, audit_profile.as_deref()),
+            audit_overlay::load_heading_patterns(cfg),
         ),
         None => (
             AuditRules::Shipped,

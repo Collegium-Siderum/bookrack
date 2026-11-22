@@ -29,10 +29,13 @@ use eyre::WrapErr;
 use tokio::sync::Mutex as AsyncMutex;
 
 use bookrack_core::knob::KnobOrigin;
-use bookrack_core::{Explain, Problem};
+use bookrack_core::{Explain, ItemKind, Problem};
 
-use crate::Ops;
-use crate::OpsError;
+use crate::write_session::{
+    ChangeSet, ChangeSink, HostWrite, NoopChangeSink, Region, SessionRunError, WriteBusy,
+    WriteIntent, WriteSession,
+};
+use crate::{Caller, Ops, OpsError};
 
 /// Why a registry operation failed.
 #[derive(Debug, thiserror::Error)]
@@ -183,11 +186,13 @@ pub type MountGuard = Arc<dyn Send + Sync>;
 /// task needs to run an op, so the underlying [`Ops`] is never moved or
 /// reopened during the registry's lifetime.
 ///
-/// The handle also owns a per-library [`AsyncMutex`] used to serialise
-/// ingest writes. Read ops keep going through the shared `Arc<Ops>`
-/// without contention; only [`LibraryHandle::ingest_book`] takes the
-/// lock, so two queue workers — current and hypothetical — never run
-/// the catalog/corpus write path in parallel against the same library.
+/// The handle also owns one [`AsyncMutex`] per intake side — books and
+/// papers — that its intake sessions wait on. Read ops keep going
+/// through the shared `Arc<Ops>` without contention; only
+/// [`LibraryHandle::ingest_book`], [`LibraryHandle::ingest_rule`], and
+/// [`LibraryHandle::glean_paper`] take them, so two queue workers —
+/// current and hypothetical — never run one side's catalog/corpus write
+/// path in parallel against the same library.
 ///
 /// The handle also carries an opaque [`MountGuard`]. The runtime puts
 /// the data root's exclusive lock there, so the lock outlives every
@@ -199,8 +204,8 @@ pub struct LibraryHandle<E: Embedder> {
     templates: JobTemplates,
     config_rows: Vec<KnobOrigin>,
     ops: Arc<Ops<E>>,
-    ingest_lock: AsyncMutex<()>,
-    glean_lock: AsyncMutex<()>,
+    ingest_lock: Arc<AsyncMutex<()>>,
+    glean_lock: Arc<AsyncMutex<()>>,
     _mount_guard: Option<MountGuard>,
 }
 
@@ -257,8 +262,8 @@ impl<E: Embedder> LibraryHandle<E> {
             templates,
             config_rows,
             ops: Arc::clone(&handle.ops),
-            ingest_lock: AsyncMutex::new(()),
-            glean_lock: AsyncMutex::new(()),
+            ingest_lock: Arc::new(AsyncMutex::new(())),
+            glean_lock: Arc::new(AsyncMutex::new(())),
             _mount_guard: guard,
         })
     }
@@ -290,8 +295,8 @@ impl<E: Embedder> LibraryHandle<E> {
             templates: JobTemplates::default(),
             config_rows: Vec::new(),
             ops,
-            ingest_lock: AsyncMutex::new(()),
-            glean_lock: AsyncMutex::new(()),
+            ingest_lock: Arc::new(AsyncMutex::new(())),
+            glean_lock: Arc::new(AsyncMutex::new(())),
             _mount_guard: None,
         })
     }
@@ -347,20 +352,26 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
     /// Ingest one book into this library through the registry-mediated
     /// write path.
     ///
-    /// Holds the per-library ingest mutex for the duration of the call,
-    /// opens fresh [`Catalog`] and [`Corpus`] handles from the library's
-    /// stored paths, then forwards to
+    /// Runs as a book intake session: waits for the per-library book
+    /// intake lock, opens fresh [`Catalog`] and [`Corpus`] handles from
+    /// the library's stored paths, then forwards to
     /// [`crate::pipeline::book::ingest_book_with_progress`] with the library's
     /// warm embedder, passing `on_embed_batch` through. The caller —
     /// currently the `bookrack run` REPL's queue worker — never opens a
     /// database on its own.
+    ///
+    /// The session rebinds the book-side vector store before it ends.
+    /// The first ingest into a previously empty data dir creates the
+    /// lance dir mid-process; the warm `Library` cached its store at
+    /// startup, when the dir did not yet exist, and would otherwise
+    /// serve every subsequent search from `store = None`.
     ///
     /// Returns an error when this handle was built catalog-only, since
     /// ingest requires the embedder that lives on the
     /// [`bookrack_query::Library`] half.
     // Parallel implementation: ops-handle-pipeline.
     pub async fn ingest_book(
-        &self,
+        self: &Arc<Self>,
         path: &Path,
         params: &IngestParams,
         on_embed_batch: &OnEmbedBatch<'_>,
@@ -369,56 +380,50 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
             .ops
             .embedder()
             .ok_or_else(|| eyre::eyre!("ingest requires a library handle with an embedder"))?;
-        let _guard = self.ingest_lock.lock().await;
-        let mut corpus =
-            Corpus::open_for_write(self.ops.corpus_db()).context("open corpus for ingest write")?;
-        let mut catalog = Catalog::open_for_write(self.ops.catalog_db(), self.ops.backup_dir())
-            .context("open catalog for ingest write")?;
-        let report = crate::pipeline::book::ingest_book_with_progress(
-            path,
-            &mut corpus,
-            &mut catalog,
-            self.ops.lancedb_dir(),
-            self.ops.books_dir(),
-            embedder,
-            params,
-            on_embed_batch,
-        )
-        .await
-        .context("registry-mediated ingest")?;
-        // The first ingest into a previously empty data dir creates the
-        // lance dir mid-process; the warm `Library` cached its store at
-        // startup, when the dir did not yet exist, and would otherwise
-        // serve every subsequent search from `store = None`. Force the
-        // library to rebind its store from the on-disk lance dir before
-        // the ingest_book lock drops.
-        if let Some(library) = self.ops.library() {
-            library
-                .refresh_store()
+        self.intake_session(ItemKind::Book)
+            .await
+            .run_inline(async |session| {
+                let ops = session.ops();
+                let mut corpus = Corpus::open_for_write(ops.corpus_db())
+                    .context("open corpus for ingest write")?;
+                let mut catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())
+                    .context("open catalog for ingest write")?;
+                let report = crate::pipeline::book::ingest_book_with_progress(
+                    path,
+                    &mut corpus,
+                    &mut catalog,
+                    ops.lancedb_dir(),
+                    ops.books_dir(),
+                    embedder,
+                    params,
+                    on_embed_batch,
+                )
                 .await
-                .context("refresh library store after ingest")?;
-        }
-        Ok(report)
+                .context("registry-mediated ingest")?;
+                Ok((report, ChangeSet::unchanged().with_refresh(ItemKind::Book)))
+            })
+            .await
+            .map_err(|e| intake_failure(e, "refresh library store after ingest"))
     }
 
     /// Ingest the book a rule file describes through the
     /// registry-mediated write path.
     ///
-    /// Mirrors [`Self::ingest_book`]: holds the per-library ingest
-    /// mutex, opens fresh [`Catalog`] and [`Corpus`] handles from the
+    /// Mirrors [`Self::ingest_book`]: runs as a book intake session,
+    /// opens fresh [`Catalog`] and [`Corpus`] handles from the
     /// library's stored paths, then forwards to
     /// [`crate::pipeline::book::ingest_rule_with_progress`] with the library's
     /// warm embedder, reporting each EMBED batch to `on_embed_batch`.
-    /// Rebinds the book-side [`Library`] store afterwards, so the first
-    /// rule ingest into a previously empty data dir lights up the read
-    /// path on the same lock.
+    /// The session rebinds the book-side [`Library`] store before it
+    /// ends, so the first rule ingest into a previously empty data dir
+    /// lights up the read path under the same lock.
     ///
     /// Returns an error when this handle was built catalog-only, since
     /// ingest requires the embedder that lives on the
     /// [`bookrack_query::Library`] half.
     // Parallel implementation: ops-handle-pipeline.
     pub async fn ingest_rule(
-        &self,
+        self: &Arc<Self>,
         rule: &Path,
         rule_params: &RuleIngestParams,
         params: &IngestParams,
@@ -428,31 +433,31 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
             .ops
             .embedder()
             .ok_or_else(|| eyre::eyre!("ingest requires a library handle with an embedder"))?;
-        let _guard = self.ingest_lock.lock().await;
-        let mut corpus = Corpus::open_for_write(self.ops.corpus_db())
-            .context("open corpus for rule ingest write")?;
-        let mut catalog = Catalog::open_for_write(self.ops.catalog_db(), self.ops.backup_dir())
-            .context("open catalog for rule ingest write")?;
-        let report = crate::pipeline::book::ingest_rule_with_progress(
-            rule,
-            &mut corpus,
-            &mut catalog,
-            self.ops.lancedb_dir(),
-            self.ops.books_dir(),
-            embedder,
-            params,
-            rule_params,
-            on_embed_batch,
-        )
-        .await
-        .context("registry-mediated rule ingest")?;
-        if let Some(library) = self.ops.library() {
-            library
-                .refresh_store()
+        self.intake_session(ItemKind::Book)
+            .await
+            .run_inline(async |session| {
+                let ops = session.ops();
+                let mut corpus = Corpus::open_for_write(ops.corpus_db())
+                    .context("open corpus for rule ingest write")?;
+                let mut catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())
+                    .context("open catalog for rule ingest write")?;
+                let report = crate::pipeline::book::ingest_rule_with_progress(
+                    rule,
+                    &mut corpus,
+                    &mut catalog,
+                    ops.lancedb_dir(),
+                    ops.books_dir(),
+                    embedder,
+                    params,
+                    rule_params,
+                    on_embed_batch,
+                )
                 .await
-                .context("refresh library store after rule ingest")?;
-        }
-        Ok(report)
+                .context("registry-mediated rule ingest")?;
+                Ok((report, ChangeSet::unchanged().with_refresh(ItemKind::Book)))
+            })
+            .await
+            .map_err(|e| intake_failure(e, "refresh library store after rule ingest"))
     }
 
     /// Check a rule submission against this library before a job is
@@ -474,21 +479,20 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
     /// Glean one paper into this library through the registry-mediated
     /// write path.
     ///
-    /// Mirrors [`Self::ingest_book`] for the paper pipeline: holds the
-    /// per-library glean mutex for the duration of the call, opens
-    /// fresh [`Catalog`] and [`Corpus`] handles from the library's
-    /// configured paper-side paths, then forwards to
-    /// [`crate::pipeline::paper::glean_paper`] with the paper-side warm
-    /// embedder. After a successful run the paper-side [`Library`]
-    /// rebinds its store from disk so the first paper into a previously
-    /// empty data dir lights up the read path.
+    /// Mirrors [`Self::ingest_book`] for the paper pipeline: runs as a
+    /// paper intake session, opens fresh [`Catalog`] and [`Corpus`]
+    /// handles from the library's configured paper-side paths, then
+    /// forwards to [`crate::pipeline::paper::glean_paper`] with the
+    /// paper-side warm embedder. After a successful run the session
+    /// rebinds the paper-side [`Library`] store from disk so the first
+    /// paper into a previously empty data dir lights up the read path.
     ///
     /// Returns an error when this handle has no papers backend attached
     /// (`Ops::with_papers` was never called), since glean has no way to
     /// open a corpus or run an embedder without one.
     // Parallel implementation: ops-handle-pipeline.
     pub async fn glean_paper(
-        &self,
+        self: &Arc<Self>,
         path: &Path,
         params: &GleanParams,
         on_embed_batch: &OnEmbedBatch<'_>,
@@ -513,47 +517,70 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
             .ops
             .papers_dir()
             .ok_or_else(|| eyre::eyre!("library handle has no papers backend"))?;
-        let _guard = self.glean_lock.lock().await;
-        let mut corpus =
-            Corpus::open_for_write(corpus_db).context("open papers corpus for glean write")?;
-        let mut catalog = Catalog::open_for_write(catalog_db, self.ops.backup_dir())
-            .context("open papers catalog for glean write")?;
-        // A caller that already opened a `pipeline_runs` row keeps
-        // ownership of its lifecycle; otherwise this handle opens one
-        // on the paper catalog so the `node_paper_audit` row lands
-        // with a run id instead of NULL.
-        let owned_run = if params.pipeline_run_id.is_none() {
-            open_glean_pipeline_run(&catalog, catalog_db)
-        } else {
-            None
-        };
-        let mut effective = params.clone();
-        if let Some(run) = owned_run.as_ref() {
-            effective.pipeline_run_id = Some(run.id().to_string());
-        }
-        let result = crate::pipeline::paper::glean_paper_with_progress(
-            path,
-            &mut corpus,
-            &mut catalog,
-            lancedb_dir,
-            papers_dir,
-            embedder,
-            &effective,
-            on_embed_batch,
-        )
-        .await
-        .context("registry-mediated glean");
-        if let Some(run) = owned_run {
-            finalize_glean_pipeline_run(&catalog, run, result.is_ok());
-        }
-        let report = result?;
-        if let Some(library) = self.ops.papers_library() {
-            library
-                .refresh_store()
+        self.intake_session(ItemKind::Paper)
+            .await
+            .run_inline(async |session| {
+                let mut corpus = Corpus::open_for_write(corpus_db)
+                    .context("open papers corpus for glean write")?;
+                let mut catalog = Catalog::open_for_write(catalog_db, session.ops().backup_dir())
+                    .context("open papers catalog for glean write")?;
+                // A caller that already opened a `pipeline_runs` row keeps
+                // ownership of its lifecycle; otherwise this handle opens one
+                // on the paper catalog so the `node_paper_audit` row lands
+                // with a run id instead of NULL.
+                let owned_run = if params.pipeline_run_id.is_none() {
+                    open_glean_pipeline_run(&catalog, catalog_db)
+                } else {
+                    None
+                };
+                let mut effective = params.clone();
+                if let Some(run) = owned_run.as_ref() {
+                    effective.pipeline_run_id = Some(run.id().to_string());
+                }
+                let result = crate::pipeline::paper::glean_paper_with_progress(
+                    path,
+                    &mut corpus,
+                    &mut catalog,
+                    lancedb_dir,
+                    papers_dir,
+                    embedder,
+                    &effective,
+                    on_embed_batch,
+                )
                 .await
-                .context("refresh papers library store after glean")?;
+                .context("registry-mediated glean");
+                if let Some(run) = owned_run {
+                    finalize_glean_pipeline_run(&catalog, run, result.is_ok());
+                }
+                Ok((
+                    result?,
+                    ChangeSet::unchanged().with_refresh(ItemKind::Paper),
+                ))
+            })
+            .await
+            .map_err(|e| intake_failure(e, "refresh papers library store after glean"))
+    }
+
+    /// Open an intake session for `kind` on this handle: wait for the
+    /// handle's own intake lock for that side, not the registry's write
+    /// mutex, and attribute the session to the pipeline. No caller opens
+    /// one for a reference book; one would wait on the book side's lock.
+    pub(crate) async fn intake_session(self: &Arc<Self>, kind: ItemKind) -> WriteSession<E> {
+        let guard = self.intake_lock(kind).clone().lock_owned().await;
+        WriteSession::intake(Arc::clone(self), kind, pipeline_caller(), guard)
+    }
+
+    fn intake_lock(&self, kind: ItemKind) -> &Arc<AsyncMutex<()>> {
+        match kind {
+            ItemKind::Book | ItemKind::Reference => &self.ingest_lock,
+            ItemKind::Paper => &self.glean_lock,
         }
-        Ok(report)
+    }
+
+    /// Whether an intake session for `kind` holds this handle's lock.
+    #[cfg(test)]
+    pub(crate) fn intake_session_is_held(&self, kind: ItemKind) -> bool {
+        self.intake_lock(kind).try_lock().is_err()
     }
 
     /// Re-run the paper-side metadata audit on an existing intake's
@@ -692,6 +719,8 @@ struct Sets<E: Embedder> {
 pub struct LibraryRegistry<E: Embedder> {
     sets: RwLock<Sets<E>>,
     default: RwLock<Option<String>>,
+    write_guard: Arc<AsyncMutex<()>>,
+    sink: Arc<dyn ChangeSink>,
 }
 
 impl<E: Embedder> LibraryRegistry<E> {
@@ -703,9 +732,30 @@ impl<E: Embedder> LibraryRegistry<E> {
     /// iterator yields no handle.
     ///
     /// [`get`]: LibraryRegistry::get
+    ///
+    /// Its sessions take a write mutex of their own and tell no sink
+    /// anything; a host with subscribers builds through
+    /// [`Self::from_handles_with_sink`].
     pub fn from_handles(
         handles: impl IntoIterator<Item = Arc<LibraryHandle<E>>>,
         default: Option<String>,
+    ) -> Result<Arc<LibraryRegistry<E>>> {
+        Self::from_handles_with_sink(
+            handles,
+            default,
+            Arc::new(NoopChangeSink),
+            Arc::new(AsyncMutex::new(())),
+        )
+    }
+
+    /// [`Self::from_handles`] whose exclusive sessions take
+    /// `write_guard` — the host's one write mutex, which its own write
+    /// paths may hold too — and report to `sink`.
+    pub fn from_handles_with_sink(
+        handles: impl IntoIterator<Item = Arc<LibraryHandle<E>>>,
+        default: Option<String>,
+        sink: Arc<dyn ChangeSink>,
+        write_guard: Arc<AsyncMutex<()>>,
     ) -> Result<Arc<LibraryRegistry<E>>> {
         let mut mounted: HashMap<String, Arc<LibraryHandle<E>>> = HashMap::new();
         for handle in handles {
@@ -720,6 +770,8 @@ impl<E: Embedder> LibraryRegistry<E> {
                 unmounted: BTreeMap::new(),
             }),
             default: RwLock::new(default),
+            write_guard,
+            sink,
         }))
     }
 
@@ -739,7 +791,69 @@ impl<E: Embedder> LibraryRegistry<E> {
                 unmounted: BTreeMap::new(),
             }),
             default: RwLock::new(Some(name)),
+            write_guard: Arc::new(AsyncMutex::new(())),
+            sink: Arc::new(NoopChangeSink),
         })
+    }
+
+    /// Open an exclusive session on `handle`'s library over `region`,
+    /// attributed to `caller`.
+    ///
+    /// Takes the registry's write mutex without waiting: while another
+    /// exclusive session holds it, the answer is [`WriteBusy`], so the
+    /// caller can retry instead of queueing. On success the sink hears
+    /// the session start; it hears the session end when the session is
+    /// dropped. An ingest or glean does not come here — its intake
+    /// session is opened by the handle's own pipeline methods.
+    pub fn begin_write(
+        &self,
+        handle: &Arc<LibraryHandle<E>>,
+        region: Region,
+        caller: Caller,
+    ) -> std::result::Result<WriteSession<E>, WriteBusy> {
+        let guard = self
+            .write_guard
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| WriteBusy)?;
+        let intent = WriteIntent {
+            library: handle.name().to_string(),
+            region,
+            caller,
+            reason: None,
+        };
+        Ok(WriteSession::exclusive(
+            Arc::clone(handle),
+            intent,
+            Arc::clone(&self.sink),
+            guard,
+        ))
+    }
+
+    /// Open an exclusive host session — a change to the set of served
+    /// libraries, such as mounting, unmounting, or forking `library` —
+    /// attributed to `caller`, with an optional note on why it runs.
+    ///
+    /// Takes the same write mutex as [`Self::begin_write`], on the same
+    /// terms. The session declares [`Region::Library`] on `library`.
+    pub fn begin_host_write(
+        &self,
+        caller: Caller,
+        library: impl Into<String>,
+        reason: Option<String>,
+    ) -> std::result::Result<HostWrite, WriteBusy> {
+        let guard = self
+            .write_guard
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| WriteBusy)?;
+        let intent = WriteIntent {
+            library: library.into(),
+            region: Region::Library,
+            caller,
+            reason,
+        };
+        Ok(HostWrite::exclusive(intent, Arc::clone(&self.sink), guard))
     }
 
     fn read_sets(&self) -> Result<std::sync::RwLockReadGuard<'_, Sets<E>>> {
@@ -978,6 +1092,28 @@ fn unnamed_route<'a, E: Embedder>(
 /// Run lifecycle is best-effort: an open failure demotes to a warning
 /// and the glean proceeds with a NULL `pipeline_run_id`, and a record
 /// that cannot be taken leaves the run registered but untracked.
+/// The caller an intake session is attributed to: the pipeline the
+/// queue worker runs.
+fn pipeline_caller() -> Caller {
+    Caller {
+        actor_kind: bookrack_catalog::ActorKind::Pipeline,
+        actor_detail: None,
+        session_id: None,
+        reason: None,
+    }
+}
+
+/// An intake session's failure as the report its pipeline method
+/// returns: the pipeline's own report as it is, or a failed rebind
+/// under `refresh`.
+fn intake_failure(e: SessionRunError<eyre::Report>, refresh: &'static str) -> eyre::Report {
+    match e {
+        SessionRunError::Op(report) => report,
+        SessionRunError::RefreshStore(err) => eyre::Report::new(err).wrap_err(refresh),
+        SessionRunError::Join(err) => eyre::Report::new(err),
+    }
+}
+
 fn open_glean_pipeline_run(catalog: &Catalog, catalog_db: &Path) -> Option<RunHandle> {
     let library_root = catalog_db.parent().and_then(Path::to_str);
     let pipeline_run_id = match catalog.open_pipeline_run("glean", None, library_root) {
