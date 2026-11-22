@@ -541,6 +541,16 @@ release workflow extracts the matching section verbatim from this file.
   crate's tests construct. Neither reaches the server bookrack runs, so
   this clears lockfile advisories. The move also changes what the
   server answers for an unadvertised capability (see *Changed*).
+- **deps: the bundled SQLite moves from 3.53.2 to 3.54.1, through
+  `rusqlite` 0.41.1, clearing RUSTSEC-2026-0459 (CVE-2026-119375).**
+  SQLite before 3.54.0 could return uninitialized page-cache memory to a
+  query when a database was opened with a sibling `-wal` file of a
+  different page size. bookrack opens only the databases under a
+  library's data root, which it writes itself, so a crafted pair could
+  reach it only through a data root copied in from elsewhere.
+  `rusqlite_migration` moves to 2.7.0, the release that takes
+  `rusqlite` 0.41. The database file format is unchanged and no
+  migration runs.
 
 ## [0.14.0] - 2026-11-07
 

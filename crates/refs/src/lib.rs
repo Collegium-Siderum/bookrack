@@ -588,7 +588,7 @@ mod refs_tests {
         let stmt = conn
             .prepare(&format!("SELECT * FROM {table} LIMIT 0"))
             .expect("prepare SELECT * LIMIT 0");
-        stmt.column_names().contains(&column)
+        stmt.column_names().any(|name| name == column)
     }
 
     fn index_exists(conn: &Connection, name: &str) -> bool {
