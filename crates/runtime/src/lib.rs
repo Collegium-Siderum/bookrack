@@ -25,7 +25,6 @@ pub mod identity_check;
 pub mod mcp_endpoint;
 pub mod mount;
 pub mod open_runs;
-pub mod ops_helpers;
 pub mod pdfium_install;
 pub mod pipeline_run_helpers;
 pub mod profile;

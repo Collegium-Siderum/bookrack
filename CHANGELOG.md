@@ -96,6 +96,13 @@ release workflow extracts the matching section verbatim from this file.
   pauses MCP for its duration and announces `library.changed` once the
   overlay is on disk. Each call now leaves a row in the tool-call log,
   as the other write tools do, attributed to `mcp`.
+- **The MCP `library.metadata.*` write tools take the daemon's write
+  mutex.** While another write holds it — a control-plane write, a
+  `papers.metadata.reaudit` waiting for a glean job, or another write
+  tool — the tool answers `-32001` with `retryable: true` and writes
+  nothing, instead of writing alongside it. A write that lands pauses
+  MCP for its duration and announces `library.changed` for its
+  library, as a control-plane write does.
 - **A busy refusal says it is retryable.** The `-32001` a write gets
   while another holds the write mutex carries `retryable: true` in
   `data`, with a detail and a hint, instead of a bare message.

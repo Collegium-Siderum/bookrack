@@ -23,6 +23,7 @@ use bookrack_ops::dto::writes::{
     PaperClearMetadataFieldRequest, PaperContributorAddRequest, PaperContributorRemoveRequest,
     PaperReviewRequest, PaperSetMetadataFieldRequest, PaperVoidMetadataFieldRequest,
 };
+use bookrack_ops::registry::LibraryHandle;
 use bookrack_ops::writes::papers_metadata as ops_papers;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -64,13 +65,15 @@ async fn run_paper_metadata_write<F>(
     op: F,
 ) -> Result<Value, RpcError>
 where
-    F: FnOnce(&bookrack_ops::Ops<bookrack_embed::OllamaEmbedClient>) -> bookrack_ops::Result<Value>
+    F: FnOnce(
+            &mut bookrack_ops::write_session::WriteSession<bookrack_embed::OllamaEmbedClient>,
+        ) -> bookrack_ops::Result<Value>
         + Send
         + 'static,
 {
     let handle = ctx.registry.get(library).map_err(registry_err)?;
     run_write(ctx, &handle, async move |session| {
-        op(session.ops()).map_err(|e| handler_err(method, e.into()))
+        op(session).map_err(|e| handler_err(method, e.into()))
     })
     .await
 }
@@ -121,16 +124,14 @@ pub async fn reaudit(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         ..
     } = parsed;
     run_write(ctx, &handle, async move |session| {
-        let handle = session.handle();
         // Both overlays live under the target library's data root, so
-        // they are read from the handle this call resolved — the
-        // catalog below is that library's, and auditing it under
-        // another library's rules is the asymmetry this pairing
-        // removes.
-        let profile = load_paper_audit_profile(handle.cfg(), audit_profile.as_deref());
-        let data = load_paper_audit_data(handle.cfg());
-        let outcome = handle
-            .reaudit_paper(intake_id, &profile, &data)
+        // they are read from the session's library — the catalog below
+        // is that library's, and auditing it under another library's
+        // rules is the asymmetry this pairing removes.
+        let cfg = session.handle().cfg_arc();
+        let profile = load_paper_audit_profile(&cfg, audit_profile.as_deref());
+        let data = load_paper_audit_data(&cfg);
+        let outcome = LibraryHandle::reaudit_paper(session, intake_id, &profile, &data)
             .await
             .map_err(|e| handler_err("papers.metadata.reaudit", e.into()))?;
         Ok(json!({
@@ -163,26 +164,31 @@ pub struct PapersMetadataSetParams {
 pub async fn set(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: PapersMetadataSetParams = parse(params, "papers.metadata.set")?;
     let library = parsed.library.clone();
-    run_paper_metadata_write(ctx, library.as_deref(), "papers.metadata.set", move |ops| {
-        let field = parsed.field.clone();
-        let value = parsed.value.clone();
-        let outcome = ops_papers::set_paper_metadata_field(
-            ops,
-            PaperSetMetadataFieldRequest {
-                intake_id: parsed.intake_id,
-                field: parsed.field,
-                value: parsed.value,
-                reason: parsed.reason,
-                confirmed: parsed.confirmed,
-            },
-        )?;
-        let mut body = outcome_json(&outcome);
-        body["intake_id"] = json!(parsed.intake_id);
-        body["field"] = json!(field);
-        body["value"] = json!(value);
-        body["confirmed"] = json!(parsed.confirmed);
-        Ok(body)
-    })
+    run_paper_metadata_write(
+        ctx,
+        library.as_deref(),
+        "papers.metadata.set",
+        move |session| {
+            let field = parsed.field.clone();
+            let value = parsed.value.clone();
+            let outcome = ops_papers::set_paper_metadata_field(
+                session,
+                PaperSetMetadataFieldRequest {
+                    intake_id: parsed.intake_id,
+                    field: parsed.field,
+                    value: parsed.value,
+                    reason: parsed.reason,
+                    confirmed: parsed.confirmed,
+                },
+            )?;
+            let mut body = outcome_json(&outcome);
+            body["intake_id"] = json!(parsed.intake_id);
+            body["field"] = json!(field);
+            body["value"] = json!(value);
+            body["confirmed"] = json!(parsed.confirmed);
+            Ok(body)
+        },
+    )
     .await
 }
 
@@ -204,10 +210,10 @@ pub async fn clear(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
         ctx,
         library.as_deref(),
         "papers.metadata.clear",
-        move |ops| {
+        move |session| {
             let field = parsed.field.clone();
             let outcome = ops_papers::clear_paper_metadata_field(
-                ops,
+                session,
                 PaperClearMetadataFieldRequest {
                     intake_id: parsed.intake_id,
                     field: parsed.field,
@@ -242,10 +248,10 @@ pub async fn void(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
         ctx,
         library.as_deref(),
         "papers.metadata.void",
-        move |ops| {
+        move |session| {
             let field = parsed.field.clone();
             let outcome = ops_papers::void_paper_metadata_field(
-                ops,
+                session,
                 PaperVoidMetadataFieldRequest {
                     intake_id: parsed.intake_id,
                     field: parsed.field,
@@ -306,7 +312,7 @@ impl From<PapersJustifiedReviewParams> for PapersReviewParams {
 /// One review verb: which op runs, and the status string the response
 /// reports.
 type ReviewOp = fn(
-    &bookrack_ops::Ops<bookrack_embed::OllamaEmbedClient>,
+    &mut bookrack_ops::write_session::WriteSession<bookrack_embed::OllamaEmbedClient>,
     PaperReviewRequest,
 ) -> bookrack_ops::Result<bookrack_ops::dto::writes::WriteOutcome>;
 
@@ -318,9 +324,9 @@ async fn write_review_status(
     op: ReviewOp,
 ) -> Result<Value, RpcError> {
     let library = parsed.library.clone();
-    run_paper_metadata_write(ctx, library.as_deref(), method, move |ops| {
+    run_paper_metadata_write(ctx, library.as_deref(), method, move |session| {
         let outcome = op(
-            ops,
+            session,
             PaperReviewRequest {
                 intake_id: parsed.intake_id,
                 reason: parsed.reason,
@@ -411,11 +417,11 @@ pub async fn contributor_add(
         ctx,
         library.as_deref(),
         "papers.metadata.contributor_add",
-        move |ops| {
+        move |session| {
             let role = parsed.role.clone();
             let name = parsed.name.clone();
             let outcome = ops_papers::add_paper_contributor(
-                ops,
+                session,
                 PaperContributorAddRequest {
                     intake_id: parsed.intake_id,
                     role: parsed.role,
@@ -459,9 +465,9 @@ pub async fn contributor_remove(
         ctx,
         library.as_deref(),
         "papers.metadata.contributor_remove",
-        move |ops| {
+        move |session| {
             let outcome = ops_papers::remove_paper_contributor(
-                ops,
+                session,
                 PaperContributorRemoveRequest {
                     intake_id: parsed.intake_id,
                     contributor_id: parsed.contributor_id,

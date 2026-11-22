@@ -45,13 +45,15 @@ use std::time::{Duration, Instant};
 
 use bookrack_catalog::{Catalog, IntakeStatus, NewIntake};
 use bookrack_config::{Config, LibrarySelection};
-use bookrack_core::ItemKind;
 use bookrack_core::queue::{IngestJob, JobOp, JobState, Priority, QueueJob, QueueState};
+use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::LogStreamHandle;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
+use bookrack_ops::write_session::{ChangeSink, WriteIntent};
 use bookrack_ops::{Caller, Ops};
+use bookrack_runtime::control::jsonrpc::BUSY;
 use bookrack_test_support::{ProcessEnv, process_env};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ErrorCode, JsonObject};
@@ -72,6 +74,8 @@ struct Fixture {
     /// The registry `serve` routes through, held so a test can move the
     /// default pointer while the server runs.
     registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
+    /// What the registry's sessions told their host.
+    changes: Arc<RecordingSink>,
     /// The queue snapshot `serve` reads, held so a test can seed jobs.
     queue_state: Arc<Mutex<QueueState>>,
     addr: SocketAddr,
@@ -126,9 +130,11 @@ impl Fixture {
                 .intake_id
         };
 
-        let registry = LibraryRegistry::from_handles(
+        let changes = Arc::new(RecordingSink::default());
+        let registry = LibraryRegistry::from_handles_with_sink(
             [handle("fixture", cfg), handle("second", second_cfg)],
             Some("fixture".into()),
+            Arc::clone(&changes) as Arc<dyn ChangeSink>,
         )
         .expect("two-library registry");
 
@@ -186,6 +192,7 @@ impl Fixture {
             catalog_db,
             intake_id,
             registry,
+            changes,
             queue_state,
             addr,
             shutdown_tx,
@@ -223,6 +230,35 @@ impl Fixture {
     async fn stop(self) {
         let _ = self.shutdown_tx.send(());
         let _ = timeout(Duration::from_secs(5), self.server).await;
+    }
+}
+
+/// A change sink that keeps what it heard, one line per call, in order.
+#[derive(Default)]
+struct RecordingSink(Mutex<Vec<String>>);
+
+impl RecordingSink {
+    fn push(&self, line: String) {
+        self.0.lock().expect("sink lock").push(line);
+    }
+
+    /// Everything heard so far, leaving the record empty.
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.lock().expect("sink lock"))
+    }
+}
+
+impl ChangeSink for RecordingSink {
+    fn exclusive_write_started(&self, intent: &WriteIntent) {
+        self.push(format!("started {}", intent.library));
+    }
+
+    fn library_changed(&self, library: &str) {
+        self.push(format!("changed {library}"));
+    }
+
+    fn exclusive_write_ended(&self, intent: &WriteIntent) {
+        self.push(format!("ended {}", intent.library));
     }
 }
 
@@ -878,6 +914,117 @@ async fn a_write_tool_against_an_unknown_intake_is_invalid_params() {
         "the message must name the rejected id: {}",
         data.message
     );
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+/// A `library.metadata.set` call setting the seeded book's title.
+fn set_title(intake_id: i64, value: &str) -> CallToolRequestParams {
+    call(
+        "library.metadata.set",
+        serde_json::json!({
+            "library": "fixture",
+            "intake_id": intake_id,
+            "field": "title",
+            "value": value,
+            "reason": "contract test",
+        }),
+    )
+}
+
+/// A metadata write takes the daemon's write mutex: while another
+/// session holds it the call is refused as retryable and writes
+/// nothing; once the session ends the same call lands, attributed to
+/// the MCP surface on both the audit row and the call row.
+#[tokio::test]
+async fn a_metadata_write_is_busy_while_another_write_session_is_open() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+    let node = PartitionIdx::new(fx.intake_id).root().get();
+    let audit_rows = || {
+        Catalog::open_for_write_unbacked(&fx.catalog_db)
+            .expect("reopen catalog")
+            .metadata_audit_for_node(node)
+            .expect("audit trail")
+    };
+
+    let held = fx
+        .registry
+        .begin_host_write(Caller::cli(), "fixture", None)
+        .expect("hold the write mutex");
+    let busy = rpc_error(
+        client
+            .call_tool(set_title(fx.intake_id, "Set while busy"))
+            .await
+            .expect_err("the write must wait its turn"),
+    );
+    assert_eq!(busy.code, ErrorCode(BUSY), "{busy:?}");
+    assert_eq!(
+        busy.data.as_ref().map(|data| data["retryable"].clone()),
+        Some(serde_json::json!(true)),
+        "{busy:?}"
+    );
+    assert!(
+        audit_rows().is_empty(),
+        "a busy write must not have been written"
+    );
+
+    drop(held);
+    client
+        .call_tool(set_title(fx.intake_id, "Set once free"))
+        .await
+        .expect("the write goes through once the session ends");
+    let rows = audit_rows();
+    let update = rows
+        .iter()
+        .find(|row| row.action == "update")
+        .expect("an update row");
+    assert_eq!(update.new_value.as_deref(), Some("Set once free"));
+    assert_eq!(update.actor_kind.as_str(), "llm");
+    assert_eq!(update.actor_detail.as_deref(), Some("mcp"));
+    let calls = Catalog::open_for_write_unbacked(&fx.catalog_db)
+        .expect("reopen catalog")
+        .tool_calls_for_tool("library.metadata.set")
+        .expect("tool calls");
+    let sources: Vec<&str> = calls.iter().map(|c| c.source.as_str()).collect();
+    assert_eq!(sources, ["mcp"], "only the call that ran is recorded");
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+/// A metadata write runs in an exclusive session the host hears start
+/// and end, and announces its library in between; a write the op
+/// refuses announces nothing.
+#[tokio::test]
+async fn a_metadata_write_announces_its_library_and_a_refused_one_does_not() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+
+    client
+        .call_tool(set_title(fx.intake_id, "Announced"))
+        .await
+        .expect("library.metadata.set");
+    assert_eq!(
+        fx.changes.take(),
+        ["started fixture", "changed fixture", "ended fixture"]
+    );
+
+    client
+        .call_tool(call(
+            "library.metadata.set",
+            serde_json::json!({
+                "library": "fixture",
+                "intake_id": fx.intake_id,
+                "field": "not_a_field",
+                "value": "x",
+                "reason": "contract test",
+            }),
+        ))
+        .await
+        .expect_err("an unknown metadata field must be rejected");
+    assert_eq!(fx.changes.take(), ["started fixture", "ended fixture"]);
 
     let _ = client.cancel().await;
     fx.stop().await;

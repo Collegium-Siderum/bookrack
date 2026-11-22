@@ -2,13 +2,11 @@
 
 //! Metadata write ops: override edits and review-status transitions.
 //!
-//! Every op here opens the catalog read-write, applies its change, and
-//! appends one [`bookrack_catalog::MetadataAudit`] row stamped with the
-//! effective [`crate::Caller`] — the task-scope override installed by
-//! [`crate::with_caller_override`] when the call arrives through a
-//! hosted surface (e.g. MCP), otherwise the caller the [`Ops`] was
-//! built with — so a CLI edit and an MCP edit are distinguishable by
-//! `actor_kind` / `actor_detail` in the audit trail.
+//! Every op here runs inside a write session: it opens the catalog
+//! read-write, applies its change, and appends one
+//! [`bookrack_catalog::MetadataAudit`] row stamped with the session's
+//! [`crate::Caller`], so edits from different surfaces are
+//! distinguishable by `actor_kind` / `actor_detail` in the audit trail.
 
 // Parallel implementation: ops-writes-metadata.
 
@@ -19,7 +17,6 @@ use bookrack_catalog::{
 use bookrack_core::ItemKind;
 use bookrack_embed::Embedder;
 
-use crate::Ops;
 use crate::OpsError;
 use crate::Result;
 use crate::dto::writes::{
@@ -28,7 +25,8 @@ use crate::dto::writes::{
     RejectMetadataRequest, RemoveContributorRequest, SetMetadataFieldRequest,
     VoidMetadataFieldRequest, WriteOutcome,
 };
-use crate::recorder::record_call_sync;
+use crate::recorder::record_call_with_caller_sync;
+use crate::write_session::WriteSession;
 use crate::writes::{build_audit, require_intake, write_outcome, write_review_status_inner};
 
 /// Set an override on one bibliographic field of the book root, writing
@@ -36,9 +34,11 @@ use crate::writes::{build_audit, require_intake, write_outcome, write_review_sta
 /// [`EDITABLE_FIELDS`]; an unknown name is rejected before anything is
 /// written.
 pub fn set_metadata_field<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: SetMetadataFieldRequest,
 ) -> Result<WriteOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "field": req.field,
@@ -46,7 +46,7 @@ pub fn set_metadata_field<E: Embedder>(
         "reason": req.reason,
         "confirmed": req.confirmed,
     });
-    record_call_sync!(ops, "library.metadata.set", args, {
+    record_call_with_caller_sync!(ops, caller, "library.metadata.set", args, {
         require_editable(&req.field)?;
         let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
         require_intake(&catalog, req.intake_id)?;
@@ -54,7 +54,6 @@ pub fn set_metadata_field<E: Embedder>(
         let effective = catalog.effective_publication_attrs(req.intake_id, ItemKind::Book)?;
         let old_value = effective.get(&req.field).map(str::to_string);
 
-        let caller = ops.effective_caller();
         let curated_by = caller.actor_kind.as_str();
 
         catalog.set_override(
@@ -69,7 +68,7 @@ pub fn set_metadata_field<E: Embedder>(
         )?;
 
         let audit = build_audit(
-            ops,
+            caller,
             "node_publication_attrs",
             "update",
             Some(req.intake_id),
@@ -80,7 +79,7 @@ pub fn set_metadata_field<E: Embedder>(
         );
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
-        Ok(write_outcome(ops, audit_id, true))
+        Ok(write_outcome(caller, audit_id, true))
     })
 }
 
@@ -91,15 +90,17 @@ pub fn set_metadata_field<E: Embedder>(
 /// that key exists — rows that predate validation must stay removable —
 /// and rejected when there is nothing to remove.
 pub fn clear_metadata_field<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: ClearMetadataFieldRequest,
 ) -> Result<WriteOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "field": req.field,
         "reason": req.reason,
     });
-    record_call_sync!(ops, "library.metadata.clear", args, {
+    record_call_with_caller_sync!(ops, caller, "library.metadata.clear", args, {
         let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
         require_intake(&catalog, req.intake_id)?;
 
@@ -113,7 +114,7 @@ pub fn clear_metadata_field<E: Embedder>(
 
         // Audit either way: the trail records that someone tried.
         let audit = build_audit(
-            ops,
+            caller,
             "node_publication_attrs",
             "delete",
             Some(req.intake_id),
@@ -124,7 +125,7 @@ pub fn clear_metadata_field<E: Embedder>(
         );
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
-        Ok(write_outcome(ops, audit_id, existed))
+        Ok(write_outcome(caller, audit_id, existed))
     })
 }
 
@@ -136,15 +137,17 @@ pub fn clear_metadata_field<E: Embedder>(
 /// [`clear_metadata_field`] removes the tombstone and restores the
 /// extracted value.
 pub fn void_metadata_field<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: VoidMetadataFieldRequest,
 ) -> Result<WriteOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "field": req.field,
         "reason": req.reason,
     });
-    record_call_sync!(ops, "library.metadata.void", args, {
+    record_call_with_caller_sync!(ops, caller, "library.metadata.void", args, {
         require_editable(&req.field)?;
         let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
         require_intake(&catalog, req.intake_id)?;
@@ -152,7 +155,6 @@ pub fn void_metadata_field<E: Embedder>(
         let effective = catalog.effective_publication_attrs(req.intake_id, ItemKind::Book)?;
         let old_value = effective.get(&req.field).map(str::to_string);
 
-        let caller = ops.effective_caller();
         catalog.set_override(&NewOverride::new(
             req.intake_id,
             ItemKind::Book,
@@ -167,7 +169,7 @@ pub fn void_metadata_field<E: Embedder>(
         // changed nothing visible.
         let changed = old_value.is_some();
         let audit = build_audit(
-            ops,
+            caller,
             "node_publication_attrs",
             "void",
             Some(req.intake_id),
@@ -178,7 +180,7 @@ pub fn void_metadata_field<E: Embedder>(
         );
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
-        Ok(write_outcome(ops, audit_id, changed))
+        Ok(write_outcome(caller, audit_id, changed))
     })
 }
 
@@ -187,9 +189,11 @@ pub fn void_metadata_field<E: Embedder>(
 /// one of [`CONTRIBUTOR_ROLES`]. User-origin rows survive a re-ingest:
 /// the pipeline's contributor refresh replaces only extracted rows.
 pub fn add_contributor<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: AddContributorRequest,
 ) -> Result<AddContributorOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "role": req.role,
@@ -197,7 +201,7 @@ pub fn add_contributor<E: Embedder>(
         "nationality": req.nationality,
         "reason": req.reason,
     });
-    record_call_sync!(ops, "library.metadata.contributor_add", args, {
+    record_call_with_caller_sync!(ops, caller, "library.metadata.contributor_add", args, {
         if !CONTRIBUTOR_ROLES.contains(&req.role.as_str()) {
             return Err(OpsError::UnknownContributorRole { role: req.role });
         }
@@ -232,7 +236,7 @@ pub fn add_contributor<E: Embedder>(
         let contributor_id = catalog.add_contributor(&new)?;
 
         let audit = build_audit(
-            ops,
+            caller,
             "node_contributors",
             "insert",
             Some(req.intake_id),
@@ -245,7 +249,7 @@ pub fn add_contributor<E: Embedder>(
 
         Ok(AddContributorOutcome {
             contributor_id,
-            write: write_outcome(ops, audit_id, true),
+            write: write_outcome(caller, audit_id, true),
         })
     })
 }
@@ -257,15 +261,17 @@ pub fn add_contributor<E: Embedder>(
 /// removal of one may need repeating after it; user-origin rows are
 /// unaffected.
 pub fn remove_contributor<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: RemoveContributorRequest,
 ) -> Result<WriteOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "contributor_id": req.contributor_id,
         "reason": req.reason,
     });
-    record_call_sync!(ops, "library.metadata.contributor_remove", args, {
+    record_call_with_caller_sync!(ops, caller, "library.metadata.contributor_remove", args, {
         let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
         require_intake(&catalog, req.intake_id)?;
 
@@ -283,7 +289,7 @@ pub fn remove_contributor<E: Embedder>(
         let removed = catalog.remove_contributor(req.contributor_id)?;
 
         let audit = build_audit(
-            ops,
+            caller,
             "node_contributors",
             "delete",
             Some(req.intake_id),
@@ -294,7 +300,7 @@ pub fn remove_contributor<E: Embedder>(
         );
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
-        Ok(write_outcome(ops, audit_id, removed))
+        Ok(write_outcome(caller, audit_id, removed))
     })
 }
 
@@ -305,13 +311,15 @@ pub fn remove_contributor<E: Embedder>(
 /// audit is machine plausibility, review is human (or LLM)
 /// confirmation.
 pub fn reaudit_metadata<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: ReauditMetadataRequest,
     audit_data: &crate::pipeline::book::AuditData,
     audit_profile: &crate::pipeline::book::AuditProfile,
 ) -> Result<ReauditOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({ "intake_id": req.intake_id });
-    record_call_sync!(ops, "library.metadata.reaudit", args, {
+    record_call_with_caller_sync!(ops, caller, "library.metadata.reaudit", args, {
         let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
         let outcome = crate::pipeline::book::reaudit::reaudit_book(
             &catalog,
@@ -338,17 +346,19 @@ pub fn reaudit_metadata<E: Embedder>(
 /// Acknowledge a metadata gap: leaves the audit verdict alone but flips
 /// the review row to `acknowledged` with a recorded reason.
 pub fn acknowledge_metadata_gap<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: AcknowledgeMetadataGapRequest,
 ) -> Result<WriteOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "reason": req.reason,
     });
-    record_call_sync!(ops, "library.metadata.ack", args, {
+    record_call_with_caller_sync!(ops, caller, "library.metadata.ack", args, {
         let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
         write_review_status_inner(
-            ops,
+            caller,
             &catalog,
             ItemKind::Book,
             req.intake_id,
@@ -363,17 +373,19 @@ pub fn acknowledge_metadata_gap<E: Embedder>(
 /// is flipped to `approved`. The reason lands on the audit row only:
 /// `node_reviews.notes` (the ingest audit's note) stays in place.
 pub fn approve_metadata<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: ApproveMetadataRequest,
 ) -> Result<WriteOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "reason": req.reason,
     });
-    record_call_sync!(ops, "library.metadata.approve", args, {
+    record_call_with_caller_sync!(ops, caller, "library.metadata.approve", args, {
         let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
         write_review_status_inner(
-            ops,
+            caller,
             &catalog,
             ItemKind::Book,
             req.intake_id,
@@ -388,17 +400,19 @@ pub fn approve_metadata<E: Embedder>(
 /// can filter on `rejected`. The reason lands on the audit row only:
 /// `node_reviews.notes` (the ingest audit's note) stays in place.
 pub fn reject_metadata<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: RejectMetadataRequest,
 ) -> Result<WriteOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "reason": req.reason,
     });
-    record_call_sync!(ops, "library.metadata.reject", args, {
+    record_call_with_caller_sync!(ops, caller, "library.metadata.reject", args, {
         let catalog = Catalog::open_for_write(ops.catalog_db(), ops.backup_dir())?;
         write_review_status_inner(
-            ops,
+            caller,
             &catalog,
             ItemKind::Book,
             req.intake_id,

@@ -25,7 +25,7 @@ use bookrack_ops::dto::{
 };
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
-use bookrack_ops::write_session::{Region, SessionRunError};
+use bookrack_ops::write_session::{ChangeSet, Region, SessionRunError, WriteSession};
 use bookrack_ops::{Caller, OpsError, SearchOptions, reads, with_caller_override, writes};
 use bookrack_runtime::control::events::EventStreamHandle;
 use eyre::WrapErr;
@@ -1027,6 +1027,44 @@ impl BookrackServer {
         library: Option<&str>,
     ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>, ErrorData> {
         self.registry.get(library).map_err(|e| registry_err(&e))
+    }
+
+    /// Run one curation write on book `intake_id` of `handle`'s library
+    /// in a write session attributed to [`Caller::mcp`].
+    ///
+    /// The session takes the daemon's write mutex without waiting, so a
+    /// concurrent write is answered busy; `op` runs on a blocking task,
+    /// off the async worker the tool call arrived on, and the library is
+    /// announced once it returns.
+    async fn metadata_write<T, F>(
+        &self,
+        handle: &Arc<LibraryHandle<OllamaEmbedClient>>,
+        intake_id: i64,
+        op: F,
+    ) -> Result<T, ErrorData>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut WriteSession<OllamaEmbedClient>) -> bookrack_ops::Result<T> + Send + 'static,
+    {
+        let region = Region::Curation {
+            kind: ItemKind::Book,
+            intake_id,
+        };
+        let session = self
+            .registry
+            .begin_write(handle, region, Caller::mcp())
+            .map_err(|busy| ops_error_to_mcp(OpsError::WriteBusy(busy)))?;
+        let library = handle.name().to_string();
+        session
+            .run_blocking(async move |s| Ok((op(s)?, ChangeSet::announced(library))))
+            .await
+            .map_err(|e| match e {
+                SessionRunError::Op(e) => ops_error_to_mcp(e),
+                other => mcp_from_problem(
+                    ErrorCode::INTERNAL_ERROR,
+                    bookrack_core::Problem::from_error_chain(&other),
+                ),
+            })
     }
 
     /// Search the library and return cited passages as a JSON array.
@@ -2051,6 +2089,7 @@ impl BookrackServer {
         Parameters(args): Parameters<MetadataSetArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(Some(args.library.as_str()))?;
+        let intake_id = args.intake_id;
         let req = bookrack_ops::dto::writes::SetMetadataFieldRequest {
             intake_id: args.intake_id,
             field: args.field,
@@ -2058,8 +2097,11 @@ impl BookrackServer {
             reason: Some(args.reason),
             confirmed: args.confirmed.unwrap_or(false),
         };
-        let outcome =
-            writes::metadata::set_metadata_field(handle.ops(), req).map_err(ops_error_to_mcp)?;
+        let outcome = self
+            .metadata_write(&handle, intake_id, move |s| {
+                writes::metadata::set_metadata_field(s, req)
+            })
+            .await?;
         respond_with(&outcome)
     }
 
@@ -2079,13 +2121,17 @@ impl BookrackServer {
         Parameters(args): Parameters<MetadataClearArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(Some(args.library.as_str()))?;
+        let intake_id = args.intake_id;
         let req = bookrack_ops::dto::writes::ClearMetadataFieldRequest {
             intake_id: args.intake_id,
             field: args.field,
             reason: Some(args.reason),
         };
-        let outcome =
-            writes::metadata::clear_metadata_field(handle.ops(), req).map_err(ops_error_to_mcp)?;
+        let outcome = self
+            .metadata_write(&handle, intake_id, move |s| {
+                writes::metadata::clear_metadata_field(s, req)
+            })
+            .await?;
         respond_with(&outcome)
     }
 
@@ -2104,13 +2150,17 @@ impl BookrackServer {
         Parameters(args): Parameters<MetadataVoidArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(Some(args.library.as_str()))?;
+        let intake_id = args.intake_id;
         let req = bookrack_ops::dto::writes::VoidMetadataFieldRequest {
             intake_id: args.intake_id,
             field: args.field,
             reason: Some(args.reason),
         };
-        let outcome =
-            writes::metadata::void_metadata_field(handle.ops(), req).map_err(ops_error_to_mcp)?;
+        let outcome = self
+            .metadata_write(&handle, intake_id, move |s| {
+                writes::metadata::void_metadata_field(s, req)
+            })
+            .await?;
         respond_with(&outcome)
     }
 
@@ -2129,6 +2179,7 @@ impl BookrackServer {
         Parameters(args): Parameters<ContributorAddArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(Some(args.library.as_str()))?;
+        let intake_id = args.intake_id;
         let req = bookrack_ops::dto::writes::AddContributorRequest {
             intake_id: args.intake_id,
             role: args.role,
@@ -2136,8 +2187,11 @@ impl BookrackServer {
             nationality: args.nationality,
             reason: Some(args.reason),
         };
-        let outcome =
-            writes::metadata::add_contributor(handle.ops(), req).map_err(ops_error_to_mcp)?;
+        let outcome = self
+            .metadata_write(&handle, intake_id, move |s| {
+                writes::metadata::add_contributor(s, req)
+            })
+            .await?;
         respond_with(&outcome)
     }
 
@@ -2158,13 +2212,17 @@ impl BookrackServer {
         Parameters(args): Parameters<ContributorRemoveArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(Some(args.library.as_str()))?;
+        let intake_id = args.intake_id;
         let req = bookrack_ops::dto::writes::RemoveContributorRequest {
             intake_id: args.intake_id,
             contributor_id: args.contributor_id,
             reason: Some(args.reason),
         };
-        let outcome =
-            writes::metadata::remove_contributor(handle.ops(), req).map_err(ops_error_to_mcp)?;
+        let outcome = self
+            .metadata_write(&handle, intake_id, move |s| {
+                writes::metadata::remove_contributor(s, req)
+            })
+            .await?;
         respond_with(&outcome)
     }
 
@@ -2184,14 +2242,17 @@ impl BookrackServer {
         Parameters(args): Parameters<MetadataReauditArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(Some(args.library.as_str()))?;
+        let intake_id = args.intake_id;
         let req = bookrack_ops::dto::writes::ReauditMetadataRequest {
             intake_id: args.intake_id,
         };
         let audit_data = bookrack_ops::AuditData::default_data();
         let audit_profile = bookrack_ops::AuditProfile::default();
-        let outcome =
-            writes::metadata::reaudit_metadata(handle.ops(), req, &audit_data, &audit_profile)
-                .map_err(ops_error_to_mcp)?;
+        let outcome = self
+            .metadata_write(&handle, intake_id, move |s| {
+                writes::metadata::reaudit_metadata(s, req, &audit_data, &audit_profile)
+            })
+            .await?;
         respond_with(&outcome)
     }
 
@@ -2209,12 +2270,16 @@ impl BookrackServer {
         Parameters(args): Parameters<MetadataAckArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(Some(args.library.as_str()))?;
+        let intake_id = args.intake_id;
         let req = bookrack_ops::dto::writes::AcknowledgeMetadataGapRequest {
             intake_id: args.intake_id,
             reason: args.reason,
         };
-        let outcome = writes::metadata::acknowledge_metadata_gap(handle.ops(), req)
-            .map_err(ops_error_to_mcp)?;
+        let outcome = self
+            .metadata_write(&handle, intake_id, move |s| {
+                writes::metadata::acknowledge_metadata_gap(s, req)
+            })
+            .await?;
         respond_with(&outcome)
     }
 
@@ -2230,12 +2295,16 @@ impl BookrackServer {
         Parameters(args): Parameters<MetadataApproveArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(Some(args.library.as_str()))?;
+        let intake_id = args.intake_id;
         let req = bookrack_ops::dto::writes::ApproveMetadataRequest {
             intake_id: args.intake_id,
             reason: args.reason,
         };
-        let outcome =
-            writes::metadata::approve_metadata(handle.ops(), req).map_err(ops_error_to_mcp)?;
+        let outcome = self
+            .metadata_write(&handle, intake_id, move |s| {
+                writes::metadata::approve_metadata(s, req)
+            })
+            .await?;
         respond_with(&outcome)
     }
 
@@ -2251,12 +2320,16 @@ impl BookrackServer {
         Parameters(args): Parameters<MetadataRejectArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(Some(args.library.as_str()))?;
+        let intake_id = args.intake_id;
         let req = bookrack_ops::dto::writes::RejectMetadataRequest {
             intake_id: args.intake_id,
             reason: args.reason,
         };
-        let outcome =
-            writes::metadata::reject_metadata(handle.ops(), req).map_err(ops_error_to_mcp)?;
+        let outcome = self
+            .metadata_write(&handle, intake_id, move |s| {
+                writes::metadata::reject_metadata(s, req)
+            })
+            .await?;
         respond_with(&outcome)
     }
 

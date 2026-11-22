@@ -4,15 +4,15 @@
 //! `bookrack rpc call library.show_metadata_audit` and its siblings;
 //! this module covers only the write surface.
 
-use bookrack_config::Config;
 use bookrack_embed::OllamaEmbedClient;
-use bookrack_ops::Ops;
 use bookrack_ops::audit_overlay::load_audit_profile;
 use bookrack_ops::dto::writes::{AddContributorOutcome, ReauditOutcome, WriteOutcome};
+use bookrack_ops::write_session::WriteSession;
 use eyre::Result;
 use serde::Serialize;
 
-use crate::ops_helpers::catalog_only_ops;
+/// The write session every metadata write here runs in.
+type Session = WriteSession<OllamaEmbedClient>;
 
 pub use bookrack_cli_grammar::WriteMetadataAction;
 
@@ -49,15 +49,15 @@ pub enum MetadataWriteReport {
     },
 }
 
-/// REPL-side dispatch for the write actions. Opens no store itself:
-/// each write takes the catalog's write door inside the ops layer,
-/// after its own argument checks. Returns what the write did.
-pub async fn run_write(
-    cfg: &Config,
+/// Dispatch for the write actions, in `session`'s library and
+/// attributed to its caller. Opens no store itself: each write takes
+/// the catalog's write door inside the ops layer, after its own argument
+/// checks. Returns what the write did.
+pub fn run_write(
+    session: &mut Session,
     action: WriteMetadataAction,
     profile_name: Option<&str>,
 ) -> Result<MetadataWriteReport> {
-    let ops = catalog_only_ops(cfg);
     let edit =
         |book: i64, field: Option<String>, outcome: WriteOutcome| MetadataWriteReport::Edit {
             book,
@@ -74,7 +74,7 @@ pub async fn run_write(
         } => edit(
             book,
             Some(field.clone()),
-            set(&ops, book, &field, &value, reason, confirmed)?,
+            set(session, book, &field, &value, reason, confirmed)?,
         ),
         WriteMetadataAction::Clear {
             book,
@@ -83,15 +83,19 @@ pub async fn run_write(
         } => edit(
             book,
             Some(field.clone()),
-            clear(&ops, book, &field, reason)?,
+            clear(session, book, &field, reason)?,
         ),
         WriteMetadataAction::Void {
             book,
             field,
             reason,
-        } => edit(book, Some(field.clone()), void(&ops, book, &field, reason)?),
+        } => edit(
+            book,
+            Some(field.clone()),
+            void(session, book, &field, reason)?,
+        ),
         WriteMetadataAction::Reaudit { book } => {
-            let outcome = reaudit(cfg, &ops, book, profile_name)?;
+            let outcome = reaudit(session, book, profile_name)?;
             MetadataWriteReport::Reaudited {
                 book,
                 verdict: outcome.verdict,
@@ -108,7 +112,7 @@ pub async fn run_write(
             reason,
         } => MetadataWriteReport::ContributorAdded {
             book,
-            outcome: contributor_add(&ops, book, role, name, nationality, reason)?,
+            outcome: contributor_add(session, book, role, name, nationality, reason)?,
         },
         WriteMetadataAction::ContributorRemove {
             book,
@@ -117,21 +121,21 @@ pub async fn run_write(
         } => edit(
             book,
             None,
-            contributor_remove(&ops, book, contributor_id, reason)?,
+            contributor_remove(session, book, contributor_id, reason)?,
         ),
-        WriteMetadataAction::Ack { book, reason } => edit(book, None, ack(&ops, book, &reason)?),
+        WriteMetadataAction::Ack { book, reason } => edit(book, None, ack(session, book, &reason)?),
         WriteMetadataAction::Approve { book, reason } => {
-            edit(book, None, approve(&ops, book, reason.as_deref())?)
+            edit(book, None, approve(session, book, reason.as_deref())?)
         }
         WriteMetadataAction::Reject { book, reason } => {
-            edit(book, None, reject(&ops, book, &reason)?)
+            edit(book, None, reject(session, book, &reason)?)
         }
     };
     Ok(report)
 }
 
 fn set(
-    ops: &Ops<OllamaEmbedClient>,
+    session: &mut Session,
     book: i64,
     field: &str,
     value: &str,
@@ -145,7 +149,7 @@ fn set(
         reason,
         confirmed,
     };
-    match bookrack_ops::writes::metadata::set_metadata_field(ops, req) {
+    match bookrack_ops::writes::metadata::set_metadata_field(session, req) {
         Ok(outcome) => Ok(outcome),
         Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
             // The typed error stays in the chain so the control plane
@@ -160,7 +164,7 @@ fn set(
 }
 
 fn clear(
-    ops: &Ops<OllamaEmbedClient>,
+    session: &mut Session,
     book: i64,
     field: &str,
     reason: Option<String>,
@@ -170,7 +174,7 @@ fn clear(
         field: field.to_string(),
         reason,
     };
-    match bookrack_ops::writes::metadata::clear_metadata_field(ops, req) {
+    match bookrack_ops::writes::metadata::clear_metadata_field(session, req) {
         Ok(outcome) => Ok(outcome),
         Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
             // The typed error stays in the chain so the control plane
@@ -185,7 +189,7 @@ fn clear(
 }
 
 fn void(
-    ops: &Ops<OllamaEmbedClient>,
+    session: &mut Session,
     book: i64,
     field: &str,
     reason: Option<String>,
@@ -195,7 +199,7 @@ fn void(
         field: field.to_string(),
         reason,
     };
-    match bookrack_ops::writes::metadata::void_metadata_field(ops, req) {
+    match bookrack_ops::writes::metadata::void_metadata_field(session, req) {
         Ok(outcome) => Ok(outcome),
         Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
             // The typed error stays in the chain so the control plane
@@ -209,16 +213,16 @@ fn void(
     }
 }
 
-fn reaudit(
-    cfg: &Config,
-    ops: &Ops<OllamaEmbedClient>,
-    book: i64,
-    profile_name: Option<&str>,
-) -> Result<ReauditOutcome> {
-    let audit_profile = load_audit_profile(cfg, profile_name);
+fn reaudit(session: &mut Session, book: i64, profile_name: Option<&str>) -> Result<ReauditOutcome> {
+    let audit_profile = load_audit_profile(session.handle().cfg(), profile_name);
     let audit_data = bookrack_ops::pipeline::book::AuditData::default_data();
     let req = bookrack_ops::dto::writes::ReauditMetadataRequest { intake_id: book };
-    match bookrack_ops::writes::metadata::reaudit_metadata(ops, req, &audit_data, &audit_profile) {
+    match bookrack_ops::writes::metadata::reaudit_metadata(
+        session,
+        req,
+        &audit_data,
+        &audit_profile,
+    ) {
         Ok(outcome) => Ok(outcome),
         Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
             // The typed error stays in the chain so the control plane
@@ -232,7 +236,7 @@ fn reaudit(
 }
 
 fn contributor_add(
-    ops: &Ops<OllamaEmbedClient>,
+    session: &mut Session,
     book: i64,
     role: String,
     name: String,
@@ -246,7 +250,7 @@ fn contributor_add(
         nationality,
         reason,
     };
-    match bookrack_ops::writes::metadata::add_contributor(ops, req) {
+    match bookrack_ops::writes::metadata::add_contributor(session, req) {
         Ok(outcome) => Ok(outcome),
         Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
             // The typed error stays in the chain so the control plane
@@ -264,7 +268,7 @@ fn contributor_add(
 }
 
 fn contributor_remove(
-    ops: &Ops<OllamaEmbedClient>,
+    session: &mut Session,
     book: i64,
     contributor_id: i64,
     reason: Option<String>,
@@ -274,7 +278,7 @@ fn contributor_remove(
         contributor_id,
         reason,
     };
-    match bookrack_ops::writes::metadata::remove_contributor(ops, req) {
+    match bookrack_ops::writes::metadata::remove_contributor(session, req) {
         Ok(outcome) => Ok(outcome),
         Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
             // The typed error stays in the chain so the control plane
@@ -291,12 +295,12 @@ fn contributor_remove(
     }
 }
 
-fn ack(ops: &Ops<OllamaEmbedClient>, book: i64, reason: &str) -> Result<WriteOutcome> {
+fn ack(session: &mut Session, book: i64, reason: &str) -> Result<WriteOutcome> {
     let req = bookrack_ops::dto::writes::AcknowledgeMetadataGapRequest {
         intake_id: book,
         reason: reason.to_string(),
     };
-    match bookrack_ops::writes::metadata::acknowledge_metadata_gap(ops, req) {
+    match bookrack_ops::writes::metadata::acknowledge_metadata_gap(session, req) {
         Ok(outcome) => Ok(outcome),
         Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
             // The typed error stays in the chain so the control plane
@@ -312,12 +316,12 @@ fn ack(ops: &Ops<OllamaEmbedClient>, book: i64, reason: &str) -> Result<WriteOut
 /// Mark the record reviewed and correct. The operator (or an LLM acting
 /// on the operator's behalf) is asserting that the effective metadata
 /// matches the source; the audit's plausibility verdict is unchanged.
-fn approve(ops: &Ops<OllamaEmbedClient>, book: i64, reason: Option<&str>) -> Result<WriteOutcome> {
+fn approve(session: &mut Session, book: i64, reason: Option<&str>) -> Result<WriteOutcome> {
     let req = bookrack_ops::dto::writes::ApproveMetadataRequest {
         intake_id: book,
         reason: reason.map(str::to_string),
     };
-    match bookrack_ops::writes::metadata::approve_metadata(ops, req) {
+    match bookrack_ops::writes::metadata::approve_metadata(session, req) {
         Ok(outcome) => Ok(outcome),
         Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
             // The typed error stays in the chain so the control plane
@@ -333,12 +337,12 @@ fn approve(ops: &Ops<OllamaEmbedClient>, book: i64, reason: Option<&str>) -> Res
 /// Reject the book. The pipeline rows stay in place so downstream
 /// consumers can filter on `rejected`; this records the rejection and
 /// the reason in the audit trail.
-fn reject(ops: &Ops<OllamaEmbedClient>, book: i64, reason: &str) -> Result<WriteOutcome> {
+fn reject(session: &mut Session, book: i64, reason: &str) -> Result<WriteOutcome> {
     let req = bookrack_ops::dto::writes::RejectMetadataRequest {
         intake_id: book,
         reason: reason.to_string(),
     };
-    match bookrack_ops::writes::metadata::reject_metadata(ops, req) {
+    match bookrack_ops::writes::metadata::reject_metadata(session, req) {
         Ok(outcome) => Ok(outcome),
         Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
             // The typed error stays in the chain so the control plane
@@ -357,21 +361,20 @@ mod tests {
     use crate::control::error_map::handler_err;
     use crate::control::jsonrpc::INVALID_PARAMS;
     use bookrack_catalog::{Catalog, NewIntake};
+    use bookrack_config::Config;
     use bookrack_core::ItemKind;
     use bookrack_ops::Caller;
+    use bookrack_ops::registry::LibraryRegistry;
+    use bookrack_ops::write_session::Region;
     use std::path::Path;
 
-    /// A catalog-only `Ops` over a scratch root, matching what
-    /// [`catalog_only_ops`] builds from a `Config`.
-    fn ops_over(root: &Path) -> Ops<OllamaEmbedClient> {
-        Ops::catalog_only(
-            root.join("corpus.db"),
-            root.join("catalog.db"),
-            &root.join("lancedb"),
-            root.join("books"),
-            root.join("backup"),
-            Caller::cli(),
-        )
+    /// A write session on a catalog-only library over a scratch root,
+    /// attributed to the CLI.
+    fn session_over(root: &Path) -> Session {
+        let handle = crate::control::methods::test_library_handle(root, "default");
+        LibraryRegistry::single(std::sync::Arc::clone(&handle))
+            .begin_write(&handle, Region::Library, Caller::cli())
+            .expect("a fresh registry's mutex is free")
     }
 
     fn seed_intake(root: &Path, sha: &str) -> i64 {
@@ -394,9 +397,8 @@ mod tests {
     /// Run one write through the cmd entry point and return its report
     /// as the control plane serializes it.
     async fn report(cfg: &Config, action: WriteMetadataAction) -> serde_json::Value {
-        let report = run_write(cfg, action, None)
-            .await
-            .expect("the write succeeds");
+        let report =
+            run_write(&mut session_over(cfg.data_dir()), action, None).expect("the write succeeds");
         serde_json::to_value(report).expect("the report serializes")
     }
 
@@ -564,11 +566,11 @@ mod tests {
     #[test]
     fn an_unknown_contributor_role_reaches_the_control_plane_as_invalid_params() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let ops = ops_over(tmp.path());
+        let mut session = session_over(tmp.path());
         let book = seed_intake(tmp.path(), "sha-contributor-role");
 
         let err = contributor_add(
-            &ops,
+            &mut session,
             book,
             "narrator".to_string(),
             "Somebody".to_string(),
@@ -594,10 +596,10 @@ mod tests {
     #[test]
     fn a_missing_contributor_row_reaches_the_control_plane_as_invalid_params() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let ops = ops_over(tmp.path());
+        let mut session = session_over(tmp.path());
         let book = seed_intake(tmp.path(), "sha-contributor-row");
 
-        let err = contributor_remove(&ops, book, 4242, None)
+        let err = contributor_remove(&mut session, book, 4242, None)
             .expect_err("an unknown contributor id must be refused");
 
         let rpc = handler_err("metadata.contributor_remove", err);
@@ -619,7 +621,7 @@ mod tests {
         let (tmp, cfg) = temp_cfg();
 
         let err = run_write(
-            &cfg,
+            &mut session_over(cfg.data_dir()),
             WriteMetadataAction::Set {
                 book: 1,
                 field: "no_such_field".to_string(),
@@ -629,7 +631,6 @@ mod tests {
             },
             None,
         )
-        .await
         .expect_err("the field is not editable");
 
         assert!(

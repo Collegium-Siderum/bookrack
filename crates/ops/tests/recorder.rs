@@ -10,18 +10,23 @@
 //! intact.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use bookrack_catalog::{Catalog, McpToolCall, NewIntake};
+use bookrack_config::Config;
 use bookrack_core::ItemKind;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::reads::books::{list_books, show_book};
 use bookrack_ops::reads::info::{LibraryInfoContext, show_library_info};
+use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
+use bookrack_ops::write_session::{Region, WriteSession};
 use bookrack_ops::{Caller, Ops, OpsError};
 use tempfile::TempDir;
 
 struct Fixture {
     _tmp: TempDir,
-    ops: Ops<OllamaEmbedClient>,
+    ops: Arc<Ops<OllamaEmbedClient>>,
+    caller: Caller,
     catalog_db: PathBuf,
 }
 
@@ -48,13 +53,28 @@ impl Fixture {
             &lancedb_dir,
             books_dir,
             backup_dir,
-            caller,
+            caller.clone(),
         );
         Fixture {
             _tmp: tmp,
-            ops,
+            ops: Arc::new(ops),
+            caller,
             catalog_db,
         }
+    }
+
+    /// A write session on a library over the fixture's stores,
+    /// attributed to the fixture's caller.
+    fn session(&self) -> WriteSession<OllamaEmbedClient> {
+        let root = self
+            .catalog_db
+            .parent()
+            .expect("the catalog sits in the root");
+        let cfg = Arc::new(Config::new(root.to_path_buf()));
+        let handle = LibraryHandle::from_arc("default", cfg, Arc::clone(&self.ops));
+        LibraryRegistry::single(Arc::clone(&handle))
+            .begin_write(&handle, Region::Library, self.caller.clone())
+            .expect("a fresh registry's mutex is free")
     }
 
     fn catalog(&self) -> Catalog {
@@ -128,7 +148,7 @@ fn record_call_sync_records_a_successful_write_op() {
     let fx = Fixture::cli();
     let id = fx.seed_intake("sha-recorder");
     set_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         SetMetadataFieldRequest {
             intake_id: id,
             field: "title".to_string(),

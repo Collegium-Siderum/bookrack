@@ -1327,8 +1327,6 @@ own rule: an intake or node id that resolves to nothing is a `null`
 body (or an empty list, where the tool description says so), not an
 error.
 
-Two properties the tool set deliberately does *not* have:
-
 The read set includes `library.show_paper_metadata_report`,
 `library.show_paper_audit_trail`, `library.list_paper_metadata` and
 `library.list_paper_pending_reviews` — the paper peers of
@@ -1339,18 +1337,22 @@ one, matching the book-side tool; the control-plane method resolves the
 overlay, so the two surfaces can grade the same paper differently and
 the tool description says which one it ran.
 
-- **The read tools are not side-effect free.** The four search tools
-  append a `retrieval_calls` row (and its hits) per call, so a
-  read-only data root cannot serve them.
-- **The metadata write tools do not take the runtime write mutex.**
-  That mutex is held by control-plane write methods (`run_write`) and
-  by `reference.overlay_set`, and `mcp.availability` is an advisory
-  broadcast, not enforcement — the daemon does not reject a
-  `library.metadata.*` tool issued while an RPC write session is open.
-  `reference.overlay_set` is refused instead: while another write holds
-  the mutex it answers `-32001` with `retryable: true` and writes
-  nothing. It judges its arguments before it asks for the mutex, so a
-  malformed overlay is `-32602` either way.
+The read tools are not side-effect free: the four search tools append
+a `retrieval_calls` row (and its hits) per call, so a read-only data
+root cannot serve them.
+
+Every write tool — the `library.metadata.*` tools and
+`reference.overlay_set` — takes the runtime write mutex the
+control-plane writes take. While another write holds the mutex the tool
+answers `-32001` with `retryable: true` and writes nothing. A
+control-plane `papers.metadata.reaudit` holds the mutex while it waits
+for a glean job on the same library, so a write tool issued meanwhile
+is refused the same way. `reference.overlay_set` judges its arguments
+before it asks for the mutex, so a malformed overlay is `-32602` either
+way; a metadata write tool judges them once it holds the mutex, as the
+control-plane methods do. A write that lands pauses MCP for its
+duration and announces `library.changed`, as a control-plane write
+does.
 
 ## Events (Phase 2)
 
@@ -1410,19 +1412,19 @@ the tool description says which one it ran.
   write command finishes, which includes a `library.mount` or
   `library.unmount` naming the library that joined or left the served
   set, a `library.fork` naming its source and the clone it mounted,
-  and the MCP `reference.overlay_set` tool. The payload does not say *what* happened, because every
+  and the MCP write tools — `reference.overlay_set` and the
+  `library.metadata.*` tools. The payload does not say *what* happened, because every
   subscriber's response is the same one: refresh what it believes the
   library set to be. A dry-run leg publishes none: it holds the write
   mutex but leaves every library as it found it, so a subscriber that
   refreshed would find nothing changed.
 - `mcp.availability` — `{ paused }` published `true` at the start of
   every write session — every control-plane write command, dry-run
-  legs included, and the MCP `reference.overlay_set` tool — and
-  `false` after it ends, so subscribers can advertise the MCP write
-  surface as temporarily paused. The signal is advisory: it reports the
-  state of the runtime write mutex, which the metadata write tools do
-  not take, so a client that ignores it can still issue one of them
-  mid-session.
+  legs included, and every MCP write tool — and `false` after it ends,
+  so subscribers can advertise the MCP write surface as temporarily
+  paused. It reports the state of the runtime write mutex: a client
+  that ignores it and issues a write tool mid-session is refused with
+  `-32001` and `retryable: true`.
 
 ## Phase log
 

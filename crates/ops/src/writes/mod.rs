@@ -2,9 +2,10 @@
 
 //! Write ops over the bookrack library.
 //!
-//! Each write op opens the catalog read-write, applies the change, and
-//! records a [`bookrack_catalog::MetadataAudit`] row tagged with the
-//! [`crate::Caller`] this [`crate::Ops`] was built with.
+//! Each write op runs inside a [`crate::write_session::WriteSession`]:
+//! it opens the catalog read-write, applies the change, and records a
+//! [`bookrack_catalog::MetadataAudit`] row tagged with the session's
+//! [`crate::Caller`].
 //!
 //! The pieces every curation write shares — the intake guard, the audit
 //! row builder, the outcome builder, and the review-status body — live
@@ -17,9 +18,8 @@ pub mod reference;
 
 use bookrack_catalog::{Catalog, NewMetadataAudit, NewReview};
 use bookrack_core::{ItemKind, PartitionIdx};
-use bookrack_embed::Embedder;
 
-use crate::Ops;
+use crate::Caller;
 use crate::OpsError;
 use crate::Result;
 use crate::dto::writes::WriteOutcome;
@@ -41,8 +41,8 @@ pub(crate) fn require_intake(catalog: &Catalog, intake_id: i64) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)] // Mirrors the columns of NewMetadataAudit; collapsing into a builder would just hide the same field list.
-pub(crate) fn build_audit<E: Embedder>(
-    ops: &Ops<E>,
+pub(crate) fn build_audit(
+    caller: &Caller,
     table_name: &str,
     action: &str,
     intake_id: Option<i64>,
@@ -51,7 +51,6 @@ pub(crate) fn build_audit<E: Embedder>(
     new_value: Option<String>,
     reason: Option<String>,
 ) -> NewMetadataAudit {
-    let caller = ops.effective_caller();
     let mut audit = NewMetadataAudit::new(table_name, action, caller.actor_kind);
     audit.node_id = intake_id.map(|id| PartitionIdx::new(id).root().get());
     audit.field = field;
@@ -63,12 +62,7 @@ pub(crate) fn build_audit<E: Embedder>(
     audit
 }
 
-pub(crate) fn write_outcome<E: Embedder>(
-    ops: &Ops<E>,
-    audit_id: i64,
-    changed: bool,
-) -> WriteOutcome {
-    let caller = ops.effective_caller();
+pub(crate) fn write_outcome(caller: &Caller, audit_id: i64, changed: bool) -> WriteOutcome {
     WriteOutcome {
         audit_id,
         actor_kind: caller.actor_kind.as_str().to_string(),
@@ -87,8 +81,8 @@ pub(crate) fn write_outcome<E: Embedder>(
 ///
 /// `node_reviews.notes` is not touched: it carries the ingest audit's
 /// report, and the curator's words belong on the audit row.
-pub(crate) fn write_review_status_inner<E: Embedder>(
-    ops: &Ops<E>,
+pub(crate) fn write_review_status_inner(
+    caller: &Caller,
     catalog: &Catalog,
     kind: ItemKind,
     intake_id: i64,
@@ -99,7 +93,7 @@ pub(crate) fn write_review_status_inner<E: Embedder>(
     require_intake(catalog, intake_id)?;
 
     let audit = build_audit(
-        ops,
+        caller,
         "node_reviews",
         action,
         Some(intake_id),
@@ -110,7 +104,6 @@ pub(crate) fn write_review_status_inner<E: Embedder>(
     );
     let audit_id = catalog.record_metadata_audit(&audit)?;
 
-    let caller = ops.effective_caller();
     catalog.upsert_review(&NewReview::new(
         intake_id,
         kind,
@@ -118,5 +111,5 @@ pub(crate) fn write_review_status_inner<E: Embedder>(
         status,
     ))?;
 
-    Ok(write_outcome(ops, audit_id, true))
+    Ok(write_outcome(caller, audit_id, true))
 }

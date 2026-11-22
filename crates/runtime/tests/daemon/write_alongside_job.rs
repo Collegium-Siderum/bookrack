@@ -229,7 +229,7 @@ async fn a_book_metadata_write_returns_while_an_ingest_is_embedding() -> Result<
 /// A paper-side metadata write returns while a glean job on the same
 /// library is held mid-embed, writing the paper catalog that glean is
 /// writing; `papers.metadata.reaudit` alone waits for the glean, on the
-/// library's glean lock.
+/// library's glean lock, and holds the write mutex while it waits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_paper_metadata_write_returns_while_a_glean_is_embedding_and_reaudit_waits() -> Result<()>
 {
@@ -285,6 +285,22 @@ async fn a_paper_metadata_write_returns_while_a_glean_is_embedding_and_reaudit_w
                 "papers.metadata.reaudit answered while the glean held its lock: {early:?}"
             );
             assert_eq!(job_state(&mut ra, &mut wa, 6, &job).await?, "running");
+
+            // The waiting re-audit holds the write mutex, so another
+            // write is refused rather than queued behind it.
+            let busy = call(
+                &mut ra,
+                &mut wa,
+                7,
+                "papers.metadata.set",
+                json!({ "intake_id": paper, "field": "title", "value": "Edited While Waiting" }),
+            )
+            .await?;
+            assert_eq!(
+                busy["error"]["code"].as_i64(),
+                Some(-32001),
+                "a write while the re-audit waits on the glean lock must be refused busy: {busy}"
+            );
 
             drop(hold);
             let reaudit = tokio::time::timeout(Duration::from_secs(30), recv(&mut rb))

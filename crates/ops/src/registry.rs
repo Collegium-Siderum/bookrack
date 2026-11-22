@@ -589,18 +589,20 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
     /// confidence pair.
     ///
     /// The audit itself is
-    /// [`crate::writes::papers_metadata::reaudit_paper_metadata`];
-    /// what this wrapper adds is the glean lock, which serializes the
-    /// re-audit against an ingest writing the same catalog.
+    /// [`crate::writes::papers_metadata::reaudit_paper_metadata`], run in
+    /// `session`; what this wrapper adds is the glean lock of the
+    /// session's library, which serializes the re-audit against an
+    /// ingest writing the same catalog.
     pub async fn reaudit_paper(
-        &self,
+        session: &mut WriteSession<E>,
         intake_id: i64,
         profile: &bookrack_metadata::paper::PaperAuditProfile,
         data: &bookrack_metadata::paper::PaperAuditData,
     ) -> std::result::Result<crate::dto::writes::ReauditOutcome, OpsError> {
-        let _guard = self.glean_lock.lock().await;
+        let glean_lock = Arc::clone(&session.handle().glean_lock);
+        let _guard = glean_lock.lock().await;
         crate::writes::papers_metadata::reaudit_paper_metadata(
-            &self.ops,
+            session,
             crate::dto::writes::PaperReauditRequest { intake_id },
             data,
             profile,

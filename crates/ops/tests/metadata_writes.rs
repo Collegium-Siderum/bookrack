@@ -2,13 +2,16 @@
 
 //! Integration tests for the metadata write ops.
 //!
-//! Each test builds a catalog-only [`Ops`] over a tempdir-backed catalog,
-//! calls one write op, and inspects the resulting catalog state to make
-//! sure both the data change and the audit row are recorded.
+//! Each test mounts a catalog-only library over a tempdir-backed
+//! catalog, runs one write op in a write session on it, and inspects the
+//! resulting catalog state to make sure both the data change and the
+//! audit row are recorded.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use bookrack_catalog::{Catalog, NewIntake, NewOverride, NewPublicationAttrs, STATUS_ACKNOWLEDGED};
+use bookrack_config::Config;
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::writes::{
@@ -17,6 +20,8 @@ use bookrack_ops::dto::writes::{
     SetMetadataFieldRequest, VoidMetadataFieldRequest,
 };
 use bookrack_ops::reads::books::{find_books, show_book};
+use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
+use bookrack_ops::write_session::{Region, WriteSession};
 use bookrack_ops::writes::metadata::{
     acknowledge_metadata_gap, add_contributor, approve_metadata, clear_metadata_field,
     reject_metadata, remove_contributor, set_metadata_field, void_metadata_field,
@@ -26,21 +31,18 @@ use tempfile::TempDir;
 
 struct Fixture {
     _tmp: TempDir,
-    ops: Ops<OllamaEmbedClient>,
+    handle: Arc<LibraryHandle<OllamaEmbedClient>>,
+    registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     catalog_db: PathBuf,
-    corpus_db: PathBuf,
-    lancedb_dir: PathBuf,
-    books_dir: PathBuf,
     backup_dir: PathBuf,
 }
 
 impl Fixture {
     fn build() -> Fixture {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let catalog_db = tmp.path().join("catalog.db");
-        let corpus_db = tmp.path().join("corpus.db");
-        let lancedb_dir = tmp.path().join("lancedb");
-        let books_dir = tmp.path().join("books");
+        let cfg = Arc::new(Config::new(tmp.path().to_path_buf()));
+        let catalog_db = cfg.catalog_db();
+        let corpus_db = cfg.corpus_db();
         let backup_dir = tmp.path().join("backup");
         // Create both stores once so their schemas are migrated before
         // the first op runs. The read ops open `corpus.db` through the
@@ -49,35 +51,39 @@ impl Fixture {
         Catalog::open_for_write_unbacked(&catalog_db).expect("seed catalog");
         bookrack_corpus::Corpus::open_for_write(&corpus_db).expect("seed corpus");
         let ops = Ops::<OllamaEmbedClient>::catalog_only(
-            corpus_db.clone(),
+            corpus_db,
             catalog_db.clone(),
-            &lancedb_dir,
-            books_dir.clone(),
+            &cfg.lancedb_dir(),
+            cfg.books_dir(),
             backup_dir.clone(),
             Caller::cli(),
         );
+        let handle = LibraryHandle::new("default", cfg, ops);
+        let registry = LibraryRegistry::single(Arc::clone(&handle));
         Fixture {
             _tmp: tmp,
-            ops,
+            handle,
+            registry,
             catalog_db,
-            corpus_db,
-            lancedb_dir,
-            books_dir,
             backup_dir,
         }
     }
 
-    fn mcp() -> Fixture {
-        let mut fx = Fixture::build();
-        fx.ops = Ops::<OllamaEmbedClient>::catalog_only(
-            fx.corpus_db.clone(),
-            fx.catalog_db.clone(),
-            &fx.lancedb_dir,
-            fx.books_dir.clone(),
-            fx.backup_dir.clone(),
-            Caller::mcp(),
-        );
-        fx
+    /// The library's ops, for the read side of a test.
+    fn ops(&self) -> &Ops<OllamaEmbedClient> {
+        self.handle.ops()
+    }
+
+    /// A write session on the library, attributed to the CLI.
+    fn session(&self) -> WriteSession<OllamaEmbedClient> {
+        self.session_as(Caller::cli())
+    }
+
+    /// A write session on the library, attributed to `caller`.
+    fn session_as(&self, caller: Caller) -> WriteSession<OllamaEmbedClient> {
+        self.registry
+            .begin_write(&self.handle, Region::Library, caller)
+            .expect("no other session is open on the fixture")
     }
 
     fn catalog(&self) -> Catalog {
@@ -98,7 +104,7 @@ fn set_metadata_field_records_the_override_and_an_update_audit_row() {
     let fx = Fixture::build();
     let id = fx.seed_intake("sha-set");
     set_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         SetMetadataFieldRequest {
             intake_id: id,
             field: "title".to_string(),
@@ -135,7 +141,7 @@ fn set_metadata_field_records_the_confirmed_mark() {
     let fx = Fixture::build();
     let id = fx.seed_intake("sha-set-confirmed");
     set_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         SetMetadataFieldRequest {
             intake_id: id,
             field: "publisher".to_string(),
@@ -157,7 +163,7 @@ fn set_metadata_field_records_the_confirmed_mark() {
     // A later unconfirmed rewrite drops the mark: the new value has
     // not been checked against the source.
     set_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         SetMetadataFieldRequest {
             intake_id: id,
             field: "publisher".to_string(),
@@ -182,7 +188,7 @@ fn set_and_clear_record_the_reason_on_their_audit_rows() {
     let fx = Fixture::build();
     let id = fx.seed_intake("sha-reason");
     set_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         SetMetadataFieldRequest {
             intake_id: id,
             field: "title".to_string(),
@@ -193,7 +199,7 @@ fn set_and_clear_record_the_reason_on_their_audit_rows() {
     )
     .expect("set");
     clear_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         ClearMetadataFieldRequest {
             intake_id: id,
             field: "title".to_string(),
@@ -226,7 +232,7 @@ fn set_metadata_field_pub_place_and_original_year_flow_through_effective() {
     let fx = Fixture::build();
     let id = fx.seed_intake("sha-pubplace");
     set_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         SetMetadataFieldRequest {
             intake_id: id,
             field: "pub_place".to_string(),
@@ -237,7 +243,7 @@ fn set_metadata_field_pub_place_and_original_year_flow_through_effective() {
     )
     .expect("set pub_place");
     set_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         SetMetadataFieldRequest {
             intake_id: id,
             field: "original_year".to_string(),
@@ -263,7 +269,7 @@ fn clear_metadata_field_falls_back_to_base_and_records_a_delete() {
     base.title = Some("Base Title".to_string());
     fx.catalog().upsert_publication_attrs(&base).expect("base");
     set_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         SetMetadataFieldRequest {
             intake_id: id,
             field: "title".to_string(),
@@ -274,7 +280,7 @@ fn clear_metadata_field_falls_back_to_base_and_records_a_delete() {
     )
     .expect("set");
     let outcome = clear_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         ClearMetadataFieldRequest {
             intake_id: id,
             field: "title".to_string(),
@@ -303,7 +309,7 @@ fn acknowledge_records_a_review_and_a_gate_audit_row() {
     let fx = Fixture::build();
     let id = fx.seed_intake("sha-ack");
     acknowledge_metadata_gap(
-        &fx.ops,
+        &mut fx.session(),
         AcknowledgeMetadataGapRequest {
             intake_id: id,
             reason: "operator vetted".to_string(),
@@ -330,7 +336,7 @@ fn approve_records_a_review_and_an_approval_audit_row() {
     let fx = Fixture::build();
     let id = fx.seed_intake("sha-approve");
     approve_metadata(
-        &fx.ops,
+        &mut fx.session(),
         ApproveMetadataRequest {
             intake_id: id,
             reason: Some("checked against the printed copy".to_string()),
@@ -358,7 +364,7 @@ fn approve_without_a_reason_still_records_the_audit_row() {
     let fx = Fixture::build();
     let id = fx.seed_intake("sha-approve-noreason");
     approve_metadata(
-        &fx.ops,
+        &mut fx.session(),
         ApproveMetadataRequest {
             intake_id: id,
             reason: None,
@@ -379,7 +385,7 @@ fn reject_records_a_review_and_a_reject_audit_row() {
     let fx = Fixture::build();
     let id = fx.seed_intake("sha-reject");
     reject_metadata(
-        &fx.ops,
+        &mut fx.session(),
         RejectMetadataRequest {
             intake_id: id,
             reason: "wrong source file".to_string(),
@@ -419,7 +425,7 @@ fn status_flips_preserve_the_ingest_audit_note() {
         .expect("ingest review");
 
     approve_metadata(
-        &fx.ops,
+        &mut fx.session(),
         ApproveMetadataRequest {
             intake_id: id,
             reason: Some("verified against the source".to_string()),
@@ -443,7 +449,7 @@ fn status_flips_preserve_the_ingest_audit_note() {
 fn write_ops_reject_unknown_intake_ids() {
     let fx = Fixture::build();
     let err = set_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         SetMetadataFieldRequest {
             intake_id: 999,
             field: "title".to_string(),
@@ -458,7 +464,7 @@ fn write_ops_reject_unknown_intake_ids() {
         bookrack_ops::OpsError::IntakeNotFound { intake_id: 999 }
     ));
     let err = clear_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         ClearMetadataFieldRequest {
             intake_id: 999,
             field: "title".to_string(),
@@ -471,7 +477,7 @@ fn write_ops_reject_unknown_intake_ids() {
         bookrack_ops::OpsError::IntakeNotFound { intake_id: 999 }
     ));
     let err = acknowledge_metadata_gap(
-        &fx.ops,
+        &mut fx.session(),
         AcknowledgeMetadataGapRequest {
             intake_id: 999,
             reason: "r".to_string(),
@@ -483,7 +489,7 @@ fn write_ops_reject_unknown_intake_ids() {
         bookrack_ops::OpsError::IntakeNotFound { intake_id: 999 }
     ));
     let err = approve_metadata(
-        &fx.ops,
+        &mut fx.session(),
         ApproveMetadataRequest {
             intake_id: 999,
             reason: None,
@@ -495,7 +501,7 @@ fn write_ops_reject_unknown_intake_ids() {
         bookrack_ops::OpsError::IntakeNotFound { intake_id: 999 }
     ));
     let err = reject_metadata(
-        &fx.ops,
+        &mut fx.session(),
         RejectMetadataRequest {
             intake_id: 999,
             reason: "r".to_string(),
@@ -510,14 +516,14 @@ fn write_ops_reject_unknown_intake_ids() {
 
 #[test]
 fn cli_and_mcp_writes_are_distinguishable_by_actor_kind() {
-    // A CLI write should write `actor_kind = human`, an MCP write should
-    // write `actor_kind = llm`, with the matching `actor_detail` on
-    // each. The pair of rows lets the audit trail tell the two surfaces
-    // apart.
-    let fx_cli = Fixture::build();
-    let id_cli = fx_cli.seed_intake("sha-cli");
+    // A CLI session should write `actor_kind = human`, an MCP session
+    // should write `actor_kind = llm`, with the matching `actor_detail`
+    // on each. The pair of rows lets the audit trail tell the two
+    // surfaces apart.
+    let fx = Fixture::build();
+    let id_cli = fx.seed_intake("sha-cli");
     set_metadata_field(
-        &fx_cli.ops,
+        &mut fx.session_as(Caller::cli()),
         SetMetadataFieldRequest {
             intake_id: id_cli,
             field: "title".to_string(),
@@ -527,7 +533,7 @@ fn cli_and_mcp_writes_are_distinguishable_by_actor_kind() {
         },
     )
     .expect("cli set");
-    let cli_row = fx_cli
+    let cli_row = fx
         .catalog()
         .metadata_audit_for_node(PartitionIdx::new(id_cli).root().get())
         .expect("audit")
@@ -537,10 +543,9 @@ fn cli_and_mcp_writes_are_distinguishable_by_actor_kind() {
     assert_eq!(cli_row.actor_kind.as_str(), "human");
     assert_eq!(cli_row.actor_detail.as_deref(), Some("cli"));
 
-    let fx_mcp = Fixture::mcp();
-    let id_mcp = fx_mcp.seed_intake("sha-mcp");
+    let id_mcp = fx.seed_intake("sha-mcp");
     set_metadata_field(
-        &fx_mcp.ops,
+        &mut fx.session_as(Caller::mcp()),
         SetMetadataFieldRequest {
             intake_id: id_mcp,
             field: "title".to_string(),
@@ -550,7 +555,7 @@ fn cli_and_mcp_writes_are_distinguishable_by_actor_kind() {
         },
     )
     .expect("mcp set");
-    let mcp_row = fx_mcp
+    let mcp_row = fx
         .catalog()
         .metadata_audit_for_node(PartitionIdx::new(id_mcp).root().get())
         .expect("audit")
@@ -562,12 +567,11 @@ fn cli_and_mcp_writes_are_distinguishable_by_actor_kind() {
 }
 
 #[test]
-fn caller_override_relabels_writes_on_a_shared_ops() {
-    // The daemon shares one `Ops` across surfaces, and the MCP server
-    // installs a task-scope `Caller::mcp()` override around each tool
-    // call. A write inside the scope must stamp `llm` / `mcp` on both
-    // the audit row and the reported outcome; a write outside the scope
-    // on the same `Ops` falls back to the baked-in caller.
+fn the_session_caller_labels_a_write_whatever_the_ops_caller_and_override() {
+    // The fixture's `Ops` is built with `Caller::cli()`, and the write
+    // below runs inside a task-scope `Caller::mcp()` override. Neither
+    // reaches the write: the audit row, the call row, and the reported
+    // outcome all carry the session's own caller.
     let fx = Fixture::build();
     let id = fx.seed_intake("sha-override");
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -576,41 +580,37 @@ fn caller_override_relabels_writes_on_a_shared_ops() {
     let outcome = runtime
         .block_on(with_caller_override(Caller::mcp(), async {
             set_metadata_field(
-                &fx.ops,
+                &mut fx.session_as(Caller::control_plane()),
                 SetMetadataFieldRequest {
                     intake_id: id,
                     field: "title".to_string(),
-                    value: "From MCP via override".to_string(),
+                    value: "From the control plane".to_string(),
                     reason: None,
                     confirmed: false,
                 },
             )
         }))
         .expect("set inside override scope");
-    assert_eq!(outcome.actor_kind, "llm");
-    assert_eq!(outcome.actor_detail.as_deref(), Some("mcp"));
+    assert_eq!(outcome.actor_kind, "human");
+    assert_eq!(outcome.actor_detail.as_deref(), Some("control_plane"));
 
-    let row = fx
-        .catalog()
+    let catalog = fx.catalog();
+    let row = catalog
         .metadata_audit_for_node(PartitionIdx::new(id).root().get())
         .expect("audit")
         .into_iter()
         .find(|r| r.action == "update")
         .expect("update row");
-    assert_eq!(row.actor_kind.as_str(), "llm");
-    assert_eq!(row.actor_detail.as_deref(), Some("mcp"));
+    assert_eq!(row.actor_kind.as_str(), "human");
+    assert_eq!(row.actor_detail.as_deref(), Some("control_plane"));
 
-    let outside = clear_metadata_field(
-        &fx.ops,
-        ClearMetadataFieldRequest {
-            intake_id: id,
-            field: "title".to_string(),
-            reason: None,
-        },
-    )
-    .expect("clear outside override scope");
-    assert_eq!(outside.actor_kind, "human");
-    assert_eq!(outside.actor_detail.as_deref(), Some("cli"));
+    let sources: Vec<String> = catalog
+        .tool_calls_for_tool("library.metadata.set")
+        .expect("call rows")
+        .into_iter()
+        .map(|c| c.source)
+        .collect();
+    assert_eq!(sources, ["control_plane"]);
 }
 
 #[test]
@@ -621,11 +621,11 @@ fn show_book_lists_active_overrides_with_their_curation_trail() {
     base.title = Some("Base Title".to_string());
     fx.catalog().upsert_publication_attrs(&base).expect("base");
 
-    let detail = show_book(&fx.ops, id).expect("show before");
+    let detail = show_book(fx.ops(), id).expect("show before");
     assert!(detail.overrides.is_empty());
 
     set_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         SetMetadataFieldRequest {
             intake_id: id,
             field: "title".to_string(),
@@ -636,7 +636,7 @@ fn show_book_lists_active_overrides_with_their_curation_trail() {
     )
     .expect("set");
 
-    let detail = show_book(&fx.ops, id).expect("show after set");
+    let detail = show_book(fx.ops(), id).expect("show after set");
     assert_eq!(detail.overrides.len(), 1);
     let entry = &detail.overrides[0];
     assert_eq!(entry.field, "title");
@@ -648,7 +648,7 @@ fn show_book_lists_active_overrides_with_their_curation_trail() {
     );
 
     clear_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         ClearMetadataFieldRequest {
             intake_id: id,
             field: "title".to_string(),
@@ -656,7 +656,7 @@ fn show_book_lists_active_overrides_with_their_curation_trail() {
         },
     )
     .expect("clear");
-    let detail = show_book(&fx.ops, id).expect("show after clear");
+    let detail = show_book(fx.ops(), id).expect("show after clear");
     assert!(detail.overrides.is_empty());
     assert_eq!(
         detail.effective_biblio.get("title").map(String::as_str),
@@ -670,7 +670,7 @@ fn contributor_add_makes_the_book_findable_by_name() {
     let id = fx.seed_intake("sha-contrib-add");
 
     let outcome = add_contributor(
-        &fx.ops,
+        &mut fx.session(),
         AddContributorRequest {
             intake_id: id,
             role: "author".to_string(),
@@ -681,7 +681,7 @@ fn contributor_add_makes_the_book_findable_by_name() {
     )
     .expect("add");
 
-    let detail = show_book(&fx.ops, id).expect("show");
+    let detail = show_book(fx.ops(), id).expect("show");
     let entry = detail
         .contributors
         .iter()
@@ -695,7 +695,7 @@ fn contributor_add_makes_the_book_findable_by_name() {
         contributor_name: Some("A Missing Author".to_string()),
         ..Default::default()
     };
-    let found = find_books(&fx.ops, filter, 10, 0).expect("find");
+    let found = find_books(fx.ops(), filter, 10, 0).expect("find");
     assert!(found.books.iter().any(|b| b.intake_id == id));
 
     let audit = fx
@@ -715,7 +715,7 @@ fn contributor_add_rejects_an_unknown_role() {
     let fx = Fixture::build();
     let id = fx.seed_intake("sha-contrib-role");
     let err = add_contributor(
-        &fx.ops,
+        &mut fx.session(),
         AddContributorRequest {
             intake_id: id,
             role: "narrator".to_string(),
@@ -752,7 +752,7 @@ fn contributor_remove_strips_a_wrong_extracted_attribution() {
         .expect("seed extracted contributor");
 
     let outcome = remove_contributor(
-        &fx.ops,
+        &mut fx.session(),
         RemoveContributorRequest {
             intake_id: id,
             contributor_id: wrong_id,
@@ -762,7 +762,7 @@ fn contributor_remove_strips_a_wrong_extracted_attribution() {
     .expect("remove");
     assert!(outcome.changed);
 
-    let detail = show_book(&fx.ops, id).expect("show");
+    let detail = show_book(fx.ops(), id).expect("show");
     assert!(detail.contributors.is_empty());
 
     let audit = fx
@@ -780,7 +780,7 @@ fn contributor_remove_strips_a_wrong_extracted_attribution() {
     );
 
     let err = remove_contributor(
-        &fx.ops,
+        &mut fx.session(),
         RemoveContributorRequest {
             intake_id: id,
             contributor_id: wrong_id,
@@ -803,7 +803,7 @@ fn void_suppresses_the_extracted_value_until_cleared() {
     fx.catalog().upsert_publication_attrs(&base).expect("base");
 
     let outcome = void_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         VoidMetadataFieldRequest {
             intake_id: id,
             field: "publisher".to_string(),
@@ -819,7 +819,7 @@ fn void_suppresses_the_extracted_value_until_cleared() {
         .expect("effective");
     assert!(effective.get("publisher").is_none());
 
-    let detail = show_book(&fx.ops, id).expect("show");
+    let detail = show_book(fx.ops(), id).expect("show");
     let entry = detail
         .overrides
         .iter()
@@ -840,7 +840,7 @@ fn void_suppresses_the_extracted_value_until_cleared() {
     );
 
     let cleared = clear_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         ClearMetadataFieldRequest {
             intake_id: id,
             field: "publisher".to_string(),
@@ -862,7 +862,7 @@ fn void_rejects_a_field_name_outside_the_editable_set() {
     let id = fx.seed_intake("sha-void-unknown");
     for field in ["tittle", "confidence"] {
         let err = void_metadata_field(
-            &fx.ops,
+            &mut fx.session(),
             VoidMetadataFieldRequest {
                 intake_id: id,
                 field: field.to_string(),
@@ -886,7 +886,7 @@ fn set_rejects_a_field_name_outside_the_editable_set() {
     let id = fx.seed_intake("sha-unknown-set");
     for field in ["tittle", "confidence"] {
         let err = set_metadata_field(
-            &fx.ops,
+            &mut fx.session(),
             SetMetadataFieldRequest {
                 intake_id: id,
                 field: field.to_string(),
@@ -922,7 +922,7 @@ fn clear_rejects_an_unknown_field_with_no_override_row() {
     let fx = Fixture::build();
     let id = fx.seed_intake("sha-unknown-clear");
     let err = clear_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         ClearMetadataFieldRequest {
             intake_id: id,
             field: "tittle".to_string(),
@@ -954,7 +954,7 @@ fn clear_removes_a_stale_override_with_an_unknown_field_name() {
         .expect("seed stale override");
 
     let outcome = clear_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         ClearMetadataFieldRequest {
             intake_id: id,
             field: "tittle".to_string(),
@@ -981,7 +981,7 @@ fn a_metadata_write_on_a_behind_catalog_backs_it_up_before_migrating() {
     let behind = fixtures::CURRENT_VERSION - 1;
 
     set_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         SetMetadataFieldRequest {
             intake_id: id,
             field: "title".to_string(),

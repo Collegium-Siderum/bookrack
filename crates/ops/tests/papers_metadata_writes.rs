@@ -5,18 +5,22 @@
 //! What the control-plane tests cannot reach lives here: every call
 //! arriving over the daemon's socket carries the same caller, so
 //! "a CLI edit and an MCP edit are distinguishable" needs two callers
-//! on one `Ops` — which is exactly the shape the daemon runs, and
-//! exactly what `with_caller_override` exists for.
+//! on one library — which is exactly the shape the daemon runs, where
+//! each surface opens its write session with its own caller.
 
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use bookrack_catalog::{Catalog, NewContributor, NewIntake};
+use bookrack_config::Config;
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_embed::{Embedder, Result as EmbedResult};
 use bookrack_ops::dto::writes::{
     PaperContributorAddRequest, PaperContributorRemoveRequest, PaperSetMetadataFieldRequest,
 };
+use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
+use bookrack_ops::write_session::{Region, WriteSession};
 use bookrack_ops::writes::papers_metadata::{
     add_paper_contributor, remove_paper_contributor, set_paper_metadata_field,
 };
@@ -41,13 +45,14 @@ impl Embedder for Fake {
 
 struct Fixture {
     _tmp: TempDir,
-    ops: Ops<Fake>,
+    handle: Arc<LibraryHandle<Fake>>,
+    registry: Arc<LibraryRegistry<Fake>>,
     papers_catalog_db: PathBuf,
 }
 
 impl Fixture {
-    /// Build an `Ops` with a papers backend attached, under `caller`.
-    async fn build_as(caller: Caller) -> Fixture {
+    /// Mount a library with a papers backend attached.
+    async fn build() -> Fixture {
         let tmp = tempfile::tempdir().expect("tempdir");
         let papers_catalog_db = tmp.path().join("papers_catalog.db");
         let papers_corpus_db = tmp.path().join("papers_corpus.db");
@@ -73,7 +78,7 @@ impl Fixture {
             &tmp.path().join("lancedb"),
             tmp.path().join("books"),
             tmp.path().join("backup"),
-            caller,
+            Caller::cli(),
         )
         .with_papers(
             papers_library,
@@ -85,15 +90,27 @@ impl Fixture {
             },
         );
 
+        let cfg = Arc::new(Config::new(tmp.path().to_path_buf()));
+        let handle = LibraryHandle::new("default", cfg, ops);
+        let registry = LibraryRegistry::single(Arc::clone(&handle));
         Fixture {
             _tmp: tmp,
-            ops,
+            handle,
+            registry,
             papers_catalog_db,
         }
     }
 
-    async fn build() -> Fixture {
-        Fixture::build_as(Caller::cli()).await
+    /// A write session on the library, attributed to the CLI.
+    fn session(&self) -> WriteSession<Fake> {
+        self.session_as(Caller::cli())
+    }
+
+    /// A write session on the library, attributed to `caller`.
+    fn session_as(&self, caller: Caller) -> WriteSession<Fake> {
+        self.registry
+            .begin_write(&self.handle, Region::Library, caller)
+            .expect("no other session is open on the fixture")
     }
 
     fn catalog(&self) -> Catalog {
@@ -117,10 +134,10 @@ impl Fixture {
     }
 }
 
-/// The daemon shares one `Ops` across surfaces and installs a
-/// task-scope `Caller::mcp()` around each MCP tool call. Two paper
-/// edits on that one handle — one inside the scope, one outside — must
-/// be told apart in the trail.
+/// The daemon shares one library handle across surfaces, and each
+/// surface opens its write session with its own caller. Two paper edits
+/// on that one handle — one per surface — must be told apart in the
+/// trail.
 ///
 /// Asserting only "not human" would pass on a handler that hard-coded
 /// any single string, so the assertion is that the two rows *differ*.
@@ -130,7 +147,7 @@ async fn two_surfaces_editing_one_paper_are_distinguishable_in_the_trail() {
     let intake_id = fx.seed_paper("sha-attribution");
 
     let direct = set_paper_metadata_field(
-        &fx.ops,
+        &mut fx.session_as(Caller::cli()),
         PaperSetMetadataFieldRequest {
             intake_id,
             field: "title".to_string(),
@@ -139,22 +156,19 @@ async fn two_surfaces_editing_one_paper_are_distinguishable_in_the_trail() {
             confirmed: false,
         },
     )
-    .expect("set outside the override scope");
+    .expect("set in a CLI session");
 
-    let hosted = bookrack_ops::with_caller_override(Caller::mcp(), async {
-        set_paper_metadata_field(
-            &fx.ops,
-            PaperSetMetadataFieldRequest {
-                intake_id,
-                field: "title".to_string(),
-                value: "Edited from MCP".to_string(),
-                reason: None,
-                confirmed: false,
-            },
-        )
-    })
-    .await
-    .expect("set inside the override scope");
+    let hosted = set_paper_metadata_field(
+        &mut fx.session_as(Caller::mcp()),
+        PaperSetMetadataFieldRequest {
+            intake_id,
+            field: "title".to_string(),
+            value: "Edited from MCP".to_string(),
+            reason: None,
+            confirmed: false,
+        },
+    )
+    .expect("set in an MCP session");
 
     assert_ne!(
         direct.actor_kind, hosted.actor_kind,
@@ -183,7 +197,7 @@ async fn a_paper_edit_records_its_reason_and_the_value_it_replaced() {
         ("Second", "checked against the published version"),
     ] {
         set_paper_metadata_field(
-            &fx.ops,
+            &mut fx.session(),
             PaperSetMetadataFieldRequest {
                 intake_id,
                 field: "title".to_string(),
@@ -215,7 +229,7 @@ async fn an_unknown_paper_field_is_refused_and_names_the_paper_set() {
     let intake_id = fx.seed_paper("sha-field");
 
     let err = set_paper_metadata_field(
-        &fx.ops,
+        &mut fx.session(),
         PaperSetMetadataFieldRequest {
             intake_id,
             field: "isbn".to_string(),
@@ -250,7 +264,7 @@ async fn removing_a_contributor_is_bounded_by_the_paper_that_owns_it() {
     let bystander = fx.seed_paper("sha-bystander");
 
     let added = add_paper_contributor(
-        &fx.ops,
+        &mut fx.session(),
         PaperContributorAddRequest {
             intake_id: owner,
             role: "author".to_string(),
@@ -264,7 +278,7 @@ async fn removing_a_contributor_is_bounded_by_the_paper_that_owns_it() {
     .expect("add contributor");
 
     let err = remove_paper_contributor(
-        &fx.ops,
+        &mut fx.session(),
         PaperContributorRemoveRequest {
             intake_id: bystander,
             contributor_id: added.contributor_id,
@@ -286,7 +300,7 @@ async fn removing_a_contributor_is_bounded_by_the_paper_that_owns_it() {
     // The same call against the owning paper succeeds, so the refusal
     // above is the ownership check and not a broken lookup.
     let outcome = remove_paper_contributor(
-        &fx.ops,
+        &mut fx.session(),
         PaperContributorRemoveRequest {
             intake_id: owner,
             contributor_id: added.contributor_id,
@@ -321,7 +335,7 @@ async fn a_contributor_added_after_a_removal_takes_the_next_free_ordinal() {
         );
     }
     remove_paper_contributor(
-        &fx.ops,
+        &mut fx.session(),
         PaperContributorRemoveRequest {
             intake_id,
             contributor_id: ids[0],
@@ -331,7 +345,7 @@ async fn a_contributor_added_after_a_removal_takes_the_next_free_ordinal() {
     .expect("remove the first row");
 
     add_paper_contributor(
-        &fx.ops,
+        &mut fx.session(),
         PaperContributorAddRequest {
             intake_id,
             role: "author".to_string(),

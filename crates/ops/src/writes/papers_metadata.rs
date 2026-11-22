@@ -5,11 +5,12 @@
 //!
 //! One op per curation action, mirroring
 //! [`crate::writes::metadata`] on the book side and sharing that
-//! side's internals through [`crate::writes`]. Each op opens the paper
-//! catalog read-write, applies its change, and appends one
-//! [`bookrack_catalog::MetadataAudit`] row stamped with the effective
-//! [`crate::Caller`], so a CLI edit and an MCP edit are
-//! distinguishable by `actor_kind` / `actor_detail`.
+//! side's internals through [`crate::writes`]. Each op runs inside a
+//! write session: it opens the paper catalog read-write, applies its
+//! change, and appends one [`bookrack_catalog::MetadataAudit`] row
+//! stamped with the session's [`crate::Caller`], so edits from
+//! different surfaces are distinguishable by `actor_kind` /
+//! `actor_detail`.
 //!
 //! The catalog is opened through [`Catalog::open_for_write`]: the
 //! paper write path has no outer caller that migrates the schema
@@ -33,7 +34,8 @@ use crate::dto::writes::{
     PaperContributorRemoveRequest, PaperReauditRequest, PaperReviewRequest,
     PaperSetMetadataFieldRequest, PaperVoidMetadataFieldRequest, ReauditOutcome, WriteOutcome,
 };
-use crate::recorder::record_call_sync;
+use crate::recorder::record_call_with_caller_sync;
+use crate::write_session::WriteSession;
 use crate::writes::{build_audit, require_intake, write_outcome, write_review_status_inner};
 
 /// Fields the paper-side curation surface accepts under
@@ -84,9 +86,11 @@ fn require_paper_editable(field: &str) -> Result<()> {
 /// [`PAPER_EDITABLE_FIELDS`]; an unknown name is rejected before
 /// anything is written.
 pub fn set_paper_metadata_field<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: PaperSetMetadataFieldRequest,
 ) -> Result<WriteOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "field": req.field,
@@ -94,7 +98,7 @@ pub fn set_paper_metadata_field<E: Embedder>(
         "reason": req.reason,
         "confirmed": req.confirmed,
     });
-    record_call_sync!(ops, "papers.metadata.set", args, {
+    record_call_with_caller_sync!(ops, caller, "papers.metadata.set", args, {
         require_paper_editable(&req.field)?;
         let catalog = open_paper_catalog_for_write(ops)?;
         require_intake(&catalog, req.intake_id)?;
@@ -102,7 +106,6 @@ pub fn set_paper_metadata_field<E: Embedder>(
         let effective = catalog.effective_publication_attrs(req.intake_id, ItemKind::Paper)?;
         let old_value = effective.get(&req.field).map(str::to_string);
 
-        let caller = ops.effective_caller();
         catalog.set_override(
             &NewOverride::new(
                 req.intake_id,
@@ -115,7 +118,7 @@ pub fn set_paper_metadata_field<E: Embedder>(
         )?;
 
         let audit = build_audit(
-            ops,
+            caller,
             "node_publication_attrs",
             "update",
             Some(req.intake_id),
@@ -126,7 +129,7 @@ pub fn set_paper_metadata_field<E: Embedder>(
         );
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
-        Ok(write_outcome(ops, audit_id, true))
+        Ok(write_outcome(caller, audit_id, true))
     })
 }
 
@@ -138,15 +141,17 @@ pub fn set_paper_metadata_field<E: Embedder>(
 /// override row with that key exists — rows that predate validation
 /// must stay removable — and rejected when there is nothing to remove.
 pub fn clear_paper_metadata_field<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: PaperClearMetadataFieldRequest,
 ) -> Result<WriteOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "field": req.field,
         "reason": req.reason,
     });
-    record_call_sync!(ops, "papers.metadata.clear", args, {
+    record_call_with_caller_sync!(ops, caller, "papers.metadata.clear", args, {
         let catalog = open_paper_catalog_for_write(ops)?;
         require_intake(&catalog, req.intake_id)?;
 
@@ -160,7 +165,7 @@ pub fn clear_paper_metadata_field<E: Embedder>(
 
         // Audit either way: the trail records that someone tried.
         let audit = build_audit(
-            ops,
+            caller,
             "node_publication_attrs",
             "delete",
             Some(req.intake_id),
@@ -171,7 +176,7 @@ pub fn clear_paper_metadata_field<E: Embedder>(
         );
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
-        Ok(write_outcome(ops, audit_id, existed))
+        Ok(write_outcome(caller, audit_id, existed))
     })
 }
 
@@ -181,15 +186,17 @@ pub fn clear_paper_metadata_field<E: Embedder>(
 /// [`clear_paper_metadata_field`] removes the tombstone and restores
 /// the extracted value.
 pub fn void_paper_metadata_field<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: PaperVoidMetadataFieldRequest,
 ) -> Result<WriteOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "field": req.field,
         "reason": req.reason,
     });
-    record_call_sync!(ops, "papers.metadata.void", args, {
+    record_call_with_caller_sync!(ops, caller, "papers.metadata.void", args, {
         require_paper_editable(&req.field)?;
         let catalog = open_paper_catalog_for_write(ops)?;
         require_intake(&catalog, req.intake_id)?;
@@ -197,7 +204,6 @@ pub fn void_paper_metadata_field<E: Embedder>(
         let effective = catalog.effective_publication_attrs(req.intake_id, ItemKind::Paper)?;
         let old_value = effective.get(&req.field).map(str::to_string);
 
-        let caller = ops.effective_caller();
         catalog.set_override(&NewOverride::new(
             req.intake_id,
             ItemKind::Paper,
@@ -211,7 +217,7 @@ pub fn void_paper_metadata_field<E: Embedder>(
         // but changed nothing visible.
         let changed = old_value.is_some();
         let audit = build_audit(
-            ops,
+            caller,
             "node_publication_attrs",
             "void",
             Some(req.intake_id),
@@ -222,7 +228,7 @@ pub fn void_paper_metadata_field<E: Embedder>(
         );
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
-        Ok(write_outcome(ops, audit_id, changed))
+        Ok(write_outcome(caller, audit_id, changed))
     })
 }
 
@@ -250,9 +256,11 @@ fn next_contributor_ordinal(existing: &[bookrack_catalog::NodeContributor], role
 /// citation formats need, and no nationality — that one is a book-side
 /// enrichment field.
 pub fn add_paper_contributor<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: PaperContributorAddRequest,
 ) -> Result<AddContributorOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "role": req.role,
@@ -262,7 +270,7 @@ pub fn add_paper_contributor<E: Embedder>(
         "orcid": req.orcid,
         "reason": req.reason,
     });
-    record_call_sync!(ops, "papers.metadata.contributor_add", args, {
+    record_call_with_caller_sync!(ops, caller, "papers.metadata.contributor_add", args, {
         if !CONTRIBUTOR_ROLES.contains(&req.role.as_str()) {
             return Err(OpsError::UnknownContributorRole { role: req.role });
         }
@@ -298,7 +306,7 @@ pub fn add_paper_contributor<E: Embedder>(
         let contributor_id = catalog.add_contributor(&new)?;
 
         let audit = build_audit(
-            ops,
+            caller,
             "node_contributors",
             "insert",
             Some(req.intake_id),
@@ -311,7 +319,7 @@ pub fn add_paper_contributor<E: Embedder>(
 
         Ok(AddContributorOutcome {
             contributor_id,
-            write: write_outcome(ops, audit_id, true),
+            write: write_outcome(caller, audit_id, true),
         })
     })
 }
@@ -321,15 +329,17 @@ pub fn add_paper_contributor<E: Embedder>(
 /// alone addresses a row anywhere in the catalog, so the paper is what
 /// makes the request checkable.
 pub fn remove_paper_contributor<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: PaperContributorRemoveRequest,
 ) -> Result<WriteOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "contributor_id": req.contributor_id,
         "reason": req.reason,
     });
-    record_call_sync!(ops, "papers.metadata.contributor_remove", args, {
+    record_call_with_caller_sync!(ops, caller, "papers.metadata.contributor_remove", args, {
         let catalog = open_paper_catalog_for_write(ops)?;
         require_intake(&catalog, req.intake_id)?;
 
@@ -347,7 +357,7 @@ pub fn remove_paper_contributor<E: Embedder>(
         let removed = catalog.remove_contributor(req.contributor_id)?;
 
         let audit = build_audit(
-            ops,
+            caller,
             "node_contributors",
             "delete",
             Some(req.intake_id),
@@ -358,7 +368,7 @@ pub fn remove_paper_contributor<E: Embedder>(
         );
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
-        Ok(write_outcome(ops, audit_id, removed))
+        Ok(write_outcome(caller, audit_id, removed))
     })
 }
 
@@ -372,13 +382,15 @@ pub fn remove_paper_contributor<E: Embedder>(
 /// edits, and the review queue and the audit trail both read it on
 /// that understanding; a recomputation is not an edit.
 pub fn reaudit_paper_metadata<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: PaperReauditRequest,
     audit_data: &bookrack_metadata::paper::PaperAuditData,
     audit_profile: &bookrack_metadata::paper::PaperAuditProfile,
 ) -> Result<ReauditOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({ "intake_id": req.intake_id });
-    record_call_sync!(ops, "papers.metadata.reaudit", args, {
+    record_call_with_caller_sync!(ops, caller, "papers.metadata.reaudit", args, {
         let catalog = open_paper_catalog_for_write(ops)?;
         let outcome = crate::pipeline::paper::reaudit::reaudit_paper(
             &catalog,
@@ -405,17 +417,19 @@ pub fn reaudit_paper_metadata<E: Embedder>(
 /// Acknowledge a metadata gap on a paper: leaves the audit verdict
 /// alone but flips the review row to `acknowledged`.
 pub fn acknowledge_paper_metadata_gap<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: PaperReviewRequest,
 ) -> Result<WriteOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "reason": req.reason,
     });
-    record_call_sync!(ops, "papers.metadata.ack", args, {
+    record_call_with_caller_sync!(ops, caller, "papers.metadata.ack", args, {
         let catalog = open_paper_catalog_for_write(ops)?;
         write_review_status_inner(
-            ops,
+            caller,
             &catalog,
             ItemKind::Paper,
             req.intake_id,
@@ -429,17 +443,19 @@ pub fn acknowledge_paper_metadata_gap<E: Embedder>(
 /// Approve a paper's record. The audit verdict is unchanged; the
 /// review row is flipped to `approved`.
 pub fn approve_paper_metadata<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: PaperReviewRequest,
 ) -> Result<WriteOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "reason": req.reason,
     });
-    record_call_sync!(ops, "papers.metadata.approve", args, {
+    record_call_with_caller_sync!(ops, caller, "papers.metadata.approve", args, {
         let catalog = open_paper_catalog_for_write(ops)?;
         write_review_status_inner(
-            ops,
+            caller,
             &catalog,
             ItemKind::Paper,
             req.intake_id,
@@ -453,17 +469,19 @@ pub fn approve_paper_metadata<E: Embedder>(
 /// Reject a paper. Pipeline rows stay in place so downstream consumers
 /// can filter on `rejected`.
 pub fn reject_paper_metadata<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: PaperReviewRequest,
 ) -> Result<WriteOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "reason": req.reason,
     });
-    record_call_sync!(ops, "papers.metadata.reject", args, {
+    record_call_with_caller_sync!(ops, caller, "papers.metadata.reject", args, {
         let catalog = open_paper_catalog_for_write(ops)?;
         write_review_status_inner(
-            ops,
+            caller,
             &catalog,
             ItemKind::Paper,
             req.intake_id,
@@ -477,17 +495,19 @@ pub fn reject_paper_metadata<E: Embedder>(
 /// Demote a paper's review row back to `pending`, so it surfaces in
 /// the review queue again. The book side has no matching verb.
 pub fn reopen_paper_review<E: Embedder>(
-    ops: &Ops<E>,
+    session: &mut WriteSession<E>,
     req: PaperReviewRequest,
 ) -> Result<WriteOutcome> {
+    let ops = session.ops();
+    let caller = session.caller();
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "reason": req.reason,
     });
-    record_call_sync!(ops, "papers.metadata.reopen", args, {
+    record_call_with_caller_sync!(ops, caller, "papers.metadata.reopen", args, {
         let catalog = open_paper_catalog_for_write(ops)?;
         write_review_status_inner(
-            ops,
+            caller,
             &catalog,
             ItemKind::Paper,
             req.intake_id,
