@@ -73,7 +73,10 @@ mod tests {
         // ingest in flight answer `busy` instead of answering.
         let dir = tempfile::tempdir().expect("tempdir");
         let ctx = test_method_context(dir.path(), None);
-        let held = ctx.write_guard.clone().lock_owned().await;
+        let held = ctx
+            .registry
+            .begin_host_write(bookrack_ops::Caller::control_plane(), "default", None)
+            .expect("hold the write mutex");
 
         let value = run(None, &ctx)
             .await

@@ -113,11 +113,15 @@ async fn a_write_is_refused_while_another_holds_the_write_mutex() -> Result<()> 
     ))
     .await?;
     let sock = runtime.control_sock.path.clone();
-    // Stand in for a write already in flight by holding the very mutex
-    // `run_write` acquires. Racing two RPC writes against each other
-    // cannot guarantee they overlap; holding the lock makes the overlap
-    // a fact of the test rather than a matter of scheduling.
-    let held = runtime.write_guard.clone().lock_owned().await;
+    // Stand in for a write already in flight by holding a session over
+    // the very mutex `run_write` takes. Racing two RPC writes against
+    // each other cannot guarantee they overlap; holding the session
+    // makes the overlap a fact of the test rather than a matter of
+    // scheduling.
+    let held = runtime
+        .registry
+        .begin_host_write(bookrack_ops::Caller::control_plane(), "default", None)
+        .expect("hold the write mutex");
     let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
 
     let driver = tokio::spawn(async move {
@@ -137,6 +141,13 @@ async fn a_write_is_refused_while_another_holds_the_write_mutex() -> Result<()> 
             refused["error"]["code"].as_i64(),
             Some(-32001_i64),
             "a write while the mutex is held must be refused as busy: {refused}"
+        );
+        // The refusal says the same call may go through once retried,
+        // which is what tells a client to retry rather than give up.
+        assert_eq!(
+            refused["error"]["data"]["retryable"],
+            serde_json::json!(true),
+            "a busy refusal is retryable: {refused}"
         );
 
         // Releasing the mutex lets the same call reach the handler

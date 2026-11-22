@@ -154,7 +154,6 @@ impl Fixture {
             queue_state: self.queue_state.clone(),
             queue_state_path: self.with_root.join("queue.json"),
             event_stream: EventStreamHandle::new(8, state),
-            write_guard: Arc::new(tokio::sync::Mutex::new(())),
             shutdown_tx: self.shutdown_tx.clone(),
             identity: test_identity(),
             config_snapshot: Arc::default(),

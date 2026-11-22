@@ -85,7 +85,7 @@ async fn rebuild_dry_run(
     let include_vectors = parsed.include_vectors;
     let paper = parsed.paper;
     let stale_only = parsed.stale_only;
-    run_dry_run(ctx, handle.name(), move || async move {
+    run_dry_run(ctx, &handle, async move |_session| {
         let report = papers_corpus::plan_rebuild(&cfg, paper, stale_only)
             .map_err(|e| handler_err("papers.corpus_rebuild", e))?;
         let registered = RegisteredPapersRebuildPlan {
@@ -131,7 +131,7 @@ async fn run_execute_from_plan(
     let plan: RegisteredPapersRebuildPlan = serde_json::from_slice(&payload)
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("decode plan payload: {e}")))?;
     let daemon = std::sync::Arc::clone(&ctx.daemon_config);
-    run_write(ctx, handle.name(), move || async move {
+    run_write(ctx, &handle, async move |_session| {
         let outcome = papers_corpus::execute_rebuild_from_plan(
             &cfg,
             &daemon,

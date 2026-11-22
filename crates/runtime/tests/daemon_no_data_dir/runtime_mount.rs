@@ -21,7 +21,7 @@ use bookrack_test_support::{ProcessEnv, Sandbox, process_env};
 use eyre::{Result, eyre};
 use serde_json::Value;
 
-use crate::common::{connect, join_with_deadline, recv, send};
+use crate::common::{Reader, Writer, connect, join_with_deadline, recv, send};
 
 /// Isolate the process and seed a registry the daemon will come up on.
 /// Only `alpha` is registered at bring-up; the second root exists on
@@ -526,9 +526,55 @@ async fn unmount_refuses_the_path_selected_root_the_daemon_came_up_under() -> Re
     join_with_deadline(runtime, repl_handle, driver).await
 }
 
+/// A connection subscribed to the daemon's events, with the snapshot
+/// bundle a fresh subscriber receives already drained: what it reads
+/// next is live broadcasts only.
+async fn subscribed(sock: &Path) -> Result<(Reader, Writer)> {
+    let (mut reader, mut w) = connect(sock).await?;
+    send(
+        &mut w,
+        r#"{"jsonrpc":"2.0","id":1,"method":"events.subscribe"}"#,
+    )
+    .await?;
+    let _ = recv(&mut reader).await?;
+    loop {
+        let frame = recv(&mut reader).await?;
+        if frame["params"]["channel"].as_str() == Some("daemon.version") {
+            break;
+        }
+    }
+    Ok((reader, w))
+}
+
+/// The libraries `library.changed` named, in order, up to the
+/// `mcp.availability` broadcast that ends the write session.
+async fn announced_until_resumed(reader: &mut Reader) -> Result<Vec<String>> {
+    let mut announced = Vec::new();
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(20));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => return Err(eyre!("the write session never ended: {announced:?}")),
+            frame = recv(reader) => {
+                let frame = frame?;
+                let params = &frame["params"];
+                match params["channel"].as_str() {
+                    Some("library.changed") => announced.push(
+                        params["value"]["library"].as_str().unwrap_or_default().to_string(),
+                    ),
+                    Some("mcp.availability") if params["value"]["paused"] == Value::Bool(false) => {
+                        return Ok(announced);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 /// Forking used to leave the operator with a library the daemon could
 /// not see until it was restarted; the clone is served on the same
-/// call now.
+/// call now, and announced beside the library it was forked from.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_forked_library_is_served_without_a_restart() -> Result<()> {
     let (_sandbox, _alpha, _beta) = world();
@@ -541,6 +587,7 @@ async fn a_forked_library_is_served_without_a_restart() -> Result<()> {
     let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
 
     let driver = tokio::spawn(async move {
+        let (mut events, _events_w) = subscribed(&sock).await?;
         let (mut reader, mut w) = connect(&sock).await?;
         let request = serde_json::json!({
             "jsonrpc": "2.0",
@@ -556,6 +603,11 @@ async fn a_forked_library_is_served_without_a_restart() -> Result<()> {
         let resp = recv(&mut reader).await?;
         assert!(resp["error"].is_null(), "fork failed: {resp}");
         let report = resp;
+        assert_eq!(
+            announced_until_resumed(&mut events).await?,
+            ["alpha", "clone"],
+            "a served clone is announced beside its source"
+        );
 
         // No restart between the fork and this listing.
         send(
@@ -634,6 +686,7 @@ async fn fork_reports_when_the_new_library_could_not_be_mounted() -> Result<()> 
     let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
 
     let driver = tokio::spawn(async move {
+        let (mut events, _events_w) = subscribed(&sock).await?;
         let (mut reader, mut w) = connect(&sock).await?;
         let request = serde_json::json!({
             "jsonrpc": "2.0",
@@ -650,6 +703,11 @@ async fn fork_reports_when_the_new_library_could_not_be_mounted() -> Result<()> 
         assert!(
             resp["error"].is_null(),
             "a fork that built its library must not be reported as failed: {resp}"
+        );
+        assert_eq!(
+            announced_until_resumed(&mut events).await?,
+            ["alpha"],
+            "an unserved clone is not announced; its source is"
         );
         assert_eq!(
             resp["result"]["mounted"],

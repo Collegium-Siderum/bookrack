@@ -142,7 +142,6 @@ mod tests {
     use bookrack_embed::EmbedError;
     use bookrack_refs::{NewBook, NewEntry};
     use serde_json::json;
-    use tokio::sync::Mutex as AsyncMutex;
 
     use super::*;
     use crate::Caller;
@@ -227,7 +226,6 @@ mod tests {
             [Arc::clone(&handle)],
             Some("alpha".into()),
             Arc::clone(&sink) as Arc<dyn ChangeSink>,
-            Arc::new(AsyncMutex::new(())),
         )
         .expect("registry");
         Fixture {

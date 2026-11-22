@@ -69,9 +69,8 @@ where
         + 'static,
 {
     let handle = ctx.registry.get(library).map_err(registry_err)?;
-    let library_name = handle.name().to_string();
-    run_write(ctx, &library_name, move || async move {
-        op(handle.ops()).map_err(|e| handler_err(method, e.into()))
+    run_write(ctx, &handle, async move |session| {
+        op(session.ops()).map_err(|e| handler_err(method, e.into()))
     })
     .await
 }
@@ -116,13 +115,13 @@ pub async fn reaudit(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         bookrack_ops::PAPER_AUDIT_BUILT_IN_NAMES,
     )
     .map_err(ops_err)?;
-    let library_name = handle.name().to_string();
     let PapersMetadataReauditParams {
         intake_id,
         audit_profile,
         ..
     } = parsed;
-    run_write(ctx, &library_name, move || async move {
+    run_write(ctx, &handle, async move |session| {
+        let handle = session.handle();
         // Both overlays live under the target library's data root, so
         // they are read from the handle this call resolved — the
         // catalog below is that library's, and auditing it under

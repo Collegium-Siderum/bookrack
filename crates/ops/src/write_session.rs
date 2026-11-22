@@ -527,25 +527,21 @@ mod tests {
     struct Fixture {
         registry: Arc<LibraryRegistry<FakeEmbedder>>,
         sink: Arc<RecordingSink>,
-        write_guard: Arc<AsyncMutex<()>>,
         alpha: Arc<LibraryHandle<FakeEmbedder>>,
     }
 
     fn fixture() -> Fixture {
         let sink = Arc::new(RecordingSink::default());
-        let write_guard = Arc::new(AsyncMutex::new(()));
         let alpha = handle("alpha");
         let registry = LibraryRegistry::from_handles_with_sink(
             [Arc::clone(&alpha), handle("beta")],
             Some("alpha".into()),
             Arc::clone(&sink) as Arc<dyn ChangeSink>,
-            Arc::clone(&write_guard),
         )
         .expect("registry");
         Fixture {
             registry,
             sink,
-            write_guard,
             alpha,
         }
     }
@@ -581,30 +577,6 @@ mod tests {
             begin(&fx).is_ok(),
             "the mutex is free once the session ends"
         );
-    }
-
-    /// The mutex the registry was built with is the one it takes, so a
-    /// holder outside the registry — the control plane's write path —
-    /// and a session keep each other out.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_registry_takes_the_write_mutex_it_was_given() {
-        let fx = fixture();
-        let outside = fx
-            .write_guard
-            .clone()
-            .try_lock_owned()
-            .expect("the injected mutex is free");
-        assert!(
-            begin(&fx).is_err(),
-            "a session must not open while the injected mutex is held elsewhere"
-        );
-        drop(outside);
-        let session = begin(&fx).expect("the session opens");
-        assert!(
-            fx.write_guard.try_lock().is_err(),
-            "an open session holds the injected mutex"
-        );
-        drop(session);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

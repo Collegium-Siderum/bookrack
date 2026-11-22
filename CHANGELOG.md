@@ -92,8 +92,17 @@ release workflow extracts the matching section verbatim from this file.
   mutex.** While another write holds it, the tool answers `-32001` with
   `retryable: true` and writes nothing, instead of writing alongside it.
   Its arguments are still judged first, so a malformed overlay is
-  `-32602` whatever else is running. Each call now leaves a row in the
-  tool-call log, as the other write tools do, attributed to `mcp`.
+  `-32602` whatever else is running. Like a control-plane write, it
+  pauses MCP for its duration and announces `library.changed` once the
+  overlay is on disk. Each call now leaves a row in the tool-call log,
+  as the other write tools do, attributed to `mcp`.
+- **A busy refusal says it is retryable.** The `-32001` a write gets
+  while another holds the write mutex carries `retryable: true` in
+  `data`, with a detail and a hint, instead of a bare message.
+- **`library.fork` announces the clone it mounted.** Beside the source
+  library, the fork now publishes `library.changed` for the clone when
+  it is served on the same call, so a subscriber sees the library set
+  grow without waiting for something else to change.
 - **`bookrack doctor` names a PDFium library a build before 0.14.0 left
   behind.** Those builds installed the library file directly under
   `<platform data dir>/bookrack/pdfium/`, where no later build looks.

@@ -47,7 +47,6 @@ use bookrack_ops::pipeline::book::IngestParams;
 use bookrack_ops::pipeline::paper::GleanParams;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{JobTemplates, LibraryHandle, LibraryRegistry, MountGuard};
-use bookrack_ops::write_session::NoopChangeSink;
 use bookrack_ops::{Caller, Ops, PapersPaths};
 use bookrack_query::Library;
 use bookrack_session::{
@@ -62,6 +61,7 @@ use crate::control::events::{
     EventStreamHandle, Stage,
 };
 use crate::control::methods::MethodContext;
+use crate::control::methods::host_session::DaemonChangeSink;
 use crate::control::progress::{
     EMBED_PROGRESS_INTERVAL, EventProgressSink, ProgressSink, embed_batch_reporter,
 };
@@ -184,12 +184,6 @@ pub struct DaemonRuntime {
     pub mcp_listener: Option<tokio::net::TcpListener>,
     /// Broadcast handle for control-plane events.
     pub event_stream: EventStreamHandle,
-    /// Process-wide write mutex held by every control-plane write
-    /// handler for the duration of its underlying business call.
-    /// Distinct from the cross-process [`TtyLock`]: this serialises
-    /// concurrent writers attached to the same daemon, while the
-    /// `TtyLock` keeps a second daemon from coming up at all.
-    pub write_guard: Arc<tokio::sync::Mutex<()>>,
     /// Discovered path of the control-plane listener, used by callers
     /// (e.g. `bookrack rpc`) that read the session lock and want to
     /// reach the control plane.
@@ -822,15 +816,12 @@ impl DaemonRuntime {
             return Err(skips.into_refusal());
         }
         let served = handles.len();
-        // One write mutex for the daemon: the control plane's write
-        // path holds it through `MethodContext`, and the registry's
-        // write sessions take the same one.
-        let write_guard = Arc::new(tokio::sync::Mutex::new(()));
+        // Every write session reports on the event stream: an exclusive
+        // one pauses MCP and raises the write source while it runs.
         let registry = LibraryRegistry::from_handles_with_sink(
             handles,
             plan.default_name.clone(),
-            Arc::new(NoopChangeSink),
-            Arc::clone(&write_guard),
+            Arc::new(DaemonChangeSink::new(event_stream.clone())),
         )
         .context("assemble the library registry")?;
         for skip in skips.iter() {
@@ -1132,7 +1123,6 @@ impl DaemonRuntime {
             queue_state: Arc::clone(&queue_state),
             queue_state_path: queue_state_path.clone(),
             event_stream: event_stream.clone(),
-            write_guard: Arc::clone(&write_guard),
             shutdown_tx: shutdown_tx.clone(),
             identity: identity.clone(),
             daemon_config: Arc::clone(&daemon_config),
@@ -1208,7 +1198,6 @@ impl DaemonRuntime {
             mcp_label,
             mcp_listener,
             event_stream,
-            write_guard,
             control_sock,
             signal_triggered,
             queue_paused,

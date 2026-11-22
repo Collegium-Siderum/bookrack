@@ -49,7 +49,7 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         .get(parsed.library.as_deref())
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
-    run_write(ctx, handle.name(), move || async move {
+    run_write(ctx, &handle, async move |_session| {
         let report = papers_vectors::rebuild(
             &cfg,
             parsed.kind.as_deref(),
@@ -123,7 +123,7 @@ async fn reembed_dry_run(
     let registry = ctx.plan_registry.clone();
     let paper = parsed.paper;
     let stale_only = parsed.stale_only;
-    run_dry_run(ctx, handle.name(), move || async move {
+    run_dry_run(ctx, &handle, async move |_session| {
         let plans = papers_vectors::plan_reembed(&cfg, paper, stale_only)
             .await
             .map_err(|e| handler_err("papers.vectors_reembed", e))?;
@@ -170,7 +170,7 @@ async fn reembed_execute_from_plan(
     let plan: RegisteredPapersReembedPlan = serde_json::from_slice(&payload)
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("decode plan payload: {e}")))?;
     let daemon = std::sync::Arc::clone(&ctx.daemon_config);
-    run_write(ctx, handle.name(), move || async move {
+    run_write(ctx, &handle, async move |_session| {
         let report = papers_vectors::execute_reembed_from_plan(&cfg, &daemon, plan.pinned_ids)
             .await
             .map_err(|e| handler_err("papers.vectors_reembed", e))?;
@@ -205,7 +205,7 @@ pub async fn reset(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
     let daemon = std::sync::Arc::clone(&ctx.daemon_config);
-    run_write(ctx, handle.name(), move || async move {
+    run_write(ctx, &handle, async move |_session| {
         let report = papers_vectors::reset(&cfg, &daemon, parsed.resume)
             .await
             .map_err(|e| reset_err("papers.vectors_reset", e))?;
@@ -232,7 +232,7 @@ pub async fn drop_index(params: &Option<Value>, ctx: &MethodContext) -> Result<V
         .get(parsed.library.as_deref())
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
-    run_write(ctx, handle.name(), move || async move {
+    run_write(ctx, &handle, async move |_session| {
         let report = papers_vectors::drop(&cfg)
             .await
             .map_err(|e| handler_err("papers.vectors_drop", e))?;

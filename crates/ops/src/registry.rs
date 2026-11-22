@@ -733,29 +733,20 @@ impl<E: Embedder> LibraryRegistry<E> {
     ///
     /// [`get`]: LibraryRegistry::get
     ///
-    /// Its sessions take a write mutex of their own and tell no sink
-    /// anything; a host with subscribers builds through
-    /// [`Self::from_handles_with_sink`].
+    /// Its sessions tell no sink anything; a host with subscribers
+    /// builds through [`Self::from_handles_with_sink`].
     pub fn from_handles(
         handles: impl IntoIterator<Item = Arc<LibraryHandle<E>>>,
         default: Option<String>,
     ) -> Result<Arc<LibraryRegistry<E>>> {
-        Self::from_handles_with_sink(
-            handles,
-            default,
-            Arc::new(NoopChangeSink),
-            Arc::new(AsyncMutex::new(())),
-        )
+        Self::from_handles_with_sink(handles, default, Arc::new(NoopChangeSink))
     }
 
-    /// [`Self::from_handles`] whose exclusive sessions take
-    /// `write_guard` — the host's one write mutex, which its own write
-    /// paths may hold too — and report to `sink`.
+    /// [`Self::from_handles`] whose sessions report to `sink`.
     pub fn from_handles_with_sink(
         handles: impl IntoIterator<Item = Arc<LibraryHandle<E>>>,
         default: Option<String>,
         sink: Arc<dyn ChangeSink>,
-        write_guard: Arc<AsyncMutex<()>>,
     ) -> Result<Arc<LibraryRegistry<E>>> {
         let mut mounted: HashMap<String, Arc<LibraryHandle<E>>> = HashMap::new();
         for handle in handles {
@@ -770,7 +761,7 @@ impl<E: Embedder> LibraryRegistry<E> {
                 unmounted: BTreeMap::new(),
             }),
             default: RwLock::new(default),
-            write_guard,
+            write_guard: Arc::new(AsyncMutex::new(())),
             sink,
         }))
     }

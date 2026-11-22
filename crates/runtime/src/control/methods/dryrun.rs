@@ -56,7 +56,7 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
         .get(parsed.library.as_deref())
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
-    run_dry_run(ctx, handle.name(), move || async move {
+    run_dry_run(ctx, &handle, async move |_session| {
         let outcome = tokio::task::spawn_blocking(move || {
             dryrun::run(
                 &cfg,

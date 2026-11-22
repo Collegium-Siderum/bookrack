@@ -25,16 +25,16 @@ use bookrack_core::DaemonIdentity;
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::stream::LogStreamHandle;
+use bookrack_ops::OpsError;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
+use bookrack_ops::write_session::{ChangeSet, Region, SessionRunError, WriteSession};
 use serde_json::Value;
-use tokio::sync::{Mutex as TokioMutex, OwnedMutexGuard, broadcast};
+use tokio::sync::broadcast;
 
 use super::error_map::rpc_from_problem;
-use super::events::{Event, EventStreamHandle};
-use super::jsonrpc::{
-    BUSY, CONFIRMATION_REQUIRED, INVALID_PARAMS, METHOD_NOT_FOUND, Request, RpcError,
-};
+use super::events::EventStreamHandle;
+use super::jsonrpc::{CONFIRMATION_REQUIRED, INVALID_PARAMS, METHOD_NOT_FOUND, Request, RpcError};
 use super::plan_registry::PlanRegistry;
 use crate::cmd::input_error::CmdInputError;
 
@@ -79,6 +79,7 @@ pub mod corpus;
 pub mod diagnose;
 pub mod dryrun;
 pub mod glean;
+pub mod host_session;
 pub mod ingest;
 pub mod libraries;
 pub mod logs;
@@ -128,7 +129,6 @@ pub struct MethodContext {
     pub queue_state: Arc<Mutex<QueueState>>,
     pub queue_state_path: PathBuf,
     pub event_stream: EventStreamHandle,
-    pub write_guard: Arc<TokioMutex<()>>,
     pub shutdown_tx: broadcast::Sender<()>,
     /// Which daemon this is; reported by `daemon.version` and `status`.
     pub identity: DaemonIdentity,
@@ -646,29 +646,6 @@ pub fn resolve_submit_target(ctx: &MethodContext, name: Option<&str>) -> Result<
     Ok(select_library(ctx, name)?.name().to_string())
 }
 
-/// RAII bundle owning the write mutex guard and the broadcast handle
-/// that raised the RPC write source / `McpAvailability { paused:
-/// true }`. Its [`Drop`] publishes `mcp.availability { paused: false }`
-/// and releases the write source — the state resolver falls back to
-/// whatever other activity is live — before releasing the mutex, so
-/// the state transitions cannot leak when the surrounding future is
-/// cancelled or the blocking work panics mid-handler.
-struct WriteSession {
-    event_stream: EventStreamHandle,
-    _guard: OwnedMutexGuard<()>,
-}
-
-impl Drop for WriteSession {
-    fn drop(&mut self) {
-        self.event_stream
-            .publish(Event::McpAvailability { paused: false });
-        self.event_stream.set_rpc_write(false);
-        // _guard releases the write mutex after this body returns, so a
-        // subsequent writer observes the released write source before
-        // being able to take the lock.
-    }
-}
-
 /// Whether a write session ends with a `library.changed` broadcast.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Announce {
@@ -678,115 +655,118 @@ enum Announce {
     Nothing,
 }
 
-/// Run a write command: a write session (see [`run_write_session`])
-/// that announces `library.changed` on success, so every subscriber
-/// refreshes what it believes about `library`.
-pub(crate) async fn run_write<F, Fut>(
+/// Run a write command on `handle`'s library: a write session (see
+/// [`run_library_session`]) that announces `library.changed` on
+/// success, so every subscriber refreshes what it believes about the
+/// library.
+pub(crate) async fn run_write<F>(
     ctx: &MethodContext,
-    library: &str,
+    handle: &Arc<LibraryHandle<OllamaEmbedClient>>,
     op: F,
 ) -> Result<Value, RpcError>
 where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = Result<Value, RpcError>>,
+    F: AsyncFnOnce(&mut WriteSession<OllamaEmbedClient>) -> Result<Value, RpcError>
+        + Send
+        + 'static,
 {
-    run_write_session(ctx, library, Announce::Changed, op).await
+    run_library_session(ctx, handle, Announce::Changed, op).await
 }
 
-/// Run a dry-run leg: a write session (see [`run_write_session`]) that
-/// publishes no `library.changed`. The leg takes the write mutex like
-/// the write it previews — the plan it registers is a snapshot nothing
-/// may move under, and `mcp.availability` pauses and resumes around it
-/// as around any holder of the mutex — but it leaves every library as
-/// it found it, so there is nothing for a subscriber to refresh.
-pub(crate) async fn run_dry_run<F, Fut>(
+/// Run a dry-run leg: a write session (see [`run_library_session`])
+/// that publishes no `library.changed`. The leg takes the write mutex
+/// like the write it previews — the plan it registers is a snapshot
+/// nothing may move under, and `mcp.availability` pauses and resumes
+/// around it as around any holder of the mutex — but it leaves every
+/// library as it found it, so there is nothing for a subscriber to
+/// refresh.
+pub(crate) async fn run_dry_run<F>(
     ctx: &MethodContext,
-    library: &str,
+    handle: &Arc<LibraryHandle<OllamaEmbedClient>>,
     op: F,
 ) -> Result<Value, RpcError>
 where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = Result<Value, RpcError>>,
+    F: AsyncFnOnce(&mut WriteSession<OllamaEmbedClient>) -> Result<Value, RpcError>
+        + Send
+        + 'static,
 {
-    run_write_session(ctx, library, Announce::Nothing, op).await
+    run_library_session(ctx, handle, Announce::Nothing, op).await
 }
 
-/// Acquire the runtime-wide write mutex, raise the RPC write source
-/// (the daemon reads [`super::events::DaemonState::Writing`] for the
-/// session's duration), broadcast `mcp.availability { paused: true }`,
-/// run `op`
-/// on a blocking executor, then unwind the broadcast and state
-/// transitions in reverse. Concurrent writers see `-32001 busy`
-/// instead of blocking on the mutex so the caller can retry.
+/// Open a write session on `handle`'s library through the registry and
+/// run `op` in it.
 ///
-/// `op` is driven on [`tokio::task::spawn_blocking`] with the current
-/// runtime's [`tokio::runtime::Handle::block_on`] so handler bodies
-/// can hold non-`Send` resources (the catalog and corpus handles use
-/// `RefCell` internally) across `await` points without poisoning the
-/// per-connection task that runs the dispatcher.
-///
-/// The state transitions and mutex release are tied to a
-/// [`WriteSession`] RAII guard that is moved into the blocking task,
-/// so cancellation of the dispatcher future or a panic inside `op`
-/// cannot leave the daemon stranded with the write source raised and
-/// MCP paused, or allow a second writer to enter while the blocking
-/// work is still running.
+/// The registry's session takes the daemon's one write mutex without
+/// waiting, so a concurrent writer sees `-32001 busy` and may retry; it
+/// raises the RPC write source and pauses MCP through
+/// [`host_session::DaemonChangeSink`] for the session's duration. `op`
+/// runs on a blocking task with the session lent to it, so handler
+/// bodies can hold non-`Send` resources (the catalog and corpus handles
+/// use `RefCell` internally) across `await` points. The announcement and
+/// the release happen on that same task, so cancelling the dispatcher
+/// future or a panic inside `op` cannot leave MCP paused, the write
+/// source raised, or a committed write unannounced.
 ///
 /// A success reply that is a JSON object names the library the write
-/// acted on: `library` is set to `library` unless `op` already put a
-/// `library` key there. A reply of any other shape, and every error,
-/// passes through unchanged.
-///
-/// `announce` decides whether a successful `op` ends with
-/// `library.changed { library }`.
-async fn run_write_session<F, Fut>(
+/// acted on: `library` is set to the handle's name unless `op` already
+/// put a `library` key there. A reply of any other shape, and every
+/// error, passes through unchanged. `announce` decides whether a
+/// successful `op` ends with `library.changed { library }`.
+async fn run_library_session<F>(
     ctx: &MethodContext,
-    library: &str,
+    handle: &Arc<LibraryHandle<OllamaEmbedClient>>,
     announce: Announce,
     op: F,
 ) -> Result<Value, RpcError>
 where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = Result<Value, RpcError>>,
+    F: AsyncFnOnce(&mut WriteSession<OllamaEmbedClient>) -> Result<Value, RpcError>
+        + Send
+        + 'static,
 {
-    let guard = ctx
-        .write_guard
-        .clone()
-        .try_lock_owned()
-        .map_err(|_| RpcError::new(BUSY, "another write command is already in progress"))?;
-    ctx.event_stream.set_rpc_write(true);
-    ctx.event_stream
-        .publish(Event::McpAvailability { paused: true });
-    let session = WriteSession {
-        event_stream: ctx.event_stream.clone(),
-        _guard: guard,
-    };
-    let event_stream = ctx.event_stream.clone();
-    let library_name = library.to_string();
-    let join = tokio::task::spawn_blocking(move || {
-        let handle = tokio::runtime::Handle::current();
-        let result = handle.block_on(op()).map(|mut value| {
-            if let Value::Object(map) = &mut value {
-                map.entry("library")
-                    .or_insert_with(|| Value::String(library_name.clone()));
-            }
-            value
-        });
-        if result.is_ok() && announce == Announce::Changed {
-            event_stream.publish(Event::LibraryChanged {
-                library: library_name,
-            });
-        }
-        drop(session);
-        result
-    })
-    .await;
-    match join {
-        Ok(result) => result,
-        Err(e) => Err(RpcError::new(
+    let caller = handle.ops().caller().clone();
+    let session = ctx
+        .registry
+        .begin_write(handle, Region::Library, caller)
+        .map_err(|busy| super::error_map::ops_err(OpsError::WriteBusy(busy)))?;
+    let library = handle.name().to_string();
+    session
+        .run_blocking(async move |s| {
+            let value = name_the_library(op(s).await?, &library);
+            let changes = match announce {
+                Announce::Changed => ChangeSet::announced(library),
+                Announce::Nothing => ChangeSet::unchanged(),
+            };
+            Ok((value, changes))
+        })
+        .await
+        .map_err(session_failure)
+}
+
+/// `value` with a `library` key naming `library`, when it is a JSON
+/// object that does not carry one already.
+pub(super) fn name_the_library(mut value: Value, library: &str) -> Value {
+    if let Value::Object(map) = &mut value {
+        map.entry("library")
+            .or_insert_with(|| Value::String(library.to_string()));
+    }
+    value
+}
+
+/// A session that did not settle as its write: the write's own error,
+/// or the blocking task that ran it failing.
+pub(super) fn session_failure(e: SessionRunError<RpcError>) -> RpcError {
+    match e {
+        SessionRunError::Op(rpc) => rpc,
+        SessionRunError::Join(e) => RpcError::new(
             crate::control::jsonrpc::INTERNAL_ERROR,
             format!("write command join failed: {e}"),
-        )),
+        ),
+        SessionRunError::RefreshStore(e) => RpcError::new(
+            crate::control::jsonrpc::INTERNAL_ERROR,
+            format!(
+                "refresh vector store after write: {}",
+                bookrack_core::error_chain(&e)
+            ),
+        ),
     }
 }
 
@@ -849,11 +829,18 @@ pub(crate) fn test_method_context(
 ) -> MethodContext {
     use crate::control::events::{DaemonState, DaemonStateFlag};
 
-    let handle = test_library_handle(dir, library_name.unwrap_or("default"));
+    let name = library_name.unwrap_or("default");
+    let handle = test_library_handle(dir, name);
     let state = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
+    let event_stream = EventStreamHandle::new(8, state);
     let (shutdown_tx, _) = broadcast::channel(8);
     MethodContext {
-        registry: LibraryRegistry::single(handle),
+        registry: LibraryRegistry::from_handles_with_sink(
+            [handle],
+            Some(name.to_string()),
+            Arc::new(host_session::DaemonChangeSink::new(event_stream.clone())),
+        )
+        .expect("a one-library registry"),
         info_context: LibraryInfoContext {
             data_dir: dir.display().to_string(),
             library_name: library_name.map(str::to_string),
@@ -866,8 +853,7 @@ pub(crate) fn test_method_context(
         },
         queue_state: Arc::new(Mutex::new(QueueState::default())),
         queue_state_path: dir.join("queue.json"),
-        event_stream: EventStreamHandle::new(8, state),
-        write_guard: Arc::new(TokioMutex::new(())),
+        event_stream,
         shutdown_tx,
         identity: DaemonIdentity {
             instance_id: "018f0000-0000-7000-8000-000000000000".to_string(),
@@ -925,37 +911,39 @@ pub(crate) fn test_library_handle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::events::{DaemonState, DaemonStateFlag};
+    use crate::control::events::{DaemonState, Event};
     use serde_json::json;
 
+    /// A registry session raises the write source and pauses MCP while
+    /// it is open; ending it unpauses before the state falls back to
+    /// idle, and only then frees the mutex for the next writer.
     #[tokio::test]
-    async fn write_session_drop_resets_state_and_releases_mutex() {
-        let state = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
-        let stream = EventStreamHandle::new(8, state.clone());
-        let mut rx = stream.subscribe();
+    async fn an_open_session_holds_the_daemon_in_writing_until_it_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_method_context(dir.path(), Some("alpha"));
+        let mut rx = ctx.event_stream.subscribe();
 
-        let mutex = Arc::new(TokioMutex::new(()));
-        let guard = mutex.clone().try_lock_owned().expect("lock free");
-        stream.set_rpc_write(true);
-        stream.publish(Event::McpAvailability { paused: true });
-        assert_eq!(state.load(), DaemonState::Writing);
-
-        let session = WriteSession {
-            event_stream: stream.clone(),
-            _guard: guard,
-        };
-        // A second writer cannot take the lock while the session lives.
-        assert!(mutex.clone().try_lock_owned().is_err());
+        let session = ctx
+            .registry
+            .begin_host_write(bookrack_ops::Caller::control_plane(), "alpha", None)
+            .expect("the mutex is free");
+        assert_eq!(ctx.event_stream.current_state(), DaemonState::Writing);
+        assert!(
+            ctx.registry
+                .begin_host_write(bookrack_ops::Caller::control_plane(), "alpha", None)
+                .is_err(),
+            "a second writer cannot open a session while the first lives"
+        );
         drop(session);
 
-        assert_eq!(state.load(), DaemonState::Idle);
-        // The mutex is released, so a fresh owned lock is immediately
-        // available to the next writer.
-        assert!(mutex.clone().try_lock_owned().is_ok());
+        assert_eq!(ctx.event_stream.current_state(), DaemonState::Idle);
+        assert!(
+            ctx.registry
+                .begin_host_write(bookrack_ops::Caller::control_plane(), "alpha", None)
+                .is_ok(),
+            "the mutex is free once the session ends"
+        );
 
-        // Drain the broadcast and assert the release events were emitted
-        // in the order the daemon contract requires (paused:false then
-        // DaemonState::Idle).
         let mut saw_unpaused = false;
         let mut saw_idle = false;
         while let Ok(event) = rx.try_recv() {
@@ -984,7 +972,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_method_context(dir.path(), served);
         let handle = select_library(&ctx, name).expect("the served library resolves");
-        run_write(&ctx, handle.name(), move || async move { reply }).await
+        run_write(&ctx, &handle, async move |_session| reply).await
     }
 
     /// Every event a session published, in order, as `channel` plus its
@@ -1004,8 +992,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_method_context(dir.path(), Some("alpha"));
         let mut rx = ctx.event_stream.subscribe();
+        let handle = select_library(&ctx, Some("alpha")).expect("alpha resolves");
 
-        run_write(&ctx, "alpha", move || async move { Ok(json!({})) })
+        run_write(&ctx, &handle, async move |_session| Ok(json!({})))
             .await
             .unwrap();
 
@@ -1026,8 +1015,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_method_context(dir.path(), Some("alpha"));
         let mut rx = ctx.event_stream.subscribe();
+        let handle = select_library(&ctx, Some("alpha")).expect("alpha resolves");
 
-        let reply = run_dry_run(&ctx, "alpha", move || async move { Ok(json!({})) })
+        let reply = run_dry_run(&ctx, &handle, async move |_session| Ok(json!({})))
             .await
             .unwrap();
         assert_eq!(reply["library"], json!("alpha"), "{reply}");

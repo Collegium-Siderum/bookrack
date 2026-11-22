@@ -40,7 +40,7 @@ pub async fn reconcile(params: &Option<Value>, ctx: &MethodContext) -> Result<Va
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
     let daemon = std::sync::Arc::clone(&ctx.daemon_config);
-    run_write(ctx, handle.name(), move || async move {
+    run_write(ctx, &handle, async move |_session| {
         let report = papers_stamps::reconcile(&cfg, &daemon)
             .await
             .map_err(|e| handler_err("papers.stamps_reconcile", e))?;

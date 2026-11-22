@@ -118,7 +118,8 @@ systems. bookrack is a local-first system and does not probe for it.
 - `-32601` method not found
 - `-32602` invalid params
 - `-32603` internal error
-- `-32001` busy (bookrack-specific; a write command is already in flight)
+- `-32001` busy (bookrack-specific; a write command is already in flight;
+  `data.retryable` is `true`)
 - `-32002` not ready (bookrack-specific; the runtime has not finished
   initialising the resource the method needs)
 - `-32010` invalid library (bookrack-specific; a `library` param does
@@ -662,6 +663,8 @@ unchanged.
   would delete data to report a serving problem. Such a fork still
   succeeds, with `mounted: false` and `mount_error` naming the reason;
   the repair is `library.mount` against the name the fork registered.
+  Fires `library.changed` for the source, and for the clone as well
+  when it is mounted.
 - `library.mount` — `{ name }` → `{ ok: true, name, library }`. Open the
   registered library `name` and add it to the served set, without a
   restart. `name` is a registry name, never a path: registering a root
@@ -1406,17 +1409,20 @@ the tool description says which one it ran.
 - `library.changed` — `{ library }` published after every successful
   write command finishes, which includes a `library.mount` or
   `library.unmount` naming the library that joined or left the served
-  set. The payload does not say *what* happened, because every
+  set, a `library.fork` naming its source and the clone it mounted,
+  and the MCP `reference.overlay_set` tool. The payload does not say *what* happened, because every
   subscriber's response is the same one: refresh what it believes the
   library set to be. A dry-run leg publishes none: it holds the write
   mutex but leaves every library as it found it, so a subscriber that
   refreshed would find nothing changed.
 - `mcp.availability` — `{ paused }` published `true` at the start of
-  every control-plane write command, dry-run legs included, and
-  `false` after it returns, so subscribers can advertise the MCP write
+  every write session — every control-plane write command, dry-run
+  legs included, and the MCP `reference.overlay_set` tool — and
+  `false` after it ends, so subscribers can advertise the MCP write
   surface as temporarily paused. The signal is advisory: it reports the
-  state of the runtime write mutex, which the MCP write tools do not
-  take, so a client that ignores it can still issue one mid-session.
+  state of the runtime write mutex, which the metadata write tools do
+  not take, so a client that ignores it can still issue one of them
+  mid-session.
 
 ## Phase log
 

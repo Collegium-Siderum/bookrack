@@ -20,8 +20,9 @@ use super::super::error_map::{config_err, handler_err, mount_err, registry_err, 
 use super::super::events::Event;
 use super::super::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, NOT_READY, RpcError};
 use super::MethodContext;
-use super::run_write;
+use super::host_session::run_host_write;
 use crate::cmd::libraries::CopyMode;
+use bookrack_ops::write_session::ChangeSet;
 
 #[derive(Debug, Deserialize)]
 pub struct LibraryForkParams {
@@ -89,7 +90,11 @@ pub async fn fork(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
     // library on disk either way, and refusing to make one because
     // this process cannot serve it would be the wrong trade.
     let mounter = ctx.mounter.clone();
-    run_write(ctx, handle.name(), move || async move {
+    let source = handle.name().to_string();
+    // The source is announced whatever happens to the clone: its
+    // registry entry may have been rewritten. The clone is announced
+    // only when this daemon now serves it.
+    run_host_write(ctx, handle.name(), async move |_session| {
         crate::cmd::libraries::fork(&cfg, &new_name, &target, &registry_path, mode, true, |_| {
             Ok(true)
         })
@@ -109,12 +114,17 @@ pub async fn fork(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
                     .to_string(),
             ),
         };
-        Ok(json!({
+        let mut changes = ChangeSet::announced(source);
+        if mounted.is_ok() {
+            changes.announced_libraries.push(new_name.clone());
+        }
+        let reply = json!({
             "new_name": new_name,
             "data_dir": target,
             "mounted": mounted.is_ok(),
             "mount_error": mounted.err(),
-        }))
+        });
+        Ok((reply, changes))
     })
     .await
 }
@@ -187,22 +197,23 @@ pub struct LibraryMountParams {
 /// declares, and registering a new root stays a separate act with its
 /// own failure modes.
 ///
-/// Runs through [`run_write`] like every other change to what the
-/// daemon serves: the write mutex keeps a mount from racing another
-/// write, MCP is paused for its duration, and the `library.changed`
-/// event a subscriber needs to refresh its view of the library set is
-/// published on success by the wrapper itself.
+/// Runs as a host session ([`run_host_write`]) like every other change
+/// to what the daemon serves: the write mutex keeps a mount from racing
+/// another write, MCP is paused for its duration, and the
+/// `library.changed` event a subscriber needs to refresh its view of the
+/// library set is published on success.
 pub async fn mount(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let name = mount_target("library.mount", params)?;
     let mounter = require_mounter("library.mount", ctx)?;
     let target = name.clone();
-    run_write(ctx, &name, move || async move {
+    run_host_write(ctx, &name, async move |_session| {
         mounter
             .mount(&target)
             .await
             .map_err(|e| mount_err(&target, e))?;
         tracing::info!(library = %target, "library mounted at runtime");
-        Ok(json!({ "ok": true, "name": target }))
+        let changes = ChangeSet::announced(target.clone());
+        Ok((json!({ "ok": true, "name": target }), changes))
     })
     .await
 }
@@ -236,7 +247,7 @@ async fn unmount_library(
     let primary = Some(ctx.library_name.clone());
     let queue_state = std::sync::Arc::clone(&ctx.queue_state);
     let target = name.clone();
-    run_write(ctx, &name, move || async move {
+    run_host_write(ctx, &name, async move |_session| {
         // The queued work is counted and the library removed under one
         // hold of the queue lock. A submit writes its row under the
         // same lock after confirming its library is mounted, so the row
@@ -260,7 +271,8 @@ async fn unmount_library(
         // library's stores.
         drop(handle);
         tracing::info!(library = %target, "library unmounted at runtime");
-        Ok(json!({ "ok": true, "name": target }))
+        let changes = ChangeSet::announced(target.clone());
+        Ok((json!({ "ok": true, "name": target }), changes))
     })
     .await
 }
