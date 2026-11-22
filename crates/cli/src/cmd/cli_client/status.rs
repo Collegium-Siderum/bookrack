@@ -184,6 +184,7 @@ fn compose_card(
             "state": status.get("state").cloned().unwrap_or(Value::Null),
             "mcp": info.mcp,
             "control": info.control_sock.as_deref().map(|p| p.display().to_string()),
+            "fds": status.get("fds").cloned().unwrap_or(Value::Null),
         },
         "library": {
             "name": status.get("library").cloned().unwrap_or(Value::Null),
@@ -327,7 +328,32 @@ fn card_hint(card: &Value) -> String {
             names.join(" ")
         );
     }
+    if card.pointer("/daemon/fds/pressure").and_then(Value::as_str) == Some("high") {
+        return "the daemon holds most of its file descriptor limit -- restart it \
+                ('bookrack quit', then 'bookrack run') to release them"
+            .to_string();
+    }
     "run 'bookrack doctor' for health checks".to_string()
+}
+
+/// The `daemon.fds` object as one table cell: `412 of 8192 open`, with
+/// `(high)` appended under high pressure. `None` leaves the object for
+/// the table to flatten as it is: a daemon that predates the field
+/// reports `null`, which renders as an empty cell.
+fn fds_cell(fds: &Value) -> Option<String> {
+    let fds = fds.as_object()?;
+    let count = match (
+        fds.get("open").and_then(Value::as_u64),
+        fds.get("soft_limit"),
+    ) {
+        (Some(open), Some(Value::Number(limit))) => format!("{open} of {limit} open"),
+        (Some(open), _) => format!("{open} open, no limit"),
+        (None, _) => "(not counted)".to_string(),
+    };
+    Some(match fds.get("pressure").and_then(Value::as_str) {
+        Some("high") => format!("{count} (high)"),
+        _ => count,
+    })
 }
 
 /// Every store `library.info` reports a read failure for, keyed by the
@@ -464,7 +490,11 @@ fn emit_card(card: &Value, hint: &str) -> Result<()> {
 }
 
 /// The card rewritten where the table renders a value worse than a
-/// sentence does. Two places qualify.
+/// sentence does. Three places qualify.
+///
+/// The descriptor count: the `daemon.fds` object would flatten to three
+/// rows, one of them a bare `null` for no limit. [`fds_cell`] makes it
+/// the one line an operator reads it as.
 ///
 /// The served set: [`flatten_into_kv`] renders an array as a single
 /// line of compact JSON, which for this array is a screenful of quoted
@@ -479,6 +509,9 @@ fn emit_card(card: &Value, hint: &str) -> Result<()> {
 /// reported, so no consumer has to parse these strings back.
 fn for_human(card: &Value) -> Value {
     let mut human = card.clone();
+    if let Some(cell) = card.pointer("/daemon/fds").and_then(fds_cell) {
+        human["daemon"]["fds"] = Value::String(cell);
+    }
     if let Some(served) = card.pointer("/library/served").and_then(Value::as_array) {
         human["library"]["served"] = Value::Object(served_rows(served));
     }
@@ -656,6 +689,76 @@ mod tests {
             "{}",
             card_hint(&broken)
         );
+    }
+
+    #[test]
+    fn the_card_carries_the_descriptor_object_the_daemon_reported() {
+        let fds = json!({ "open": 412, "soft_limit": 8192, "pressure": "normal" });
+        let card = compose_card(
+            Path::new("/run/bookrack.tty.lock"),
+            &lock_info(None),
+            &json!({ "version": "0.1.0" }),
+            &json!({ "library": "main", "fds": fds }),
+            &json!({}),
+        );
+        assert_eq!(card["daemon"]["fds"], fds);
+        // A daemon that predates the field: the row is there and empty.
+        let older = compose_card(
+            Path::new("/run/bookrack.tty.lock"),
+            &lock_info(None),
+            &json!({ "version": "0.1.0" }),
+            &json!({ "library": "main" }),
+            &json!({}),
+        );
+        assert_eq!(older["daemon"]["fds"], Value::Null);
+    }
+
+    #[test]
+    fn the_descriptor_row_reads_as_one_line() {
+        let cell =
+            |fds: Value| for_human(&json!({ "daemon": { "fds": fds } }))["daemon"]["fds"].clone();
+        assert_eq!(
+            cell(json!({ "open": 412, "soft_limit": 8192, "pressure": "normal" })),
+            "412 of 8192 open"
+        );
+        assert_eq!(
+            cell(json!({ "open": 7000, "soft_limit": 8192, "pressure": "high" })),
+            "7000 of 8192 open (high)"
+        );
+        assert_eq!(
+            cell(json!({ "open": 412, "soft_limit": null, "pressure": "normal" })),
+            "412 open, no limit"
+        );
+        assert_eq!(
+            cell(json!({ "open": null, "soft_limit": 8192, "pressure": "unknown" })),
+            "(not counted)"
+        );
+        assert_eq!(cell(Value::Null), Value::Null);
+    }
+
+    #[test]
+    fn high_descriptor_pressure_turns_the_hint_to_a_restart() {
+        let high = json!({ "open": 7000, "soft_limit": 8192, "pressure": "high" });
+        let normal = json!({ "open": 412, "soft_limit": 8192, "pressure": "normal" });
+        let hint = card_hint(&json!({ "daemon": { "fds": high }, "library": {} }));
+        assert!(
+            hint.contains("bookrack quit") && hint.contains("bookrack run"),
+            "{hint}"
+        );
+        let hint = card_hint(&json!({ "daemon": { "fds": normal }, "library": {} }));
+        assert!(hint.contains("doctor"), "{hint}");
+        // A store that cannot be read, or a library not mounted, is a
+        // problem a restart does not fix; their hints come first.
+        let hint = card_hint(&json!({
+            "daemon": { "fds": high },
+            "library": { "unreadable": { "catalog": "boom" } },
+        }));
+        assert!(hint.contains("verify"), "{hint}");
+        let hint = card_hint(&json!({
+            "daemon": { "fds": high },
+            "library": { "unmounted": { "beta": {} } },
+        }));
+        assert!(hint.contains("libraries mount beta"), "{hint}");
     }
 
     #[test]

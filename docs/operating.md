@@ -150,6 +150,14 @@ powercfg /change standby-timeout-ac 30   # restore the previous value
 For an unattended overnight run, prefer a wrapper that runs the restore
 step even when the session exits with an error.
 
+A daemon that ingests into a library with a vector index holds more
+file descriptors after each book, and gives them back only when it
+exits. After a large batch, restart it — `bookrack quit`, then
+`bookrack run`. `bookrack status` shows the count against the limit on
+its `daemon.fds` row, and its hint turns to the restart once the count
+reaches 75% of the limit; `bookrack doctor` warns on its `fd limit` row
+at the same point.
+
 ### The queue
 
 Ingest work runs through a persistent queue the worker drains on a
@@ -467,7 +475,7 @@ bookrack status
 One no-argument call answers "is a daemon running, which library does
 it serve, is it busy". With a live daemon it renders a single card in
 three sections — `daemon.*` (version, pid, uptime, state, MCP and
-control endpoints), `library.*` (name, data root, chunk and ready-book
+control endpoints, open file descriptors against the limit), `library.*` (name, data root, chunk and ready-book
 counts, disk usage), `queue.*` (pending, running, worker) — and a hint
 pointing at `bookrack doctor` for the health probes the card
 deliberately skips (embedder and reranker reachability involve network
@@ -480,7 +488,9 @@ bring-up skipped a registered library, the card carries a
 and the reason — and the hint names the `libraries mount` command that
 brings it in once repaired; when the skipped library is the one the
 daemon was started under, the card keeps its identity rows and shows no
-counts for it.
+counts for it. When the open descriptors reach 75% of the limit, the
+`daemon.fds` row says so and the hint asks for a restart (see *Long
+ingestions*).
 
 The short card answers one thing the full card has no use for: the
 `registry.default` row names the library a `bookrack run` here would
@@ -543,7 +553,8 @@ bookrack doctor
 
 A one-screen health check: the data root resolves, every store under it
 is accounted for, PDFium is on disk, the file-descriptor limit is
-sufficient, the Ollama daemon is reachable, the embed model is pulled,
+sufficient — and, when a running daemon answers, how much of it the
+daemon already holds — the Ollama daemon is reachable, the embed model is pulled,
 each registry entry agrees with its on-disk identity manifest, and each
 library's referenced index profile is coherent with its built index
 stamps.
