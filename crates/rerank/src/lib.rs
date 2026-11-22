@@ -370,6 +370,27 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    /// Every variant must have a judgement registered in
+    /// `bookrack-ops`'s `error_class::from_rerank`. Adding one here
+    /// without adding it there means it is judged a fault, `-32603` on
+    /// the wire, whatever it says about retrying.
+    ///
+    /// The guard lives beside the type rather than beside the mapping
+    /// because [`RerankError`] is `#[non_exhaustive]`: a downstream
+    /// `match` cannot be exhaustive, so only a same-crate one binds.
+    #[test]
+    fn every_variant_is_registered_for_wire_mapping() {
+        fn assert_classified(e: &RerankError) {
+            match e {
+                RerankError::Overloaded { .. }
+                | RerankError::Unreachable(_)
+                | RerankError::BadRequest { .. }
+                | RerankError::MalformedResponse(_) => {}
+            }
+        }
+        assert_classified(&RerankError::Unreachable("probe".into()));
+    }
+
     /// A client wired for fast tests: no retries, negligible backoff.
     fn test_client(base_url: &str) -> RerankClient {
         RerankClient::new(

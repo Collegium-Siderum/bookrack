@@ -60,6 +60,7 @@ use bookrack_corpus::CorpusError;
 use bookrack_embed::EmbedError;
 use bookrack_query::QueryError;
 use bookrack_refs::RefsError;
+use bookrack_rerank::RerankError;
 use bookrack_vectors::{TrainingLimit, VectorsError};
 use eyre::Report;
 
@@ -372,9 +373,7 @@ fn from_embed(e: &EmbedError) -> ClassifiedError {
 }
 
 /// Judge an [`OpsError`], delegating every variant that carries a leaf
-/// to that leaf's classifier. `Rerank` stays here: `RerankError` writes
-/// its own wording but has no caller-input variant, so the wrapper's
-/// residual kind is already right for it.
+/// or a backend failure to that type's classifier.
 pub fn from_ops(e: &OpsError) -> ClassifiedError {
     use OpsError::*;
     match e {
@@ -382,6 +381,7 @@ pub fn from_ops(e: &OpsError) -> ClassifiedError {
         Catalog(e) => return from_catalog(e),
         Corpus(e) => return from_corpus(e),
         Vectors(e) => return from_vectors(e),
+        Rerank(e) => return from_rerank(e),
         // The report inside is opaque to this `match`, so nothing has
         // judged what it holds: the fault kind is a fallback, not a
         // verdict, and the serving side keeps a record of it.
@@ -404,6 +404,27 @@ pub fn from_ops(e: &OpsError) -> ClassifiedError {
         | SourceNotArchived { .. }
         | UnknownAuditProfile { .. } => ErrorKind::InvalidParams,
         WriteBusy(_) => ErrorKind::Busy,
+        _ => ErrorKind::Internal,
+    };
+    ClassifiedError::new(kind, e.explain())
+}
+
+/// Judge a reranker failure. A server that did not answer, or answered
+/// that it is overloaded or still loading its model, is a backend the
+/// same call may reach later; a request it refused and a reply that
+/// does not parse are faults, since this binary assembles the request
+/// and the backend broke its response contract. The wording is the
+/// reranker's own.
+///
+/// The wildcard is forced: [`RerankError`] is `#[non_exhaustive]` and
+/// this is a downstream crate. The guard against a new variant landing
+/// silently on [`ErrorKind::Internal`] lives beside the type instead,
+/// in `bookrack-rerank`'s own tests.
+fn from_rerank(e: &RerankError) -> ClassifiedError {
+    use RerankError::*;
+    let kind = match e {
+        Unreachable(_) | Overloaded { .. } => ErrorKind::BackendUnavailable,
+        BadRequest { .. } | MalformedResponse(_) => ErrorKind::Internal,
         _ => ErrorKind::Internal,
     };
     ClassifiedError::new(kind, e.explain())
@@ -1648,5 +1669,57 @@ mod tests {
             "another write command is already in progress"
         );
         assert!(data(&c).retryable);
+    }
+
+    /// A reranker that did not answer, or answered that it is overloaded
+    /// or still loading its model, is a backend the same call may reach
+    /// later: the backend kind, retryable, with the reranker's own
+    /// wording. Asserted against the literal kind, through the wrapper
+    /// a search raises it in and under a caller's context.
+    #[test]
+    fn a_reranker_that_did_not_answer_is_backend_unavailable_and_retryable() {
+        use bookrack_rerank::RerankError;
+        for e in [
+            RerankError::Unreachable("connection refused".into()),
+            RerankError::Overloaded {
+                status: 503,
+                body: "loading model".into(),
+            },
+        ] {
+            let label = format!("{e:?}");
+            let c = classified(Report::from(OpsError::Rerank(e)).wrap_err("library.search"));
+            assert_eq!(
+                c.kind,
+                ErrorKind::BackendUnavailable,
+                "{label}: {}",
+                c.problem.summary
+            );
+            assert!(data(&c).retryable, "{label}");
+            assert!(
+                c.problem.summary.contains("reranker"),
+                "{label}: {}",
+                c.problem.summary
+            );
+        }
+    }
+
+    /// A request the reranker refused and a reply it could not parse
+    /// are faults, not a backend that may come back: the backend kind
+    /// does not widen to them.
+    #[test]
+    fn a_refused_or_malformed_rerank_stays_internal() {
+        use bookrack_rerank::RerankError;
+        for e in [
+            RerankError::BadRequest {
+                status: 400,
+                body: "bad documents".into(),
+            },
+            RerankError::MalformedResponse("no results".into()),
+        ] {
+            let label = format!("{e:?}");
+            let c = from_ops(&OpsError::Rerank(e));
+            assert_eq!(c.kind, ErrorKind::Internal, "{label}");
+            assert!(!data(&c).retryable, "{label}");
+        }
     }
 }

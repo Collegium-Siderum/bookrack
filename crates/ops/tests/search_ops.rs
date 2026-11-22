@@ -868,6 +868,30 @@ async fn a_failed_rerank_stage_fails_the_search() {
     assert!(matches!(err, OpsError::Rerank(_)), "{err:?}");
 }
 
+/// A search whose rerank stage cannot reach its server fails with a
+/// failure the classifier judges a backend that may come back: the same
+/// call is worth retrying once the reranker answers.
+#[tokio::test]
+async fn an_unreachable_rerank_stage_is_judged_a_backend_unavailable() {
+    use bookrack_ops::error_class::{ErrorKind, from_ops};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let paths = seed_store(
+        tmp.path(),
+        "books",
+        &[("the one passage", vec![1.0, 0.0, 0.0, 0.0])],
+    )
+    .await;
+    let library = open_library(&paths, Fixed::unit_x()).await;
+    let ops = ops_over(&tmp, &paths, library).with_reranker(stage_at(&dead_address(), 10, 2));
+
+    let err = search(&ops, "q", SearchOptions::default(), None)
+        .await
+        .expect_err("stage failure fails the search");
+    let classified = from_ops(&err);
+    assert_eq!(classified.kind, ErrorKind::BackendUnavailable, "{err:?}");
+    assert!(classified.problem.data.retryable, "{err:?}");
+}
+
 #[tokio::test]
 async fn an_empty_recall_skips_the_rerank_stage() {
     let tmp = tempfile::tempdir().expect("tempdir");

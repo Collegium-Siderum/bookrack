@@ -429,6 +429,14 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A reranker that does not answer is a backend the caller may retry.**
+  A search whose rerank stage could not reach its server, or was told
+  the server is overloaded or still loading its model, answered
+  `-32603` and `bookrack search` exited 1, although the error itself
+  said the call may succeed later. It now answers `-32017` on the
+  control socket and over MCP, with `retryable: true`, and the CLI
+  exits 4. A request the reranker refused, or a reply it could not
+  parse, stays `-32603`.
 - **A book-side re-audit grades under the library's overlays.**
   `bookrack metadata reaudit` and the control-plane `metadata.reaudit`
   honoured the library's audit profile but graded against the shipped

@@ -152,7 +152,7 @@ mod tests {
     use bookrack_catalog::CatalogError;
     use bookrack_embed::EmbedError;
     use bookrack_query::QueryError;
-    use bookrack_runtime::control::jsonrpc::STATE_UNUSABLE;
+    use bookrack_runtime::control::jsonrpc::{BACKEND_UNAVAILABLE, STATE_UNUSABLE};
 
     #[test]
     fn wrapper_error_keeps_its_root_cause_on_the_wire() {
@@ -175,6 +175,21 @@ mod tests {
         assert!(data.hint.expect("hint").contains("ollama pull test-model"));
         assert!(!data.retryable);
         assert!(err.message.contains("test-model"), "{}", err.message);
+    }
+
+    /// A reranker that answered it is overloaded takes the same backend
+    /// code over MCP as over the control socket, and says the call may
+    /// be retried.
+    #[test]
+    fn an_overloaded_reranker_is_backend_unavailable_and_retryable() {
+        let err = ops_error_to_mcp(OpsError::Rerank(bookrack_rerank::RerankError::Overloaded {
+            status: 503,
+            body: "loading model".into(),
+        }));
+        assert_eq!(err.code, ErrorCode(BACKEND_UNAVAILABLE), "{}", err.message);
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(err.data.expect("data slot filled")).expect("ProblemData");
+        assert!(data.retryable);
     }
 
     #[test]

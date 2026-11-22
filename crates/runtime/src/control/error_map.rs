@@ -500,6 +500,32 @@ mod tests {
         assert_eq!(unreachable.code, BACKEND_UNAVAILABLE);
     }
 
+    /// A reranker that did not answer is the backend code on the control
+    /// socket, retryable, whether a read proxy holds the typed error or
+    /// a handler folds it into its report — the code the CLI turns into
+    /// exit 4.
+    #[test]
+    fn a_reranker_that_did_not_answer_takes_the_backend_code() {
+        use bookrack_rerank::RerankError;
+        let direct = ops_err(OpsError::Rerank(RerankError::Unreachable(
+            "connection refused".into(),
+        )));
+        let folded = handler_err(
+            "library.search",
+            Report::from(OpsError::Rerank(RerankError::Overloaded {
+                status: 503,
+                body: "loading model".into(),
+            }))
+            .wrap_err("rerank the candidates"),
+        );
+        for (label, rpc) in [("direct", direct), ("folded", folded)] {
+            assert_eq!(rpc.code, BACKEND_UNAVAILABLE, "{label}: {}", rpc.message);
+            let data: bookrack_core::ProblemData =
+                serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
+            assert!(data.retryable, "{label}");
+        }
+    }
+
     /// The outermost cause the walk recognises decides, whichever tier
     /// it belongs to. An untyped ops report is judged by the wrapper it
     /// arrived in, so a command refusal or a store leaf it holds — both
