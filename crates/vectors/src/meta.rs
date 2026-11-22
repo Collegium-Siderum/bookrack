@@ -44,6 +44,7 @@ pub const DEFAULT_INDEX_NAME: &str = "vector_idx";
 /// The persisted ANN configuration plus the bookkeeping the embed run
 /// uses to decide when to retrain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VectorsMeta {
     /// Schema version of this file. Readers may warn on mismatch but
     /// should still try to deserialize — fields are added as optional.

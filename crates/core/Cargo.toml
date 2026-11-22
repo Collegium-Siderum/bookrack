@@ -11,6 +11,13 @@ serde.workspace = true
 # `started_at`, `finished_at`). Round-tripped through serde as RFC 3339
 # strings.
 chrono.workspace = true
+# JSON Schema derives behind the `schema` feature.
+schemars = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true
+
+[features]
+# Derive `schemars::JsonSchema` on the types this crate hands the
+# method table. Off by default; `bookrack-ops` turns it on.
+schema = ["dep:schemars"]

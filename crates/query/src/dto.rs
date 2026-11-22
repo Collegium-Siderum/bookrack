@@ -106,6 +106,7 @@ bookrack_core::fixed_settings! {
 /// One row of a `library.list_books` / `library.find_books` page: just
 /// enough to render a list entry without a second fetch.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BookSummary {
     /// The catalog's surrogate key for this book; stable for life.
     pub intake_id: i64,
@@ -138,6 +139,7 @@ pub struct BookSummary {
 /// to an OCR tool; the raw `stored_path` / `original_path` are carried
 /// alongside so the row is self-describing.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AwaitingText {
     /// The path to read the scan from: the durable opaque-store copy
     /// (`stored_path`) when present, else the original source path.
@@ -179,6 +181,7 @@ impl AwaitingText {
 /// One `library.show_book` response: the full bibliographic record
 /// plus all contributors.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BookDetail {
     /// The catalog's surrogate key.
     pub intake_id: i64,
@@ -223,6 +226,7 @@ pub struct BookDetail {
 
 /// One override entry within a [`BookDetail`].
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OverrideEntry {
     /// The overridden field.
     pub field: String,
@@ -242,6 +246,7 @@ pub struct OverrideEntry {
 
 /// One contributor entry within a [`BookDetail`].
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ContributorEntry {
     /// Surrogate id of the contributor row; the address
     /// `contributor_remove` takes.
@@ -263,6 +268,7 @@ pub struct ContributorEntry {
 /// [`PaperDetail`] so a caller can pick a TOC read strategy without
 /// pulling any entries.
 #[derive(Debug, Clone, Copy, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TocStats {
     /// Number of entries a full, unfiltered TOC walk returns, the
     /// book root included.
@@ -283,6 +289,7 @@ impl From<bookrack_corpus::TocStats> for TocStats {
 /// One node entry within a [`Toc`], flattened from the corpus tree's
 /// depth-first walk.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TocNode {
     /// Stable corpus node id of this TOC entry.
     pub node_id: i64,
@@ -303,6 +310,7 @@ pub struct TocNode {
 /// One node entry within a [`Toc`] when `titles_only` is set: just
 /// enough to scan a book's structure and address a follow-up read.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TocSlimEntry {
     /// Stable corpus node id of this TOC entry — the id a span read
     /// takes.
@@ -328,6 +336,7 @@ impl TocSlimEntry {
 /// untagged, so both variants come out as a bare JSON array and the
 /// full form is wire-identical to a plain `Vec<TocNode>`.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum TocNodes {
     /// Every [`TocNode`] field.
@@ -362,6 +371,7 @@ impl TocNodes {
 
 /// A book's table of contents as the facade serves it.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Toc {
     /// The book this TOC belongs to.
     pub intake_id: i64,
@@ -382,6 +392,7 @@ pub struct Toc {
 
 /// Arguments accepted by the book and paper TOC reads.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ShowTocArgs {
     /// Leading TOC entries to skip.
     pub offset: u32,
@@ -421,6 +432,7 @@ impl ShowTocArgs {
 /// One leaf of body text within a context-window or span read, in
 /// document order.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Passage {
     /// Stable corpus node id of this leaf.
     pub node_id: i64,
@@ -440,6 +452,7 @@ pub struct Passage {
 
 /// A window of leaves around one anchor leaf, in document order.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ContextWindow {
     /// The book the anchor belongs to.
     pub intake_id: i64,
@@ -455,6 +468,7 @@ pub struct ContextWindow {
 
 /// One page of an organizing node's body text, in document order.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SpanText {
     /// The book the node belongs to.
     pub intake_id: i64,
@@ -480,6 +494,7 @@ pub struct SpanText {
 
 /// Aggregate counts behind the `library.stats` tool.
 #[derive(Debug, Clone, Default, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LibraryStats {
     /// Number of intake rows per coarse lifecycle status.
     pub intake_counts_by_status: BTreeMap<String, u64>,
@@ -498,6 +513,7 @@ pub struct LibraryStats {
 
 /// Result page for `library.list_books` / `library.find_books`.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ListBooksResult {
     /// Books in this page.
     pub books: Vec<BookSummary>,
@@ -794,6 +810,7 @@ pub fn clamp_limit(requested: u32) -> (u32, bool) {
 /// Triage caller needs to disambiguate at a glance: DOI, arXiv id,
 /// container title, and year.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PaperSummary {
     /// The catalog's surrogate key for this paper.
     pub intake_id: i64,
@@ -825,6 +842,7 @@ pub struct PaperSummary {
 /// effective biblio and contributor rows. The abstract is in the
 /// detail response only — list responses stay slim.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PaperDetail {
     /// The catalog's surrogate key.
     pub intake_id: i64,
@@ -871,6 +889,7 @@ pub struct PaperDetail {
 /// Audit identity block on one `library.show_paper` response: the
 /// verdict rollup plus the profile that produced it.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PaperAuditInfo {
     /// `clean` / `needs_work`.
     pub verdict: String,
@@ -892,6 +911,7 @@ pub struct PaperAuditInfo {
 /// client can open the bytes directly via `fs::read`. The bytes
 /// themselves never flow through the control plane.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PaperSource {
     /// Catalog intake id of the paper this source belongs to.
     pub intake_id: i64,
@@ -937,6 +957,7 @@ pub struct PaperFilter {
 
 /// Result page for `library.list_papers` / `library.find_papers`.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ListPapersResult {
     /// Papers in this page.
     pub papers: Vec<PaperSummary>,
@@ -950,6 +971,7 @@ pub struct ListPapersResult {
 /// optional companion section. Set when the calling `Ops` has a
 /// papers backend; absent otherwise.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PapersStats {
     /// Number of paper intake rows per coarse lifecycle status.
     pub intake_counts_by_status: BTreeMap<String, u64>,

@@ -10,7 +10,7 @@ bookrack-audit-profile.workspace = true
 bookrack-catalog = { path = "../catalog" }
 bookrack-config = { path = "../config" }
 bookrack-control-client = { path = "../control-client" }
-bookrack-core = { path = "../core" }
+bookrack-core = { path = "../core", features = ["schema"] }
 bookrack-corpus = { path = "../corpus" }
 bookrack-dbkit = { path = "../dbkit" }
 bookrack-diagnose = { path = "../diagnose" }
@@ -18,17 +18,19 @@ bookrack-distill = { path = "../distill" }
 bookrack-embed = { path = "../embed" }
 bookrack-extract = { path = "../extract" }
 bookrack-metadata = { path = "../metadata" }
-bookrack-obs = { path = "../obs" }
-bookrack-query = { path = "../query" }
-bookrack-refs = { path = "../refs" }
+bookrack-obs = { path = "../obs", features = ["schema"] }
+bookrack-query = { path = "../query", features = ["schema"] }
+bookrack-refs = { path = "../refs", features = ["schema"] }
 bookrack-rerank = { path = "../rerank" }
-bookrack-search = { path = "../search" }
+bookrack-search = { path = "../search", features = ["schema"] }
 bookrack-session = { path = "../session" }
 bookrack-text = { path = "../text" }
-bookrack-vectors = { path = "../vectors" }
+bookrack-vectors = { path = "../vectors", features = ["schema"] }
 chrono.workspace = true
 eyre.workspace = true
 regex.workspace = true
+# JSON Schema for the method table's parameter and result types.
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

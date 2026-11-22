@@ -18,7 +18,7 @@ use crate::dto::BookDetail;
 
 /// The metadata-status read returned by
 /// [`crate::reads::metadata::show_metadata_audit`].
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct MetadataReport {
     /// Catalog intake id of the book.
     pub intake_id: i64,
@@ -36,7 +36,7 @@ pub struct MetadataReport {
 }
 
 /// One graded field row of a [`MetadataAuditReport`].
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct FieldAuditEntry {
     /// The `node_publication_attrs` column name being audited.
     pub field: String,
@@ -55,7 +55,7 @@ pub struct FieldAuditEntry {
 /// [`crate::reads::metadata::show_metadata_report`]: the plausibility
 /// audit re-run from the book's cached extraction against the current
 /// effective metadata, next to the stored rollup for comparison.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct MetadataAuditReport {
     /// Catalog intake id of the book.
     pub intake_id: i64,
@@ -144,7 +144,7 @@ impl MetadataAuditReport {
 /// One row of a paginated metadata list — returned by both
 /// [`crate::reads::metadata::list_metadata`] (unfiltered) and
 /// [`crate::reads::metadata::list_pending_reviews`] (review queue).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct MetadataListRow {
     /// Catalog intake id of the book.
     pub intake_id: i64,
@@ -162,7 +162,7 @@ pub struct MetadataListRow {
 }
 
 /// Paginated result of a metadata listing — see [`MetadataListRow`].
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct MetadataListPage {
     /// Books in this page.
     pub rows: Vec<MetadataListRow>,
@@ -178,7 +178,7 @@ pub struct MetadataListPage {
 /// Peer of [`FieldAuditEntry`], not the same type: the paper audit
 /// grades a different field set and its hint is optional, because a
 /// clean field on that side has nothing to say.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PaperFieldAuditEntry {
     /// The effective-attrs field name being audited.
     pub field: String,
@@ -202,7 +202,7 @@ pub struct PaperFieldAuditEntry {
 /// The two rollups disagreeing is the point of carrying both. It means
 /// the paper has been edited since the stored judgement was made, and
 /// `papers.metadata.reaudit` is what brings the row back in line.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PaperMetadataAuditReport {
     /// Catalog intake id of the paper.
     pub intake_id: i64,

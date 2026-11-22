@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Classify a control-plane handler's error onto the right JSON-RPC
-//! code.
+//! Put a control-plane handler's error onto the right JSON-RPC code.
 //!
 //! Write-class RPCs receive `eyre::Report` from the `cmd::*` layer
 //! (which folds typed downstream errors through `?`/`.context()`); the
@@ -13,74 +12,45 @@
 //! genuine server fault. Both classes route through this one module,
 //! so the same condition takes the same code whichever side raised it.
 //!
-//! [`handler_err`] walks the `eyre` cause chain looking for known typed
-//! errors and, when one matches, maps a user-input variant onto
-//! [`INVALID_PARAMS`] (or the bookrack-specific code reserved for that
-//! shape, e.g. [`INVALID_LIBRARY`]). Anything that does not match a
-//! known user-input variant falls through to [`INTERNAL_ERROR`].
+//! The judgement is [`bookrack_ops::error_class`]'s: it reads the
+//! pipeline wrappers and the store and backend leaves, and returns an
+//! [`ErrorKind`] with the failure's three-part [`Problem`]. This module
+//! maps each kind onto its code, and adds what only the host knows: the
+//! refusals a write command raises on its own, before it reaches the
+//! layers below ([`CmdInputError`], [`CmdStateError`]; a bare `bail!`
+//! is not classified), a refused change to the mounted set, a plan
+//! lookup that failed, and the residual channel.
+//!
+//! [`handler_err`] walks the `eyre` cause chain outermost first and
+//! asks of each cause the ops tier, the host's command types, and the
+//! leaf tier; the first cause one of them reads decides. Anything that
+//! matches no known type falls through to [`INTERNAL_ERROR`].
 //!
 //! Two of those fall-throughs are exits nothing has judged: the chain
 //! that matched no known type at all, and an `OpsError::Other` whose
-//! report the `match` cannot see into. Each leaves a `warn` event on
+//! report the classifier cannot see into. Each leaves a `warn` event on
 //! the daemon side — `unclassified handler error` with the method and
-//! the flattened chain, `unclassified ops error` with the chain — so a
-//! failure the reply alone would otherwise record reaches the daemon
-//! log. A variant a `from_*` judged a fault is a verdict, and is not
-//! logged.
+//! the flattened chain from here, `unclassified ops error` with the
+//! chain from the classifier — so a failure the reply alone would
+//! otherwise record reaches the daemon log. A variant judged a fault is
+//! a verdict, and is not logged.
 //!
-//! The walk recognises two tiers of type. The pipeline wrappers —
-//! [`OpsError`], [`IngestError`], [`GleanError`], [`QueryError`] — are
-//! raised by the layers below `cmd::*` and carry their own caller-input
-//! variants; a refusal a write command makes on its own, before it
-//! reaches those layers, is only classified if the command raises
-//! [`CmdInputError`] rather than a bare `bail!`. The leaves —
-//! [`EmbedError`], [`VectorsError`], [`CatalogError`], [`CorpusError`],
-//! [`RegistryError`] — are the store and backend types the wrappers
-//! fold in.
-//!
-//! Classification is recursive: a wrapper's `from_*` delegates every
-//! variant that holds a leaf to that leaf's own `from_*`, so a leaf
-//! reaches the same code whether a command raised it bare or a wrapper
-//! (or two — `OpsError::Query(QueryError::Vectors(..))`) carried it.
-//! The one shape the recursion cannot see through is
-//! `OpsError::Other(eyre::Report)`: the report inside is opaque to the
-//! `match`, and whatever typed error it holds takes the wrapper's
-//! residual code.
-//!
-//! Wording is not written here. Each error renders itself through
-//! [`bookrack_core::Explain`], and [`rpc_from_problem`] splits the
-//! result across the envelope: the summary into `message`, the
-//! detail / hint / retryable triple into `data`. A type with no
-//! `Explain` impl takes [`Problem::from_error_chain`], whose summary
-//! is the flattened cause chain — `Display` on a wrapper variant
-//! prints only its own text ("query error"), so a bare `to_string()`
-//! here would drop the root cause at the process boundary.
-//! `scripts/error-boundary-check.sh` enforces that.
-//!
-//! The exception to "wording is not written here" is the hint on a
-//! leaf the classifier judges caller input. The leaf store types write
-//! no wording of their own, and a caller-input code without a next
-//! step is an empty promise, so the `from_*` for those types attaches
-//! the step beside the code it chose. That is the classifier stating
-//! what its own judgement implies, not the leaf inventing facts about
-//! itself: the summary stays the leaf's flattened chain.
+//! [`rpc_from_problem`] splits a [`Problem`] across the envelope: the
+//! summary into `message`, the detail / hint / retryable triple into
+//! `data`. A type with no `Explain` impl takes
+//! [`Problem::from_error_chain`], whose summary is the flattened cause
+//! chain — a bare `to_string()` here would drop the root cause at the
+//! process boundary. `scripts/error-boundary-check.sh` enforces that.
 
-use std::path::Path;
+use std::ops::ControlFlow;
 
-use bookrack_catalog::CatalogError;
 use bookrack_config::ConfigError;
 use bookrack_core::{Explain, Problem, ProblemData};
-use bookrack_corpus::CorpusError;
-use bookrack_embed::EmbedError;
 use bookrack_ops::OpsError;
 use bookrack_ops::dto::UnknownFilterValue;
-use bookrack_ops::pipeline::book::IngestError;
-use bookrack_ops::pipeline::paper::GleanError;
+use bookrack_ops::error_class::{self, ClassifiedError, ErrorKind};
 use bookrack_ops::reads::reference::ReferenceError;
 use bookrack_ops::registry::RegistryError;
-use bookrack_query::QueryError;
-use bookrack_refs::RefsError;
-use bookrack_vectors::{TrainingLimit, VectorsError};
 use eyre::Report;
 
 use super::jsonrpc::{
@@ -141,65 +111,10 @@ pub(crate) fn report_problem(err: &Report) -> Problem {
 /// library; every other error reads as [`report_problem`] reads it and
 /// is repaired in place.
 pub(crate) fn skip_reason(library: Option<&str>, err: &Report) -> (Problem, Repair) {
-    for cause in err.chain() {
-        if let Some(CatalogError::RetiredLabels { path, hits }) =
-            cause.downcast_ref::<CatalogError>()
-        {
-            return (
-                retired_labels_problem(library, path, hits),
-                Repair::Replacement,
-            );
-        }
+    match error_class::retired_labels_reason(library, err) {
+        Some(problem) => (problem, Repair::Replacement),
+        None => (report_problem(err), Repair::InPlace),
     }
-    (report_problem(err), Repair::InPlace)
-}
-
-/// The three-part reading of a catalog at `path` that is behind this
-/// build and holds rows carrying retired labels.
-///
-/// The summary states the fact, the detail counts each label, and the
-/// hint is the removal of the whole library. With `library`, the hint
-/// names it; without, it points at the data root and at the listing
-/// that carries the name of a library registered there.
-fn retired_labels_problem(
-    library: Option<&str>,
-    path: &Path,
-    hits: &[bookrack_dbkit::RetiredHit],
-) -> Problem {
-    let counted = hits
-        .iter()
-        .map(|hit| format!("{hit}"))
-        .collect::<Vec<String>>()
-        .join(", ");
-    let removal = match library {
-        Some(name) => format!(
-            "Remove the library with `bookrack libraries remove {name} --purge` and ingest \
-             its books again, or keep a bookrack 0.14 binary for it."
-        ),
-        None => {
-            let root = path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or(path);
-            format!(
-                "If `bookrack libraries list` shows a library at the root '{}', remove it with \
-                 `bookrack libraries remove <name> --purge` and ingest its books again; or \
-                 keep a bookrack 0.14 binary for it.",
-                root.display()
-            )
-        }
-    };
-    Problem::new(format!(
-        "catalog \"{}\" holds rows from the removed OCR intake path",
-        path.display()
-    ))
-    .detail(format!(
-        "The catalog was neither backed up nor migrated. Rows carrying a retired label: \
-         {counted}."
-    ))
-    .hint(format!(
-        "This build cannot open the catalog, and no step repairs it in place. {removal}"
-    ))
 }
 
 /// The three-part reading of `err` when a store it depends on is in a
@@ -249,20 +164,15 @@ fn problem_of(rpc: RpcError) -> Problem {
 /// The envelope `err` takes when its chain carries a type this map
 /// knows, or `None` when it does not and the caller falls back to the
 /// residual `INTERNAL_ERROR`.
-// Parallel implementation: frontend-error-map.
+///
+/// Each cause is asked of the ops tier, the host's command types, and
+/// the leaf tier in turn; the first cause one of them reads decides. A
+/// leaf that reads its cause and holds no judgement ends the walk
+/// unclassified.
 fn classify(err: &Report) -> Option<RpcError> {
     for cause in err.chain() {
-        if let Some(e) = cause.downcast_ref::<OpsError>() {
-            return Some(from_ops(e));
-        }
-        if let Some(e) = cause.downcast_ref::<IngestError>() {
-            return Some(from_ingest(e));
-        }
-        if let Some(e) = cause.downcast_ref::<GleanError>() {
-            return Some(from_glean(e));
-        }
-        if let Some(e) = cause.downcast_ref::<RegistryError>() {
-            return Some(from_registry(e));
+        if let Some(classified) = error_class::classify_ops_cause(cause) {
+            return Some(rpc_from_classified(classified));
         }
         if let Some(e) = cause.downcast_ref::<CmdInputError>() {
             return Some(from_cmd_input(e));
@@ -270,23 +180,8 @@ fn classify(err: &Report) -> Option<RpcError> {
         if let Some(e) = cause.downcast_ref::<CmdStateError>() {
             return Some(from_cmd_state(e));
         }
-        if let Some(e) = cause.downcast_ref::<EmbedError>() {
-            return Some(from_embed(e));
-        }
-        if let Some(e) = cause.downcast_ref::<QueryError>() {
-            return Some(from_query(e));
-        }
-        if let Some(e) = cause.downcast_ref::<VectorsError>() {
-            return Some(from_vectors(e));
-        }
-        if let Some(e) = cause.downcast_ref::<CatalogError>() {
-            return Some(from_catalog(e));
-        }
-        if let Some(e) = cause.downcast_ref::<CorpusError>() {
-            return Some(from_corpus(e));
-        }
-        if let Some(e) = cause.downcast_ref::<RefsError>() {
-            return from_refs(e);
+        if let ControlFlow::Break(found) = error_class::classify_leaf_cause(cause) {
+            return found.map(rpc_from_classified);
         }
     }
     None
@@ -327,91 +222,28 @@ pub fn job_failure_problem(err: &Report) -> Option<Problem> {
 
 /// Map a directly-held [`OpsError`] without an `eyre` round-trip: the
 /// read proxies and the MCP tools get the typed error straight from
-/// `bookrack_ops` and classify it here, with the same arms the write
-/// side reaches through [`handler_err`]. The MCP front end re-wraps the
-/// returned envelope in its own error type without re-deciding the
-/// code, so one typed error takes one code on both surfaces.
+/// `bookrack_ops` and classify it here, with the same judgement the
+/// write side reaches through [`handler_err`]. The MCP front end
+/// re-wraps the returned envelope in its own error type without
+/// re-deciding the code, so one typed error takes one code on both
+/// surfaces.
 pub fn ops_err(e: OpsError) -> RpcError {
-    from_ops(&e)
+    rpc_from_classified(error_class::from_ops(&e))
 }
 
 /// Map a reference read or write failure onto its wire code. The
 /// control plane's `reference.lookup` and the MCP `reference.lookup`
 /// and `reference.overlay_set` tools all come here, so one failure
-/// takes one code on every surface.
-///
-/// A request field outside what the call accepts, and an overlay key
-/// outside the property catalog, are caller input (`-32602`); the
-/// message already names the field or key. A store whose
-/// schema this build does not read is a state the operator has to
-/// change (`-32018`), with the direction of the mismatch deciding the
-/// hint. Everything else — a path that could not be inspected, a
-/// damaged store, a query fault, a catalog that did not parse — is an
-/// internal error carrying its full cause chain.
+/// takes one code on every surface: caller input (`-32602`), a store at
+/// a schema this build does not read (`-32018`), or an internal error
+/// carrying its full cause chain.
 pub fn reference_err(e: ReferenceError) -> RpcError {
-    match &e {
-        ReferenceError::InvalidArgument(message) => {
-            rpc_from_problem(INVALID_PARAMS, Problem::new(message.as_str()))
-        }
-        ReferenceError::UnknownOverlayProperty { .. } => {
-            rpc_from_problem(INVALID_PARAMS, Problem::from_error_chain(&e))
-        }
-        ReferenceError::Open {
-            path,
-            source: RefsError::SchemaTooNew { found, supported },
-        } => rpc_from_problem(
-            STATE_UNUSABLE,
-            reference_schema_problem(path, *found, *supported).hint(
-                "This build is older than the store. Run the build that wrote the store, \
-                 or a newer one.",
-            ),
-        ),
-        ReferenceError::Open {
-            path,
-            source: RefsError::SchemaTooOld { found, supported },
-        } => rpc_from_problem(
-            STATE_UNUSABLE,
-            reference_schema_problem(path, *found, *supported).hint(
-                "Run `bookrack distill build` with this build, or start the daemon once \
-                 with `bookrack run`: either one migrates the store to this build's schema.",
-            ),
-        ),
-        ReferenceError::Open {
-            path,
-            source: RefsError::ReaderTooOld { required, current },
-        } => rpc_from_problem(
-            STATE_UNUSABLE,
-            Problem::new("cannot read the reference store")
-                .detail(format!(
-                    "The store at {} requires reader version {required}; this build is at \
-                     reader version {current}.",
-                    path.display()
-                ))
-                .hint(format!(
-                    "Run a bookrack build at reader version v{required} or newer."
-                )),
-        ),
-        ReferenceError::Open { .. }
-        | ReferenceError::Store(_)
-        | ReferenceError::Io { .. }
-        | ReferenceError::Catalog(_) => {
-            rpc_from_problem(INTERNAL_ERROR, Problem::from_error_chain(&e))
-        }
-    }
-}
-
-/// The summary and detail of a reference store at a schema this build
-/// does not read; the caller adds the hint its direction calls for.
-fn reference_schema_problem(path: &std::path::Path, found: i64, supported: i64) -> Problem {
-    Problem::new("cannot read the reference store").detail(format!(
-        "The store at {} is at schema {found}; this build reads schema {supported}.",
-        path.display()
-    ))
+    rpc_from_classified(error_class::from_reference(&e))
 }
 
 /// Map a directly-held [`RegistryError`] without an `anyhow` round-trip.
 pub(crate) fn registry_err(e: RegistryError) -> RpcError {
-    from_registry(&e)
+    rpc_from_classified(error_class::from_registry(&e))
 }
 
 /// Map a directly-held [`ConfigError`] from a registry write onto the
@@ -419,7 +251,7 @@ pub(crate) fn registry_err(e: RegistryError) -> RpcError {
 /// on-disk registry is caller input ([`INVALID_LIBRARY`]); every other
 /// registry fault is a server-side [`INTERNAL_ERROR`].
 pub(crate) fn config_err(e: ConfigError) -> RpcError {
-    from_config(&e)
+    rpc_from_classified(error_class::from_config(&e))
 }
 
 /// Map a refused runtime mount of `name` onto the corresponding wire
@@ -482,7 +314,7 @@ fn refusal_rpc(
                 ),
             )
         }
-        MountRefusal::Registry(e) => from_registry(&e),
+        MountRefusal::Registry(e) => registry_err(e),
         MountRefusal::Refused { problem, .. } => {
             rpc_from_problem(INVALID_PARAMS, close(problem, Repair::InPlace))
         }
@@ -533,19 +365,7 @@ pub(crate) fn plan_lookup_err(e: PlanLookupError) -> RpcError {
 /// out here, so a vocabulary that gains a value cannot leave a stale
 /// list behind on this surface.
 pub(crate) fn unknown_filter_value(unknown: &UnknownFilterValue) -> RpcError {
-    rpc_from_problem(
-        INVALID_PARAMS,
-        Problem::new(format!(
-            "cannot filter on {} value {:?}",
-            unknown.parameter, unknown.value
-        ))
-        .detail(format!(
-            "The {} filter names a value no row carries, so it was refused rather \
-             than applied without it.",
-            unknown.parameter
-        ))
-        .hint(format!("Use one of: {}.", unknown.accepted.join(", "))),
-    )
+    rpc_from_classified(error_class::from_unknown_filter(unknown))
 }
 
 /// Build the wire envelope from a rendered [`Problem`]: the summary
@@ -559,382 +379,22 @@ pub(crate) fn rpc_from_problem(code: i32, problem: Problem) -> RpcError {
     err
 }
 
-/// Map an embed-backend failure onto the code its judgement implies.
-///
-/// The split follows `retryable`, not `EmbedError::is_transient()`:
-/// the two ask different questions and are expected to disagree on an
-/// overloaded server. The `match` reads the variant rather than the
-/// rendered `Problem`, so classification does not depend on the
-/// presentation layer it is supposed to precede.
-///
-/// The wildcard is forced: [`EmbedError`] is `#[non_exhaustive]` and
-/// this is a downstream crate, so an exhaustive `match` does not
-/// compile here. The guard against a new variant landing silently on
-/// [`INTERNAL_ERROR`] lives beside the type instead, in
-/// `bookrack-embed`'s own tests.
-fn from_embed(e: &EmbedError) -> RpcError {
-    use EmbedError::*;
-    let code = match e {
-        // The model name comes from the operator's index profile, and
-        // the repair is `ollama pull`.
-        ModelNotFound { .. } => INVALID_PARAMS,
-        Unreachable(_) | Overloaded { .. } => BACKEND_UNAVAILABLE,
-        // The request body is assembled here, so the operator cannot
-        // have written either of these.
-        BadRequest { .. } | MalformedResponse(_) => INTERNAL_ERROR,
-        // The backend broke its response contract; the hint still names
-        // the operator's way around it.
-        UnusableVector { .. } => INTERNAL_ERROR,
-        _ => INTERNAL_ERROR,
-    };
-    rpc_from_problem(code, e.explain())
+/// Build the wire envelope from a classified failure: its kind picks
+/// the code, its problem fills `message` and `data`.
+fn rpc_from_classified(classified: ClassifiedError) -> RpcError {
+    rpc_from_problem(code_of(classified.kind), classified.problem)
 }
 
-/// Map a pipeline wrapper onto its wire code, delegating every variant
-/// that carries a leaf to that leaf's classifier. `Rerank` stays here:
-/// `RerankError` writes its own wording but has no caller-input
-/// variant, so the wrapper's residual code is already right for it.
-fn from_ops(e: &OpsError) -> RpcError {
-    use OpsError::*;
-    match e {
-        Query(e) => return from_query(e),
-        Catalog(e) => return from_catalog(e),
-        Corpus(e) => return from_corpus(e),
-        Vectors(e) => return from_vectors(e),
-        // The report inside is opaque to this `match`, so nothing has
-        // judged what it holds: the fault code is a fallback, not a
-        // verdict, and the daemon side keeps a record of it.
-        Other(_) => {
-            let problem = e.explain();
-            tracing::warn!(error = %problem.summary, "unclassified ops error");
-            return rpc_from_problem(INTERNAL_ERROR, problem);
-        }
-        _ => {}
+/// The code each kind of failure takes on the control socket.
+fn code_of(kind: ErrorKind) -> i32 {
+    match kind {
+        ErrorKind::InvalidParams => INVALID_PARAMS,
+        ErrorKind::Internal => INTERNAL_ERROR,
+        ErrorKind::Busy => BUSY,
+        ErrorKind::InvalidLibrary => INVALID_LIBRARY,
+        ErrorKind::BackendUnavailable => BACKEND_UNAVAILABLE,
+        ErrorKind::StateUnusable => STATE_UNUSABLE,
     }
-    let code = match e {
-        IntakeNotFound { .. }
-        | UnknownMetadataField { .. }
-        | UnknownContributorRole { .. }
-        | ContributorNotFound { .. }
-        | NodeNotFound { .. }
-        | NotALeaf { .. }
-        | NotOrganizing { .. }
-        | NoPassagesForKind { .. }
-        | SourceNotArchived { .. }
-        | UnknownAuditProfile { .. } => INVALID_PARAMS,
-        WriteBusy(_) => BUSY,
-        _ => INTERNAL_ERROR,
-    };
-    rpc_from_problem(code, e.explain())
-}
-
-/// `Extract`, `Envelope`, and `Io` are not delegated: the extraction
-/// refusals that look like caller input (`UnsupportedFormat`,
-/// `DrmProtected`) are intercepted earlier on the write path by the
-/// queue's extension check and by `NeedsOcr`, so a second judgement
-/// here would be a second place for the two to drift apart.
-// Parallel implementation: control-error-map-pipeline.
-fn from_ingest(e: &IngestError) -> RpcError {
-    use IngestError::*;
-    match e {
-        Embed(e) => return from_embed(e),
-        Catalog(e) => return from_catalog(e),
-        Corpus(e) => return from_corpus(e),
-        Vectors(e) => return from_vectors(e),
-        _ => {}
-    }
-    let code = match e {
-        EmptyExtraction
-        | NeedsOcr { .. }
-        | UnknownIntake(_)
-        | MissingEnvelope(_)
-        | EnvelopeMismatch(_)
-        | IntakeNotEmbedded(_)
-        | Rule(_)
-        | RuleKindNotBook { .. }
-        | RuleSourceNotPending { .. }
-        | RuleSourceNotAFile { .. }
-        | RuleSourceUnnumbered { .. }
-        | RuleCoverage { .. } => INVALID_PARAMS,
-        _ => INTERNAL_ERROR,
-    };
-    rpc_from_problem(code, e.explain())
-}
-
-// Parallel implementation: control-error-map-pipeline.
-fn from_glean(e: &GleanError) -> RpcError {
-    use GleanError::*;
-    match e {
-        Embed(e) => return from_embed(e),
-        Catalog(e) => return from_catalog(e),
-        Corpus(e) => return from_corpus(e),
-        Vectors(e) => return from_vectors(e),
-        _ => {}
-    }
-    let code = match e {
-        NeedsOcr { .. }
-        | UnknownIntake(_)
-        | IntakeNotRebuildable(_)
-        | MissingEnvelope(_)
-        | EnvelopeMismatch(_) => INVALID_PARAMS,
-        _ => INTERNAL_ERROR,
-    };
-    rpc_from_problem(code, e.explain())
-}
-
-/// Map a query-layer wrapper onto its wire code. Every variant but the
-/// two the query layer raises itself (`Search`, `EmptyProbe`) carries
-/// a leaf and delegates to it; those two are faults in this binary.
-fn from_query(e: &QueryError) -> RpcError {
-    match e {
-        QueryError::Embed(e) => from_embed(e),
-        QueryError::Vectors(e) => from_vectors(e),
-        QueryError::Corpus(e) => from_corpus(e),
-        QueryError::Catalog(e) => from_catalog(e),
-        QueryError::Search(_) | QueryError::EmptyProbe => {
-            rpc_from_problem(INTERNAL_ERROR, e.explain())
-        }
-        // `QueryError` is `#[non_exhaustive]`; a variant this build does
-        // not know is a fault until someone judges otherwise.
-        _ => rpc_from_problem(INTERNAL_ERROR, e.explain()),
-    }
-}
-
-/// Map a leaf `VectorsError` onto its wire code.
-///
-/// The type has no `Explain` impl, so the summary is the flattened
-/// chain. The variants whose next step is "change what you passed"
-/// are caller input; those whose next step is the operator's — a newer
-/// build, a rebuild, a reset — take [`STATE_UNUSABLE`], since calling
-/// them invalid params would be a lie of the same shape this line
-/// rejected for `-32013` and `-32001`, and calling them internal would
-/// hide a step that exists. Both kinds carry that step as the hint.
-/// Everything else is a fault and stays on [`INTERNAL_ERROR`].
-fn from_vectors(e: &VectorsError) -> RpcError {
-    use VectorsError::*;
-    let problem = Problem::from_error_chain(e);
-    match e {
-        UnknownAnnKind(_) => rpc_from_problem(
-            STATE_UNUSABLE,
-            problem.hint(
-                "Run a bookrack build that knows this ANN kind, or run `bookrack vectors \
-                 rebuild` to rewrite the index and its `vectors_meta.json` sidecar.",
-            ),
-        ),
-        DimensionMismatch { expected, .. } => rpc_from_problem(
-            STATE_UNUSABLE,
-            problem.hint(format!(
-                "Run `bookrack vectors reset` to re-embed every chunk at the configured \
-                 model's dimension; the store was built at {expected}."
-            )),
-        ),
-        ReaderTooOld { required, .. } => rpc_from_problem(
-            STATE_UNUSABLE,
-            problem.hint(format!(
-                "Run a bookrack build at reader version v{required} or newer."
-            )),
-        ),
-        BuildOnBruteForceKind => rpc_from_problem(
-            INVALID_PARAMS,
-            problem.hint(
-                "Brute-force search has no index to build. Choose an ANN kind in the \
-                 index profile, or drop the index instead of building one.",
-            ),
-        ),
-        MissingPqParam(param) => rpc_from_problem(
-            INVALID_PARAMS,
-            problem.hint(format!(
-                "Set `{param}` in the index profile; an IvfPq build does not run without it."
-            )),
-        ),
-        IvfPqQuantizationTooCoarse {
-            dim,
-            num_sub_vectors: _,
-        } => rpc_from_problem(
-            INVALID_PARAMS,
-            problem.hint(format!(
-                "Raise `num_sub_vectors` to at least {} (the embedding dimension divided by \
-                 8) in the index profile, or choose a kind other than IvfPq.",
-                dim.div_ceil(8)
-            )),
-        ),
-        InvalidAnnConfig { field, .. } => rpc_from_problem(
-            INVALID_PARAMS,
-            problem.hint(format!(
-                "Correct `{field}` in the index profile, or the `--{}` flag passed to \
-                 `vectors rebuild`.",
-                field.replace('_', "-")
-            )),
-        ),
-        TooFewVectors {
-            rows,
-            required,
-            limit,
-            ..
-        } => rpc_from_problem(
-            INVALID_PARAMS,
-            problem.hint(too_few_vectors_hint(*rows, *required, limit)),
-        ),
-        _ => rpc_from_problem(INTERNAL_ERROR, problem),
-    }
-}
-
-/// The way forward from a store too small for the requested index:
-/// only the routes that can succeed on `rows` vectors.
-fn too_few_vectors_hint(rows: u64, required: u64, limit: &TrainingLimit) -> String {
-    const KEEP_SCAN: &str = "To keep searching by exhaustive scan instead, run `bookrack vectors \
-                             drop` (`bookrack papers vectors drop` for papers).";
-    if rows == 0 {
-        return format!(
-            "The store holds no vectors yet; ingest before building an index. {KEEP_SCAN}"
-        );
-    }
-    match limit {
-        TrainingLimit::Partitions { .. } => format!(
-            "Lower `num_partitions` to at most {rows}, or ingest more before rebuilding. \
-             {KEEP_SCAN}"
-        ),
-        TrainingLimit::PqCodebook {
-            num_bits,
-            num_sub_vectors,
-        } => {
-            let narrower = *num_bits == 8
-                && rows >= 16
-                && num_sub_vectors.is_some_and(|nsv| nsv.is_multiple_of(2));
-            let narrower = if narrower {
-                " Setting `num_bits = 4` lowers the floor to 16 vectors."
-            } else {
-                ""
-            };
-            format!(
-                "A {num_bits}-bit PQ codebook needs at least {required} vectors. Choose a kind \
-                 without PQ, or ingest more before rebuilding.{narrower} {KEEP_SCAN}"
-            )
-        }
-    }
-}
-
-/// Map a leaf `CatalogError` onto its wire code. The type has no
-/// `Explain`: the summary is its own text, and a hint is added for a
-/// state this build cannot serve and for caller input. A catalog
-/// holding retired labels is the exception, worded in three parts by
-/// [`retired_labels_problem`] with no library to name.
-fn from_catalog(e: &CatalogError) -> RpcError {
-    let problem = Problem::from_error_chain(e);
-    match e {
-        CatalogError::RetiredLabels { path, hits } => {
-            rpc_from_problem(STATE_UNUSABLE, retired_labels_problem(None, path, hits))
-        }
-        CatalogError::SchemaTooNew { expected, .. } => rpc_from_problem(
-            STATE_UNUSABLE,
-            problem.hint(format!(
-                "Run a newer bookrack build (this one reads catalog schemas up to \
-                 v{expected}), or restore the catalog from a backup this build wrote."
-            )),
-        ),
-        CatalogError::ReaderTooOld { required, .. } => rpc_from_problem(
-            STATE_UNUSABLE,
-            problem.hint(format!(
-                "Run a bookrack build at reader version v{required} or newer."
-            )),
-        ),
-        CatalogError::SchemaTooOld { .. } => rpc_from_problem(
-            STATE_UNUSABLE,
-            problem.hint(
-                "Start the daemon once with `bookrack run`: mounting the library backs the \
-                 catalog up and migrates it to this build's schema.",
-            ),
-        ),
-        CatalogError::DerivedFromConflict { .. } => rpc_from_problem(
-            INVALID_PARAMS,
-            problem.hint(
-                "A derived text keeps the source it was first registered against. Register \
-                 it against that source, or remove the intake and ingest it again for the \
-                 new one.",
-            ),
-        ),
-        _ => rpc_from_problem(INTERNAL_ERROR, problem),
-    }
-}
-
-/// The envelope of a `RefsError` that says the reference store is in a
-/// state this build cannot serve, and `None` for every other one.
-///
-/// The summary is the leaf's own text, which names the store and both
-/// versions; a context wrapped around it is not part of it. A variant
-/// with no next step is left to the residual channel, which keeps that
-/// context.
-fn from_refs(e: &RefsError) -> Option<RpcError> {
-    let hint = match e {
-        RefsError::SchemaTooNew { supported, .. } => format!(
-            "Run a newer bookrack build (this one reads reference store schemas up to \
-             v{supported}), or restore reference.db from a backup this build wrote."
-        ),
-        RefsError::SchemaTooOld { .. } => String::from(
-            "Run `bookrack distill build` with this build, or start the daemon once with \
-             `bookrack run`: either one backs the reference store up and migrates it to \
-             this build's schema.",
-        ),
-        RefsError::ReaderTooOld { required, .. } => {
-            format!("Run a bookrack build at reader version v{required} or newer.")
-        }
-        _ => return None,
-    };
-    Some(rpc_from_problem(
-        STATE_UNUSABLE,
-        Problem::from_error_chain(e).hint(hint),
-    ))
-}
-
-/// Map a leaf `CorpusError` onto its wire code. Same contract as
-/// [`from_vectors`].
-fn from_corpus(e: &CorpusError) -> RpcError {
-    let problem = Problem::from_error_chain(e);
-    match e {
-        CorpusError::SchemaMismatch { .. } | CorpusError::IndexNotStamped => rpc_from_problem(
-            STATE_UNUSABLE,
-            problem.hint(
-                "Run `bookrack corpus rebuild` to rewrite the corpus at this build's schema \
-                 and stamps.",
-            ),
-        ),
-        CorpusError::IndexStampMismatch { key, .. } => rpc_from_problem(
-            STATE_UNUSABLE,
-            problem.hint(format!(
-                "Run `bookrack stamps reconcile` to see what the `{key}` stamp invalidates, \
-                 then the refresh command it names."
-            )),
-        ),
-        CorpusError::ReaderTooOld { required, .. } => rpc_from_problem(
-            STATE_UNUSABLE,
-            problem.hint(format!(
-                "Run a bookrack build at reader version v{required} or newer."
-            )),
-        ),
-        CorpusError::InvalidIntakeId(_) => rpc_from_problem(
-            INVALID_PARAMS,
-            problem.hint("Pass a positive intake id; `bookrack list` prints them."),
-        ),
-        _ => rpc_from_problem(INTERNAL_ERROR, problem),
-    }
-}
-
-/// Map a registry refusal. Every variant has its own arm because the
-/// enum is `#[non_exhaustive]`: the `_` arm is there for the compiler,
-/// and a variant that reached it would be an internal error without a
-/// hint, so a new variant is named here before it ships.
-fn from_registry(e: &RegistryError) -> RpcError {
-    let code = match e {
-        RegistryError::LibraryUnknown { .. }
-        | RegistryError::UnnamedAmbiguous { .. }
-        | RegistryError::LibraryUnmounted { .. } => INVALID_LIBRARY,
-        RegistryError::Empty => INVALID_PARAMS,
-        RegistryError::AlreadyMounted { .. }
-        | RegistryError::DefaultLockPoisoned
-        | RegistryError::LibsLockPoisoned => INTERNAL_ERROR,
-        _ => INTERNAL_ERROR,
-    };
-    rpc_from_problem(code, e.explain())
 }
 
 /// Map a refusal a write command raised on its own input.
@@ -967,130 +427,122 @@ fn from_cmd_state(e: &CmdStateError) -> RpcError {
     rpc_from_problem(code, e.explain())
 }
 
-fn from_config(e: &ConfigError) -> RpcError {
-    let code = match e {
-        ConfigError::UnknownLibrary { .. } => INVALID_LIBRARY,
-        _ => INTERNAL_ERROR,
-    };
-    rpc_from_problem(code, Problem::from_error_chain(e))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bookrack_ops::pipeline::book::IngestError;
+    use bookrack_refs::RefsError;
     use eyre::WrapErr;
 
+    /// The code each kind takes is the control plane's documented
+    /// contract, written out here rather than derived from `code_of`,
+    /// which is what is under test.
     #[test]
-    fn ops_intake_not_found_is_invalid_params() {
-        let err: Report = OpsError::IntakeNotFound { intake_id: 42 }.into();
-        let rpc = handler_err("metadata.set", err);
-        assert_eq!(rpc.code, INVALID_PARAMS);
-        assert!(rpc.message.contains("42"));
-    }
-
-    #[test]
-    fn ops_unknown_field_is_invalid_params() {
-        let err: Report = OpsError::UnknownMetadataField {
-            field: "no_such_field".into(),
-            editable: vec![String::from("title")],
+    fn every_error_kind_takes_its_documented_code() {
+        for (kind, code) in [
+            (ErrorKind::InvalidParams, -32602),
+            (ErrorKind::Internal, -32603),
+            (ErrorKind::Busy, -32001),
+            (ErrorKind::InvalidLibrary, -32010),
+            (ErrorKind::BackendUnavailable, -32017),
+            (ErrorKind::StateUnusable, -32018),
+        ] {
+            assert_eq!(code_of(kind), code, "{kind:?}");
         }
-        .into();
-        let rpc = handler_err("metadata.set", err);
-        assert_eq!(rpc.code, INVALID_PARAMS);
-        assert!(rpc.message.contains("no_such_field"));
     }
 
+    /// Each entry point hands its error to the classifier and puts the
+    /// judgement on the envelope: one failure per entry, with the code
+    /// and the wording the classifier gave it.
     #[test]
-    fn ingest_unknown_intake_walks_context_chain() {
-        let inner: Result<(), IngestError> = Err(IngestError::UnknownIntake(7));
-        let err: Report = inner
-            .context("rebuild step")
-            .context("outer wrap")
-            .unwrap_err();
-        let rpc = handler_err("corpus.rebuild", err);
-        assert_eq!(rpc.code, INVALID_PARAMS);
-    }
+    fn every_entry_point_puts_the_classifiers_judgement_on_the_envelope() {
+        let busy = ops_err(OpsError::WriteBusy(bookrack_ops::write_session::WriteBusy));
+        assert_eq!(busy.code, BUSY);
+        assert_eq!(busy.message, "another write command is already in progress");
+        let data = busy.data.expect("problem data");
+        assert_eq!(data["retryable"], serde_json::json!(true), "{data}");
 
-    #[test]
-    fn glean_needs_ocr_is_invalid_params() {
-        let err: Report = GleanError::NeedsOcr {
-            reason: "no text layer".into(),
-        }
-        .into();
-        let rpc = handler_err("papers.corpus_rebuild", err);
-        assert_eq!(rpc.code, INVALID_PARAMS);
-        assert!(rpc.message.contains("no text layer"));
-    }
-
-    /// The summary names only the name that did not resolve; the names
-    /// that would are the next step, so they travel in the hint.
-    #[test]
-    fn registry_library_unknown_is_invalid_library() {
-        let err: Report = RegistryError::LibraryUnknown {
+        let unknown = registry_err(RegistryError::LibraryUnknown {
             name: "ghost".into(),
-            available: vec!["alpha".into(), "beta".into()],
-        }
-        .into();
-        let rpc = handler_err("library.set_default", err);
-        assert_eq!(rpc.code, INVALID_LIBRARY);
-        assert_eq!(rpc.message, "no library named \"ghost\"");
-        let data: bookrack_core::ProblemData =
-            serde_json::from_value(rpc.data.expect("data")).expect("ProblemData");
-        let hint = data.hint.expect("the available names are the next step");
-        for available in ["alpha", "beta"] {
-            assert!(hint.contains(available), "{hint}");
-        }
-        assert!(!data.retryable);
+            available: vec!["alpha".into()],
+        });
+        assert_eq!(unknown.code, INVALID_LIBRARY);
+        assert_eq!(unknown.message, "no library named \"ghost\"");
+
+        let config = config_err(ConfigError::UnknownLibrary {
+            name: "ghost".into(),
+            available: vec!["main".into()],
+        });
+        assert_eq!(config.code, INVALID_LIBRARY);
+
+        let reference = reference_err(ReferenceError::Open {
+            path: std::path::PathBuf::from("/some/where/reference.db"),
+            source: RefsError::SchemaTooOld {
+                found: 1,
+                supported: 2,
+            },
+        });
+        assert_eq!(reference.code, STATE_UNUSABLE, "{}", reference.message);
+        assert_eq!(reference.message, "cannot read the reference store");
+
+        let filter = unknown_filter_value(&UnknownFilterValue {
+            parameter: "status",
+            value: "nosuch".into(),
+            accepted: vec!["done", "failed"],
+        });
+        assert_eq!(filter.code, INVALID_PARAMS);
+        assert_eq!(filter.message, "cannot filter on status value \"nosuch\"");
+
+        let unreachable = handler_err(
+            "stamps.reconcile",
+            bookrack_embed::EmbedError::Unreachable("connection refused".into()).into(),
+        );
+        assert_eq!(unreachable.code, BACKEND_UNAVAILABLE);
     }
 
-    /// `RegistryError` is `#[non_exhaustive]`, so a variant the mapping
-    /// does not name falls through to `-32603` without a hint. The
-    /// unnamed-route refusal is caller input with a next step and takes
-    /// the library code.
+    /// The outermost cause the walk recognises decides, whichever tier
+    /// it belongs to. An untyped ops report is judged by the wrapper it
+    /// arrived in, so a command refusal or a store leaf it holds — both
+    /// of which the walk reads when they arrive bare — does not reach
+    /// the envelope.
     #[test]
-    fn unnamed_ambiguous_is_invalid_library_with_a_hint() {
-        let err: Report = RegistryError::UnnamedAmbiguous {
-            mounted: vec!["alpha".into(), "beta".into()],
-            default: None,
-        }
+    fn the_outermost_recognised_cause_decides_across_tiers() {
+        let over_command: Report = OpsError::Other(
+            Report::from(CmdInputError::UnknownIntake { intake_id: 7 }).wrap_err("remove step"),
+        )
         .into();
-        let rpc = handler_err("library.stats", err);
-        assert_eq!(rpc.code, INVALID_LIBRARY, "{}", rpc.message);
-        assert_eq!(
-            rpc.message,
-            "cannot tell which library a call naming none is for"
+        assert!(
+            over_command
+                .chain()
+                .any(|cause| cause.downcast_ref::<CmdInputError>().is_some()),
+            "the command refusal is on the chain"
         );
-        let data: bookrack_core::ProblemData =
-            serde_json::from_value(rpc.data.expect("data")).expect("ProblemData");
-        let hint = data.hint.expect("naming a library is the next step");
-        assert!(hint.contains("--library"), "{hint}");
-        assert!(!data.retryable);
-    }
-
-    /// A library bring-up skipped is caller input to fix: the library
-    /// code, with the skip's reason in the data and its hint, which
-    /// already closes with the mount command, as it is.
-    #[test]
-    fn registry_library_unmounted_is_invalid_library_with_the_mount_hint() {
-        let err: Report = RegistryError::LibraryUnmounted {
-            name: "beta".into(),
-            reason: Box::new(
-                Problem::new("cannot read the catalog")
-                    .hint("Upgrade bookrack. Then run `bookrack libraries mount beta`."),
-            ),
-        }
+        let over_leaf: Report = OpsError::Other(
+            Report::from(bookrack_catalog::CatalogError::SchemaTooNew {
+                found: 99,
+                expected: 17,
+            })
+            .wrap_err("open catalog"),
+        )
         .into();
-        let rpc = handler_err("library.stats", err);
-        assert_eq!(rpc.code, INVALID_LIBRARY, "{}", rpc.message);
-        let data: bookrack_core::ProblemData =
-            serde_json::from_value(rpc.data.expect("data")).expect("ProblemData");
-        let detail = data.detail.expect("the skip's reason is the evidence");
-        assert!(detail.contains("cannot read the catalog"), "{detail}");
-        let hint = data.hint.expect("the mount command is the next step");
-        assert_eq!(
-            hint,
-            "Upgrade bookrack. Then run `bookrack libraries mount beta`."
+        assert!(
+            over_leaf.chain().any(|cause| cause
+                .downcast_ref::<bookrack_catalog::CatalogError>()
+                .is_some()),
+            "the store leaf is on the chain"
         );
+        for (label, err) in [
+            ("over a command refusal", over_command),
+            ("over a store leaf", over_leaf),
+        ] {
+            let rpc = handler_err("remove", err);
+            assert_eq!(rpc.code, INTERNAL_ERROR, "{label}: {}", rpc.message);
+            assert!(
+                !rpc.message.starts_with("remove failed:"),
+                "{label}: the ops wrapper judged it, not the residual channel: {}",
+                rpc.message
+            );
+        }
     }
 
     /// `report_problem` is `rpc_from_problem`'s inverse on a classified
@@ -1126,27 +578,6 @@ mod tests {
         assert!(problem.data.hint.is_none());
     }
 
-    /// An empty registry has one next step, and it is not a name.
-    #[test]
-    fn registry_empty_hints_at_registering() {
-        let err: Report = RegistryError::Empty.into();
-        let rpc = handler_err("library.set_default", err);
-        assert_eq!(rpc.code, INVALID_PARAMS);
-        let data: bookrack_core::ProblemData =
-            serde_json::from_value(rpc.data.expect("data")).expect("ProblemData");
-        let hint = data.hint.expect("an empty registry has a next step");
-        assert!(hint.contains("libraries register"), "{hint}");
-    }
-
-    #[test]
-    fn config_unknown_library_is_invalid_library() {
-        let rpc = config_err(ConfigError::UnknownLibrary {
-            name: "ghost".into(),
-            available: vec!["main".into()],
-        });
-        assert_eq!(rpc.code, INVALID_LIBRARY);
-    }
-
     /// The transport reason must survive the boundary somewhere in the
     /// envelope. Before flattening, the wrapper's `Display` ("query
     /// error") was the whole message and the reason was simply gone.
@@ -1160,99 +591,6 @@ mod tests {
         assert_eq!(rpc.code, BACKEND_UNAVAILABLE);
         let wire = serde_json::to_string(&rpc).expect("serialize");
         assert!(wire.contains("boom"), "root cause lost: {wire}");
-    }
-
-    /// A command that talks to the embedder folds the failure through
-    /// `?` and `.context()`, so the arm has to find the type below the
-    /// wraps. An absent model is the operator's own configuration —
-    /// the repair is `ollama pull`, and the hint that names it has to
-    /// reach the wire for the code to be worth anything.
-    #[test]
-    fn a_bare_model_not_found_is_caller_input_and_keeps_its_hint() {
-        let inner: Result<(), bookrack_embed::EmbedError> =
-            Err(bookrack_embed::EmbedError::ModelNotFound {
-                model: "test-model".into(),
-                reason: "model not found, try pulling it first".into(),
-            });
-        let err: Report = inner
-            .context("probe embedding dimension")
-            .context("stamps.reconcile")
-            .unwrap_err();
-        let rpc = handler_err("stamps.reconcile", err);
-        assert_eq!(rpc.code, INVALID_PARAMS);
-        let data: bookrack_core::ProblemData =
-            serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
-        assert!(
-            data.hint.expect("hint").contains("ollama pull test-model"),
-            "the repair must reach the operator"
-        );
-    }
-
-    /// An unreachable backend is neither caller input nor a bug in this
-    /// binary: the same call may succeed once Ollama is up, which is
-    /// what `retryable` says and what the dedicated code carries.
-    #[test]
-    fn a_bare_unreachable_backend_is_backend_unavailable_and_retryable() {
-        let err: Report =
-            bookrack_embed::EmbedError::Unreachable("connection refused".into()).into();
-        let rpc = handler_err("stamps.reconcile", err);
-        assert_eq!(rpc.code, BACKEND_UNAVAILABLE);
-        let data: bookrack_core::ProblemData =
-            serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
-        assert!(data.retryable);
-        assert!(data.hint.expect("hint").contains("BOOKRACK_OLLAMA_URL"));
-    }
-
-    /// The same embed failure reached through a pipeline wrapper takes
-    /// the same code as the bare form. Asserted against the literal
-    /// code rather than against the bare form's code: before the
-    /// wrappers delegated, both were `-32603`, so comparing the two
-    /// would have passed while the classification was wrong.
-    #[test]
-    fn a_wrapped_model_not_found_takes_the_same_code_as_a_bare_one() {
-        let wrapped: Vec<Report> = vec![
-            IngestError::Embed(bookrack_embed::EmbedError::ModelNotFound {
-                model: "test-model".into(),
-                reason: "model not found".into(),
-            })
-            .into(),
-            GleanError::Embed(bookrack_embed::EmbedError::ModelNotFound {
-                model: "test-model".into(),
-                reason: "model not found".into(),
-            })
-            .into(),
-            OpsError::Query(bookrack_query::QueryError::Embed(
-                bookrack_embed::EmbedError::ModelNotFound {
-                    model: "test-model".into(),
-                    reason: "model not found".into(),
-                },
-            ))
-            .into(),
-        ];
-        for err in wrapped {
-            let label = format!("{err:#}");
-            let rpc = handler_err("vectors.reembed", err);
-            assert_eq!(rpc.code, INVALID_PARAMS, "{label}");
-        }
-    }
-
-    /// The request body an embed call sends is assembled by this
-    /// binary, so a 4xx that is not an absent model is a fault on this
-    /// side. It stays in the residual bucket, and the delegate must not
-    /// sweep it into the caller-input one.
-    #[test]
-    fn a_bad_request_from_the_backend_stays_internal() {
-        for e in [
-            bookrack_embed::EmbedError::BadRequest {
-                status: 400,
-                body: "malformed input".into(),
-            },
-            bookrack_embed::EmbedError::MalformedResponse("not json".into()),
-        ] {
-            let label = format!("{e:?}");
-            let rpc = handler_err("stamps.reconcile", e.into());
-            assert_eq!(rpc.code, INTERNAL_ERROR, "{label}");
-        }
     }
 
     #[test]
@@ -1307,14 +645,6 @@ mod tests {
             "{}",
             rpc.message
         );
-    }
-
-    #[test]
-    fn user_input_error_message_is_unchanged_by_flattening() {
-        let e = OpsError::IntakeNotFound { intake_id: 42 };
-        let expected = e.to_string(); // error-boundary-check: allow
-        let rpc = from_ops(&e);
-        assert_eq!(rpc.message, expected);
     }
 
     /// Every `CmdInputError` variant, with the code the caller sees.
@@ -1414,467 +744,25 @@ mod tests {
         assert!(rpc.message.contains("book 7"), "{}", rpc.message);
     }
 
-    /// Pins the recursion itself: a leaf variant two wrappers deep takes
-    /// the code its own classifier assigns. Asserted against the literal
-    /// code — before the wrappers delegated, every leaf under them was
-    /// `-32603`, so comparing wrapped to bare would have passed while
-    /// both were wrong.
+    /// A library state a write command refuses to act on is the
+    /// operator's to resolve: the state code, with the step that
+    /// resolves it.
     #[test]
-    fn a_wrapped_leaf_variant_takes_its_own_code_through_every_wrapper() {
-        use bookrack_vectors::VectorsError;
-        let cases: Vec<(&str, Report)> = vec![
-            (
-                "ingest > vectors",
-                IngestError::Vectors(VectorsError::MissingPqParam("num_sub_vectors")).into(),
-            ),
-            (
-                "glean > vectors",
-                GleanError::Vectors(VectorsError::BuildOnBruteForceKind).into(),
-            ),
-            (
-                "ops > query > vectors",
-                OpsError::Query(bookrack_query::QueryError::Vectors(
-                    VectorsError::MissingPqParam("num_sub_vectors"),
-                ))
-                .into(),
-            ),
-            (
-                "ops > corpus",
-                OpsError::Corpus(bookrack_corpus::CorpusError::InvalidIntakeId(-1)).into(),
-            ),
-            (
-                "ingest > corpus",
-                IngestError::Corpus(bookrack_corpus::CorpusError::InvalidIntakeId(-1)).into(),
-            ),
-            (
-                "glean > catalog",
-                GleanError::Catalog(bookrack_catalog::CatalogError::DerivedFromConflict {
-                    intake_id: 7,
-                    existing: "aaa".into(),
-                    requested: "bbb".into(),
-                })
-                .into(),
-            ),
-        ];
-        for (label, err) in cases {
-            let rpc = handler_err("vectors.rebuild", err);
-            assert_eq!(rpc.code, INVALID_PARAMS, "{label}: {}", rpc.message);
-        }
-    }
-
-    /// A rule the pipeline refuses is caller input: every such failure
-    /// answers invalid params, with the rule's own wording and a next
-    /// step on the wire rather than the wrapper's name.
-    #[test]
-    fn a_refused_rule_answers_invalid_params_with_its_own_wording() {
-        use bookrack_extract::rule::RuleError;
-        let rule = std::path::PathBuf::from("rule.toml");
-        let scan = std::path::PathBuf::from("scan.pdf");
-        let cases: Vec<(&str, IngestError)> = vec![
-            (
-                "rule",
-                IngestError::Rule(RuleError::NoMembers { rule: rule.clone() }),
-            ),
-            ("kind", IngestError::RuleKindNotBook { rule: rule.clone() }),
-            (
-                "not pending",
-                IngestError::RuleSourceNotPending {
-                    source_pdf: scan.clone(),
-                    status: None,
-                },
-            ),
-            (
-                "not a file",
-                IngestError::RuleSourceNotAFile {
-                    source_pdf: scan.clone(),
-                },
-            ),
-            (
-                "unnumbered",
-                IngestError::RuleSourceUnnumbered { rule: rule.clone() },
-            ),
-            (
-                "coverage",
-                IngestError::RuleCoverage {
-                    rule,
-                    source_pdf: scan,
-                    covered: 2,
-                    expected: 3,
-                    missing: vec![3],
-                    excess: Vec::new(),
-                },
-            ),
-        ];
-        for (label, err) in cases {
-            let rpc = handler_err("ingest.submit", Report::from(err).wrap_err("ingest"));
-            assert_eq!(rpc.code, INVALID_PARAMS, "{label}: {}", rpc.message);
-            assert!(
-                !rpc.message.contains("rule error") && !rpc.message.ends_with('.'),
-                "{label}: {}",
-                rpc.message
-            );
-            let hint = rpc
-                .data
-                .as_ref()
-                .and_then(|data| data.get("hint"))
-                .and_then(|hint| hint.as_str());
-            assert!(
-                hint.is_some_and(|hint| !hint.is_empty()),
-                "{label}: {rpc:?}"
-            );
-        }
-    }
-
-    /// A leaf error a command raises without any pipeline wrapper around
-    /// it must be recognised by the walk, not swept into the residual
-    /// channel.
-    #[test]
-    fn a_bare_leaf_variant_is_recognised_by_the_walk() {
-        let inner: Result<(), bookrack_vectors::VectorsError> = Err(
-            bookrack_vectors::VectorsError::MissingPqParam("num_sub_vectors"),
-        );
-        let err: Report = inner
-            .context("build the ANN index")
-            .context("vectors.rebuild")
-            .unwrap_err();
-        let rpc = handler_err("vectors.rebuild", err);
-        assert_eq!(rpc.code, INVALID_PARAMS, "{}", rpc.message);
-        assert!(
-            !rpc.message.contains("vectors.rebuild failed:"),
-            "the residual channel must not have handled it: {}",
-            rpc.message
-        );
-
-        let err: Report = bookrack_corpus::CorpusError::InvalidIntakeId(-1).into();
-        assert_eq!(handler_err("ingest.submit", err).code, INVALID_PARAMS);
-    }
-
-    /// Every variant the classifier judges caller input carries a next
-    /// step on the wire. The leaf types write no wording of their own,
-    /// so the hint is the classifier's, keyed on the code it chose.
-    #[test]
-    fn every_caller_input_leaf_variant_carries_a_hint() {
-        use bookrack_vectors::VectorsError;
-        let cases: Vec<(&str, Report)> = vec![
-            (
-                "BuildOnBruteForceKind",
-                VectorsError::BuildOnBruteForceKind.into(),
-            ),
-            (
-                "MissingPqParam",
-                VectorsError::MissingPqParam("num_sub_vectors").into(),
-            ),
-            (
-                "IvfPqQuantizationTooCoarse",
-                VectorsError::IvfPqQuantizationTooCoarse {
-                    dim: 1024,
-                    num_sub_vectors: 16,
-                }
-                .into(),
-            ),
-            (
-                "InvalidAnnConfig",
-                VectorsError::InvalidAnnConfig {
-                    field: "nprobes",
-                    reason: "must be greater than 0, got 0".into(),
-                }
-                .into(),
-            ),
-            (
-                "TooFewVectors",
-                VectorsError::TooFewVectors {
-                    kind: bookrack_vectors::AnnKind::IvfFlat,
-                    rows: 4,
-                    required: 256,
-                    limit: TrainingLimit::Partitions {
-                        num_partitions: 256,
-                    },
-                }
-                .into(),
-            ),
-            (
-                "InvalidIntakeId",
-                bookrack_corpus::CorpusError::InvalidIntakeId(0).into(),
-            ),
-            (
-                "DerivedFromConflict",
-                bookrack_catalog::CatalogError::DerivedFromConflict {
-                    intake_id: 7,
-                    existing: "aaa".into(),
-                    requested: "bbb".into(),
-                }
-                .into(),
-            ),
-        ];
-        for (label, err) in cases {
-            let rpc = handler_err("vectors.rebuild", err);
-            assert_eq!(rpc.code, INVALID_PARAMS, "{label}");
-            let data: bookrack_core::ProblemData =
-                serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
-            let hint = data.hint.unwrap_or_default();
-            assert!(
-                !hint.trim().is_empty(),
-                "{label}: caller input without a next step"
-            );
-            assert!(!data.retryable, "{label}");
-        }
-    }
-
-    /// An embedding backend returning an unusable vector broke its
-    /// response contract, so the code is the fault code; the wording
-    /// is the variant's own, with the way around it as the hint.
-    #[test]
-    fn an_unusable_embed_vector_is_a_fault_with_a_hint() {
-        let err: Report = EmbedError::UnusableVector {
-            index: 1,
-            defect: bookrack_core::VectorDefect::NonFinite,
+    fn a_command_state_refusal_takes_the_state_code_with_a_next_step() {
+        let err: Report = CmdStateError::VectorTableMissing {
+            dim: 1024,
+            reset_command: "bookrack vectors reset",
         }
         .into();
-        let rpc = handler_err("vectors.reembed", err);
-        assert_eq!(rpc.code, INTERNAL_ERROR);
-        assert_eq!(
-            rpc.message,
-            "cannot embed: Ollama returned an unusable vector"
-        );
+        let rpc = handler_err("vectors.rebuild", err);
+        assert_eq!(rpc.code, STATE_UNUSABLE, "{}", rpc.message);
         let data: bookrack_core::ProblemData =
-            serde_json::from_value(rpc.data.expect("data")).expect("ProblemData");
+            serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
         assert!(
-            data.hint.as_deref().is_some_and(|h| !h.trim().is_empty()),
-            "{:?}",
-            data.hint
+            !data.hint.unwrap_or_default().trim().is_empty(),
+            "a state code without the operator's next step"
         );
         assert!(!data.retryable);
-    }
-
-    /// The hint for a store too small for its index names only routes
-    /// that can succeed on the rows it has: no partition count when
-    /// there are no rows, and 4-bit codes only where 16 vectors and an
-    /// even sub-vector count make them buildable.
-    #[test]
-    fn too_few_vectors_hints_follow_the_binding_limit() {
-        use bookrack_vectors::{AnnKind, VectorsError};
-        let hint = |rows: u64, required: u64, limit: TrainingLimit| {
-            let err: Report = VectorsError::TooFewVectors {
-                kind: AnnKind::IvfPq,
-                rows,
-                required,
-                limit,
-            }
-            .into();
-            let rpc = handler_err("vectors.rebuild", err);
-            assert_eq!(rpc.code, INVALID_PARAMS);
-            let data: bookrack_core::ProblemData =
-                serde_json::from_value(rpc.data.expect("data")).expect("ProblemData");
-            data.hint.expect("hint")
-        };
-        let partitions = TrainingLimit::Partitions {
-            num_partitions: 256,
-        };
-        let codebook = |num_bits, num_sub_vectors| TrainingLimit::PqCodebook {
-            num_bits,
-            num_sub_vectors,
-        };
-
-        let empty = hint(0, 256, partitions);
-        assert!(empty.contains("no vectors yet"), "{empty}");
-        assert!(!empty.contains("num_partitions"), "{empty}");
-        assert!(empty.contains("`bookrack vectors drop`"), "{empty}");
-
-        let small = hint(4, 256, partitions);
-        assert!(small.contains("`num_partitions` to at most 4"), "{small}");
-        assert!(small.contains("`bookrack papers vectors drop`"), "{small}");
-
-        let even = hint(100, 256, codebook(8, Some(2)));
-        assert!(
-            even.contains("8-bit PQ codebook needs at least 256"),
-            "{even}"
-        );
-        assert!(even.contains("`num_bits = 4`"), "{even}");
-        for (label, rows, limit) in [
-            ("odd sub-vectors", 100, codebook(8, Some(3))),
-            ("unknown sub-vectors", 100, codebook(8, None)),
-            ("fewer than 16 rows", 10, codebook(8, Some(2))),
-            ("already 4-bit", 10, codebook(4, Some(2))),
-        ] {
-            let text = hint(rows, 256, limit);
-            assert!(!text.contains("num_bits = 4"), "{label}: {text}");
-        }
-    }
-
-    #[test]
-    fn an_invalid_ann_field_hint_names_the_profile_field_and_the_flag() {
-        let err: Report = bookrack_vectors::VectorsError::InvalidAnnConfig {
-            field: "refine_factor",
-            reason: "must be greater than 0 when set, got 0".into(),
-        }
-        .into();
-        let rpc = handler_err("vectors.rebuild", err);
-        assert_eq!(rpc.code, INVALID_PARAMS);
-        assert_eq!(
-            rpc.message,
-            "invalid ANN configuration: refine_factor must be greater than 0 when set, got 0"
-        );
-        let data: bookrack_core::ProblemData =
-            serde_json::from_value(rpc.data.expect("data")).expect("ProblemData");
-        let hint = data.hint.expect("hint");
-        assert!(hint.contains("`refine_factor`"), "{hint}");
-        assert!(hint.contains("`--refine-factor`"), "{hint}");
-    }
-
-    /// Delegation must not widen the caller-input bucket: a leaf fault
-    /// stays `-32603`. The one visible trace of the delegation is the
-    /// wrapper's own `Display` ("catalog error: ") leaving the summary,
-    /// because the leaf is now rendered from its own chain.
-    #[test]
-    fn a_wrapped_leaf_fault_stays_internal_and_drops_the_wrapper_prefix() {
-        let err: Report = OpsError::Catalog(bookrack_catalog::CatalogError::Io(
-            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "backup dir read-only"),
-        ))
-        .into();
-        let rpc = handler_err("metadata.set", err);
-        assert_eq!(rpc.code, INTERNAL_ERROR);
-        assert!(
-            !rpc.message.starts_with("catalog error"),
-            "wrapper Display leaked onto the wire: {}",
-            rpc.message
-        );
-        assert!(
-            rpc.message.contains("backup dir read-only"),
-            "{}",
-            rpc.message
-        );
-    }
-
-    /// Every store variant whose next step is the operator's — a newer
-    /// build, a rebuild, a reset — takes the state code, bare or
-    /// wrapped, and names that step. Written out rather than derived
-    /// from the `from_*` functions, which are what is under test.
-    #[test]
-    fn every_unusable_state_variant_takes_the_state_code_with_a_next_step() {
-        use bookrack_catalog::CatalogError;
-        use bookrack_corpus::CorpusError;
-        use bookrack_vectors::VectorsError;
-        let cases: Vec<(&str, Report)> = vec![
-            (
-                "catalog SchemaTooNew (bare)",
-                CatalogError::SchemaTooNew {
-                    found: 99,
-                    expected: 17,
-                }
-                .into(),
-            ),
-            (
-                "catalog ReaderTooOld (ops)",
-                OpsError::Catalog(CatalogError::ReaderTooOld {
-                    required: 9,
-                    current: 3,
-                })
-                .into(),
-            ),
-            (
-                "corpus SchemaMismatch (ingest)",
-                IngestError::Corpus(CorpusError::SchemaMismatch {
-                    found: "v0".into(),
-                    expected: 4,
-                })
-                .into(),
-            ),
-            (
-                "corpus ReaderTooOld (glean)",
-                GleanError::Corpus(CorpusError::ReaderTooOld {
-                    required: 9,
-                    current: 3,
-                })
-                .into(),
-            ),
-            (
-                "corpus IndexNotStamped (bare)",
-                CorpusError::IndexNotStamped.into(),
-            ),
-            (
-                "corpus IndexStampMismatch (ops > query)",
-                OpsError::Query(bookrack_query::QueryError::Corpus(
-                    CorpusError::IndexStampMismatch {
-                        key: "embed_model",
-                        found: "a".into(),
-                        expected: "b".into(),
-                    },
-                ))
-                .into(),
-            ),
-            (
-                "vectors UnknownAnnKind (ops)",
-                OpsError::Vectors(VectorsError::UnknownAnnKind("hyperspace".into())).into(),
-            ),
-            (
-                "vectors DimensionMismatch (ingest)",
-                IngestError::Vectors(VectorsError::DimensionMismatch {
-                    got: 768,
-                    expected: 1024,
-                })
-                .into(),
-            ),
-            (
-                "vectors ReaderTooOld (bare)",
-                VectorsError::ReaderTooOld {
-                    required: 9,
-                    current: 3,
-                }
-                .into(),
-            ),
-            (
-                "cmd VectorTableMissing (bare)",
-                CmdStateError::VectorTableMissing {
-                    dim: 1024,
-                    reset_command: "bookrack vectors reset",
-                }
-                .into(),
-            ),
-        ];
-        for (label, err) in cases {
-            let rpc = handler_err("vectors.rebuild", err);
-            assert_eq!(rpc.code, STATE_UNUSABLE, "{label}: {}", rpc.message);
-            let data: bookrack_core::ProblemData =
-                serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
-            assert!(
-                !data.hint.unwrap_or_default().trim().is_empty(),
-                "{label}: a state code without the operator's next step"
-            );
-            assert!(!data.retryable, "{label}");
-        }
-    }
-
-    /// A catalog behind this build, met through a door that does not
-    /// migrate, is a state the operator resolves: the state code, a
-    /// summary naming the store and both versions, and the step.
-    #[test]
-    fn a_catalog_behind_this_build_takes_the_state_code_and_names_both_versions() {
-        use bookrack_catalog::CatalogError;
-        let behind = || CatalogError::SchemaTooOld {
-            found: 16,
-            expected: 17,
-        };
-        for (label, err) in [
-            ("bare", Report::from(behind())),
-            ("ops", OpsError::Catalog(behind()).into()),
-        ] {
-            let rpc = handler_err("library.list_books", err);
-            assert_eq!(rpc.code, STATE_UNUSABLE, "{label}: {}", rpc.message);
-            assert!(
-                rpc.message
-                    .starts_with("catalog schema is behind this build")
-                    && rpc.message.contains("v16")
-                    && rpc.message.contains("v17"),
-                "{label}: {}",
-                rpc.message
-            );
-            let data: bookrack_core::ProblemData =
-                serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
-            assert!(
-                data.hint.unwrap_or_default().contains("bookrack run"),
-                "{label}: the hint names the step that migrates it"
-            );
-        }
     }
 
     fn retired_catalog() -> bookrack_catalog::CatalogError {
@@ -1890,46 +778,6 @@ mod tests {
                     count: 2,
                 },
             ],
-        }
-    }
-
-    /// A catalog holding retired labels, met with no library to name,
-    /// is a state the operator resolves: the state code, a summary
-    /// without the counts, a detail that carries each of them, and a
-    /// hint that points at the root and names no library.
-    #[test]
-    fn a_catalog_holding_retired_labels_takes_the_state_code_in_three_parts() {
-        for (label, err) in [
-            ("bare", Report::from(retired_catalog())),
-            ("ops", OpsError::Catalog(retired_catalog()).into()),
-            (
-                "wrapped",
-                Report::from(retired_catalog()).wrap_err("preflight catalog schema check failed"),
-            ),
-        ] {
-            let rpc = handler_err("library.list_books", err);
-            assert_eq!(rpc.code, STATE_UNUSABLE, "{label}: {}", rpc.message);
-            assert_eq!(
-                rpc.message,
-                "catalog \"/disk/library/beta/catalog.db\" holds rows from the removed OCR \
-                 intake path",
-                "{label}"
-            );
-            let data: bookrack_core::ProblemData =
-                serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
-            let detail = data.detail.unwrap_or_default();
-            assert!(
-                detail.ends_with("format = ocr-markdown (3), derived_from_sha256 (2)."),
-                "{label}: {detail}"
-            );
-            let hint = data.hint.unwrap_or_default();
-            assert!(hint.contains("'/disk/library/beta'"), "{label}: {hint}");
-            assert!(
-                hint.contains("`bookrack libraries list`")
-                    && hint.contains("`bookrack libraries remove <name> --purge`"),
-                "{label}: {hint}"
-            );
-            assert!(!data.retryable, "{label}");
         }
     }
 
@@ -1960,68 +808,6 @@ mod tests {
         let (reason, repair) = skip_reason(Some("beta"), &behind);
         assert_eq!(repair, Repair::InPlace);
         assert_eq!(reason, report_problem(&behind));
-    }
-
-    /// A reference store this build cannot serve is a state the
-    /// operator resolves, wherever on the chain it sits: the state code,
-    /// a summary that names the store from the leaf's own words, and a
-    /// next step. The context a caller wrapped it in stays out of the
-    /// summary.
-    #[test]
-    fn a_reference_store_this_build_cannot_serve_takes_the_state_code_and_names_the_store() {
-        let cases: Vec<(&str, RefsError, &str, &[&str])> = vec![
-            (
-                "SchemaTooNew",
-                RefsError::SchemaTooNew {
-                    found: 3,
-                    supported: 2,
-                },
-                "reference.db schema is newer than this build supports",
-                &["3", "2"],
-            ),
-            (
-                "SchemaTooOld",
-                RefsError::SchemaTooOld {
-                    found: 1,
-                    supported: 2,
-                },
-                "reference.db schema is behind this build",
-                &["1", "2"],
-            ),
-            (
-                "ReaderTooOld",
-                RefsError::ReaderTooOld {
-                    required: 9,
-                    current: 3,
-                },
-                "reference.db requires a newer reader",
-                &["v9", "v3"],
-            ),
-        ];
-        for (label, leaf, opening, numbers) in cases {
-            let err = Report::from(leaf).wrap_err("preflight reference store schema check failed");
-            let rpc = handler_err("library.mount", err);
-            assert_eq!(rpc.code, STATE_UNUSABLE, "{label}: {}", rpc.message);
-            assert!(rpc.message.starts_with(opening), "{label}: {}", rpc.message);
-            assert!(
-                numbers.iter().all(|n| rpc.message.contains(n)),
-                "{label}: both versions are named: {}",
-                rpc.message
-            );
-            assert!(
-                !rpc.message.contains("preflight"),
-                "{label}: {}",
-                rpc.message
-            );
-            let data: bookrack_core::ProblemData =
-                serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
-            let hint = data.hint.unwrap_or_default();
-            assert!(
-                hint.ends_with('.') && !hint.contains("libraries mount"),
-                "{label}: a full sentence that names the repair and no retry: {hint:?}"
-            );
-            assert!(!data.retryable, "{label}");
-        }
     }
 
     /// A reference store fault with no next step is not classified: it
@@ -2068,52 +854,6 @@ mod tests {
         );
     }
 
-    /// The lookup's own classifier answers a store stamped for a newer
-    /// reader with the state code and says which reader it needs.
-    #[test]
-    fn a_lookup_on_a_store_stamped_for_a_newer_reader_takes_the_state_code() {
-        let rpc = reference_err(ReferenceError::Open {
-            path: std::path::PathBuf::from("/some/where/reference.db"),
-            source: RefsError::ReaderTooOld {
-                required: 9,
-                current: 3,
-            },
-        });
-        assert_eq!(rpc.code, STATE_UNUSABLE, "{}", rpc.message);
-        let data: bookrack_core::ProblemData =
-            serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
-        let detail = data.detail.unwrap_or_default();
-        assert!(
-            detail.contains("reader version 9") && detail.contains("reader version 3"),
-            "the detail names both reader versions: {detail}"
-        );
-        assert!(
-            data.hint.unwrap_or_default().contains("v9"),
-            "the hint names the reader version to run"
-        );
-    }
-
-    /// A store behind this build is migrated by a distill build or by
-    /// mounting the library; the lookup's hint names both.
-    #[test]
-    fn a_lookup_on_a_store_behind_this_build_names_both_steps_that_migrate_it() {
-        let rpc = reference_err(ReferenceError::Open {
-            path: std::path::PathBuf::from("/some/where/reference.db"),
-            source: RefsError::SchemaTooOld {
-                found: 1,
-                supported: 2,
-            },
-        });
-        assert_eq!(rpc.code, STATE_UNUSABLE, "{}", rpc.message);
-        let data: bookrack_core::ProblemData =
-            serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
-        let hint = data.hint.unwrap_or_default();
-        assert!(
-            hint.contains("bookrack distill build") && hint.contains("bookrack run"),
-            "{hint}"
-        );
-    }
-
     /// The exit for a command that opens a store itself lets a state
     /// refusal through with its three parts and nothing else.
     #[test]
@@ -2141,52 +881,6 @@ mod tests {
 
         let unclassified = eyre::eyre!("disk on fire");
         assert!(state_refusal(&unclassified).is_none());
-    }
-
-    /// The two read-shape refusals the read proxies used to hand-pick
-    /// are caller input in the shared classifier too, so routing the
-    /// proxies through it does not demote them to `-32603`.
-    #[test]
-    fn read_shape_refusals_are_caller_input_through_ops_err() {
-        for e in [
-            OpsError::NotALeaf { node_id: 7 },
-            OpsError::NotOrganizing { node_id: 7 },
-        ] {
-            let label = format!("{e:?}");
-            let rpc = ops_err(e);
-            assert_eq!(rpc.code, INVALID_PARAMS, "{label}");
-            assert!(rpc.message.contains("node 7"), "{label}: {}", rpc.message);
-        }
-    }
-
-    /// A passage read of a kind without corpus nodes is caller input,
-    /// and its remedy travels in the hint rather than the summary.
-    #[test]
-    fn a_passage_read_of_a_kind_without_nodes_is_caller_input() {
-        let rpc = ops_err(OpsError::NoPassagesForKind {
-            kind: bookrack_core::ItemKind::Reference,
-        });
-        assert_eq!(rpc.code, INVALID_PARAMS);
-        assert_eq!(rpc.message, "cannot read passages of kind \"reference\"");
-        let data = rpc.data.expect("problem data");
-        assert!(
-            data["hint"]
-                .as_str()
-                .is_some_and(|h| h.contains("reference.lookup")),
-            "{data}"
-        );
-    }
-
-    /// A write session refused because another holds the write mutex
-    /// is the busy code the control plane already answers a colliding
-    /// write with, and it says the same call may succeed once retried.
-    #[test]
-    fn a_busy_write_session_is_busy_and_retryable_through_ops_err() {
-        let rpc = ops_err(OpsError::WriteBusy(bookrack_ops::write_session::WriteBusy));
-        assert_eq!(rpc.code, BUSY);
-        assert_eq!(rpc.message, "another write command is already in progress");
-        let data = rpc.data.expect("problem data");
-        assert_eq!(data["retryable"], serde_json::json!(true), "{data}");
     }
 
     #[test]
@@ -2301,7 +995,7 @@ mod tests {
         let judged: [(&str, Report); 3] = [
             (
                 "a fault",
-                EmbedError::UnusableVector {
+                bookrack_embed::EmbedError::UnusableVector {
                     index: 1,
                     defect: bookrack_core::VectorDefect::NonFinite,
                 }
@@ -2314,7 +1008,7 @@ mod tests {
             (
                 "a wrapped fault",
                 OpsError::Query(bookrack_query::QueryError::Embed(
-                    EmbedError::MalformedResponse("no vectors".into()),
+                    bookrack_embed::EmbedError::MalformedResponse("no vectors".into()),
                 ))
                 .into(),
             ),

@@ -168,7 +168,6 @@ exit = "command bodies live in ops"
 
 [[file]]
 paths = [
-  "crates/runtime/src/control/error_map.rs",
   "crates/runtime/src/control/methods/diagnose.rs",
   "crates/runtime/src/control/methods/papers_metadata.rs",
   "crates/runtime/src/control/methods/papers_remove.rs",
@@ -586,10 +585,10 @@ exit = "one handler takes the kind as a parameter"
 
 [[parallel]]
 id = "control-error-map-pipeline"
-summary = "pipeline error to RPC error mapping"
+summary = "pipeline error classification"
 sites = [
-  "crates/runtime/src/control/error_map.rs::from_ingest",
-  "crates/runtime/src/control/error_map.rs::from_glean",
+  "crates/ops/src/error_class.rs::from_ingest",
+  "crates/ops/src/error_class.rs::from_glean",
 ]
 reason = "transitional"
 detail = "each maps its own pipeline's error enum, and the variants differ: EmptyExtraction on the ingest side, IntakeNotRebuildable on the glean side"
@@ -1018,7 +1017,7 @@ id = "frontend-error-map"
 summary = "mapping ops and store errors to wire errors"
 sites = [
   "crates/mcp/src/error_map.rs",
-  "crates/runtime/src/control/error_map.rs::classify",
+  "crates/ops/src/error_class.rs::classify_report",
 ]
 reason = "transitional"
 detail = "MCP answers every registry error as invalid params; the control plane gives each its own code"

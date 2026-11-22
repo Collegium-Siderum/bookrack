@@ -67,6 +67,7 @@ pub struct NewOverlay {
 /// merged with the overlay through `json_patch`, with the overlay's
 /// presence surfaced as `has_overlay`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ResolvedEntry {
     pub book_slug: String,
     pub entry_key: String,
@@ -84,6 +85,7 @@ pub struct ResolvedEntry {
 /// borrowed from Wikipedia's dab page. Always returned even for a
 /// single-hit lookup, so callers do not branch on cardinality.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LookupResult {
     /// The `entry_key` the caller asked for. If a redirect was
     /// followed, this remains the original key (the followed-to key

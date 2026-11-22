@@ -9,7 +9,7 @@
 use serde::Serialize;
 
 /// One line of the distribution: a category and the books carrying it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct CategoryBooks {
     /// The category, as `find_books` expects it in `categories`.
     pub category: String,
@@ -23,7 +23,7 @@ pub struct CategoryBooks {
 /// together account for every book once: `total` is the registry
 /// count, and a library nobody has tagged reports it whole under
 /// `uncategorised`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct CategoryCounts {
     /// Categories carried by at least one book, most-used first and by
     /// name within a count.

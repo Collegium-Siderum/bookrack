@@ -70,6 +70,7 @@ pub type Result<T> = std::result::Result<T, SearchError>;
 /// emit it as JSON without redeclaring its fields; adding a field here
 /// flows through automatically.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Citation {
     /// The passage text to display.
     pub text: String,

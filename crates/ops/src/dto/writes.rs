@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Request body for [`crate::writes::metadata::set_metadata_field`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct SetMetadataFieldRequest {
     /// Catalog intake id of the book.
     pub intake_id: i64,
@@ -29,7 +29,7 @@ pub struct SetMetadataFieldRequest {
 }
 
 /// Request body for [`crate::writes::metadata::clear_metadata_field`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct ClearMetadataFieldRequest {
     /// Catalog intake id of the book.
     pub intake_id: i64,
@@ -41,7 +41,7 @@ pub struct ClearMetadataFieldRequest {
 }
 
 /// Request body for [`crate::writes::metadata::void_metadata_field`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct VoidMetadataFieldRequest {
     /// Catalog intake id of the book.
     pub intake_id: i64,
@@ -53,14 +53,14 @@ pub struct VoidMetadataFieldRequest {
 }
 
 /// Request body for [`crate::writes::metadata::reaudit_metadata`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct ReauditMetadataRequest {
     /// Catalog intake id of the book.
     pub intake_id: i64,
 }
 
 /// What a re-audit computed and stored.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ReauditOutcome {
     /// The book that was re-audited.
     pub intake_id: i64,
@@ -75,7 +75,7 @@ pub struct ReauditOutcome {
 }
 
 /// Request body for [`crate::writes::metadata::add_contributor`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct AddContributorRequest {
     /// Catalog intake id of the book.
     pub intake_id: i64,
@@ -93,7 +93,7 @@ pub struct AddContributorRequest {
 }
 
 /// Request body for [`crate::writes::metadata::remove_contributor`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct RemoveContributorRequest {
     /// Catalog intake id of the book.
     pub intake_id: i64,
@@ -105,7 +105,7 @@ pub struct RemoveContributorRequest {
 }
 
 /// What [`crate::writes::metadata::add_contributor`] created.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AddContributorOutcome {
     /// Surrogate id of the new contributor row.
     pub contributor_id: i64,
@@ -115,7 +115,7 @@ pub struct AddContributorOutcome {
 }
 
 /// Request body for [`crate::writes::metadata::acknowledge_metadata_gap`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct AcknowledgeMetadataGapRequest {
     /// Catalog intake id of the book.
     pub intake_id: i64,
@@ -124,7 +124,7 @@ pub struct AcknowledgeMetadataGapRequest {
 }
 
 /// Request body for [`crate::writes::metadata::approve_metadata`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct ApproveMetadataRequest {
     /// Catalog intake id of the book.
     pub intake_id: i64,
@@ -134,7 +134,7 @@ pub struct ApproveMetadataRequest {
 }
 
 /// Request body for [`crate::writes::metadata::reject_metadata`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct RejectMetadataRequest {
     /// Catalog intake id of the book.
     pub intake_id: i64,
@@ -144,7 +144,7 @@ pub struct RejectMetadataRequest {
 
 /// Request body for
 /// [`crate::writes::papers_metadata::set_paper_metadata_field`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct PaperSetMetadataFieldRequest {
     /// Catalog intake id of the paper.
     pub intake_id: i64,
@@ -165,7 +165,7 @@ pub struct PaperSetMetadataFieldRequest {
 
 /// Request body for
 /// [`crate::writes::papers_metadata::clear_paper_metadata_field`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct PaperClearMetadataFieldRequest {
     /// Catalog intake id of the paper.
     pub intake_id: i64,
@@ -178,7 +178,7 @@ pub struct PaperClearMetadataFieldRequest {
 
 /// Request body for
 /// [`crate::writes::papers_metadata::void_paper_metadata_field`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct PaperVoidMetadataFieldRequest {
     /// Catalog intake id of the paper.
     pub intake_id: i64,
@@ -194,7 +194,7 @@ pub struct PaperVoidMetadataFieldRequest {
 ///
 /// Carries the structured name parts and the ORCID a citation needs,
 /// and no nationality: that one is a book-side enrichment field.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct PaperContributorAddRequest {
     /// Catalog intake id of the paper.
     pub intake_id: i64,
@@ -219,7 +219,7 @@ pub struct PaperContributorAddRequest {
 
 /// Request body for
 /// [`crate::writes::papers_metadata::remove_paper_contributor`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct PaperContributorRemoveRequest {
     /// Catalog intake id of the paper the row belongs to. The
     /// surrogate id alone addresses a row anywhere in the catalog, so
@@ -234,7 +234,7 @@ pub struct PaperContributorRemoveRequest {
 
 /// Request body for
 /// [`crate::writes::papers_metadata::reaudit_paper_metadata`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct PaperReauditRequest {
     /// Catalog intake id of the paper.
     pub intake_id: i64,
@@ -243,7 +243,7 @@ pub struct PaperReauditRequest {
 /// Request body for the four paper review-status transitions
 /// (`ack` / `approve` / `reject` / `reopen`), which differ only in the
 /// status and audit action their op supplies.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct PaperReviewRequest {
     /// Catalog intake id of the paper.
     pub intake_id: i64,
@@ -259,7 +259,7 @@ pub struct PaperReviewRequest {
 ///
 /// Every write op returns one of these so the caller can render or log
 /// the resulting audit identity without a second round-trip.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct WriteOutcome {
     /// Surrogate id of the `metadata_audit` row this op appended.
     pub audit_id: i64,

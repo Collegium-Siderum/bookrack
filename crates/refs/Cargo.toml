@@ -18,8 +18,15 @@ rusqlite_migration.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# JSON Schema derives behind the `schema` feature.
+schemars = { workspace = true, optional = true }
 
 [dev-dependencies]
 # On-disk fixtures for the read-only open path, which by contract
 # refuses a missing file and so cannot use the in-memory handle.
 tempfile.workspace = true
+
+[features]
+# Derive `schemars::JsonSchema` on the types this crate hands the
+# method table. Off by default; `bookrack-ops` turns it on.
+schema = ["dep:schemars"]

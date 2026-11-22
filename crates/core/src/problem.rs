@@ -37,6 +37,7 @@ use crate::error_chain;
 /// summary stays in `message`, and so a client can read them back
 /// with one `from_value` instead of picking keys by hand.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProblemData {
     /// Implementation-level evidence for the summary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,6 +67,7 @@ pub struct ProblemData {
 /// three — so `--json` output and the wire `data` object share one
 /// shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Problem {
     /// One line naming what failed.
     pub summary: String,

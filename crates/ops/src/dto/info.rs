@@ -11,7 +11,7 @@ use bookrack_vectors::VectorsMeta;
 
 /// One-page library status: which library is open, how it's configured,
 /// what the stamps say, and how big it is on disk.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct LibraryInfo {
     /// Where the library lives on disk.
     pub data_dir: String,
@@ -81,7 +81,7 @@ pub struct LibraryInfo {
 /// Paper-side companion to [`LibraryInfo`]. Reports the same shape of
 /// status (stamps, chunks, intake count, disk usage) for the paper
 /// catalog, corpus, and lancedb_papers directory.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, schemars::JsonSchema)]
 pub struct PapersInfo {
     /// Stamps the paper corpus carries about the index it was built
     /// with.
@@ -110,7 +110,7 @@ pub struct PapersInfo {
 }
 
 /// Build-time stamps the corpus tracks about its index.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, schemars::JsonSchema)]
 pub struct CorpusStamps {
     /// Embedding model the chunks were embedded with, when stamped.
     pub embed_model: Option<String>,
@@ -125,7 +125,7 @@ pub struct CorpusStamps {
 }
 
 /// Rough disk usage of the library's three stores.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, schemars::JsonSchema)]
 pub struct DiskUsage {
     /// `catalog.db` size, when readable.
     pub catalog_db: Option<u64>,

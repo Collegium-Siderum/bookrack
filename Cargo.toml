@@ -119,6 +119,12 @@ rmcp = { version = "3.5", default-features = false, features = [
     "client",
     "transport-streamable-http-client-reqwest",
 ] }
+# JSON Schema derivation for the method table's parameter and result
+# types. The lower DTO crates take it behind an optional `schema`
+# feature, off by default, which `ops` turns on; the version and the
+# `chrono04` feature are the ones rmcp already locks, so the graph does
+# not grow. License: MIT.
+schemars = { version = "1", features = ["chrono04"] }
 # HTTP server that hosts the MCP streamable-HTTP service. Entry-point only,
 # alongside rmcp; hyper comes in transitively.
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }

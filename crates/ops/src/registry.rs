@@ -1444,10 +1444,10 @@ mod tests {
 
     /// Compile-time registration: every variant is named here, so a
     /// variant added to the `#[non_exhaustive]` enum stops its author
-    /// at a same-crate `match` and sends them to the wire mappings in
-    /// the runtime and MCP crates, where a downstream `match` cannot
-    /// be exhaustive and a new variant would otherwise take a default
-    /// code.
+    /// at a same-crate `match` and sends them to the judgement in
+    /// `error_class::from_registry` and to the MCP crate's wire
+    /// mapping, where a downstream `match` cannot be exhaustive and a
+    /// new variant would otherwise take a default code.
     #[test]
     fn every_registry_error_variant_is_registered_for_wire_mapping() {
         fn assert_classified(e: &RegistryError) {

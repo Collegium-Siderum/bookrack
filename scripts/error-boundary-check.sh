@@ -35,6 +35,12 @@
 # `crates/mcp/src/error_map.rs`, the one MCP file the rule above
 # covers. An `ErrorData::` call anywhere else in the crate's sources
 # would be an exit that rule never reads, so it fails here.
+#
+# A third rule: a failure is judged only in
+# `crates/ops/src/error_class.rs`. A `ClassifiedError` struct literal
+# anywhere else would be a second judgement for the two transports to
+# drift apart on; the classifier's entry points are the way to obtain
+# one.
 set -eu
 fail=0
 
@@ -43,7 +49,13 @@ if grep -rn 'ErrorData::' crates/mcp/src | grep -v '^crates/mcp/src/error_map.rs
   fail=1
 fi
 
+if grep -rn 'ClassifiedError {' crates --include='*.rs' | grep -v '^crates/ops/src/error_class.rs:'; then
+  echo "BOUNDARY: ClassifiedError built outside crates/ops/src/error_class.rs -- use its classifiers"
+  fail=1
+fi
+
 boundary_files="
+crates/ops/src/error_class.rs
 crates/runtime/src/control/error_map.rs
 crates/runtime/src/control/methods/reads_library.rs
 crates/runtime/src/unmounted.rs

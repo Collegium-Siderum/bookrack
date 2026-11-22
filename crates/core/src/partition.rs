@@ -36,6 +36,7 @@ pub const NODE_CAPACITY: i64 = NODE_PARTITION_FACTOR - 1;
 /// Serializes transparently as its bare `i64` (a newtype struct), so a
 /// query consumer sees `start_node_id: 12345`, not a wrapper object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct NodeId(i64);
 
 impl NodeId {

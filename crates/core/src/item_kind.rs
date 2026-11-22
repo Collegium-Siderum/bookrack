@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 /// [`ItemKind`] round-trips through any JSON-shaped wire format without
 /// a custom derive on the consumer side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum ItemKind {
     /// A book ingested through the `ingest` pipeline. Default so that

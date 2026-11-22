@@ -20,3 +20,10 @@ serde_json.workspace = true
 # Broadcast channel + ring buffer that fan out log events to live
 # subscribers (`session.logs_tail`, the SSE endpoint, REPL `:logs tail`).
 tokio = { workspace = true, features = ["sync"] }
+# JSON Schema derives behind the `schema` feature.
+schemars = { workspace = true, optional = true }
+
+[features]
+# Derive `schemars::JsonSchema` on the types this crate hands the
+# method table. Off by default; `bookrack-ops` turns it on.
+schema = ["dep:schemars"]

@@ -34,7 +34,7 @@ pub struct Caller {
 /// Decoupled from [`bookrack_catalog::MetadataAudit`] so a catalog schema
 /// change does not break MCP clients. The `actor_kind` field carries the
 /// database string ("human", "llm", ...), not the enum variant name.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AuditTrailEntry {
     /// Surrogate key assigned by the database.
     pub audit_id: i64,
@@ -84,7 +84,7 @@ impl AuditTrailEntry {
 }
 
 /// One row of the book-level pipeline audit trail, projected for the wire.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PipelineAuditEntry {
     /// Surrogate key assigned by the database.
     pub audit_id: i64,

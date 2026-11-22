@@ -80,6 +80,7 @@ bookrack_core::fixed_settings! {
 /// consumers can forward it verbatim and `session.logs_tail` can return
 /// a slice of events without re-formatting.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LogEvent {
     /// Wall-clock timestamp the event passed through the layer.
     pub ts: chrono::DateTime<chrono::Utc>,
