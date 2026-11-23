@@ -10,7 +10,9 @@ bookrack-audit-profile = { path = "../audit-profile" }
 bookrack-catalog = { path = "../catalog" }
 bookrack-config = { path = "../config" }
 bookrack-control-client = { path = "../control-client" }
-bookrack-core = { path = "../core" }
+# `schema`: the session tools' results carry a `Problem` and describe
+# themselves to the MCP tool list.
+bookrack-core = { path = "../core", features = ["schema"] }
 bookrack-corpus = { path = "../corpus" }
 bookrack-dbkit = { path = "../dbkit" }
 bookrack-diagnose = { path = "../diagnose" }
@@ -21,7 +23,8 @@ bookrack-index-profile = { path = "../index-profile" }
 # the PDF adapter that consumes the library.
 bookrack-extract = { path = "../extract" }
 bookrack-metadata = { path = "../metadata" }
-bookrack-obs = { path = "../obs" }
+# `schema`: `session.logs_tail` returns log events in a typed result.
+bookrack-obs = { path = "../obs", features = ["schema"] }
 bookrack-ops = { path = "../ops" }
 bookrack-query = { path = "../query" }
 bookrack-cli-grammar = { path = "../cli-grammar" }

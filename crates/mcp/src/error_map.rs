@@ -1,151 +1,39 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Map typed server-side errors onto the MCP wire envelope.
+//! Move a judged failure onto the MCP wire envelope.
 //!
-//! This is the crate's outbound boundary: every message an agent
-//! client sees leaves through one of these helpers. Wording is not
-//! written here — each error renders itself through
-//! [`bookrack_core::Explain`], and [`mcp_from_problem`] splits the
-//! result across the MCP envelope: the summary into `message`, the
-//! detail / hint / retryable triple into `data`. A type with no
-//! `Explain` impl takes [`Problem::from_error_chain`], whose summary
-//! is the flattened cause chain — `Display` on a wrapper variant
-//! prints only its own text and would drop the root cause exactly
-//! where the caller can no longer reach it.
-//! `scripts/error-boundary-check.sh` enforces that for this file.
+//! This is the crate's outbound boundary: every error an agent client
+//! sees leaves through one of these helpers. Nothing is judged or
+//! worded here. A tool's failure arrives judged — by the ops method
+//! dispatcher, or by a session tool — and the control plane's error map
+//! turns it into the code and three-part message both transports
+//! answer with: the summary in `message`, the detail / hint / retryable
+//! triple in `data`. This file moves that envelope across to rmcp's
+//! type, so one failure takes one code and one wording on either
+//! surface. `scripts/error-boundary-check.sh` keeps every MCP error
+//! envelope in this file.
 
-// Parallel implementation: frontend-error-map.
-
-use bookrack_core::{Explain, Problem};
-use bookrack_ops::OpsError;
-use bookrack_ops::dto::UnknownFilterValue;
-use bookrack_ops::reads::reference::ReferenceError;
-use bookrack_ops::registry::RegistryError;
+use bookrack_ops::methods::dispatch::DispatchError;
+use bookrack_runtime::control::error_map::{dispatch_err, session_err};
+use bookrack_runtime::control::jsonrpc::RpcError;
 use bookrack_runtime::control::methods::session::SessionError;
 use rmcp::ErrorData;
-use rmcp::model::{CallToolResult, ContentBlock, ErrorCode};
-use serde::Serialize;
+use rmcp::model::ErrorCode;
 
-/// Encode `value` to a JSON string and wrap it as the body of a successful
-/// tool response. Centralises serialization so every tool returns the same
-/// `text` content shape.
-pub(crate) fn respond_with<T: Serialize>(value: &T) -> Result<CallToolResult, ErrorData> {
-    let json = serde_json::to_string(value)
-        .map_err(|e| mcp_from_problem(ErrorCode::INTERNAL_ERROR, Problem::from_error_chain(&e)))?;
-    Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+/// Map a library method's failure onto the MCP envelope.
+pub(crate) fn dispatch_error_to_mcp(e: DispatchError) -> ErrorData {
+    envelope(dispatch_err(e))
 }
 
-/// Build the MCP error envelope from a rendered [`Problem`]: the
-/// summary line becomes `message`, the other three parts become
-/// `data`. Mirrors the control plane's `rpc_from_problem`, so the two
-/// front ends put the same object in the same slot.
-///
-/// `message` stays self-sufficient on its own, so a client that reads
-/// only that field learns no less than it did before `data` existed.
-pub(crate) fn mcp_from_problem(code: ErrorCode, problem: Problem) -> ErrorData {
-    envelope(
-        code,
-        problem.summary,
-        serde_json::to_value(problem.data).ok(),
-    )
-}
-
-/// An `invalid_params` envelope for a refusal a tool body words itself.
-pub(crate) fn invalid_params_message(message: String) -> ErrorData {
-    envelope(ErrorCode::INVALID_PARAMS, message, None)
-}
-
-/// The one constructor of the MCP error envelope: every outbound
-/// error of the crate is built in this file, where the flattening
-/// rule is enforced.
-fn envelope(code: ErrorCode, message: String, data: Option<serde_json::Value>) -> ErrorData {
-    ErrorData::new(code, message, data)
-}
-
-/// Map a validation or argument-shape error to an MCP `invalid_params`.
-///
-/// The tool bodies reject caller input in a handful of places that hold
-/// no typed enum worth matching on (exclusion-list validation,
-/// single-variant arms). They all funnel here so the outbound
-/// message stays flattened and this file remains the crate's only
-/// unguarded exit.
-pub(crate) fn invalid_params_err<E: std::error::Error + 'static>(e: &E) -> ErrorData {
-    mcp_from_problem(ErrorCode::INVALID_PARAMS, Problem::from_error_chain(e))
-}
-
-/// Map a registry refusal onto an MCP `invalid_params`, through the
-/// error's own wording: the names that would resolve reach the agent
-/// in the hint, as they do on the control plane.
-pub(crate) fn registry_err(e: &RegistryError) -> ErrorData {
-    mcp_from_problem(ErrorCode::INVALID_PARAMS, e.explain())
-}
-
-/// Map a refused filter value to an MCP `invalid_params`.
-///
-/// The accepted set travels with the refusal rather than being spelled
-/// out here, so a vocabulary that gains a value cannot leave a stale
-/// list behind on this surface.
-pub(crate) fn unknown_filter_value_to_mcp(unknown: &UnknownFilterValue) -> ErrorData {
-    mcp_from_problem(
-        ErrorCode::INVALID_PARAMS,
-        Problem::new(format!(
-            "cannot filter on {} value {:?}",
-            unknown.parameter, unknown.value
-        ))
-        .detail(format!(
-            "The {} filter names a value no row carries, so it was refused rather \
-             than applied without it.",
-            unknown.parameter
-        ))
-        .hint(format!("Use one of: {}.", unknown.accepted.join(", "))),
-    )
-}
-
-/// Map an [`OpsError`] onto the MCP envelope through the control
-/// plane's classifier.
-///
-/// [`bookrack_runtime::control::error_map::ops_err`] decides the code
-/// — caller input, a store this build cannot serve, a backend that
-/// did not answer, or a residual internal fault — and renders the
-/// three-part message; this function only moves the envelope across
-/// to rmcp's type. The code is not re-decided here, so a typed error
-/// takes the same code over MCP as over the control socket.
-///
-/// Tool bodies that answer a missing id with a `null` body match that
-/// variant before reaching this function; everything else funnels
-/// here.
-pub(crate) fn ops_error_to_mcp(e: OpsError) -> ErrorData {
-    let rpc = bookrack_runtime::control::error_map::ops_err(e);
-    envelope(ErrorCode(rpc.code), rpc.message, rpc.data)
-}
-
-/// Map a handler's `eyre::Report` onto the MCP envelope through the
-/// control plane's classifier, for the tool bodies that share a
-/// runtime helper with a control-plane method. `method` labels the
-/// residual internal-error message with the tool's wire name. As with
-/// [`ops_error_to_mcp`], the code is decided once, in
-/// [`bookrack_runtime::control::error_map::handler_err`].
-pub(crate) fn report_to_mcp(method: &str, e: eyre::Report) -> ErrorData {
-    let rpc = bookrack_runtime::control::error_map::handler_err(method, e);
-    envelope(ErrorCode(rpc.code), rpc.message, rpc.data)
-}
-
-/// Map a reference read or write failure onto the MCP envelope
-/// through the control plane's classifier, as [`ops_error_to_mcp`]
-/// does: the code is decided once, in
-/// [`bookrack_runtime::control::error_map::reference_err`], so the
-/// `reference.lookup` and `reference.overlay_set` tools and the
-/// control-plane method answer one failure with one code.
-pub(crate) fn reference_error_to_mcp(e: ReferenceError) -> ErrorData {
-    let rpc = bookrack_runtime::control::error_map::reference_err(e);
-    envelope(ErrorCode(rpc.code), rpc.message, rpc.data)
-}
-
-/// Map a session tool's failure onto the MCP envelope through the
-/// control plane's classifier, as [`ops_error_to_mcp`] does.
+/// Map a session tool's failure onto the MCP envelope.
 pub(crate) fn session_error_to_mcp(e: SessionError) -> ErrorData {
-    let rpc = bookrack_runtime::control::error_map::session_err(e);
-    envelope(ErrorCode(rpc.code), rpc.message, rpc.data)
+    envelope(session_err(e))
+}
+
+/// The one constructor of the MCP error envelope: the control plane's
+/// envelope, code, message, and data as they are.
+fn envelope(rpc: RpcError) -> ErrorData {
+    ErrorData::new(ErrorCode(rpc.code), rpc.message, rpc.data)
 }
 
 #[cfg(test)]
@@ -153,8 +41,36 @@ mod tests {
     use super::*;
     use bookrack_catalog::CatalogError;
     use bookrack_embed::EmbedError;
+    use bookrack_ops::OpsError;
+    use bookrack_ops::error_class;
+    use bookrack_ops::reads::reference::ReferenceError;
+    use bookrack_ops::registry::RegistryError;
     use bookrack_query::QueryError;
-    use bookrack_runtime::control::jsonrpc::{BACKEND_UNAVAILABLE, STATE_UNUSABLE};
+    use bookrack_runtime::control::jsonrpc::{
+        BACKEND_UNAVAILABLE, INVALID_LIBRARY, STATE_UNUSABLE,
+    };
+
+    /// The MCP envelope of an ops error as the dispatcher judges it.
+    fn ops_error_to_mcp(e: OpsError) -> ErrorData {
+        dispatch_error_to_mcp(DispatchError::Judged(error_class::from_ops(&e)))
+    }
+
+    /// The MCP envelope of a registry refusal as the dispatcher judges
+    /// it.
+    fn registry_err(e: &RegistryError) -> ErrorData {
+        dispatch_error_to_mcp(DispatchError::Judged(error_class::from_registry(e)))
+    }
+
+    /// The MCP envelope of a reference failure as the dispatcher judges
+    /// it.
+    fn reference_error_to_mcp(e: ReferenceError) -> ErrorData {
+        dispatch_error_to_mcp(DispatchError::Judged(error_class::from_reference(&e)))
+    }
+
+    /// The problem an envelope's `data` carries.
+    fn problem_data(err: &ErrorData) -> bookrack_core::ProblemData {
+        serde_json::from_value(err.data.clone().expect("data slot filled")).expect("ProblemData")
+    }
 
     #[test]
     fn wrapper_error_keeps_its_root_cause_on_the_wire() {
@@ -172,8 +88,7 @@ mod tests {
         }));
         let err = ops_error_to_mcp(e);
         assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "{}", err.message);
-        let data: bookrack_core::ProblemData =
-            serde_json::from_value(err.data.expect("data slot filled")).expect("ProblemData");
+        let data = problem_data(&err);
         assert!(data.hint.expect("hint").contains("ollama pull test-model"));
         assert!(!data.retryable);
         assert!(err.message.contains("test-model"), "{}", err.message);
@@ -189,9 +104,7 @@ mod tests {
             body: "loading model".into(),
         }));
         assert_eq!(err.code, ErrorCode(BACKEND_UNAVAILABLE), "{}", err.message);
-        let data: bookrack_core::ProblemData =
-            serde_json::from_value(err.data.expect("data slot filled")).expect("ProblemData");
-        assert!(data.retryable);
+        assert!(problem_data(&err).retryable);
     }
 
     /// An Ollama that answered a search's own embed round trip with
@@ -208,9 +121,7 @@ mod tests {
         ))));
         assert_eq!(err.code, ErrorCode(BACKEND_UNAVAILABLE), "{}", err.message);
         assert!(!err.message.contains("search error"), "{}", err.message);
-        let data: bookrack_core::ProblemData =
-            serde_json::from_value(err.data.expect("data slot filled")).expect("ProblemData");
-        assert!(data.retryable);
+        assert!(problem_data(&err).retryable);
     }
 
     /// An empty search query is the agent's own input: the parameter
@@ -220,8 +131,7 @@ mod tests {
         use bookrack_search::SearchError;
         let err = ops_error_to_mcp(OpsError::Query(QueryError::Search(SearchError::EmptyQuery)));
         assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "{}", err.message);
-        let data: bookrack_core::ProblemData =
-            serde_json::from_value(err.data.expect("data slot filled")).expect("ProblemData");
+        let data = problem_data(&err);
         assert!(data.hint.is_some_and(|h| !h.trim().is_empty()));
         assert!(!data.retryable);
     }
@@ -234,15 +144,12 @@ mod tests {
         });
         let err = ops_error_to_mcp(e);
         assert_eq!(err.code, ErrorCode(STATE_UNUSABLE), "{}", err.message);
-        let data: bookrack_core::ProblemData =
-            serde_json::from_value(err.data.expect("data slot filled")).expect("ProblemData");
+        let hint = problem_data(&err).hint;
         assert!(
-            data.hint
-                .as_deref()
+            hint.as_deref()
                 .unwrap_or("")
                 .contains("newer bookrack build"),
-            "hint: {:?}",
-            data.hint
+            "hint: {hint:?}"
         );
     }
 
@@ -269,18 +176,18 @@ mod tests {
         assert_eq!(mapped.code, ErrorCode::INTERNAL_ERROR, "{}", mapped.message);
     }
 
-    /// An unnamed tool call the daemon cannot route is the agent's
-    /// input to fix: invalid params, with the `library` argument as
-    /// the next step in the data slot.
+    /// An unnamed tool call the daemon cannot route names a library the
+    /// agent has to choose: the invalid-library code the control plane
+    /// answers with, with the `library` argument as the next step in
+    /// the data slot.
     #[test]
-    fn an_unroutable_unnamed_call_is_invalid_params_with_a_hint() {
+    fn an_unroutable_unnamed_call_is_invalid_library_with_a_hint() {
         let err = registry_err(&RegistryError::UnnamedAmbiguous {
             mounted: vec!["alpha".into(), "beta".into()],
             default: Some("gamma".into()),
         });
-        assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "{}", err.message);
-        let data: bookrack_core::ProblemData =
-            serde_json::from_value(err.data.expect("data slot filled")).expect("ProblemData");
+        assert_eq!(err.code, ErrorCode(INVALID_LIBRARY), "{}", err.message);
+        let data = problem_data(&err);
         assert!(
             data.hint
                 .as_deref()
@@ -294,6 +201,69 @@ mod tests {
             "detail: {:?}",
             data.detail
         );
+    }
+
+    /// Every registry refusal takes the code the control plane gives it:
+    /// a library the agent named or must name is invalid library, an
+    /// empty registry is the caller's input, and a poisoned lock is a
+    /// fault.
+    #[test]
+    fn registry_refusals_take_the_control_planes_codes() {
+        for e in [
+            RegistryError::LibraryUnknown {
+                name: "ghost".into(),
+                available: vec!["alpha".into()],
+            },
+            RegistryError::UnnamedAmbiguous {
+                mounted: vec!["alpha".into(), "beta".into()],
+                default: None,
+            },
+            RegistryError::LibraryUnmounted {
+                name: "beta".into(),
+                reason: Box::new(bookrack_core::Problem::new("cannot read the catalog")),
+            },
+        ] {
+            let err = registry_err(&e);
+            assert_eq!(err.code, ErrorCode(INVALID_LIBRARY), "{}", err.message);
+        }
+        let empty = registry_err(&RegistryError::Empty);
+        assert_eq!(empty.code, ErrorCode::INVALID_PARAMS, "{}", empty.message);
+        for poisoned in [
+            RegistryError::DefaultLockPoisoned,
+            RegistryError::LibsLockPoisoned,
+        ] {
+            let err = registry_err(&poisoned);
+            assert_eq!(err.code, ErrorCode::INTERNAL_ERROR, "{}", err.message);
+        }
+    }
+
+    /// The reference tools' failures: caller input, a store this build
+    /// cannot serve, and a residual fault each keep their own code.
+    #[test]
+    fn reference_errors_split_into_caller_input_state_and_fault() {
+        let invalid = [
+            ReferenceError::InvalidArgument("bad".to_owned()),
+            ReferenceError::UnknownOverlayProperty {
+                key: "bogus".to_owned(),
+            },
+        ];
+        for err in invalid {
+            let mapped = reference_error_to_mcp(err);
+            assert_eq!(mapped.code, ErrorCode::INVALID_PARAMS, "{}", mapped.message);
+        }
+        let newer = reference_error_to_mcp(ReferenceError::Open {
+            path: "/data/reference.db".into(),
+            source: bookrack_refs::RefsError::SchemaTooNew {
+                found: 99,
+                supported: 1,
+            },
+        });
+        assert_eq!(newer.code, ErrorCode(STATE_UNUSABLE), "{}", newer.message);
+        let fault = reference_error_to_mcp(ReferenceError::Io {
+            path: "/data/reference.db".into(),
+            source: std::io::Error::other("permission denied"),
+        });
+        assert_eq!(fault.code, ErrorCode::INTERNAL_ERROR, "{}", fault.message);
     }
 
     #[test]

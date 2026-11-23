@@ -5,8 +5,9 @@
 //!
 //! The method bodies live in the ops dispatcher, which both transports
 //! call; this module supplies what the control plane contributes — the
-//! caller every write records, the process-side half of `library.info`,
-//! and the mapping of a judged failure onto a JSON-RPC envelope.
+//! caller every write records and the mapping of a judged failure onto a
+//! JSON-RPC envelope — and [`ProcessHost`], the process-side half of
+//! `library.info`, which the MCP transport hands the dispatcher too.
 
 use bookrack_config::Config;
 use bookrack_ops::Caller;
@@ -19,13 +20,17 @@ use super::MethodContext;
 use crate::control::error_map::dispatch_err;
 use crate::control::jsonrpc::RpcError;
 
-/// The control plane's half of the methods that need the host.
-struct ControlHost<'a> {
-    ollama_url: &'a str,
-    mcp_addr: &'a str,
+/// The daemon's half of the methods that need the host: the two
+/// endpoints of the process, which a library's status card reports
+/// beside the library's own facts.
+pub struct ProcessHost<'a> {
+    /// The Ollama endpoint the daemon reaches.
+    pub ollama_url: &'a str,
+    /// The MCP listener address, or `disabled`.
+    pub mcp_addr: &'a str,
 }
 
-impl HostContext for ControlHost<'_> {
+impl HostContext for ProcessHost<'_> {
     /// The card's identity is the library the handle names: the counts
     /// already come from that handle, and a card pairing one library's
     /// counts with another's root is the one an operator cannot read.
@@ -42,7 +47,7 @@ pub(super) async fn dispatch(
     params: &Option<Value>,
     ctx: &MethodContext,
 ) -> Result<Value, RpcError> {
-    let host = ControlHost {
+    let host = ProcessHost {
         ollama_url: &ctx.daemon_config.ollama_url,
         mcp_addr: &ctx.info_context.mcp_addr,
     };

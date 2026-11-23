@@ -253,16 +253,20 @@ pub fn dispatch_err(e: DispatchError) -> RpcError {
     }
 }
 
-/// Map a session tool's failure: a registry that could not be read and
-/// a poisoned queue lock are faults, an unknown state filter is caller
-/// input.
+/// Map a session tool's failure: params that do not fit and an unknown
+/// state filter are caller input; a registry that could not be read is
+/// judged as the registry judges it; a poisoned queue lock, a reply
+/// that did not serialize, and a tool with no body are faults.
 pub fn session_err(e: SessionError) -> RpcError {
     match &e {
         SessionError::Registry(registry) => {
             rpc_from_classified(error_class::from_registry(registry))
         }
         SessionError::UnknownState(unknown) => unknown_filter_value(unknown),
-        SessionError::QueueStateLock => rpc_from_classified(error_class::from_server_fault(&e)),
+        SessionError::Params(params) => rpc_from_classified(error_class::from_params(params)),
+        SessionError::QueueStateLock
+        | SessionError::Encode { .. }
+        | SessionError::NoBody { .. } => rpc_from_classified(error_class::from_server_fault(&e)),
     }
 }
 

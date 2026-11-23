@@ -1332,6 +1332,44 @@ buckets below; adding, renaming, or removing a tool fails that test
 until the list is updated, which is the point at which the version
 discipline (a tool-surface change is a minor bump) applies.
 
+The tools are registered from two tables rather than written one by
+one. Thirty-nine are the rows of the ops method table that MCP carries
+— every method under *Methods (library read proxies)* except
+`papers.export_csl` — and take their name, description, and parameter
+schema from the row; their bodies are the dispatcher the control plane
+runs. The other four are the session tools, `session.info`,
+`session.logs_tail`, `session.queue_status`, and `session.shutdown`,
+whose table and bodies live in the daemon's runtime. A tool and the
+control-plane method of the same row therefore read their params from
+one type: the book-side metadata writes are the exception, whose two
+wire contracts stay apart — `book` and an optional `reason` on the
+control plane, `intake_id`, a required `library`, and a required
+`reason` over MCP.
+
+Every successful answer is one text content block holding the JSON
+body, fields in the order the result type declares them. The shape of
+the answer decides what else a tool publishes:
+
+- A tool whose answer is always a JSON object — 27 of them, the four
+  session tools included — publishes an `outputSchema` in `tools/list`
+  and carries the same value as `structuredContent` beside the text.
+- A tool whose answer is an object, or `null` when the addressed item
+  does not exist — `library.show_book`, `library.show_toc`,
+  `library.read_context`, `library.read_span`,
+  `library.show_metadata_audit`, `library.show_metadata_report`,
+  `library.show_paper`, `library.show_paper_toc`,
+  `library.show_paper_metadata_report`, `papers.fetch_source` —
+  publishes no output schema, and carries `structuredContent` only
+  when the answer is an object.
+- A tool whose answer is an array, or an array or `null` — the three
+  searches and the three trails, `library.show_audit_trail`,
+  `library.show_paper_audit_trail`, `library.show_pipeline_trail` —
+  publishes no output schema and answers with the text alone.
+
+A client on a protocol version before 2026-07-28 is sent the same, less
+anything the MCP SDK withholds from such a client: it strips an output
+schema or structured content whose root is not an object.
+
 Eleven of the tools write:
 
 - `library.metadata.set` / `library.metadata.clear` — add or remove an
@@ -1352,6 +1390,11 @@ It also carries the six identity fields of `daemon.version` —
 `instance_id`, `version`, `pid`, `runtime_dir`, `control_sock`,
 `started_at` — with the daemon's own values, so an agent client and a
 control-plane client can tell they are talking to the same daemon.
+`session.queue_status` counts the whole queue by state, as `queue.list`
+does in its `summary`, and lists the ten most recently enqueued jobs,
+optionally only those in one `state`; the control plane does not serve
+the name, and a call to it there is answered `-32601` naming
+`queue.list`.
 
 Every write tool runs attributed to `Caller::mcp()`, so its audit rows
 carry `actor_kind=llm` / `actor_detail=mcp` regardless of the surface
@@ -1360,29 +1403,32 @@ that launched the daemon. The metadata write tools all require a
 
 A tool that fails answers with the error codes listed under *Error
 codes* above, in the MCP error envelope: the summary in `message`, the
-detail / hint / retryable triple in `data`. The typed ops errors the
-tools raise go through the same mapping layer as the control-plane
-methods, so `-32602`, `-32017`, and `-32018` mean on this surface
-exactly what they mean there, and a residual `-32603` is a fault to
-report rather than a state to repair. The tools keep the read proxies'
-own rule: an intake or node id that resolves to nothing is a `null`
-body (or an empty list, where the tool description says so), not an
-error.
+detail / hint / retryable triple in `data`. A tool's failure is judged
+where the control-plane method's is, and mapped by the same code, so
+every code means on this surface exactly what it means there: `-32602`
+for the caller's input, params that do not fit the tool's schema
+included; `-32010` for a `library` the registry does not carry, a
+library bring-up skipped, or an unnamed call the registry cannot route,
+with the names that would resolve, or the skip's own repair, in the
+hint; `-32001` for a write refused while another holds the write mutex;
+`-32017` for a backend that did not answer; `-32018` for a store this
+build cannot serve. A residual `-32603` is a fault to report rather
+than a state to repair. The tools keep the read proxies' own rule: an
+intake or node id that resolves to nothing is a `null` body (or an
+empty list, where the tool description says so), not an error.
 
 The read set includes `library.show_paper_metadata_report`,
 `library.show_paper_audit_trail`, `library.list_paper_metadata` and
 `library.list_paper_pending_reviews` — the paper peers of
 `library.show_metadata_report`, `library.show_audit_trail`,
 `library.list_metadata` and `library.list_pending_reviews`. The two
-report tools run the built-in default audit profiles rather than the
-library's overlays; the control-plane methods of the same names grade
-under the overlays, so the two surfaces can grade the same item
-differently, and the tool description says which one it ran. The write tool
-`library.metadata.reaudit` does not share that rule: like the
-control-plane `metadata.reaudit`, it grades under the library's audit
-data and audit profile overlays, read when the call arrives. So on this
-surface the report `library.show_metadata_report` returns can differ
-from the rollup a re-audit of the same book then stores.
+report tools grade under the library's audit data and audit profile
+overlays, read when the call arrives, as the control-plane methods of
+the same names and the re-audit tools do.
+`library.show_paper_metadata_report` also takes an optional
+`audit_profile` naming a built-in paper profile to grade under instead.
+The two pending-review tools take a page and a `library`, and no
+filters.
 
 The read tools are not side-effect free: the four search tools append
 a `retrieval_calls` row (and its hits) per call, so a read-only data

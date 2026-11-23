@@ -129,7 +129,6 @@ impl ClassifiedError {
 /// one either per-cause entry reads, so a chain judged here is judged
 /// the same as by a host that walks it itself and asks
 /// [`classify_ops_cause`] and [`classify_leaf_cause`] in turn.
-// Parallel implementation: frontend-error-map.
 pub fn classify_report(err: &Report) -> Option<ClassifiedError> {
     for cause in err.chain() {
         if let Some(classified) = classify_ops_cause(cause) {

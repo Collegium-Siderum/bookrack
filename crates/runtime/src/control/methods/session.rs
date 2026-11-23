@@ -9,8 +9,10 @@
 //! and does not serve these names; a control-plane call to one is told
 //! which method to use instead.
 //!
-//! Each tool body here returns its typed result or a [`SessionError`];
-//! the transport serializes the one and maps the other through
+//! [`SESSION_TOOLS`] lists the tools with their schemas, and
+//! [`dispatch`] runs one: it reads the call's params, runs the tool's
+//! body, and answers with the same [`Reply`] the library methods answer
+//! with, or a [`SessionError`] the transport maps through
 //! [`crate::control::error_map::session_err`].
 
 use std::sync::{Arc, Mutex};
@@ -20,8 +22,13 @@ use bookrack_core::queue::{JobState, QueueState};
 use bookrack_core::{DaemonIdentity, Problem};
 use bookrack_obs::{LogEvent, LogStreamHandle};
 use bookrack_ops::dto::UnknownFilterValue;
+use bookrack_ops::methods::dispatch::Reply;
+use bookrack_ops::methods::params::ParamsError;
+use bookrack_ops::methods::{SchemaFn, input_schema, output_schema};
 use bookrack_ops::registry::RegistryError;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::sync::broadcast;
 
 use super::DaemonRegistry;
@@ -39,6 +46,24 @@ pub enum SessionError {
     /// The queue snapshot's lock was poisoned by a panic while held.
     #[error("the queue state lock is poisoned")]
     QueueStateLock,
+    /// The call's params do not fit the tool's.
+    #[error(transparent)]
+    Params(ParamsError),
+    /// The tool's answer did not serialize.
+    #[error("encode the reply of {tool}")]
+    Encode {
+        /// The tool whose answer did not serialize.
+        tool: &'static str,
+        /// The serializer's refusal.
+        #[source]
+        source: serde_json::Error,
+    },
+    /// [`SESSION_TOOLS`] lists a tool [`dispatch`] has no body for.
+    #[error("{tool} has no body in the session tool table")]
+    NoBody {
+        /// The tool's name.
+        tool: &'static str,
+    },
 }
 
 /// Arguments for `session.info`. The tool takes no inputs.
@@ -141,7 +166,7 @@ pub struct SessionLogsTailParams {
 
 /// Response shape returned by `session.logs_tail`: a slice of the
 /// daemon's in-memory log ring buffer, oldest first.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SessionLogsTailResult {
     /// The events themselves.
     pub events: Vec<LogEvent>,
@@ -165,7 +190,7 @@ pub struct SessionQueueStatusParams {
 
 /// Compact projection of one queued ingest job, used in the `recent`
 /// list returned by `session.queue_status`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct QueueJobSummary {
     /// UUIDv7 string identifying the job.
     pub id: String,
@@ -192,7 +217,7 @@ pub struct QueueJobSummary {
 
 /// Response shape returned by `session.queue_status`: counts by state
 /// and a small recent-job tail.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SessionQueueStatusResult {
     /// Whether the worker is currently paused.
     pub paused: bool,
@@ -228,11 +253,154 @@ pub const SESSION_QUEUE_STATUS_RECENT: usize = 10;
 pub struct SessionShutdownParams {}
 
 /// Response shape returned by `session.shutdown`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SessionShutdownResult {
     /// Always `shutting down`: the signal is sent, and the daemon winds
     /// down after the reply.
     pub status: &'static str,
+}
+
+/// One session tool as MCP lists it: its name, what it does, and the
+/// schemas of its params and of its answer, which is always an object.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionTool {
+    /// The tool's name.
+    pub name: &'static str,
+    /// What the tool does, as an MCP client reads it in the tool list.
+    pub summary: &'static str,
+    /// The schema of its params.
+    pub input_schema: SchemaFn,
+    /// The schema of its answer.
+    pub output_schema: SchemaFn,
+}
+
+/// The session tools, in the order MCP registers them.
+pub const SESSION_TOOLS: &[SessionTool] = &[
+    SessionTool {
+        name: "session.info",
+        summary: "Daemon runtime summary: bookrack version, uptime, the libraries \
+                  this session has mounted (each with its data root and whether \
+                  it is the default), the registered libraries it did not mount \
+                  (each with its data root and the reason), the default library, \
+                  MCP listener address, and Ollama endpoint.",
+        input_schema: input_schema::<SessionInfoParams>,
+        output_schema: output_schema::<SessionInfoResult>,
+    },
+    SessionTool {
+        name: "session.logs_tail",
+        summary: "Return the most recent N log events from the daemon's in-memory \
+                  ring buffer (oldest first within the returned slice). N defaults \
+                  to 100 and is capped server-side at 1024.",
+        input_schema: input_schema::<SessionLogsTailParams>,
+        output_schema: output_schema::<SessionLogsTailResult>,
+    },
+    SessionTool {
+        name: "session.queue_status",
+        summary: "Snapshot of the ingest queue: counts by lifecycle state across the \
+                  whole queue, plus the most recently enqueued jobs (newest first, \
+                  capped at 10). `state` lists only jobs in that state, so \
+                  `{\"state\": \"failed\"}` finds failures however early they were \
+                  enqueued; a failed job carries its `error` and, when the daemon \
+                  classified the failure, a `problem` with summary, detail, hint and \
+                  retryable. Returns an empty snapshot when run against a daemon that \
+                  does not host a queue worker.",
+        input_schema: input_schema::<SessionQueueStatusParams>,
+        output_schema: output_schema::<SessionQueueStatusResult>,
+    },
+    SessionTool {
+        name: "session.shutdown",
+        summary: "Ask the daemon to perform a graceful shutdown. Returns immediately \
+                  after firing the shutdown signal; the listener and queue worker \
+                  then wind down asynchronously.",
+        input_schema: input_schema::<SessionShutdownParams>,
+        output_schema: output_schema::<SessionShutdownResult>,
+    },
+];
+
+/// What the session tools read and signal.
+pub struct SessionContext<'a> {
+    /// The libraries the daemon serves.
+    pub registry: &'a DaemonRegistry,
+    /// The daemon's own identity.
+    pub identity: &'a DaemonIdentity,
+    /// When the daemon came up.
+    pub started_at: Instant,
+    /// The MCP listener address, or `disabled`.
+    pub mcp_addr: &'a str,
+    /// The Ollama endpoint the daemon reaches.
+    pub ollama_url: &'a str,
+    /// The in-process log fan-out.
+    pub log_stream: &'a LogStreamHandle,
+    /// The queue snapshot the worker drives.
+    pub queue_state: &'a Arc<Mutex<QueueState>>,
+    /// Where `stopping` is published.
+    pub event_stream: &'a EventStreamHandle,
+    /// The session-wide shutdown signal.
+    pub shutdown_tx: &'a broadcast::Sender<()>,
+}
+
+/// Run session tool `tool` for a call carrying `params`.
+///
+/// `params` absent or `null` reads as an empty object, so a tool whose
+/// params are all optional takes no params at all.
+pub fn dispatch(
+    ctx: &SessionContext<'_>,
+    tool: &SessionTool,
+    params: Option<Value>,
+) -> Result<Reply, SessionError> {
+    let params = match params {
+        None | Some(Value::Null) => Value::Object(serde_json::Map::new()),
+        Some(value) => value,
+    };
+    match tool.name {
+        "session.info" => {
+            let _: SessionInfoParams = parse(tool.name, params)?;
+            reply(
+                tool.name,
+                &info(
+                    ctx.registry,
+                    ctx.identity,
+                    ctx.started_at,
+                    ctx.mcp_addr,
+                    ctx.ollama_url,
+                )?,
+            )
+        }
+        "session.logs_tail" => {
+            let p: SessionLogsTailParams = parse(tool.name, params)?;
+            reply(tool.name, &logs_tail(ctx.log_stream, &p))
+        }
+        "session.queue_status" => {
+            let p: SessionQueueStatusParams = parse(tool.name, params)?;
+            reply(tool.name, &queue_status(ctx.queue_state, &p)?)
+        }
+        "session.shutdown" => {
+            let _: SessionShutdownParams = parse(tool.name, params)?;
+            reply(tool.name, &shutdown(ctx.event_stream, ctx.shutdown_tx))
+        }
+        // Every row of the table has an arm above; the table's own test
+        // drives each row through here.
+        _ => Err(SessionError::NoBody { tool: tool.name }),
+    }
+}
+
+/// Deserialize a call's params into `T`, refusing them under the tool's
+/// name when they do not fit.
+fn parse<T: DeserializeOwned>(tool: &'static str, params: Value) -> Result<T, SessionError> {
+    serde_json::from_value(params).map_err(|e| {
+        SessionError::Params(ParamsError::Malformed {
+            method: tool,
+            message: format!("{e}"),
+        })
+    })
+}
+
+/// Serialize `tool`'s answer `value` into both forms of a [`Reply`].
+fn reply<T: Serialize>(tool: &'static str, value: &T) -> Result<Reply, SessionError> {
+    let encode = |source| SessionError::Encode { tool, source };
+    let text = serde_json::to_string(value).map_err(encode)?;
+    let value = serde_json::to_value(value).map_err(encode)?;
+    Ok(Reply { text, value })
 }
 
 /// The daemon's runtime summary: its identity, the libraries mounted
@@ -570,6 +738,80 @@ mod tests {
         assert_eq!(value["libraries"][0]["default"], true, "{value}");
         assert_eq!(value["mcp_addr"], "127.0.0.1:9", "{value}");
         assert_eq!(value["instance_id"], ctx.identity.instance_id, "{value}");
+    }
+
+    /// The session context a test method context stands for.
+    fn session_context(ctx: &crate::control::methods::MethodContext) -> SessionContext<'_> {
+        SessionContext {
+            registry: &ctx.registry,
+            identity: &ctx.identity,
+            started_at: Instant::now(),
+            mcp_addr: "127.0.0.1:9",
+            ollama_url: "http://127.0.0.1:11434",
+            log_stream: &ctx.log_stream,
+            queue_state: &ctx.queue_state,
+            event_stream: &ctx.event_stream,
+            shutdown_tx: &ctx.shutdown_tx,
+        }
+    }
+
+    /// Every row of the table reaches a body, and answers with the
+    /// object its output schema describes: the text and the value are
+    /// one answer. Each schema is an object at the root carrying
+    /// neither a root `title` nor a root `description`.
+    #[test]
+    fn every_session_tool_reaches_a_body_and_answers_an_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_method_context(dir.path(), Some("alpha"));
+        let names: Vec<&str> = SESSION_TOOLS.iter().map(|tool| tool.name).collect();
+        assert_eq!(
+            names,
+            [
+                "session.info",
+                "session.logs_tail",
+                "session.queue_status",
+                "session.shutdown"
+            ]
+        );
+        for tool in SESSION_TOOLS {
+            assert!(!tool.summary.trim().is_empty(), "{}", tool.name);
+            for schema in [(tool.input_schema)(), (tool.output_schema)()] {
+                assert_eq!(schema["type"], "object", "{}: {schema:?}", tool.name);
+                for root_key in ["title", "description"] {
+                    assert!(!schema.contains_key(root_key), "{}: {schema:?}", tool.name);
+                }
+            }
+            let reply = dispatch(&session_context(&ctx), tool, None)
+                .unwrap_or_else(|e| panic!("{}: {e:?}", tool.name));
+            assert!(reply.value.is_object(), "{}: {}", tool.name, reply.text);
+            assert_eq!(
+                serde_json::from_str::<Value>(&reply.text).expect("the text is JSON"),
+                reply.value,
+                "{}",
+                tool.name
+            );
+        }
+    }
+
+    /// Params that do not fit a tool's are caller input, refused under
+    /// the tool's name.
+    #[test]
+    fn params_that_do_not_fit_are_refused_under_the_tools_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_method_context(dir.path(), Some("alpha"));
+        let tool = SESSION_TOOLS
+            .iter()
+            .find(|tool| tool.name == "session.logs_tail")
+            .expect("a table row");
+        let err = dispatch(&session_context(&ctx), tool, Some(json!({ "n": "three" })))
+            .expect_err("a count that is not a number");
+        let rpc = crate::control::error_map::session_err(err);
+        assert_eq!(rpc.code, crate::control::jsonrpc::INVALID_PARAMS);
+        assert!(
+            rpc.message.starts_with("invalid session.logs_tail params:"),
+            "{}",
+            rpc.message
+        );
     }
 
     /// The recent-jobs cap is registered as this crate's compiled-in

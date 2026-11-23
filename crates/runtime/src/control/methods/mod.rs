@@ -52,6 +52,7 @@ use crate::cmd::input_error::CmdInputError;
 /// method table checks its rows against, implemented here for the
 /// host's own params types.
 pub use bookrack_ops::methods::RoutedParams;
+pub use library::ProcessHost;
 
 /// Implement [`RoutedParams`] for params types that spell the key
 /// `library`. Invoked in the module that owns the type, so the field

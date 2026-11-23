@@ -95,17 +95,42 @@ release workflow extracts the matching section verbatim from this file.
   write holds the mutex the call answers `-32001`. An edit that lands
   announces `library.changed`. See
   [control-plane.md](docs/control-plane.md).
+- **MCP tools whose answer is always an object publish an output
+  schema and answer with structured content.** Twenty-seven tools, the
+  four session tools among them, list an `outputSchema` in `tools/list`
+  and carry their answer as `structuredContent` beside the text block,
+  which is unchanged. A tool whose answer may be `null` carries
+  structured content only when it found the item, and publishes no
+  schema; the searches and the trails answer with the text alone. See
+  [control-plane.md](docs/control-plane.md).
 
 ### Changed
 
-- **The control-plane `library.show_metadata_report` grades under the
-  library's overlays.** The report graded against the shipped audit
-  profile and data lists, while `metadata.reaudit` stores under the
-  library's `audit-rules/` overlays, so the report could show a flag the
-  re-audit it recommends would not store. It now reads both overlays
-  when the call arrives, as `library.show_paper_metadata_report`
-  already did. The MCP tool of the same name still grades under the
-  shipped profile.
+- **The `library.show_metadata_report` and
+  `library.show_paper_metadata_report` reports grade under the
+  library's overlays, on both surfaces.** The book report graded
+  against the shipped audit profile and data lists on the control plane
+  and over MCP, and the paper report did over MCP, while the re-audits
+  store under the library's `audit-rules/` overlays, so a report could
+  show a flag the re-audit it recommends would not store. Both now read
+  the overlays when the call arrives. The MCP
+  `library.show_paper_metadata_report` tool takes the optional
+  `audit_profile` the control-plane method takes.
+- **An MCP tool answers a `library` it cannot serve with `-32010`.** A
+  name the registry does not carry, a library bring-up skipped, and an
+  unnamed call the registry cannot route were `-32602` over MCP and
+  `-32010` on the control plane; both surfaces now answer `-32010`, with
+  the same message and hint.
+- **An MCP tool refuses params that do not fit its schema with
+  `-32602`.** Such a call was answered with a tool result flagged as an
+  error, its text `failed to deserialize parameters: ...`; it is now a
+  JSON-RPC error worded as the control plane words the same refusal,
+  `invalid <tool> params: ...`.
+- **The MCP pending-review tools no longer list filters they ignore.**
+  `library.list_pending_reviews` and `library.list_paper_pending_reviews`
+  listed `title_substring`, `confidence_in`, and `review_status_in` in
+  their schemas and never applied them; they now list `limit`, `offset`,
+  and `library` alone.
 - **`config fixed` lists `mcp.queue_status_recent` under `runtime`.**
   The MCP session tools' bodies live in the daemon's runtime, which owns
   the cap on the recent jobs `session.queue_status` returns; the value

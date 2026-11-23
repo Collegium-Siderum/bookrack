@@ -1,758 +1,51 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! bookrack MCP server: exposes the shared ops layer to agent clients
-//! over streamable HTTP.
+//! bookrack MCP server: exposes the daemon's method tables to agent
+//! clients over streamable HTTP.
 //!
-//! The server is a thin shell. It holds the warm [`LibraryRegistry`]
-//! behind an `Arc` and routes every tool call through it — the
-//! tool's `library` selector picks the target handle; absent, the
-//! registry routes the call as it does one naming no library — the
-//! default when it is mounted, else the only mounted library, else a
-//! refusal. The crate depends
-//! only on `bookrack-ops`, never on the database crates behind it, so
-//! a schema change downstream leaves it untouched.
+//! The server is a thin shell. Its tools are registered at run time
+//! from two tables: the rows of
+//! [`bookrack_ops::methods::LIBRARY_METHODS`] MCP carries, and the
+//! session tools of
+//! [`bookrack_runtime::control::methods::session::SESSION_TOOLS`]. A
+//! tool's name, description, and schemas are its row's, and its body is
+//! that table's dispatcher, the one the control plane calls too; this
+//! crate adds the MCP envelope around a reply and moves a judged
+//! failure onto the MCP error envelope. The `library` selector routes a
+//! call through the registry; absent, the registry routes the call as
+//! it does one naming no library — the default when it is mounted,
+//! else the only mounted library, else a refusal.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
 
 use axum::response::sse::{Event, KeepAlive, Sse};
+use bookrack_core::DaemonIdentity;
 use bookrack_core::queue::QueueState;
-use bookrack_core::{DaemonIdentity, ItemKind, KindedNodeId, NodeId};
-use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::LogStreamHandle;
-use bookrack_ops::dto::{BookFilter, MetadataFilter, PaperFilter, parse_statuses};
-use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
-use bookrack_ops::write_session::{ChangeSet, Region, SessionRunError, WriteSession};
-use bookrack_ops::{
-    Caller, OpsError, SearchOptions, audit_overlay, reads, with_caller_override, writes,
-};
+use bookrack_ops::methods::dispatch::{DispatchContext, Reply, dispatch};
+use bookrack_ops::methods::{LIBRARY_METHODS, MethodSpec, Output, Surface};
+use bookrack_ops::{Caller, with_caller_override};
 use bookrack_runtime::control::events::EventStreamHandle;
-use bookrack_runtime::control::methods::session;
+use bookrack_runtime::control::methods::session::{
+    self, SESSION_TOOLS, SessionContext, SessionTool,
+};
+use bookrack_runtime::control::methods::{DaemonRegistry, ProcessHost};
 use eyre::WrapErr;
-use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::handler::server::wrapper::Parameters;
+use rmcp::handler::server::router::tool::{ToolRoute, ToolRouter};
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::*;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
-use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
-
-mod error_map;
-use error_map::{
-    invalid_params_err, invalid_params_message, mcp_from_problem, ops_error_to_mcp,
-    reference_error_to_mcp, registry_err, report_to_mcp, respond_with, session_error_to_mcp,
-    unknown_filter_value_to_mcp,
-};
-use serde::Deserialize;
+use rmcp::{ErrorData, ServerHandler, tool_handler};
+use serde_json::Value;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 
-/// Arguments for the `library.search` tool.
-// Parallel implementation: frontend-param-mirror.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SearchArgs {
-    /// The natural-language query to search the library for.
-    pub query: String,
-    /// Maximum number of passages to return. Defaults to the server's
-    /// configured top-k when omitted.
-    pub top_k: Option<usize>,
-    /// Force a brute-force scan, ignoring any ANN index. Useful for
-    /// ground-truth checks.
-    #[serde(default)]
-    pub bypass_index: bool,
-    /// Override the IVF probe count for this query only. Higher values
-    /// trade latency for recall; the persisted meta default applies when
-    /// omitted.
-    #[serde(default)]
-    pub nprobes: Option<usize>,
-    /// Override the IVF-PQ refinement multiplier for this query only.
-    /// The persisted meta default applies when omitted.
-    #[serde(default)]
-    pub refine_factor: Option<u32>,
-    /// Library short name from the registry. Omit to let the daemon
-    /// route the call: the registry default when it is mounted, else
-    /// the only mounted library; otherwise the call is refused.
-    #[serde(default)]
-    pub library: Option<String>,
-    /// Which side of the library to search: `"book"` (the default —
-    /// existing behaviour), `"paper"` (only the paper-side store),
-    /// or `"all"` (both stores, merged by ascending distance).
-    #[serde(default)]
-    pub kind: Option<String>,
-    /// Catalog intake ids of books whose passages must not be returned.
-    /// Omit or pass an empty list to filter nothing. Applies to `kind`
-    /// `"book"` and `"all"`; passing it with `kind="paper"` is an
-    /// error, since the two id name spaces are unrelated. Ids that name
-    /// no book simply exclude nothing. `library.search_in_book` takes
-    /// no exclusions — recall is already confined to one book there.
-    #[serde(default)]
-    pub exclude_book_intake_ids: Vec<i64>,
-    /// Catalog intake ids of papers whose passages must not be
-    /// returned. The paper-side mirror of `exclude_book_intake_ids`:
-    /// applies to `kind` `"paper"` and `"all"`, and passing it with
-    /// `kind="book"` is an error.
-    #[serde(default)]
-    pub exclude_paper_intake_ids: Vec<i64>,
-}
-
-/// Arguments for the `library.search_in_book` tool.
-// Parallel implementation: frontend-param-mirror.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SearchInBookArgs {
-    /// Catalog intake id of the book to confine recall to.
-    pub intake_id: i64,
-    /// The natural-language query.
-    pub query: String,
-    /// Maximum number of passages to return.
-    pub top_k: Option<usize>,
-    /// Force a brute-force scan, ignoring any ANN index.
-    #[serde(default)]
-    pub bypass_index: bool,
-    /// Override the IVF probe count for this query only.
-    #[serde(default)]
-    pub nprobes: Option<usize>,
-    /// Override the IVF-PQ refinement multiplier for this query only.
-    #[serde(default)]
-    pub refine_factor: Option<u32>,
-    /// Library short name from the registry. Omit to let the daemon
-    /// route the call: the registry default when it is mounted, else
-    /// the only mounted library; otherwise the call is refused.
-    #[serde(default)]
-    pub library: Option<String>,
-}
-
-impl SearchArgs {
-    /// The side of the library to dispatch to, with the exclusion lists
-    /// checked against it: naming the other side's ids is refused as
-    /// invalid params rather than silently ignored. An unrecognized
-    /// kind passes through here and is rejected by the dispatch itself.
-    fn checked_kind(&self) -> Result<&str, ErrorData> {
-        let kind = self.kind.as_deref().unwrap_or("book");
-        reads::search::validate_exclusions(
-            kind,
-            &self.exclude_book_intake_ids,
-            &self.exclude_paper_intake_ids,
-        )
-        .map_err(|e| invalid_params_err(&e))?;
-        Ok(kind)
-    }
-
-    /// Project the override fields onto the underlying [`SearchOptions`]
-    /// struct the ops layer consumes, excluding the books named by
-    /// `exclude` — the ids of whichever side this call dispatches to.
-    fn overrides_excluding(&self, exclude: &[i64]) -> SearchOptions {
-        SearchOptions {
-            bypass_index: self.bypass_index,
-            nprobes: self.nprobes,
-            refine_factor: self.refine_factor,
-            exclude_partitions: reads::search::exclusions_to_partitions(exclude),
-        }
-    }
-}
-
-impl SearchInBookArgs {
-    /// Project the override fields onto the underlying [`SearchOptions`]
-    /// struct the ops layer consumes.
-    fn overrides(&self) -> SearchOptions {
-        SearchOptions {
-            bypass_index: self.bypass_index,
-            nprobes: self.nprobes,
-            refine_factor: self.refine_factor,
-            // A search already confined to one book has nothing to
-            // exclude, so this tool carries no exclusion fields.
-            exclude_partitions: Vec::new(),
-        }
-    }
-}
-
-/// Arguments for the `library.list_books` tool.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ListBooksArgs {
-    /// Maximum number of books in this page. Server-side cap applies.
-    #[serde(default)]
-    pub limit: Option<u32>,
-    /// Number of leading rows to skip.
-    #[serde(default)]
-    pub offset: Option<u32>,
-    /// Library short name from the registry. Omit to let the daemon
-    /// route the call: the registry default when it is mounted, else
-    /// the only mounted library; otherwise the call is refused.
-    #[serde(default)]
-    pub library: Option<String>,
-}
-
-/// Arguments for the `library.find_books` tool.
-// Parallel implementation: frontend-param-mirror.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct FindBooksArgs {
-    /// Substring match against the book title as reported, i.e. with
-    /// the curator's corrections applied.
-    #[serde(default)]
-    pub title_substring: Option<String>,
-    /// Exact-equality match against a contributor name.
-    #[serde(default)]
-    pub contributor_name: Option<String>,
-    /// Restrict the contributor filter to one role (`author` /
-    /// `translator` / `editor` / `other`). Only takes effect with
-    /// `contributor_name`.
-    #[serde(default)]
-    pub contributor_role: Option<String>,
-    /// Exact-equality match against the file format (`epub`, `pdf`,
-    /// `rule-text`, ...).
-    #[serde(default)]
-    pub format: Option<String>,
-    /// Match books whose lifecycle status is one of these, named as
-    /// they are reported in a row's `status`: `pending`, `extracted`,
-    /// `dedup_hold`, `embedded`, `aborted`, `needs_ocr`. Only an
-    /// `embedded` book has vectors, so only an `embedded` book can be
-    /// recalled by the search tools. An unrecognised name is refused
-    /// rather than dropped.
-    #[serde(default)]
-    pub statuses: Option<Vec<String>>,
-    /// Match books carrying at least one of these category tags. An
-    /// empty list, like an absent one, imposes no category filter. The
-    /// tags a library carries are listed by `library.categories`; a tag
-    /// not listed there matches nothing.
-    #[serde(default)]
-    pub categories: Option<Vec<String>>,
-    /// Match books whose reported language is one of these, compared
-    /// as text against the value the row carries (`de`, `en`, ...).
-    /// The pipeline does not normalise the tag, so match what
-    /// `show_book` reports.
-    #[serde(default)]
-    pub language: Option<Vec<String>>,
-    /// When true, match only scan sources the library holds no text
-    /// for: a `needs_ocr` book with no book derived from it that was
-    /// ingested. Each row then carries an `awaiting_text` object with
-    /// the path of the scan, its SHA-256, its page count, and why its
-    /// text layer was rejected. `statuses: ["needs_ocr"]` alone also
-    /// lists the scans whose text is already in the library.
-    #[serde(default)]
-    pub awaiting_text: Option<bool>,
-    /// Maximum number of books in this page.
-    #[serde(default)]
-    pub limit: Option<u32>,
-    /// Number of leading rows to skip.
-    #[serde(default)]
-    pub offset: Option<u32>,
-    /// Library short name from the registry. Omit to let the daemon
-    /// route the call: the registry default when it is mounted, else
-    /// the only mounted library; otherwise the call is refused.
-    #[serde(default)]
-    pub library: Option<String>,
-}
-
-/// Arguments for the tools that address one book by intake id.
-// Parallel implementation: frontend-param-mirror.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct BookIdArgs {
-    /// Catalog intake id of the book.
-    pub intake_id: i64,
-    /// Library short name from the registry. Omit to let the daemon
-    /// route the call: the registry default when it is mounted, else
-    /// the only mounted library; otherwise the call is refused.
-    #[serde(default)]
-    pub library: Option<String>,
-}
-
-/// Arguments for the `library.show_toc` and `library.show_paper_toc`
-/// tools.
-// Parallel implementation: frontend-param-mirror.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ShowTocArgs {
-    /// Catalog intake id of the book or paper.
-    pub intake_id: i64,
-    /// Number of leading TOC entries to skip. Pass a previous
-    /// response's `next_offset` here to read the following page.
-    #[serde(default)]
-    pub offset: Option<u32>,
-    /// Maximum TOC entries in this page. Defaults to and is clamped
-    /// by the server-side cap (2000); around 200 keeps responses
-    /// small.
-    #[serde(default)]
-    pub limit: Option<u32>,
-    /// Return slim entries carrying only node_id, title, and depth —
-    /// the cheap way to scan a book's structure. The node_id feeds
-    /// library.read_span.
-    #[serde(default)]
-    pub titles_only: bool,
-    /// Keep only entries at depth <= max_depth. The book root is
-    /// depth 0, so 1 keeps the root plus its top-level divisions.
-    #[serde(default)]
-    pub max_depth: Option<i64>,
-    /// Keep only entries whose title contains this substring,
-    /// ignoring ASCII case. The cheap way to locate one chapter or
-    /// section by name.
-    #[serde(default)]
-    pub title_substring: Option<String>,
-    /// Library short name from the registry. Omit to let the daemon
-    /// route the call: the registry default when it is mounted, else
-    /// the only mounted library; otherwise the call is refused.
-    #[serde(default)]
-    pub library: Option<String>,
-}
-
-impl ShowTocArgs {
-    /// Project the pagination, projection, and filter fields onto the
-    /// ops-side args struct.
-    fn toc_args(&self) -> bookrack_ops::dto::ShowTocArgs {
-        bookrack_ops::dto::ShowTocArgs {
-            offset: self.offset.unwrap_or(0),
-            limit: self.limit,
-            titles_only: self.titles_only,
-            max_depth: self.max_depth,
-            title_substring: self.title_substring.clone(),
-        }
-    }
-}
-
-/// Arguments for the `library.list_papers` tool.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ListPapersArgs {
-    /// Maximum number of papers in this page. Server-side cap applies.
-    #[serde(default)]
-    pub limit: Option<u32>,
-    /// Number of leading rows to skip.
-    #[serde(default)]
-    pub offset: Option<u32>,
-    /// Library short name from the registry. Omit to let the daemon
-    /// route the call: the registry default when it is mounted, else
-    /// the only mounted library; otherwise the call is refused.
-    #[serde(default)]
-    pub library: Option<String>,
-}
-
-/// Arguments for the `library.find_papers` tool.
-// Parallel implementation: frontend-param-mirror.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct FindPapersArgs {
-    /// Substring match against the paper title as reported, i.e. with
-    /// the curator's corrections applied. The three bibliographic
-    /// filters below read the same layer.
-    #[serde(default)]
-    pub title_substring: Option<String>,
-    /// Exact-equality match against a contributor name.
-    #[serde(default)]
-    pub contributor_name: Option<String>,
-    /// Restrict the contributor filter to one role (`author` /
-    /// `translator` / `editor` / `other`). Only takes effect with
-    /// `contributor_name`.
-    #[serde(default)]
-    pub contributor_role: Option<String>,
-    /// Match papers whose lifecycle status is one of these, named as
-    /// they are reported in a row's `status`: `pending`, `extracted`,
-    /// `embedded`. Only an `embedded` paper has vectors, so only an
-    /// `embedded` paper can be recalled by the search tools. The book
-    /// pipeline's three further states are not reachable here and are
-    /// refused, as is an unrecognised name.
-    #[serde(default)]
-    pub statuses: Option<Vec<String>>,
-    /// Match papers whose reported language is one of these, compared
-    /// as text against the value the row carries (`de`, `en`, ...).
-    /// The pipeline does not normalise the tag, so match what
-    /// `show_paper` reports.
-    #[serde(default)]
-    pub language: Option<Vec<String>>,
-    /// Exact-equality match against the reported year.
-    #[serde(default)]
-    pub year: Option<String>,
-    /// Substring match against the reported container title (journal,
-    /// proceedings, ...).
-    #[serde(default)]
-    pub venue_substring: Option<String>,
-    /// Exact-equality match against the reported DOI.
-    #[serde(default)]
-    pub doi: Option<String>,
-    /// Maximum number of papers in this page.
-    #[serde(default)]
-    pub limit: Option<u32>,
-    /// Number of leading rows to skip.
-    #[serde(default)]
-    pub offset: Option<u32>,
-    /// Library short name from the registry. Omit to let the daemon
-    /// route the call: the registry default when it is mounted, else
-    /// the only mounted library; otherwise the call is refused.
-    #[serde(default)]
-    pub library: Option<String>,
-}
-
-/// Arguments for the tools that address one paper by intake id.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct PaperIdArgs {
-    /// Catalog intake id of the paper.
-    pub intake_id: i64,
-    /// Library short name from the registry. Omit to let the daemon
-    /// route the call: the registry default when it is mounted, else
-    /// the only mounted library; otherwise the call is refused.
-    #[serde(default)]
-    pub library: Option<String>,
-}
-
-/// Arguments for the `library.search_in_paper` tool.
-// Parallel implementation: frontend-param-mirror.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SearchInPaperArgs {
-    /// Catalog intake id of the paper to confine recall to.
-    pub intake_id: i64,
-    /// The natural-language query.
-    pub query: String,
-    /// Maximum number of passages to return.
-    pub top_k: Option<usize>,
-    /// Force a brute-force scan, ignoring any ANN index.
-    #[serde(default)]
-    pub bypass_index: bool,
-    /// Override the IVF probe count for this query only.
-    #[serde(default)]
-    pub nprobes: Option<usize>,
-    /// Override the IVF-PQ refinement multiplier for this query only.
-    #[serde(default)]
-    pub refine_factor: Option<u32>,
-    /// Library short name from the registry. Omit to let the daemon
-    /// route the call: the registry default when it is mounted, else
-    /// the only mounted library; otherwise the call is refused.
-    #[serde(default)]
-    pub library: Option<String>,
-}
-
-impl SearchInPaperArgs {
-    /// Project the override fields onto the underlying [`SearchOptions`]
-    /// struct the ops layer consumes.
-    fn overrides(&self) -> SearchOptions {
-        SearchOptions {
-            bypass_index: self.bypass_index,
-            nprobes: self.nprobes,
-            refine_factor: self.refine_factor,
-            exclude_partitions: Vec::new(),
-        }
-    }
-}
-
-/// Arguments for the `library.read_context` tool.
-// Parallel implementation: frontend-param-mirror.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ReadContextArgs {
-    /// Corpus node id of the anchor leaf — take it from a search
-    /// citation's `start_node_id` or from a passage of a previous
-    /// read.
-    pub node_id: i64,
-    /// Which pipeline the anchor node belongs to (`book` for ingest,
-    /// `paper` for glean). Defaults to `book` via
-    /// [`ItemKind::default`] so existing callers stay green; pass
-    /// `paper` to read context from the papers corpus.
-    #[serde(default)]
-    #[schemars(with = "String")]
-    pub kind: ItemKind,
-    /// Number of leaves to include before the anchor. Defaults to 3;
-    /// clamped server-side.
-    #[serde(default)]
-    pub before: Option<u32>,
-    /// Number of leaves to include after the anchor. Defaults to 3;
-    /// clamped server-side.
-    #[serde(default)]
-    pub after: Option<u32>,
-    /// Library short name from the registry. Omit to let the daemon
-    /// route the call: the registry default when it is mounted, else
-    /// the only mounted library; otherwise the call is refused. Unrelated to `kind`.
-    #[serde(default)]
-    pub library: Option<String>,
-}
-
-/// Arguments for the `library.read_span` tool.
-// Parallel implementation: frontend-param-mirror.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ReadSpanArgs {
-    /// Corpus node id of the organizing node (chapter, section, ...)
-    /// to read — take it from `library.show_toc`.
-    pub node_id: i64,
-    /// Which pipeline the target node belongs to (`book` for ingest,
-    /// `paper` for glean). Defaults to `book` via
-    /// [`ItemKind::default`] so existing callers stay green; pass
-    /// `paper` to read from the papers corpus.
-    #[serde(default)]
-    #[schemars(with = "String")]
-    pub kind: ItemKind,
-    /// Resume cursor: the `next_offset` of the previous page. Omit to
-    /// read from the span's start.
-    #[serde(default)]
-    pub start_after: Option<i64>,
-    /// Library short name from the registry. Omit to let the daemon
-    /// route the call: the registry default when it is mounted, else
-    /// the only mounted library; otherwise the call is refused. Unrelated to `kind`.
-    #[serde(default)]
-    pub library: Option<String>,
-}
-
-/// Arguments shared by `library.list_metadata` and
-/// `library.list_pending_reviews`. Identical field set — the two tools
-/// differ only in which catalog rows they include.
-// Parallel implementation: frontend-param-mirror.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct MetadataPageArgs {
-    /// Substring match against the title as extraction and enrichment
-    /// wrote it, before any correction — the layer a review pass asks
-    /// about. To search the titles rows report, use
-    /// `library.find_books`.
-    #[serde(default)]
-    pub title_substring: Option<String>,
-    /// Match the audit's row-level confidence against this set:
-    /// `low`, `medium`, `high`. An unrecognised name is refused rather
-    /// than dropped.
-    #[serde(default)]
-    pub confidence_in: Option<Vec<String>>,
-    /// Match the review status against this set: `pending`,
-    /// `approved`, `acknowledged`, `rejected`. A book never reviewed
-    /// counts as `pending`. An unrecognised name is refused rather
-    /// than dropped.
-    #[serde(default)]
-    pub review_status_in: Option<Vec<String>>,
-    /// Maximum number of rows in this page.
-    #[serde(default)]
-    pub limit: Option<u32>,
-    /// Number of leading rows to skip.
-    #[serde(default)]
-    pub offset: Option<u32>,
-    /// Library short name from the registry. Omit to let the daemon
-    /// route the call: the registry default when it is mounted, else
-    /// the only mounted library; otherwise the call is refused.
-    #[serde(default)]
-    pub library: Option<String>,
-}
-
-/// Arguments for `library.stats` and `library.categories`. Carries only
-/// the library selector; the tools themselves accept no other inputs.
-// Parallel implementation: frontend-param-mirror.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
-pub struct LibraryOnlyArgs {
-    /// Library short name from the registry. Omit to let the daemon
-    /// route the call: the registry default when it is mounted, else
-    /// the only mounted library; otherwise the call is refused.
-    #[serde(default)]
-    pub library: Option<String>,
-}
-
-/// Arguments for `library.metadata.set`. Requires `library`.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct MetadataSetArgs {
-    /// Catalog intake id of the book.
-    pub intake_id: i64,
-    /// The field to set. Must be a curator-editable bibliographic
-    /// field; an unknown name is rejected and the error carries the
-    /// full editable list.
-    pub field: String,
-    /// The new value.
-    pub value: String,
-    /// Why this value is correct (e.g. the source consulted). Recorded
-    /// on the audit row; required so an LLM edit always carries its
-    /// justification.
-    pub reason: String,
-    /// Set true only after checking the value against the source
-    /// itself (e.g. the copyright page via `library.read_span`), not
-    /// against an external catalog alone. The audit grades a confirmed
-    /// override strong unless a validation check fails. Defaults to
-    /// false.
-    pub confirmed: Option<bool>,
-    /// Library short name from the registry. Write tools require an
-    /// explicit selector so a misrouted call never silently lands on
-    /// the wrong library's catalog.
-    pub library: String,
-}
-
-/// Arguments for `library.metadata.clear`. Requires `library`.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct MetadataClearArgs {
-    /// Catalog intake id of the book.
-    pub intake_id: i64,
-    /// The field whose override should be removed. A name outside the
-    /// editable set is accepted only when an override row with that key
-    /// exists (cleanup of stale rows); otherwise it is rejected.
-    pub field: String,
-    /// Why the override is being removed. Recorded on the audit row;
-    /// required so an LLM edit always carries its justification.
-    pub reason: String,
-    /// Library short name from the registry. Write tools require an
-    /// explicit selector so a misrouted call never silently lands on
-    /// the wrong library's catalog.
-    pub library: String,
-}
-
-/// Arguments for `library.metadata.void`. Requires `library`.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct MetadataVoidArgs {
-    /// Catalog intake id of the book.
-    pub intake_id: i64,
-    /// The field whose extracted value should be suppressed. Must be a
-    /// curator-editable bibliographic field.
-    pub field: String,
-    /// Why the extracted value is wrong. Recorded on the audit row;
-    /// required so an LLM edit always carries its justification.
-    pub reason: String,
-    /// Library short name from the registry. Write tools require an
-    /// explicit selector so a misrouted call never silently lands on
-    /// the wrong library's catalog.
-    pub library: String,
-}
-
-/// Arguments for `library.metadata.contributor_add`. Requires `library`.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ContributorAddArgs {
-    /// Catalog intake id of the book.
-    pub intake_id: i64,
-    /// Contribution role: `author`, `translator`, `editor`, or `other`.
-    pub role: String,
-    /// The contributor's name, exactly as it should be searchable.
-    pub name: String,
-    /// The contributor's nationality, when known.
-    #[serde(default)]
-    pub nationality: Option<String>,
-    /// Why this attribution is correct (e.g. the source consulted).
-    /// Recorded on the audit row; required so an LLM edit always
-    /// carries its justification.
-    pub reason: String,
-    /// Library short name from the registry. Write tools require an
-    /// explicit selector so a misrouted call never silently lands on
-    /// the wrong library's catalog.
-    pub library: String,
-}
-
-/// Arguments for `library.metadata.contributor_remove`. Requires
-/// `library`.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ContributorRemoveArgs {
-    /// Catalog intake id of the book.
-    pub intake_id: i64,
-    /// Surrogate id of the contributor row, as listed by
-    /// `library.show_book`.
-    pub contributor_id: i64,
-    /// Why the attribution is wrong. Recorded on the audit row;
-    /// required so an LLM edit always carries its justification.
-    pub reason: String,
-    /// Library short name from the registry. Write tools require an
-    /// explicit selector so a misrouted call never silently lands on
-    /// the wrong library's catalog.
-    pub library: String,
-}
-
-/// Arguments for `library.metadata.reaudit`. Requires `library`.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct MetadataReauditArgs {
-    /// Catalog intake id of the book.
-    pub intake_id: i64,
-    /// Library short name from the registry. Write tools require an
-    /// explicit selector so a misrouted call never silently lands on
-    /// the wrong library's catalog.
-    pub library: String,
-}
-
-/// Arguments for `library.metadata.ack`. Requires `library`.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct MetadataAckArgs {
-    /// Catalog intake id of the book.
-    pub intake_id: i64,
-    /// Why the gap is being acknowledged; recorded on the audit row.
-    pub reason: String,
-    /// Library short name from the registry. Write tools require an
-    /// explicit selector so a misrouted call never silently lands on
-    /// the wrong library's catalog.
-    pub library: String,
-}
-
-/// Arguments for `library.metadata.approve`. Requires `library`.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct MetadataApproveArgs {
-    /// Catalog intake id of the book.
-    pub intake_id: i64,
-    /// Optional reason recorded on the audit row.
-    #[serde(default)]
-    pub reason: Option<String>,
-    /// Library short name from the registry. Write tools require an
-    /// explicit selector so a misrouted call never silently lands on
-    /// the wrong library's catalog.
-    pub library: String,
-}
-
-/// Arguments for `library.metadata.reject`. Requires `library`.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct MetadataRejectArgs {
-    /// Catalog intake id of the book.
-    pub intake_id: i64,
-    /// Why the book is being rejected; recorded on the audit row.
-    pub reason: String,
-    /// Library short name from the registry. Write tools require an
-    /// explicit selector so a misrouted call never silently lands on
-    /// the wrong library's catalog.
-    pub library: String,
-}
-
-/// Arguments for the `reference.lookup` tool. `library` is
-/// `Option<String>` to honour the same default-or-explicit semantics
-/// used by every other read tool.
-#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
-pub struct ReferenceLookupArgs {
-    pub library: Option<String>,
-    /// Book slug to scope the lookup to. Pass `"*"` to query every
-    /// registered book and rank cross-book hits by `authority_rank`.
-    pub book: String,
-    /// The lookup key; resolves directly against
-    /// `reference_entries.entry_key`.
-    pub entry_key: String,
-    /// Optional payload-key whitelist. When `Some`, payload keys
-    /// outside the list are stripped from each hit.
-    pub fields: Option<Vec<String>>,
-    /// Optional quality_flag-severity floor. When set, hits whose
-    /// flags do not include at least one flag at or above this
-    /// severity drop out. Recognised values: `ok`, `info`, `warn`,
-    /// `error`.
-    pub min_severity: Option<String>,
-    /// Book slugs whose entries must not be returned. Only meaningful
-    /// with `book = "*"`, where the lookup spans every registered
-    /// book; passing it alongside a single-book scope is an error
-    /// rather than a no-op. An excluded book is also skipped as a
-    /// redirect target, so it cannot re-enter the result that way.
-    pub exclude_books: Option<Vec<String>>,
-}
-
-impl ReferenceLookupArgs {
-    /// The request without the library selector, in the shape the
-    /// ops layer runs.
-    pub fn to_lookup(&self) -> reads::reference::ReferenceLookup {
-        reads::reference::ReferenceLookup {
-            book: self.book.clone(),
-            entry_key: self.entry_key.clone(),
-            fields: self.fields.clone(),
-            min_severity: self.min_severity.clone(),
-            exclude_books: self.exclude_books.clone(),
-        }
-    }
-}
-
-/// Arguments for the `reference.overlay_set` tool. `library` is
-/// required for write tools, so this carries a bare `String` rather
-/// than `Option<String>`.
-#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
-pub struct ReferenceOverlaySetArgs {
-    pub library: String,
-    pub book_slug: String,
-    pub entry_key: String,
-    /// JSON object whose keys must be present in the property
-    /// catalog (`crates/distill/data/property_catalog.toml`).
-    pub overlay: serde_json::Value,
-    /// Free-text edit summary recorded on the overlay row.
-    pub reason: String,
-}
-
-impl ReferenceOverlaySetArgs {
-    /// The edit without the library selector, in the shape the ops
-    /// layer writes.
-    pub fn to_request(&self) -> writes::reference::ReferenceOverlaySetRequest {
-        writes::reference::ReferenceOverlaySetRequest {
-            book_slug: self.book_slug.clone(),
-            entry_key: self.entry_key.clone(),
-            overlay: self.overlay.clone(),
-            reason: self.reason.clone(),
-        }
-    }
-}
+mod error_map;
+use error_map::{dispatch_error_to_mcp, session_error_to_mcp};
 
 /// The two endpoints of the daemon process the tools report: where
 /// this listener answers and where the embedder is reached. Neither
@@ -767,12 +60,17 @@ pub struct ProcessEndpoints {
     pub ollama_url: String,
 }
 
+/// Every tool's route, built once per process. A session clones it:
+/// the clones share each tool's schemas, and each keeps its own
+/// handler state.
+static TOOL_ROUTER: LazyLock<ToolRouter<BookrackServer>> = LazyLock::new(tool_router);
+
 /// MCP request handler. The streamable-HTTP service clones it per
 /// session; the heavy state sits behind an `Arc`, so a clone is cheap
 /// and every session shares one warm library registry.
 #[derive(Clone)]
 pub struct BookrackServer {
-    registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
+    registry: Arc<DaemonRegistry>,
     endpoints: ProcessEndpoints,
     started_at: Instant,
     identity: DaemonIdentity,
@@ -783,7 +81,6 @@ pub struct BookrackServer {
     tool_router: ToolRouter<BookrackServer>,
 }
 
-#[tool_router(router = tool_router)]
 impl BookrackServer {
     /// Build a handler over the given library registry. `endpoints`
     /// are the process's listener address and Ollama endpoint, which
@@ -794,18 +91,17 @@ impl BookrackServer {
     /// own, reported by the same tool. `log_stream` is the shared
     /// in-process log fan-out the `session.logs_tail` tool reads its
     /// ring-buffer snapshot from. `queue_state` is the shared snapshot
-    /// of the ingest queue the daemon's worker drives; a host that spawns
-    /// no queue worker passes an inert default. `shutdown_tx` carries the session-wide graceful-shutdown
-    /// signal so the `session.shutdown` tool can ask the daemon to
-    /// stop, and `event_stream` is where that tool publishes the
-    /// `stopping` state first. Tools route each call through the registry, scoped to an
-    /// explicit `library` selector or, when the selector is absent, to
-    /// the library the registry routes an unnamed call to.
+    /// of the ingest queue the daemon's worker drives; a host that
+    /// spawns no queue worker passes an inert default. `shutdown_tx`
+    /// carries the session-wide graceful-shutdown signal so the
+    /// `session.shutdown` tool can ask the daemon to stop, and
+    /// `event_stream` is where that tool publishes the `stopping` state
+    /// first.
     // One handle per subsystem the tools reach, each passed once by the
     // single caller; see `serve` for why they stay separate arguments.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
+        registry: Arc<DaemonRegistry>,
         endpoints: ProcessEndpoints,
         started_at: Instant,
         identity: DaemonIdentity,
@@ -823,1304 +119,125 @@ impl BookrackServer {
             queue_state,
             shutdown_tx,
             event_stream,
-            tool_router: Self::tool_router(),
+            tool_router: TOOL_ROUTER.clone(),
         }
     }
 
-    /// Resolve a [`LibraryHandle`] for the given selector. Read tools
-    /// pass `args.library.as_deref()`; write tools demand a name up
-    /// front (their args carry `library: String`, not `Option`) so the
-    /// resolution never falls back silently.
-    ///
-    /// An unknown name produces an MCP `InvalidParams` error whose
-    /// hint lists the registry's names — the same three parts the
-    /// control plane puts on its `-32010` envelope.
-    fn resolve_handle(
+    /// Run the library method `spec` for a tool call carrying
+    /// `arguments`, attributed to [`Caller::mcp`].
+    async fn call_library(
         &self,
-        library: Option<&str>,
-    ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>, ErrorData> {
-        self.registry.get(library).map_err(|e| registry_err(&e))
-    }
-
-    /// Run one curation write on book `intake_id` of `handle`'s library
-    /// in a write session attributed to [`Caller::mcp`].
-    ///
-    /// The session takes the daemon's write mutex without waiting, so a
-    /// concurrent write is answered busy; `op` runs on a blocking task,
-    /// off the async worker the tool call arrived on, and the library is
-    /// announced once it returns.
-    async fn metadata_write<T, F>(
-        &self,
-        handle: &Arc<LibraryHandle<OllamaEmbedClient>>,
-        intake_id: i64,
-        op: F,
-    ) -> Result<T, ErrorData>
-    where
-        T: Send + 'static,
-        F: FnOnce(&mut WriteSession<OllamaEmbedClient>) -> bookrack_ops::Result<T> + Send + 'static,
-    {
-        let region = Region::Curation {
-            kind: ItemKind::Book,
-            intake_id,
+        spec: &'static MethodSpec,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let host = ProcessHost {
+            ollama_url: &self.endpoints.ollama_url,
+            mcp_addr: &self.endpoints.mcp_addr,
         };
-        let session = self
-            .registry
-            .begin_write(handle, region, Caller::mcp())
-            .map_err(|busy| ops_error_to_mcp(OpsError::WriteBusy(busy)))?;
-        let library = handle.name().to_string();
-        session
-            .run_blocking(async move |s| Ok((op(s)?, ChangeSet::announced(library))))
+        let caller = Caller::mcp();
+        let ctx = DispatchContext {
+            registry: &*self.registry,
+            caller: &caller,
+            host: &host,
+        };
+        let reply = dispatch(&ctx, spec, Surface::Mcp, arguments.map(Value::Object))
             .await
-            .map_err(|e| match e {
-                SessionRunError::Op(e) => ops_error_to_mcp(e),
-                other => mcp_from_problem(
-                    ErrorCode::INTERNAL_ERROR,
-                    bookrack_core::Problem::from_error_chain(&other),
-                ),
-            })
-    }
-
-    /// Search the library and return cited passages as a JSON array.
-    #[tool(
-        name = "library.search",
-        description = "Search the library for passages relevant to a natural-language \
-                       query. Returns cited passages, nearest first, each with a \
-                       breadcrumb trail and source location. `kind` selects which \
-                       side: `\"book\"` (the default; existing behaviour), `\"paper\"` \
-                       (only the paper-side store), or `\"all\"` (both stores, merged \
-                       by ascending distance). To suppress books you have already \
-                       read or judged irrelevant, pass their intake ids in \
-                       `exclude_book_intake_ids` (or `exclude_paper_intake_ids` for \
-                       papers); the ids must match the `kind` being searched."
-    )]
-    async fn library_search(
-        &self,
-        Parameters(args): Parameters<SearchArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let kind = args.checked_kind()?;
-        let book_overrides = args.overrides_excluding(&args.exclude_book_intake_ids);
-        let paper_overrides = args.overrides_excluding(&args.exclude_paper_intake_ids);
-        let hits = match kind {
-            "book" => reads::search::search(handle.ops(), &args.query, book_overrides, args.top_k)
-                .await
-                .map_err(ops_error_to_mcp)?,
-            "paper" => {
-                reads::search::search_paper(handle.ops(), &args.query, paper_overrides, args.top_k)
-                    .await
-                    .map_err(ops_error_to_mcp)?
-            }
-            "all" => reads::search::search_unified(
-                handle.ops(),
-                &args.query,
-                book_overrides,
-                paper_overrides,
-                args.top_k,
-            )
-            .await
-            .map_err(ops_error_to_mcp)?,
-            other => {
-                return Err(invalid_params_message(format!(
-                    "library.search: kind={other:?} is not one of \"book\", \"paper\", \"all\""
-                )));
-            }
+            .map_err(dispatch_error_to_mcp)?;
+        let structured = match spec.output {
+            Output::Structured(_) => true,
+            Output::NullableObject => reply.value.is_object(),
+            Output::TextOnly => false,
         };
-        tracing::info!(kind = kind, hits = hits.len(), "mcp library.search");
-        respond_with(&hits)
+        Ok(tool_result(reply, structured))
     }
 
-    /// Search within one book only — the same ranking as `library.search`
-    /// but recall is confined to the chunks owned by `intake_id`.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.search_in_book",
-        description = "Search a single book for passages relevant to a query. Pass \
-                       the book's intake_id (from library.list_books / \
-                       library.show_book). Returns cited passages, nearest first."
-    )]
-    async fn library_search_in_book(
+    /// Run the session tool `tool` for a call carrying `arguments`.
+    fn call_session(
         &self,
-        Parameters(args): Parameters<SearchInBookArgs>,
+        tool: &'static SessionTool,
+        arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let overrides = args.overrides();
-        let result = reads::search::search_in_book(
-            handle.ops(),
-            args.intake_id,
-            &args.query,
-            overrides,
-            args.top_k,
+        let ctx = SessionContext {
+            registry: &self.registry,
+            identity: &self.identity,
+            started_at: self.started_at,
+            mcp_addr: &self.endpoints.mcp_addr,
+            ollama_url: &self.endpoints.ollama_url,
+            log_stream: &self.log_stream,
+            queue_state: &self.queue_state,
+            event_stream: &self.event_stream,
+            shutdown_tx: &self.shutdown_tx,
+        };
+        let reply = session::dispatch(&ctx, tool, arguments.map(Value::Object))
+            .map_err(session_error_to_mcp)?;
+        Ok(tool_result(reply, true))
+    }
+}
+
+/// A successful tool answer: the reply's text as the one content block,
+/// fields in their declared order, and the same answer as structured
+/// content when `structured`.
+fn tool_result(reply: Reply, structured: bool) -> CallToolResult {
+    let mut result = CallToolResult::success(vec![ContentBlock::text(reply.text)]);
+    if structured {
+        result.structured_content = Some(reply.value);
+    }
+    result
+}
+
+/// The route of every tool MCP carries: one per row of the library
+/// table with an MCP name, then one per session tool.
+///
+/// A tool whose answer is always an object publishes its output schema;
+/// one whose answer may be `null` or an array publishes none.
+fn tool_router() -> ToolRouter<BookrackServer> {
+    let mut router = ToolRouter::new();
+    for spec in LIBRARY_METHODS {
+        let Some(name) = spec.mcp_name else { continue };
+        let mut tool = Tool::new(name, spec.summary, Arc::new((spec.mcp_input_schema)()));
+        if let Output::Structured(schema) = spec.output {
+            tool = tool.with_raw_output_schema(Arc::new(schema()));
+        }
+        router.add_route(ToolRoute::new_dyn(tool, move |tcc| library_call(spec, tcc)));
+    }
+    for session_tool in SESSION_TOOLS {
+        let tool = Tool::new(
+            session_tool.name,
+            session_tool.summary,
+            Arc::new((session_tool.input_schema)()),
         )
-        .await;
-        match result {
-            Ok(hits) => {
-                tracing::info!(
-                    intake_id = args.intake_id,
-                    hits = hits.len(),
-                    "mcp library.search_in_book"
-                );
-                respond_with(&hits)
-            }
-            // Preserve the prior wire shape: an unknown intake reads
-            // as an empty hit list on this tool, not a fault.
-            Err(OpsError::IntakeNotFound { .. }) => {
-                respond_with::<Vec<bookrack_ops::Citation>>(&Vec::new())
-            }
-            Err(e) => Err(ops_error_to_mcp(e)),
-        }
+        .with_raw_output_schema(Arc::new((session_tool.output_schema)()));
+        router.add_route(ToolRoute::new_dyn(tool, move |tcc| {
+            session_call(session_tool, tcc)
+        }));
     }
+    router
+}
 
-    /// Aggregate counts over the library (intakes, book states, retrieval
-    /// issues).
-    #[tool(
-        name = "library.stats",
-        description = "Return aggregate counts over the library: intakes by status \
-                       and format, book states by pipeline stage, and retrieval \
-                       issues by triage status."
-    )]
-    async fn library_stats(
-        &self,
-        Parameters(args): Parameters<LibraryOnlyArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let stats = reads::books::show_stats(handle.ops()).map_err(ops_error_to_mcp)?;
-        respond_with(&stats)
-    }
+/// What a tool's route returns: the call's answer, once the call has
+/// run.
+type ToolFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<CallToolResponse, ErrorData>> + Send + 'a>,
+>;
 
-    /// The library-wide category distribution.
-    #[tool(
-        name = "library.categories",
-        description = "Count the books under each category tag, most-used first, plus \
-                       the books carrying no tag. Read this before passing \
-                       `categories` to library.find_books: it is where this \
-                       library's tag vocabulary can be seen, and a library nobody \
-                       has tagged reports every book as uncategorised."
-    )]
-    async fn library_categories(
-        &self,
-        Parameters(args): Parameters<LibraryOnlyArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let counts = reads::books::category_counts(handle.ops()).map_err(ops_error_to_mcp)?;
-        respond_with(&counts)
-    }
+/// The future a tool call of library method `spec` runs.
+fn library_call<'a>(
+    spec: &'static MethodSpec,
+    tcc: ToolCallContext<'a, BookrackServer>,
+) -> ToolFuture<'a> {
+    let server = tcc.service;
+    let arguments = tcc.arguments;
+    Box::pin(async move { server.call_library(spec, arguments).await.map(Into::into) })
+}
 
-    /// List books in the library, paginated.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.list_books",
-        description = "List books known to the library, paginated. Returns a slice \
-                       of book summaries plus the total matching count and a \
-                       truncated flag. Each summary carries source_filename, the \
-                       basename of the file the book was ingested from, which \
-                       identifies a book whose title is missing or is an export-tool \
-                       placeholder."
-    )]
-    async fn library_list_books(
-        &self,
-        Parameters(args): Parameters<ListBooksArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let limit = args.limit.unwrap_or(0);
-        let offset = args.offset.unwrap_or(0);
-        let page =
-            reads::books::list_books(handle.ops(), limit, offset).map_err(ops_error_to_mcp)?;
-        tracing::info!(
-            returned = page.books.len(),
-            total = page.total,
-            "mcp library.list_books"
-        );
-        respond_with(&page)
-    }
-
-    /// Find books by title substring, contributor, format, lifecycle
-    /// status, or category tags.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.find_books",
-        description = "Search the book registry by title substring (fuzzy), contributor \
-                       name (exact), file format, or category tags. The `categories` \
-                       filter matches books carrying at least one of the listed tags; \
-                       library.categories lists the tags this library carries. \
-                       `awaiting_text` lists the scan sources still without text."
-    )]
-    async fn library_find_books(
-        &self,
-        Parameters(args): Parameters<FindBooksArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let statuses = parse_statuses(ItemKind::Book, &args.statuses.unwrap_or_default())
-            .map_err(|unknown| unknown_filter_value_to_mcp(&unknown))?;
-        let filter = BookFilter {
-            title_substring: args.title_substring,
-            contributor_name: args.contributor_name,
-            contributor_role: args.contributor_role,
-            format: args.format,
-            statuses,
-            categories: args.categories.unwrap_or_default(),
-            language: args.language.unwrap_or_default(),
-            awaiting_text: args.awaiting_text.unwrap_or(false),
-        };
-        let limit = args.limit.unwrap_or(0);
-        let offset = args.offset.unwrap_or(0);
-        let page = reads::books::find_books(handle.ops(), filter, limit, offset)
-            .map_err(ops_error_to_mcp)?;
-        tracing::info!(
-            returned = page.books.len(),
-            total = page.total,
-            "mcp library.find_books"
-        );
-        respond_with(&page)
-    }
-
-    /// Fetch the full bibliographic record for one book.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.show_book",
-        description = "Fetch the full bibliographic record for one book by intake id. \
-                       Returns effective biblio attributes, the active overrides \
-                       (which fields are curated rather than extracted, by whom and \
-                       when; `value: null` marks a suppressed extracted value), the \
-                       contributor list, the source-side record of the ingested file \
-                       (source_path / source_filename / source_sha256 / intake_at / \
-                       page_count / byte_size; source_path is recorded verbatim at \
-                       intake, so it may be relative or no longer exist on disk), and \
-                       toc_stats (entry_count / max_depth of the ingested TOC; null \
-                       when nothing is ingested) — check toc_stats before \
-                       library.show_toc to pick a pagination or projection strategy. \
-                       Returns null when no such book is registered."
-    )]
-    async fn library_show_book(
-        &self,
-        Parameters(args): Parameters<BookIdArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        match reads::books::show_book(handle.ops(), args.intake_id) {
-            Ok(detail) => respond_with(&Some(detail)),
-            Err(OpsError::IntakeNotFound { .. }) => {
-                respond_with::<Option<bookrack_ops::dto::BookDetail>>(&None)
-            }
-            Err(e) => Err(ops_error_to_mcp(e)),
-        }
-    }
-
-    /// Return one book's table of contents.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.show_toc",
-        description = "Return the table of contents of one book: a depth-first list \
-                       of organizing nodes (chapters, sections, ...) with their \
-                       titles, depths, and document-order spans, paginated. To \
-                       continue, pass the returned next_offset back as offset until \
-                       next_offset is null; total counts every matching entry. A \
-                       limit of about 200 keeps responses small. To scan structure, \
-                       prefer titles_only (each entry keeps node_id / title / depth; \
-                       node_id is what library.read_span takes) and max_depth (1 = \
-                       root plus top-level divisions). To locate one chapter or \
-                       section by name, filter with title_substring instead of \
-                       paging the whole TOC. Returns null when no such book is \
-                       ingested."
-    )]
-    async fn library_show_toc(
-        &self,
-        Parameters(args): Parameters<ShowTocArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        match reads::books::show_toc(handle.ops(), args.intake_id, &args.toc_args()) {
-            Ok(toc) => respond_with(&Some(toc)),
-            Err(OpsError::IntakeNotFound { .. }) => {
-                respond_with::<Option<bookrack_ops::dto::Toc>>(&None)
-            }
-            Err(e) => Err(ops_error_to_mcp(e)),
-        }
-    }
-
-    /// List papers in the library, paginated.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.list_papers",
-        description = "List papers known to the library, paginated. Mirrors \
-                       library.list_books for the paper pipeline. Returns paper \
-                       summaries plus the total matching count and a truncated flag. \
-                       Each summary carries source_filename, the basename of the file \
-                       the paper was ingested from, which identifies a paper whose \
-                       title the identify pass did not extract."
-    )]
-    async fn library_list_papers(
-        &self,
-        Parameters(args): Parameters<ListPapersArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let limit = args.limit.unwrap_or(0);
-        let offset = args.offset.unwrap_or(0);
-        let page =
-            reads::papers::list_papers(handle.ops(), limit, offset).map_err(ops_error_to_mcp)?;
-        tracing::info!(
-            returned = page.papers.len(),
-            total = page.total,
-            "mcp library.list_papers"
-        );
-        respond_with(&page)
-    }
-
-    /// Find papers by title substring, contributor, year, venue, or DOI.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.find_papers",
-        description = "Search the paper registry by title substring (fuzzy), \
-                       contributor name (exact), year (exact), venue substring \
-                       (matched against container title), or DOI (exact). Mirrors \
-                       library.find_books for the paper pipeline; rows carry \
-                       source_filename like library.list_papers."
-    )]
-    async fn library_find_papers(
-        &self,
-        Parameters(args): Parameters<FindPapersArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let statuses = parse_statuses(ItemKind::Paper, &args.statuses.unwrap_or_default())
-            .map_err(|unknown| unknown_filter_value_to_mcp(&unknown))?;
-        let filter = PaperFilter {
-            title_substring: args.title_substring,
-            contributor_name: args.contributor_name,
-            contributor_role: args.contributor_role,
-            statuses,
-            year: args.year,
-            venue_substring: args.venue_substring,
-            doi: args.doi,
-            language: args.language.unwrap_or_default(),
-        };
-        let limit = args.limit.unwrap_or(0);
-        let offset = args.offset.unwrap_or(0);
-        let page = reads::papers::find_papers(handle.ops(), filter, limit, offset)
-            .map_err(ops_error_to_mcp)?;
-        tracing::info!(
-            returned = page.papers.len(),
-            total = page.total,
-            "mcp library.find_papers"
-        );
-        respond_with(&page)
-    }
-
-    /// Fetch the full bibliographic record for one paper.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.show_paper",
-        description = "Fetch the full bibliographic record for one paper by intake \
-                       id. Mirrors library.show_book for the paper pipeline, \
-                       toc_stats included; the abstract text is in the detail \
-                       response, not in list summaries. Also returns the source-side \
-                       record of the ingested file (source_path / source_filename / \
-                       source_sha256 / intake_at / page_count / byte_size; \
-                       source_path is recorded verbatim at intake, so it may be \
-                       relative or no longer exist on disk — papers.fetch_source \
-                       locates the archived copy instead). Returns null when no such \
-                       paper is registered."
-    )]
-    async fn library_show_paper(
-        &self,
-        Parameters(args): Parameters<PaperIdArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        match reads::papers::show_paper(handle.ops(), args.intake_id) {
-            Ok(detail) => respond_with(&Some(detail)),
-            Err(OpsError::IntakeNotFound { .. }) => {
-                respond_with::<Option<bookrack_ops::dto::PaperDetail>>(&None)
-            }
-            Err(e) => Err(ops_error_to_mcp(e)),
-        }
-    }
-
-    /// Return the locator of one paper's archived source PDF.
-    #[tool(
-        name = "papers.fetch_source",
-        description = "Return the absolute path, byte size, and SHA-256 of one \
-                       paper's archived source PDF. The client opens the path \
-                       with its own file-system primitives — the bytes do not \
-                       flow through the control plane. Returns null when the \
-                       intake id is unknown; raises an error when the intake \
-                       exists but its source PDF was not archived (e.g. glean \
-                       ran with `keep_source_pdf = false`)."
-    )]
-    async fn papers_fetch_source(
-        &self,
-        Parameters(args): Parameters<PaperIdArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        match reads::papers::fetch_source(handle.ops(), args.intake_id) {
-            Ok(src) => respond_with(&Some(src)),
-            Err(OpsError::IntakeNotFound { .. }) => {
-                respond_with::<Option<bookrack_ops::dto::PaperSource>>(&None)
-            }
-            Err(e) => Err(ops_error_to_mcp(e)),
-        }
-    }
-
-    /// Return one paper's table of contents.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.show_paper_toc",
-        description = "Return the table of contents of one paper. Papers carry one \
-                       Work root plus one prose leaf, so the TOC is effectively \
-                       empty for a well-formed paper. The shape, the offset / limit \
-                       / next_offset pagination contract, and the titles_only / \
-                       max_depth / title_substring parameters mirror \
-                       library.show_toc for the book pipeline."
-    )]
-    async fn library_show_paper_toc(
-        &self,
-        Parameters(args): Parameters<ShowTocArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        match reads::papers::show_paper_toc(handle.ops(), args.intake_id, &args.toc_args()) {
-            Ok(toc) => respond_with(&Some(toc)),
-            Err(OpsError::IntakeNotFound { .. }) => {
-                respond_with::<Option<bookrack_ops::dto::Toc>>(&None)
-            }
-            Err(e) => Err(ops_error_to_mcp(e)),
-        }
-    }
-
-    /// Search within one paper only — the partition-bounded peer of
-    /// `library.search_in_book` for the paper pipeline.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.search_in_paper",
-        description = "Search a single paper for passages relevant to a query. Pass \
-                       the paper's intake_id (from library.list_papers / \
-                       library.show_paper). Returns cited passages, nearest first."
-    )]
-    async fn library_search_in_paper(
-        &self,
-        Parameters(args): Parameters<SearchInPaperArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let overrides = args.overrides();
-        let result = reads::search::search_in_paper(
-            handle.ops(),
-            args.intake_id,
-            &args.query,
-            overrides,
-            args.top_k,
-        )
-        .await;
-        match result {
-            Ok(hits) => {
-                tracing::info!(
-                    intake_id = args.intake_id,
-                    hits = hits.len(),
-                    "mcp library.search_in_paper"
-                );
-                respond_with(&hits)
-            }
-            // Preserve the prior wire shape: an unknown intake reads
-            // as an empty hit list on this tool, not a fault.
-            Err(OpsError::IntakeNotFound { .. }) => {
-                respond_with::<Vec<bookrack_ops::Citation>>(&Vec::new())
-            }
-            Err(e) => Err(ops_error_to_mcp(e)),
-        }
-    }
-
-    /// Read the leaves around one anchor leaf, in document order.
-    #[tool(
-        name = "library.read_context",
-        description = "Read the passages surrounding one anchor passage, in document \
-                       order: N leaves before and N after, paragraph-precise. Pass the \
-                       node_id from a search citation's start_node_id or from a \
-                       passage of a previous read. Returns null when no such node \
-                       exists; rejects organizing nodes (read those with \
-                       library.read_span)."
-    )]
-    async fn library_read_context(
-        &self,
-        Parameters(args): Parameters<ReadContextArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let before = args
-            .before
-            .unwrap_or(bookrack_query::dto::DEFAULT_CONTEXT_RADIUS);
-        let after = args
-            .after
-            .unwrap_or(bookrack_query::dto::DEFAULT_CONTEXT_RADIUS);
-        let target = KindedNodeId {
-            kind: args.kind,
-            node_id: NodeId::new(args.node_id),
-        };
-        match reads::passages::read_context(handle.ops(), target, before, after) {
-            Ok(window) => respond_with(&Some(window)),
-            Err(OpsError::NodeNotFound { .. }) => {
-                respond_with::<Option<bookrack_ops::dto::ContextWindow>>(&None)
-            }
-            Err(e @ OpsError::NotALeaf { .. }) => Err(invalid_params_err(&e)),
-            Err(e) => Err(ops_error_to_mcp(e)),
-        }
-    }
-
-    /// Read one page of an organizing node's span, in document order.
-    #[tool(
-        name = "library.read_span",
-        description = "Read the full text under one TOC node (chapter, section, ...) \
-                       in document order, paginated by a character budget. Pass the \
-                       node_id from library.show_toc; to continue, pass the returned \
-                       next_offset back as start_after until next_offset is null. \
-                       Returns null when no such node exists; rejects leaf nodes \
-                       (read around those with library.read_context)."
-    )]
-    async fn library_read_span(
-        &self,
-        Parameters(args): Parameters<ReadSpanArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let target = KindedNodeId {
-            kind: args.kind,
-            node_id: NodeId::new(args.node_id),
-        };
-        match reads::passages::read_span(handle.ops(), target, args.start_after) {
-            Ok(span) => respond_with(&Some(span)),
-            Err(OpsError::NodeNotFound { .. }) => {
-                respond_with::<Option<bookrack_ops::dto::SpanText>>(&None)
-            }
-            Err(e @ OpsError::NotOrganizing { .. }) => Err(invalid_params_err(&e)),
-            Err(e) => Err(ops_error_to_mcp(e)),
-        }
-    }
-
-    /// Return the metadata-status read for one book.
-    #[tool(
-        name = "library.show_metadata_audit",
-        description = "Return the metadata-status record for one book: the \
-                       bibliographic detail plus the persisted audit verdict, \
-                       confidence, and current review status. Returns null when \
-                       no such book is registered."
-    )]
-    async fn library_show_metadata_audit(
-        &self,
-        Parameters(args): Parameters<BookIdArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        match reads::metadata::show_metadata_audit(handle.ops(), args.intake_id) {
-            Ok(report) => respond_with(&Some(report)),
-            Err(OpsError::IntakeNotFound { .. }) => {
-                respond_with::<Option<bookrack_ops::dto::metadata_report::MetadataReport>>(&None)
-            }
-            Err(e) => Err(ops_error_to_mcp(e)),
-        }
-    }
-
-    /// Recompute and return the full per-field metadata audit report
-    /// for one book.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.show_metadata_report",
-        description = "Recompute the metadata plausibility audit for one book from \
-                       its cached extraction and return the full per-field report: \
-                       origin (extracted / override / override_confirmed / voided), \
-                       grade, flags, and hint per field, plus TOC shape flags and \
-                       copyright-page block candidates, next to the stored verdict / \
-                       confidence rollup for comparison. Use it to see why a book is \
-                       `needs_work` / `low` before editing. Runs the default audit \
-                       profile; nothing is written back — library.metadata.reaudit \
-                       is the write path that refreshes the stored rollup. Returns \
-                       null when no such book is registered."
-    )]
-    async fn library_show_metadata_report(
-        &self,
-        Parameters(args): Parameters<BookIdArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let audit_data = bookrack_ops::AuditData::default_data();
-        let audit_profile = bookrack_ops::AuditProfile::default();
-        match reads::metadata::show_metadata_report(
-            handle.ops(),
-            args.intake_id,
-            &audit_data,
-            &audit_profile,
-        ) {
-            Ok(report) => respond_with(&Some(report)),
-            Err(OpsError::IntakeNotFound { .. }) => respond_with::<
-                Option<bookrack_ops::dto::metadata_report::MetadataAuditReport>,
-            >(&None),
-            Err(e) => Err(ops_error_to_mcp(e)),
-        }
-    }
-
-    /// Return registered books with their confidence and review
-    /// status, optionally narrowed by the extracted title, the audit
-    /// verdict, or the review state.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.list_metadata",
-        description = "List registered books with their current confidence and review \
-                       status, regardless of audit verdict. Filters match the metadata as \
-                       extracted, before curation, so this is the tool for finding records \
-                       that need fixing; `library.find_books` searches the corrected \
-                       values. Paginated."
-    )]
-    async fn library_list_metadata(
-        &self,
-        Parameters(args): Parameters<MetadataPageArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let filter = MetadataFilter::checked(
-            args.title_substring,
-            args.confidence_in.unwrap_or_default(),
-            args.review_status_in.unwrap_or_default(),
-        )
-        .map_err(|unknown| unknown_filter_value_to_mcp(&unknown))?;
-        let limit = args.limit.unwrap_or(0);
-        let offset = args.offset.unwrap_or(0);
-        let page = reads::metadata::list_metadata(handle.ops(), filter, limit, offset)
-            .map_err(ops_error_to_mcp)?;
-        respond_with(&page)
-    }
-
-    /// Return books still on the metadata review queue.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.list_pending_reviews",
-        description = "List books whose metadata audit confidence is low or medium \
-                       and whose review is still pending or acknowledged. Paginated."
-    )]
-    async fn library_list_pending_reviews(
-        &self,
-        Parameters(args): Parameters<MetadataPageArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let limit = args.limit.unwrap_or(0);
-        let offset = args.offset.unwrap_or(0);
-        let page = reads::metadata::list_pending_reviews(handle.ops(), limit, offset)
-            .map_err(ops_error_to_mcp)?;
-        respond_with(&page)
-    }
-
-    /// Return the metadata-edit audit trail for one book.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.show_audit_trail",
-        description = "Return the metadata-edit audit trail for one book, oldest \
-                       first. Returns null when no such book is registered."
-    )]
-    async fn library_show_audit_trail(
-        &self,
-        Parameters(args): Parameters<BookIdArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        match reads::metadata::show_audit_trail(handle.ops(), args.intake_id) {
-            Ok(trail) => respond_with(&Some(trail)),
-            Err(OpsError::IntakeNotFound { .. }) => {
-                respond_with::<Option<Vec<bookrack_ops::dto::audit::AuditTrailEntry>>>(&None)
-            }
-            Err(e) => Err(ops_error_to_mcp(e)),
-        }
-    }
-
-    /// Recompute and return the full per-field metadata audit report
-    /// for one paper.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.show_paper_metadata_report",
-        description = "Recompute the metadata plausibility audit for one paper from \
-                       its cached extraction and return the full per-field report: \
-                       origin (extracted / override / override_confirmed / voided), \
-                       grade, flags, and hint per field, plus the cross-field flags \
-                       and the CSL type the required-field matrix was selected by. \
-                       Each response also carries the judgement stored on the paper's \
-                       audit row; the two disagreeing means the paper was edited after \
-                       that judgement was made, and papers.metadata.reaudit is the \
-                       write path that brings the row back in line. Runs the default \
-                       audit profile; nothing is written back. Returns null when no \
-                       such paper is registered."
-    )]
-    async fn library_show_paper_metadata_report(
-        &self,
-        Parameters(args): Parameters<BookIdArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let audit_data = bookrack_ops::PaperAuditData::default_data();
-        let audit_profile = bookrack_ops::PaperAuditProfile::default_profile();
-        match reads::papers_metadata::show_paper_metadata_report(
-            handle.ops(),
-            args.intake_id,
-            &audit_data,
-            &audit_profile,
-        ) {
-            Ok(report) => respond_with(&Some(report)),
-            Err(OpsError::IntakeNotFound { .. }) => respond_with::<
-                Option<bookrack_ops::dto::metadata_report::PaperMetadataAuditReport>,
-            >(&None),
-            Err(e) => Err(ops_error_to_mcp(e)),
-        }
-    }
-
-    /// Return registered papers with their confidence and review
-    /// status.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.list_paper_metadata",
-        description = "List registered papers with their current confidence and \
-                       review status, regardless of audit verdict. Filters match \
-                       the metadata as extracted, before curation, so this is the \
-                       tool for finding records that need fixing; \
-                       `library.find_papers` searches the corrected values. \
-                       Paginated."
-    )]
-    async fn library_list_paper_metadata(
-        &self,
-        Parameters(args): Parameters<MetadataPageArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let filter = MetadataFilter::checked(
-            args.title_substring,
-            args.confidence_in.unwrap_or_default(),
-            args.review_status_in.unwrap_or_default(),
-        )
-        .map_err(|unknown| unknown_filter_value_to_mcp(&unknown))?;
-        let limit = args.limit.unwrap_or(0);
-        let offset = args.offset.unwrap_or(0);
-        let page = reads::papers_metadata::list_paper_metadata(handle.ops(), filter, limit, offset)
-            .map_err(ops_error_to_mcp)?;
-        respond_with(&page)
-    }
-
-    /// Return papers still on the metadata review queue.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.list_paper_pending_reviews",
-        description = "List papers whose metadata audit confidence is low or medium \
-                       and whose review is still pending or acknowledged. Paginated."
-    )]
-    async fn library_list_paper_pending_reviews(
-        &self,
-        Parameters(args): Parameters<MetadataPageArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let limit = args.limit.unwrap_or(0);
-        let offset = args.offset.unwrap_or(0);
-        let page = reads::papers_metadata::list_paper_pending_reviews(handle.ops(), limit, offset)
-            .map_err(ops_error_to_mcp)?;
-        respond_with(&page)
-    }
-
-    /// Return the metadata-edit audit trail for one paper.
-    // Parallel implementation: mcp-paired-read-tools.
-    #[tool(
-        name = "library.show_paper_audit_trail",
-        description = "Return the metadata-edit audit trail for one paper, oldest \
-                       first: who changed which field, what it said before, and why. \
-                       Returns null when no such paper is registered and no edits \
-                       were ever recorded against the id."
-    )]
-    async fn library_show_paper_audit_trail(
-        &self,
-        Parameters(args): Parameters<BookIdArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        match reads::papers_metadata::show_paper_audit_trail(handle.ops(), args.intake_id) {
-            Ok(trail) => respond_with(&Some(trail)),
-            Err(OpsError::IntakeNotFound { .. }) => {
-                respond_with::<Option<Vec<bookrack_ops::dto::audit::AuditTrailEntry>>>(&None)
-            }
-            Err(e) => Err(ops_error_to_mcp(e)),
-        }
-    }
-
-    /// Return the book-level pipeline audit trail for one book.
-    #[tool(
-        name = "library.show_pipeline_trail",
-        description = "Return the book-level pipeline audit trail for one book, \
-                       oldest first. Each row records a pipeline sub-step (stage, \
-                       outcome, duration, run id). Returns null when no such book \
-                       is registered."
-    )]
-    async fn library_show_pipeline_trail(
-        &self,
-        Parameters(args): Parameters<BookIdArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        match reads::pipeline::show_pipeline_trail(handle.ops(), args.intake_id) {
-            Ok(trail) => respond_with(&Some(trail)),
-            Err(OpsError::IntakeNotFound { .. }) => {
-                respond_with::<Option<Vec<bookrack_ops::dto::audit::PipelineAuditEntry>>>(&None)
-            }
-            Err(e) => Err(ops_error_to_mcp(e)),
-        }
-    }
-
-    /// Return the one-page library status card.
-    #[tool(
-        name = "library.info",
-        description = "Return a one-page status card for the open library: schema \
-                       versions, embedder configuration, stamped index parameters, \
-                       live row count, intake counts, and approximate disk usage."
-    )]
-    async fn library_info(
-        &self,
-        Parameters(args): Parameters<LibraryOnlyArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        // The card's identity comes from the library the handle names:
-        // the counts below are this handle's, and the two halves of one
-        // card describe one root. The Ollama endpoint and the MCP
-        // address are properties of the process.
-        let ctx = bookrack_runtime::daemon::library_info_context_for(
-            handle.cfg(),
-            &self.endpoints.ollama_url,
-            &self.endpoints.mcp_addr,
-        )
-        .map_err(|e| report_to_mcp("library.info", e))?;
-        let info = reads::info::show_library_info(handle.ops(), ctx)
-            .await
-            .map_err(ops_error_to_mcp)?;
-        respond_with(&info)
-    }
-
-    /// Return a one-page status card for the daemon process itself.
-    #[tool(
-        name = "session.info",
-        description = "Daemon runtime summary: bookrack version, uptime, the libraries \
-                       this session has mounted (each with its data root and whether \
-                       it is the default), the registered libraries it did not mount \
-                       (each with its data root and the reason), the default library, \
-                       MCP listener address, and Ollama endpoint."
-    )]
-    async fn session_info(
-        &self,
-        Parameters(_): Parameters<session::SessionInfoParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let result = session::info(
-            &self.registry,
-            &self.identity,
-            self.started_at,
-            &self.endpoints.mcp_addr,
-            &self.endpoints.ollama_url,
-        )
-        .map_err(session_error_to_mcp)?;
-        respond_with(&result)
-    }
-
-    /// Return the most recent log events from the daemon's in-memory
-    /// ring buffer. Hands clients a one-shot snapshot; the live
-    /// SSE endpoint at `/session/logs` is the streaming counterpart.
-    #[tool(
-        name = "session.logs_tail",
-        description = "Return the most recent N log events from the daemon's in-memory \
-                       ring buffer (oldest first within the returned slice). N defaults \
-                       to 100 and is capped server-side at 1024."
-    )]
-    async fn session_logs_tail(
-        &self,
-        Parameters(args): Parameters<session::SessionLogsTailParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        respond_with(&session::logs_tail(&self.log_stream, &args))
-    }
-
-    /// Snapshot the daemon's ingest queue: counts by lifecycle
-    /// state plus the most recent jobs, optionally only those in one
-    /// state. The filter applies before the cap, so an early failure in
-    /// a long batch stays reachable.
-    ///
-    /// Against a host that spawns no queue worker this tool reports
-    /// an inert empty state.
-    #[tool(
-        name = "session.queue_status",
-        description = "Snapshot of the ingest queue: counts by lifecycle state across the \
-                       whole queue, plus the most recently enqueued jobs (newest first, \
-                       capped at 10). `state` lists only jobs in that state, so \
-                       `{\"state\": \"failed\"}` finds failures however early they were \
-                       enqueued; a failed job carries its `error` and, when the daemon \
-                       classified the failure, a `problem` with summary, detail, hint and \
-                       retryable. Returns an empty snapshot when run against a daemon that \
-                       does not host a queue worker."
-    )]
-    async fn session_queue_status(
-        &self,
-        Parameters(args): Parameters<session::SessionQueueStatusParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let result =
-            session::queue_status(&self.queue_state, &args).map_err(session_error_to_mcp)?;
-        respond_with(&result)
-    }
-
-    /// Ask the daemon to perform a graceful shutdown. Publishes the
-    /// `stopping` state to control-plane subscribers, then fires the
-    /// session-wide broadcast signal that the signal listener, the
-    /// control-plane socket, the queue worker, and the MCP listener all
-    /// subscribe to; the daemon's
-    /// own join logic then closes everything in order.
-    ///
-    /// The tool returns immediately once the signal is sent — the
-    /// shutdown itself happens asynchronously in the daemon's main
-    /// loop, and the calling client sees the connection close as the
-    /// listener winds down.
-    #[tool(
-        name = "session.shutdown",
-        description = "Ask the daemon to perform a graceful shutdown. Returns immediately \
-                       after firing the shutdown signal; the listener and queue worker \
-                       then wind down asynchronously."
-    )]
-    async fn session_shutdown(
-        &self,
-        Parameters(_): Parameters<session::SessionShutdownParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        respond_with(&session::shutdown(&self.event_stream, &self.shutdown_tx))
-    }
-
-    /// Snapshot the vector store.
-    #[tool(
-        name = "library.vectors_status",
-        description = "Snapshot the vector store: chunk-table row count, every ANN \
-                       index LanceDB enumerates with its per-shard statistics, the \
-                       persisted ANN config, and any drift between the on-disk meta \
-                       and the indices LanceDB actually carries."
-    )]
-    async fn library_vectors_status(
-        &self,
-        Parameters(args): Parameters<LibraryOnlyArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let status = reads::vectors::status(handle.ops())
-            .await
-            .map_err(ops_error_to_mcp)?;
-        respond_with(&status)
-    }
-
-    /// Set an override on one bibliographic field of a book.
-    #[tool(
-        name = "library.metadata.set",
-        description = "Set an override on one editable bibliographic field of one \
-                       book. An unknown field name is rejected with the editable \
-                       list in the error. The extracted value is preserved; the \
-                       override wins on read. Appends one audit row tagged \
-                       `actor_kind=llm` carrying the required `reason`. Pass \
-                       `confirmed: true` only after verifying the value against \
-                       the source itself; the audit then grades the field strong."
-    )]
-    async fn library_metadata_set(
-        &self,
-        Parameters(args): Parameters<MetadataSetArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(Some(args.library.as_str()))?;
-        let intake_id = args.intake_id;
-        let req = bookrack_ops::dto::writes::SetMetadataFieldRequest {
-            intake_id: args.intake_id,
-            field: args.field,
-            value: args.value,
-            reason: Some(args.reason),
-            confirmed: args.confirmed.unwrap_or(false),
-        };
-        let outcome = self
-            .metadata_write(&handle, intake_id, move |s| {
-                writes::metadata::set_metadata_field(s, req)
-            })
-            .await?;
-        respond_with(&outcome)
-    }
-
-    /// Remove an override on one bibliographic field, reverting to the
-    /// extracted value.
-    #[tool(
-        name = "library.metadata.clear",
-        description = "Remove an override on one bibliographic field of one book, \
-                       reverting to the extracted value. An editable field with no \
-                       override still appends an audit row recording the attempt; \
-                       an unknown field name is rejected unless a stale override \
-                       row with that key exists. The required `reason` lands on \
-                       the audit row."
-    )]
-    async fn library_metadata_clear(
-        &self,
-        Parameters(args): Parameters<MetadataClearArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(Some(args.library.as_str()))?;
-        let intake_id = args.intake_id;
-        let req = bookrack_ops::dto::writes::ClearMetadataFieldRequest {
-            intake_id: args.intake_id,
-            field: args.field,
-            reason: Some(args.reason),
-        };
-        let outcome = self
-            .metadata_write(&handle, intake_id, move |s| {
-                writes::metadata::clear_metadata_field(s, req)
-            })
-            .await?;
-        respond_with(&outcome)
-    }
-
-    /// Suppress one field's extracted value with a NULL override.
-    #[tool(
-        name = "library.metadata.void",
-        description = "Suppress one field's extracted value without supplying a \
-                       replacement: the field reads as absent until a correct \
-                       value is set. For extracted values known to be wrong when \
-                       no right value is at hand. `library.metadata.clear` \
-                       removes the suppression. Appends one audit row tagged \
-                       `actor_kind=llm` carrying the required `reason`."
-    )]
-    async fn library_metadata_void(
-        &self,
-        Parameters(args): Parameters<MetadataVoidArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(Some(args.library.as_str()))?;
-        let intake_id = args.intake_id;
-        let req = bookrack_ops::dto::writes::VoidMetadataFieldRequest {
-            intake_id: args.intake_id,
-            field: args.field,
-            reason: Some(args.reason),
-        };
-        let outcome = self
-            .metadata_write(&handle, intake_id, move |s| {
-                writes::metadata::void_metadata_field(s, req)
-            })
-            .await?;
-        respond_with(&outcome)
-    }
-
-    /// Attribute a contributor to one book with `origin = "user"`.
-    #[tool(
-        name = "library.metadata.contributor_add",
-        description = "Attribute a contributor (role: author / translator / editor \
-                       / other) to one book. The row is written with origin `user`, \
-                       survives re-ingest, and is immediately searchable via \
-                       `library.find_books` `contributor_name`. Appends one audit \
-                       row tagged `actor_kind=llm` carrying the required `reason`. \
-                       Returns the new row's `contributor_id`."
-    )]
-    async fn library_metadata_contributor_add(
-        &self,
-        Parameters(args): Parameters<ContributorAddArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(Some(args.library.as_str()))?;
-        let intake_id = args.intake_id;
-        let req = bookrack_ops::dto::writes::AddContributorRequest {
-            intake_id: args.intake_id,
-            role: args.role,
-            name: args.name,
-            nationality: args.nationality,
-            reason: Some(args.reason),
-        };
-        let outcome = self
-            .metadata_write(&handle, intake_id, move |s| {
-                writes::metadata::add_contributor(s, req)
-            })
-            .await?;
-        respond_with(&outcome)
-    }
-
-    /// Remove one contributor row by its surrogate id.
-    #[tool(
-        name = "library.metadata.contributor_remove",
-        description = "Remove one contributor row from one book by the \
-                       `contributor_id` listed in `library.show_book`, whatever \
-                       its origin — the path for stripping a wrong extracted \
-                       attribution (e.g. an ebook packager credited as the \
-                       author). Appends one audit row tagged `actor_kind=llm` \
-                       carrying the required `reason`. A forced re-ingest \
-                       re-seeds extracted rows, so such a removal may need \
-                       repeating after one."
-    )]
-    async fn library_metadata_contributor_remove(
-        &self,
-        Parameters(args): Parameters<ContributorRemoveArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(Some(args.library.as_str()))?;
-        let intake_id = args.intake_id;
-        let req = bookrack_ops::dto::writes::RemoveContributorRequest {
-            intake_id: args.intake_id,
-            contributor_id: args.contributor_id,
-            reason: Some(args.reason),
-        };
-        let outcome = self
-            .metadata_write(&handle, intake_id, move |s| {
-                writes::metadata::remove_contributor(s, req)
-            })
-            .await?;
-        respond_with(&outcome)
-    }
-
-    /// Re-run the metadata plausibility audit from the cached extraction.
-    #[tool(
-        name = "library.metadata.reaudit",
-        description = "Re-run the metadata plausibility audit for one book from \
-                       its cached extraction, refreshing the stored verdict and \
-                       confidence so they reflect the current effective metadata \
-                       (overrides included). Use after correcting fields so the \
-                       stored `needs_work` / `low` can catch up. Grades under the \
-                       library's audit profile and audit data overlays; the review \
-                       status is untouched. Returns the previous and new verdict / \
-                       confidence pair."
-    )]
-    async fn library_metadata_reaudit(
-        &self,
-        Parameters(args): Parameters<MetadataReauditArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(Some(args.library.as_str()))?;
-        let intake_id = args.intake_id;
-        let req = bookrack_ops::dto::writes::ReauditMetadataRequest {
-            intake_id: args.intake_id,
-        };
-        // The overlays are read inside the session, from the library
-        // the session writes, so an edited overlay applies to the next
-        // call without a remount.
-        let outcome = self
-            .metadata_write(&handle, intake_id, move |s| {
-                let cfg = s.handle().cfg();
-                let audit_data = audit_overlay::load_audit_data(cfg);
-                let audit_profile = audit_overlay::load_audit_profile(cfg, None);
-                writes::metadata::reaudit_metadata(s, req, &audit_data, &audit_profile)
-            })
-            .await?;
-        respond_with(&outcome)
-    }
-
-    /// Acknowledge a metadata gap: flip the review row to `acknowledged`
-    /// with a recorded reason.
-    #[tool(
-        name = "library.metadata.ack",
-        description = "Acknowledge a metadata gap on one book: the audit verdict \
-                       is unchanged; the review row is flipped to `acknowledged` \
-                       with the given reason. The book stays on the review queue \
-                       until approved or rejected."
-    )]
-    async fn library_metadata_ack(
-        &self,
-        Parameters(args): Parameters<MetadataAckArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(Some(args.library.as_str()))?;
-        let intake_id = args.intake_id;
-        let req = bookrack_ops::dto::writes::AcknowledgeMetadataGapRequest {
-            intake_id: args.intake_id,
-            reason: args.reason,
-        };
-        let outcome = self
-            .metadata_write(&handle, intake_id, move |s| {
-                writes::metadata::acknowledge_metadata_gap(s, req)
-            })
-            .await?;
-        respond_with(&outcome)
-    }
-
-    /// Approve the metadata record: flip the review row to `approved`.
-    #[tool(
-        name = "library.metadata.approve",
-        description = "Approve the metadata record on one book: assert that the \
-                       effective metadata matches the source. Flips the review \
-                       row to `approved`. The audit verdict is unchanged."
-    )]
-    async fn library_metadata_approve(
-        &self,
-        Parameters(args): Parameters<MetadataApproveArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(Some(args.library.as_str()))?;
-        let intake_id = args.intake_id;
-        let req = bookrack_ops::dto::writes::ApproveMetadataRequest {
-            intake_id: args.intake_id,
-            reason: args.reason,
-        };
-        let outcome = self
-            .metadata_write(&handle, intake_id, move |s| {
-                writes::metadata::approve_metadata(s, req)
-            })
-            .await?;
-        respond_with(&outcome)
-    }
-
-    /// Reject the book: flip the review row to `rejected`.
-    #[tool(
-        name = "library.metadata.reject",
-        description = "Reject one book: flip the review row to `rejected`. \
-                       Pipeline rows stay in place so downstream consumers can \
-                       filter on `rejected`. Records the reason on the audit row."
-    )]
-    async fn library_metadata_reject(
-        &self,
-        Parameters(args): Parameters<MetadataRejectArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(Some(args.library.as_str()))?;
-        let intake_id = args.intake_id;
-        let req = bookrack_ops::dto::writes::RejectMetadataRequest {
-            intake_id: args.intake_id,
-            reason: args.reason,
-        };
-        let outcome = self
-            .metadata_write(&handle, intake_id, move |s| {
-                writes::metadata::reject_metadata(s, req)
-            })
-            .await?;
-        respond_with(&outcome)
-    }
-
-    // ----- reference-book surface (v2 distill phase 9) -----
-
-    /// Polymorphic reference-book lookup. Returns the
-    /// disambiguation array shape even for a single-hit query, so
-    /// callers do not branch on cardinality.
-    #[tool(
-        name = "reference.lookup",
-        description = "Look up a reference-book entry by its normalized key. \
-                       `book` is either a specific book slug or `*` to query \
-                       every registered book and rank cross-book hits by \
-                       authority_rank. `fields` optionally restricts which \
-                       payload keys appear on each hit; `min_severity` \
-                       (ok | info | warn | error) drops hits whose quality_flags \
-                       carry no concern at or above that severity. Single-hit \
-                       redirect entries auto-follow one hop."
-    )]
-    async fn reference_lookup(
-        &self,
-        Parameters(args): Parameters<ReferenceLookupArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(args.library.as_deref())?;
-        let catalogs = reads::reference::catalogs().map_err(reference_error_to_mcp)?;
-        let result = reads::reference::lookup_at(
-            &handle.ops().reference_db_path(),
-            catalogs,
-            &args.to_lookup(),
-        )
-        .map_err(reference_error_to_mcp)?;
-        respond_with(&result)
-    }
-
-    /// Layer or replace one entry's overlay. The overlay JSON's keys
-    /// are validated against the property catalog before a write
-    /// session is opened, so a refused payload neither waits on another
-    /// write nor creates the store; mismatches raise `invalid_params`.
-    /// The write itself runs in the library's write session, so a
-    /// concurrent write is answered busy.
-    #[tool(
-        name = "reference.overlay_set",
-        description = "Layer a user edit on top of one reference entry. Every key \
-                       in `overlay` must be in property_catalog.toml. `reason` is \
-                       a free-text edit summary recorded on the overlay row. The \
-                       `edited_at` stamp is set to the daemon's current UTC time."
-    )]
-    async fn reference_overlay_set(
-        &self,
-        Parameters(args): Parameters<ReferenceOverlaySetArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let handle = self.resolve_handle(Some(args.library.as_str()))?;
-        let request = args.to_request();
-        let catalogs = reads::reference::catalogs().map_err(reference_error_to_mcp)?;
-        writes::reference::validate_overlay(catalogs, &request).map_err(reference_error_to_mcp)?;
-        let region = Region::Reference {
-            book_slug: request.book_slug.clone(),
-        };
-        let session = self
-            .registry
-            .begin_write(&handle, region, Caller::mcp())
-            .map_err(|busy| ops_error_to_mcp(OpsError::WriteBusy(busy)))?;
-        let receipt = session
-            .run_blocking(async move |s| writes::reference::set_overlay(s, &request))
-            .await
-            .map_err(|e| match e {
-                SessionRunError::Op(e) => reference_error_to_mcp(e),
-                other => mcp_from_problem(
-                    ErrorCode::INTERNAL_ERROR,
-                    bookrack_core::Problem::from_error_chain(&other),
-                ),
-            })?;
-        respond_with(&receipt)
-    }
+/// The future a tool call of session tool `tool` runs.
+fn session_call<'a>(
+    tool: &'static SessionTool,
+    tcc: ToolCallContext<'a, BookrackServer>,
+) -> ToolFuture<'a> {
+    let server = tcc.service;
+    let arguments = tcc.arguments;
+    Box::pin(async move { server.call_session(tool, arguments).map(Into::into) })
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -2152,19 +269,18 @@ impl ServerHandler for BookrackServer {
 
     /// Override the `#[tool_handler]`-generated dispatch so every tool
     /// call runs attributed to [`Caller::mcp`], regardless of the
-    /// [`Caller`] baked into the shared [`Ops`] handle. The daemon
-    /// builds one [`Ops`] per library tagged with the control plane
+    /// [`Caller`] baked into the shared `Ops` handle. The daemon builds
+    /// one `Ops` per library tagged with the control plane
     /// (`Caller::control_plane()`) and shares it across the control
-    /// socket, HTTP, and queue worker; without this wrap, both the recorded
-    /// tool-call `source` and the `actor_kind` / `actor_detail` on
-    /// write audit rows would carry the host surface's identity
-    /// instead of `llm` / `mcp`.
+    /// socket, HTTP, and queue worker; without this wrap, the recorded
+    /// tool-call `source` of a read would carry the host surface's
+    /// identity instead of `mcp`.
     async fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
-        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let tcc = ToolCallContext::new(self, request, context);
         with_caller_override(Caller::mcp(), self.tool_router.call(tcc)).await
     }
 }
@@ -2223,7 +339,7 @@ impl ServerHandler for BookrackServer {
 // and would just trade names for repetition.
 #[allow(clippy::too_many_arguments)]
 pub async fn serve(
-    registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
+    registry: Arc<DaemonRegistry>,
     endpoints: ProcessEndpoints,
     started_at: Instant,
     identity: DaemonIdentity,
@@ -2354,15 +470,14 @@ pub fn spawn_listener(
     }))
 }
 
-/// Enumerate every MCP tool the live server exposes. Calls into the
-/// static [`BookrackServer::tool_router`] generated by rmcp's
-/// `#[tool_router]` macro, so the list stays in lockstep with the
-/// `#[tool]` annotations above without a separate registry.
+/// Enumerate every MCP tool the live server exposes, read from the
+/// routes the server registers, so the list cannot name a tool the
+/// server does not answer.
 ///
 /// The daemon's control plane reaches for this list at startup so
 /// `daemon.mcp_tools` can answer without spinning up an MCP transport.
 pub fn list_tools() -> Vec<bookrack_runtime::control::methods::meta::McpToolInfo> {
-    BookrackServer::tool_router()
+    TOOL_ROUTER
         .list_all()
         .into_iter()
         .map(
@@ -2377,12 +492,12 @@ pub fn list_tools() -> Vec<bookrack_runtime::control::methods::meta::McpToolInfo
 #[cfg(test)]
 mod tests {
     use bookrack_core::ItemKind;
+    use bookrack_core::NodeId;
     use bookrack_ops::Citation;
     use bookrack_ops::dto::{
         BookDetail, BookSummary, ContextWindow, ContributorEntry, LibraryStats, ListBooksResult,
         Passage, SpanText, Toc, TocNode, TocNodes, TocSlimEntry,
     };
-    use bookrack_query::NodeId;
 
     fn citation(node: i64) -> Citation {
         Citation {
@@ -2593,110 +708,6 @@ mod tests {
     }
 
     #[test]
-    fn search_args_default_to_no_exclusions() {
-        let args: super::SearchArgs =
-            serde_json::from_value(serde_json::json!({ "query": "hello" })).expect("parse");
-        assert!(args.exclude_book_intake_ids.is_empty());
-        assert!(args.exclude_paper_intake_ids.is_empty());
-        assert!(
-            args.overrides_excluding(&args.exclude_book_intake_ids)
-                .exclude_partitions
-                .is_empty(),
-            "an omitted list must reach the store as no filter at all",
-        );
-    }
-
-    #[test]
-    fn search_args_project_each_sides_exclusions_separately() {
-        let args: super::SearchArgs = serde_json::from_value(serde_json::json!({
-            "query": "hello",
-            "kind": "all",
-            "exclude_book_intake_ids": [2, 5],
-            "exclude_paper_intake_ids": [9],
-        }))
-        .expect("parse");
-        use bookrack_core::PartitionIdx;
-        assert_eq!(
-            args.overrides_excluding(&args.exclude_book_intake_ids)
-                .exclude_partitions,
-            vec![PartitionIdx::new(2), PartitionIdx::new(5)],
-        );
-        assert_eq!(
-            args.overrides_excluding(&args.exclude_paper_intake_ids)
-                .exclude_partitions,
-            vec![PartitionIdx::new(9)],
-        );
-    }
-
-    #[test]
-    fn search_args_reject_the_other_sides_exclusion_list() {
-        for (kind, field) in [
-            ("book", "exclude_paper_intake_ids"),
-            ("paper", "exclude_book_intake_ids"),
-        ] {
-            let args: super::SearchArgs = serde_json::from_value(serde_json::json!({
-                "query": "hello",
-                "kind": kind,
-                field: [9],
-            }))
-            .expect("parse");
-            let err = args
-                .checked_kind()
-                .expect_err("the mismatched list is refused");
-            assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-            assert!(
-                err.message.contains(field) && err.message.contains(kind),
-                "the message must name the field and the kind: {}",
-                err.message
-            );
-        }
-        // Each kind admits the list that belongs to it.
-        for (kind, field) in [
-            ("book", "exclude_book_intake_ids"),
-            ("paper", "exclude_paper_intake_ids"),
-        ] {
-            let args: super::SearchArgs = serde_json::from_value(serde_json::json!({
-                "query": "hello",
-                "kind": kind,
-                field: [9],
-            }))
-            .expect("parse");
-            assert_eq!(args.checked_kind().expect("admissible"), kind);
-        }
-        // `all` searches both sides, so both lists apply at once.
-        let args: super::SearchArgs = serde_json::from_value(serde_json::json!({
-            "query": "hello",
-            "kind": "all",
-            "exclude_book_intake_ids": [2],
-            "exclude_paper_intake_ids": [9],
-        }))
-        .expect("parse");
-        assert_eq!(args.checked_kind().expect("admissible"), "all");
-    }
-
-    #[test]
-    fn search_args_kind_defaults_to_none_for_book_side_behavior() {
-        let args: super::SearchArgs =
-            serde_json::from_value(serde_json::json!({ "query": "hello" })).expect("parse");
-        assert!(
-            args.kind.is_none(),
-            "omitting kind must leave the field absent so the handler defaults to book",
-        );
-    }
-
-    #[test]
-    fn search_args_kind_accepts_paper_and_all() {
-        for value in ["book", "paper", "all"] {
-            let args: super::SearchArgs = serde_json::from_value(serde_json::json!({
-                "query": "hello",
-                "kind": value,
-            }))
-            .expect("parse");
-            assert_eq!(args.kind.as_deref(), Some(value));
-        }
-    }
-
-    #[test]
     fn paper_summary_serializes_paper_specific_fields() {
         use bookrack_ops::dto::PaperSummary;
         let summary = PaperSummary {
@@ -2737,61 +748,6 @@ mod tests {
     }
 
     #[test]
-    fn read_context_args_without_kind_default_to_book() {
-        let payload = serde_json::json!({ "node_id": 42 });
-        let args: super::ReadContextArgs = serde_json::from_value(payload).expect("deserialize");
-        assert_eq!(args.kind, ItemKind::Book);
-    }
-
-    #[test]
-    fn read_context_args_accept_an_explicit_paper_kind() {
-        let payload = serde_json::json!({ "node_id": 42, "kind": "paper" });
-        let args: super::ReadContextArgs = serde_json::from_value(payload).expect("deserialize");
-        assert_eq!(args.kind, ItemKind::Paper);
-    }
-
-    #[test]
-    fn read_span_args_without_kind_default_to_book() {
-        let payload = serde_json::json!({ "node_id": 7 });
-        let args: super::ReadSpanArgs = serde_json::from_value(payload).expect("deserialize");
-        assert_eq!(args.kind, ItemKind::Book);
-    }
-
-    /// The overlay tool's failures are classified by the same mapper as
-    /// the lookup's: caller input, a store this build cannot serve, and
-    /// a residual fault each keep their own code.
-    #[test]
-    fn reference_errors_split_into_caller_input_state_and_fault() {
-        use bookrack_ops::reads::reference::ReferenceError;
-        use bookrack_runtime::control::jsonrpc::STATE_UNUSABLE;
-        use rmcp::model::ErrorCode;
-
-        let invalid = [
-            ReferenceError::InvalidArgument("bad".to_string()),
-            ReferenceError::UnknownOverlayProperty {
-                key: "bogus".to_string(),
-            },
-        ];
-        for err in invalid {
-            let mapped = super::reference_error_to_mcp(err);
-            assert_eq!(mapped.code, ErrorCode::INVALID_PARAMS, "{}", mapped.message);
-        }
-        let newer = super::reference_error_to_mcp(ReferenceError::Open {
-            path: "/data/reference.db".into(),
-            source: bookrack_refs::RefsError::SchemaTooNew {
-                found: 99,
-                supported: 1,
-            },
-        });
-        assert_eq!(newer.code, ErrorCode(STATE_UNUSABLE), "{}", newer.message);
-        let fault = super::reference_error_to_mcp(ReferenceError::Io {
-            path: "/data/reference.db".into(),
-            source: std::io::Error::other("permission denied"),
-        });
-        assert_eq!(fault.code, ErrorCode::INTERNAL_ERROR, "{}", fault.message);
-    }
-
-    #[test]
     fn the_find_books_schema_does_not_disclaim_the_category_filter() {
         // A field's doc comment becomes that parameter's `description`
         // in the published tool schema, which is all a client reads
@@ -2799,7 +755,7 @@ mod tests {
         // disclaimer there makes an implemented, tested filter
         // unreachable in practice, however the tool description and
         // `docs/control-plane.md` word it.
-        let tool = super::BookrackServer::tool_router()
+        let tool = super::TOOL_ROUTER
             .list_all()
             .into_iter()
             .find(|tool| tool.name == "library.find_books")

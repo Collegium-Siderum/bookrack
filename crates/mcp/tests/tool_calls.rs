@@ -9,21 +9,27 @@
 //! and no other layer asserts:
 //!
 //! * a successful tool response is one text content block whose text
-//!   is the JSON body;
+//!   is the JSON body, fields in their declared order; a tool whose
+//!   answer is always an object publishes an output schema and carries
+//!   the same value as structured content, and a tool whose answer may
+//!   be `null` or is an array publishes none and carries structured
+//!   content only beside an object — for the per-request client too;
 //! * `library.show_book` reads an unknown intake as a `null` body
 //!   rather than an error;
-//! * an unknown `library` selector, a caller-input edit fault, a
-//!   write against an unknown intake, and a malformed `kind` all
-//!   surface as `invalid_params`, while an environmental fault
-//!   surfaces as `internal_error`;
+//! * an unknown or skipped `library` selector is `-32010`, the code the
+//!   control plane gives it; a caller-input edit fault, a write against
+//!   an unknown intake, a malformed `kind`, and params that do not fit
+//!   a tool all surface as `invalid_params`, while an environmental
+//!   fault surfaces as `internal_error`;
 //! * every recorded tool-call row carries `source = "mcp"` even
 //!   though the shared `Ops` was built for another surface — the
 //!   `call_tool` caller override the audit trail depends on;
 //! * `library.info` for a selected library reports that library's
 //!   root and name, not the ones of the library the daemon came up
 //!   on;
-//! * `library.metadata.reaudit` grades under the library's audit data
-//!   and audit profile overlays, read when the call arrives;
+//! * `library.metadata.reaudit` and `library.show_metadata_report`
+//!   grade under the library's audit overlays, read when the call
+//!   arrives;
 //! * `session.info` lists each mounted library with its own root and
 //!   default mark, and its default name follows the registry's pointer;
 //! * `session.queue_status` filters `recent` on a state before capping
@@ -57,7 +63,7 @@ use bookrack_obs::LogStreamHandle;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::write_session::{ChangeSink, WriteIntent};
 use bookrack_ops::{Caller, Ops};
-use bookrack_runtime::control::jsonrpc::BUSY;
+use bookrack_runtime::control::jsonrpc::{BUSY, INVALID_LIBRARY};
 use bookrack_test_support::{ProcessEnv, process_env};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ErrorCode, JsonObject};
@@ -580,8 +586,11 @@ async fn a_passage_read_of_the_reference_kind_is_invalid_params() {
     fx.stop().await;
 }
 
+/// A `library` selector the registry does not carry is refused with
+/// the invalid-library code the control plane answers the same name
+/// with.
 #[tokio::test]
-async fn an_unknown_library_selector_is_invalid_params() {
+async fn an_unknown_library_selector_is_invalid_library() {
     let fx = Fixture::start().await;
     let client = fx.connect().await;
 
@@ -593,7 +602,7 @@ async fn an_unknown_library_selector_is_invalid_params() {
         .await
         .expect_err("an unknown library selector must be rejected");
     let data = rpc_error(err);
-    assert_eq!(data.code, ErrorCode::INVALID_PARAMS, "{}", data.message);
+    assert_eq!(data.code, ErrorCode(INVALID_LIBRARY), "{}", data.message);
     assert!(
         data.message.contains("no-such-library"),
         "the message must name the rejected selector: {}",
@@ -619,10 +628,10 @@ async fn an_unknown_library_selector_is_invalid_params() {
 
 /// A library bring-up skipped is refused by name with the reason it
 /// was skipped for, whose hint already closes with the command that
-/// mounts it, as invalid params: the agent's input names a library
+/// mounts it, as an invalid library: the agent's input names a library
 /// that is registered but not served.
 #[tokio::test]
-async fn a_library_bring_up_skipped_is_invalid_params_with_the_mount_hint() {
+async fn a_library_bring_up_skipped_is_invalid_library_with_the_mount_hint() {
     let fx = Fixture::start().await;
     fx.registry
         .record_unmounted(bookrack_ops::registry::UnmountedLibrary::new(
@@ -642,7 +651,7 @@ async fn a_library_bring_up_skipped_is_invalid_params_with_the_mount_hint() {
         .await
         .expect_err("a skipped library must be refused");
     let data = rpc_error(err);
-    assert_eq!(data.code, ErrorCode::INVALID_PARAMS, "{}", data.message);
+    assert_eq!(data.code, ErrorCode(INVALID_LIBRARY), "{}", data.message);
     assert!(
         data.message.contains("beta") && data.message.contains("not mounted"),
         "the message names the library and the fact: {}",
@@ -709,12 +718,12 @@ async fn session_info_lists_skipped_libraries_with_their_reason() {
 }
 
 /// A client that negotiates protocol version 2026-07-28 sends no
-/// `initialize` and is served one request at a time. A tool's
-/// `invalid_params` for the caller's input reaches it as a JSON-RPC
-/// error under HTTP 200: a client that treats a 4xx status as a
-/// transport failure never reads the body.
+/// `initialize` and is served one request at a time. A tool's refusal
+/// of the caller's input reaches it as a JSON-RPC error under HTTP
+/// 200: a client that treats a 4xx status as a transport failure never
+/// reads the body.
 #[tokio::test]
-async fn a_per_request_clients_invalid_params_arrives_in_band() {
+async fn a_per_request_clients_refused_input_arrives_in_band() {
     let fx = Fixture::start().await;
 
     let body = serde_json::json!({
@@ -740,10 +749,10 @@ async fn a_per_request_clients_invalid_params_arrives_in_band() {
         body.to_string(),
     )
     .await;
-    assert_eq!(status, 200, "invalid params must stay in band: {text}");
+    assert_eq!(status, 200, "a refused input must stay in band: {text}");
     assert!(
-        text.contains("-32602") && text.contains("no-such-library"),
-        "the body must carry the invalid-params error naming the selector: {text}"
+        text.contains("-32010") && text.contains("no-such-library"),
+        "the body must carry the invalid-library error naming the selector: {text}"
     );
 
     fx.stop().await;
@@ -1629,6 +1638,373 @@ async fn session_info_reports_the_daemons_identity() {
         Some(12),
         "session.info carries a field outside the contract: {body}"
     );
+}
+
+/// The published tools as pinned: one JSON line per tool — its name,
+/// description, and input schema — in name order.
+const PINNED_TOOLS: &str = include_str!("fixtures/tool_inputs.jsonl");
+
+/// Every tool publishes exactly the description and input schema
+/// pinned for it. A parameter's description is its params type's doc
+/// comment, so an edit there changes what a client reads; it fails here
+/// until the pin is updated with it, and the failure prints each
+/// drifted tool as it is published now, one line per tool.
+#[tokio::test]
+async fn every_tool_publishes_its_pinned_description_and_input_schema() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+
+    let mut published: Vec<serde_json::Value> = client
+        .list_all_tools()
+        .await
+        .expect("tools/list")
+        .into_iter()
+        .map(|tool| {
+            serde_json::json!({
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": tool.input_schema,
+            })
+        })
+        .collect();
+    published.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    let pinned: Vec<serde_json::Value> = PINNED_TOOLS
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a pinned line is JSON"))
+        .collect();
+    let names = |tools: &[serde_json::Value]| -> Vec<String> {
+        tools
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("a name").to_owned())
+            .collect()
+    };
+    assert_eq!(names(&published), names(&pinned), "the published names");
+    let drifted: Vec<String> = published
+        .iter()
+        .zip(&pinned)
+        .filter(|(now, pin)| now != pin)
+        .map(|(now, _)| now.to_string())
+        .collect();
+    assert!(
+        drifted.is_empty(),
+        "{} tools drifted from the pin; as published now:\n{}",
+        drifted.len(),
+        drifted.join("\n")
+    );
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+/// The tools whose answer is an object, or `null` when the addressed
+/// item does not exist.
+const NULLABLE_OBJECT_TOOLS: &[&str] = &[
+    "library.show_book",
+    "library.show_toc",
+    "library.read_context",
+    "library.read_span",
+    "library.show_metadata_audit",
+    "library.show_metadata_report",
+    "library.show_paper",
+    "library.show_paper_toc",
+    "library.show_paper_metadata_report",
+    "papers.fetch_source",
+];
+
+/// The tools whose answer is an array, or an array or `null`.
+const ARRAY_TOOLS: &[&str] = &[
+    "library.search",
+    "library.search_in_book",
+    "library.search_in_paper",
+    "library.show_audit_trail",
+    "library.show_paper_audit_trail",
+    "library.show_pipeline_trail",
+];
+
+/// The structured content a successful tool call carries, if any.
+fn structured(result: &CallToolResult) -> Option<&serde_json::Value> {
+    result.structured_content.as_ref()
+}
+
+/// A tool whose answer is always an object publishes an object-rooted
+/// output schema; a tool whose answer may be `null` or is an array
+/// publishes none.
+#[tokio::test]
+async fn only_the_tools_answering_with_an_object_publish_an_output_schema() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+
+    let tools = client.list_all_tools().await.expect("tools/list");
+    assert_eq!(tools.len(), 43, "the published tool count");
+    let mut with_schema = 0;
+    for tool in &tools {
+        let name = tool.name.as_ref();
+        let schemaless = NULLABLE_OBJECT_TOOLS.contains(&name) || ARRAY_TOOLS.contains(&name);
+        match &tool.output_schema {
+            Some(schema) => {
+                assert!(
+                    !schemaless,
+                    "{name} may answer with null or an array, yet publishes {schema:?}"
+                );
+                assert_eq!(
+                    schema.get("type"),
+                    Some(&serde_json::json!("object")),
+                    "{name}'s output schema is not an object root: {schema:?}"
+                );
+                with_schema += 1;
+            }
+            None => assert!(
+                schemaless,
+                "{name} answers with an object but publishes no schema"
+            ),
+        }
+    }
+    assert_eq!(
+        with_schema, 27,
+        "the tools that always answer with an object"
+    );
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+/// An object answer arrives twice: as the text block, fields in the
+/// order the answer declares them, and as structured content holding
+/// the same value. A `null` or array answer arrives as text alone.
+#[tokio::test]
+async fn an_object_answer_carries_structured_content_and_a_null_or_array_one_does_not() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+
+    let stats = client
+        .call_tool(call("library.stats", serde_json::json!({})))
+        .await
+        .expect("library.stats");
+    let text = stats.content[0]
+        .as_text()
+        .expect("a text block")
+        .text
+        .clone();
+    assert!(
+        text.starts_with("{\"intake_counts_by_status\":"),
+        "the text keeps the declared field order: {text}"
+    );
+    assert_eq!(
+        structured(&stats),
+        Some(&body_json(&stats)),
+        "the structured content is the text's value"
+    );
+    let card = client
+        .call_tool(call("session.info", serde_json::json!({})))
+        .await
+        .expect("session.info");
+    assert_eq!(structured(&card), Some(&body_json(&card)), "session.info");
+
+    let book = fx.seed_audited_book("sha-structured-report");
+    let found = client
+        .call_tool(call(
+            "library.show_metadata_report",
+            serde_json::json!({ "intake_id": book }),
+        ))
+        .await
+        .expect("library.show_metadata_report");
+    assert!(body_json(&found).is_object(), "{found:?}");
+    assert_eq!(structured(&found), Some(&body_json(&found)), "a found book");
+
+    for (tool, arguments) in [
+        (
+            "library.show_book",
+            serde_json::json!({ "intake_id": 999_999 }),
+        ),
+        (
+            "library.show_audit_trail",
+            serde_json::json!({ "intake_id": 999_999 }),
+        ),
+        (
+            "library.show_audit_trail",
+            serde_json::json!({ "intake_id": fx.intake_id }),
+        ),
+    ] {
+        let result = client
+            .call_tool(call(tool, arguments))
+            .await
+            .unwrap_or_else(|e| panic!("{tool}: {e:?}"));
+        let body = body_json(&result);
+        assert!(body.is_null() || body.is_array(), "{tool}: {body}");
+        assert_eq!(
+            structured(&result),
+            None,
+            "{tool} carries structured content"
+        );
+    }
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+/// The per-request client of protocol version 2026-07-28 is sent what
+/// the SDK would otherwise strip for an older one: the output schemas
+/// in the tool list, and structured content only beside an object.
+#[tokio::test]
+async fn a_per_request_client_sees_output_schemas_and_structured_content_on_objects_only() {
+    let fx = Fixture::start().await;
+    let headers = |method: &'static str, name: Option<&'static str>| {
+        let mut headers = vec![
+            ("MCP-Protocol-Version", "2026-07-28"),
+            ("Mcp-Method", method),
+        ];
+        if let Some(name) = name {
+            headers.push(("Mcp-Name", name));
+        }
+        headers
+    };
+    let meta = serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+
+    let list = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+        "params": { "_meta": meta },
+    });
+    let (status, text) = post_raw(fx.addr, &headers("tools/list", None), list.to_string()).await;
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(
+        text.matches("\"outputSchema\"").count(),
+        27,
+        "only the tools that always answer with an object publish a schema: {text}"
+    );
+
+    for (tool, arguments, carries) in [
+        ("library.stats", serde_json::json!({}), true),
+        (
+            "library.show_book",
+            serde_json::json!({ "intake_id": 999_999 }),
+            false,
+        ),
+        (
+            "library.show_pipeline_trail",
+            serde_json::json!({ "intake_id": 999_999 }),
+            false,
+        ),
+        (
+            "library.show_audit_trail",
+            serde_json::json!({ "intake_id": fx.intake_id }),
+            false,
+        ),
+    ] {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": { "name": tool, "arguments": arguments, "_meta": meta },
+        });
+        let (status, text) = post_raw(
+            fx.addr,
+            &headers("tools/call", Some(tool)),
+            body.to_string(),
+        )
+        .await;
+        assert_eq!(status, 200, "{tool}: {text}");
+        assert!(
+            text.contains("\"result\"") && !text.contains("\"error\""),
+            "{tool} must answer, not fail: {text}"
+        );
+        assert_eq!(
+            text.contains("\"structuredContent\""),
+            carries,
+            "{tool}: {text}"
+        );
+    }
+
+    fx.stop().await;
+}
+
+/// The book report grades under the library's own audit profile
+/// overlay, read when the call arrives, as a re-audit of the book
+/// would store it.
+#[tokio::test]
+async fn the_book_report_grades_under_the_librarys_audit_profile_overlay() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+    let book = fx.seed_audited_book("sha-report-profile");
+    client
+        .call_tool(set_title(book, "Untitled"))
+        .await
+        .expect("library.metadata.set");
+    let report = || {
+        call(
+            "library.show_metadata_report",
+            serde_json::json!({ "intake_id": book }),
+        )
+    };
+    let title_flags = |body: &serde_json::Value| -> Vec<String> {
+        body["fields"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a report with fields: {body}"))
+            .iter()
+            .find(|row| row["field"] == "title")
+            .unwrap_or_else(|| panic!("a title row: {body}"))["flags"]
+            .as_array()
+            .expect("a flags array")
+            .iter()
+            .map(|flag| flag.as_str().expect("a flag string").to_owned())
+            .collect()
+    };
+
+    let shipped = body_json(&client.call_tool(report()).await.expect("the report"));
+    assert!(
+        title_flags(&shipped).contains(&"placeholder_value".to_owned()),
+        "the shipped profile flags a placeholder title: {shipped}"
+    );
+    fx.write_audit_rule(
+        "audit_profile.local.toml",
+        "schema_version = 1\n\n[title]\nplaceholder_check = false\n",
+    );
+    let overlaid = body_json(&client.call_tool(report()).await.expect("the report"));
+    assert!(
+        !title_flags(&overlaid).contains(&"placeholder_value".to_owned()),
+        "the overlay turns the placeholder check off: {overlaid}"
+    );
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+/// Params that do not fit a tool's schema are the caller's input,
+/// refused under the tool's name in the words the control plane uses
+/// for the same refusal.
+#[tokio::test]
+async fn params_that_do_not_fit_a_tool_are_invalid_params_under_its_name() {
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+
+    for (tool, arguments) in [
+        (
+            "library.show_book",
+            serde_json::json!({ "intake_id": "one" }),
+        ),
+        ("session.logs_tail", serde_json::json!({ "n": "three" })),
+    ] {
+        let data = rpc_error(
+            client
+                .call_tool(call(tool, arguments))
+                .await
+                .expect_err("params of the wrong type must be refused"),
+        );
+        assert_eq!(
+            data.code,
+            ErrorCode::INVALID_PARAMS,
+            "{tool}: {}",
+            data.message
+        );
+        assert!(
+            data.message.starts_with(&format!("invalid {tool} params:")),
+            "{tool}: {}",
+            data.message
+        );
+    }
+
+    let _ = client.cancel().await;
+    fx.stop().await;
 }
 
 /// A daemon identity for a server no daemon stands behind.

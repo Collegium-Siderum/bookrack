@@ -42,18 +42,6 @@ reason = "transitional"
 exit = "diagnose is called through ops"
 
 [[edge]]
-from = "mcp"
-to = "query"
-reason = "transitional"
-exit = "ops supplies the context radius and the embedding client type"
-
-[[edge]]
-from = "mcp"
-to = "embed"
-reason = "transitional"
-exit = "ops supplies the context radius and the embedding client type"
-
-[[edge]]
 from = "runtime"
 to = "catalog"
 reason = "transitional"
@@ -136,13 +124,6 @@ paths = [
 ]
 reason = "transitional"
 exit = "diagnose is called through ops"
-
-[[file]]
-paths = [
-  "crates/mcp/src/lib.rs",
-]
-reason = "transitional"
-exit = "ops supplies the context radius and the embedding client type"
 
 [[file]]
 paths = [
@@ -698,34 +679,6 @@ agreement = "unverified"
 exit = "one entry point takes the kind"
 
 [[parallel]]
-id = "mcp-paired-read-tools"
-summary = "MCP read tools, one per kind"
-sites = [
-  "crates/mcp/src/lib.rs::library_find_books",
-  "crates/mcp/src/lib.rs::library_find_papers",
-  "crates/mcp/src/lib.rs::library_list_books",
-  "crates/mcp/src/lib.rs::library_list_papers",
-  "crates/mcp/src/lib.rs::library_list_metadata",
-  "crates/mcp/src/lib.rs::library_list_paper_metadata",
-  "crates/mcp/src/lib.rs::library_list_pending_reviews",
-  "crates/mcp/src/lib.rs::library_list_paper_pending_reviews",
-  "crates/mcp/src/lib.rs::library_search_in_book",
-  "crates/mcp/src/lib.rs::library_search_in_paper",
-  "crates/mcp/src/lib.rs::library_show_book",
-  "crates/mcp/src/lib.rs::library_show_paper",
-  "crates/mcp/src/lib.rs::library_show_audit_trail",
-  "crates/mcp/src/lib.rs::library_show_paper_audit_trail",
-  "crates/mcp/src/lib.rs::library_show_metadata_report",
-  "crates/mcp/src/lib.rs::library_show_paper_metadata_report",
-  "crates/mcp/src/lib.rs::library_show_toc",
-  "crates/mcp/src/lib.rs::library_show_paper_toc",
-]
-reason = "transitional"
-detail = "both pending-review tools accept three filter parameters and ignore them"
-agreement = "divergent"
-exit = "tools are registered from one method table"
-
-[[parallel]]
 id = "cli-item-rendering"
 summary = "human-readable item card and item list, one per kind"
 sites = [
@@ -953,38 +906,6 @@ agreement = "divergent"
 exit = "one walk takes the accepted extensions"
 
 [[parallel]]
-id = "frontend-param-mirror"
-summary = "read parameters, declared once per front end"
-sites = [
-  "crates/mcp/src/lib.rs::SearchArgs",
-  "crates/mcp/src/lib.rs::SearchInBookArgs",
-  "crates/mcp/src/lib.rs::FindBooksArgs",
-  "crates/mcp/src/lib.rs::BookIdArgs",
-  "crates/mcp/src/lib.rs::ShowTocArgs",
-  "crates/mcp/src/lib.rs::FindPapersArgs",
-  "crates/mcp/src/lib.rs::SearchInPaperArgs",
-  "crates/mcp/src/lib.rs::ReadContextArgs",
-  "crates/mcp/src/lib.rs::ReadSpanArgs",
-  "crates/mcp/src/lib.rs::LibraryOnlyArgs",
-  "crates/mcp/src/lib.rs::MetadataPageArgs",
-  "crates/ops/src/methods/params.rs::SearchParams",
-  "crates/ops/src/methods/params.rs::SearchInBookParams",
-  "crates/ops/src/methods/params.rs::FindBooksParams",
-  "crates/ops/src/methods/params.rs::BookIdParams",
-  "crates/ops/src/methods/params.rs::ShowTocParams",
-  "crates/ops/src/methods/params.rs::FindPapersParams",
-  "crates/ops/src/methods/params.rs::SearchInPaperParams",
-  "crates/ops/src/methods/params.rs::ReadContextParams",
-  "crates/ops/src/methods/params.rs::ReadSpanParams",
-  "crates/ops/src/methods/params.rs::LibraryOnlyParams",
-  "crates/ops/src/methods/params.rs::ListMetadataParams",
-]
-reason = "transitional"
-detail = "the MCP pending-review tools take three filters they ignore, and its paper report takes no audit_profile"
-agreement = "divergent"
-exit = "both transports read one method table"
-
-[[parallel]]
 id = "metadata-write-param-mirror"
 summary = "book-side metadata write parameters, one type per transport"
 sites = [
@@ -1011,18 +932,6 @@ reason = "transitional"
 detail = "control-plane metadata.* uses book and optional reason while MCP library.metadata.* uses intake_id, required library and reason"
 agreement = "divergent"
 exit = "step 7 unifies control-plane metadata.* and MCP library.metadata.* wire contracts"
-
-[[parallel]]
-id = "frontend-error-map"
-summary = "mapping ops and store errors to wire errors"
-sites = [
-  "crates/mcp/src/error_map.rs",
-  "crates/ops/src/error_class.rs::classify_report",
-]
-reason = "transitional"
-detail = "MCP answers every registry error as invalid params; the control plane gives each its own code"
-agreement = "divergent"
-exit = "both transports map errors in one place"
 
 [[parallel]]
 id = "destructive-roundtrip"

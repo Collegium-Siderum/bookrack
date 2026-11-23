@@ -6,15 +6,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-bookrack-query = { path = "../query" }
 bookrack-config = { path = "../config" }
 bookrack-core = { path = "../core" }
-bookrack-embed = { path = "../embed" }
 bookrack-obs = { path = "../obs" }
 bookrack-ops = { path = "../ops" }
 bookrack-runtime = { path = "../runtime" }
-# The `finished_at` timestamp on the queue-status job rows.
-chrono.workspace = true
 rmcp.workspace = true
 axum.workspace = true
 # `BroadcastStream` adapter to fan the LogStreamHandle broadcast
@@ -24,11 +20,20 @@ axum.workspace = true
 tokio-stream.workspace = true
 tokio.workspace = true
 eyre.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# The client side of the protocol, for the tests that drive the server
+# through a real client session.
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
+# Query-layer error values the mapping tests build by hand.
+bookrack-query = { path = "../query" }
+# The embedding client type the fixture registries are built over, and
+# the embed error values the mapping tests build by hand.
+bookrack-embed = { path = "../embed" }
+# Timestamps on the queue jobs the queue-status tests seed.
+chrono.workspace = true
 # Reference-store fixtures and error values the reference tool tests
 # build by hand.
 bookrack-refs.workspace = true

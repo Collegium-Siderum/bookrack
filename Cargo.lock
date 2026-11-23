@@ -903,7 +903,6 @@ dependencies = [
  "chrono",
  "eyre",
  "rmcp",
- "serde",
  "serde_json",
  "tempfile",
  "tokio",
