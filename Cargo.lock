@@ -898,6 +898,7 @@ dependencies = [
  "bookrack-refs",
  "bookrack-rerank",
  "bookrack-runtime",
+ "bookrack-search",
  "bookrack-test-support",
  "chrono",
  "eyre",

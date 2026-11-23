@@ -57,12 +57,44 @@ pub enum SearchError {
     /// The caller passed a query that is empty or whitespace-only.
     /// Embedding such an input would return the nearest neighbours of
     /// the asymmetric query prompt itself, not of any real intent.
-    #[error("query text is empty; pass a non-empty natural-language phrase")]
+    #[error("query text is empty")]
     EmptyQuery,
+}
+
+impl bookrack_core::Explain for SearchError {
+    fn explain(&self) -> bookrack_core::Problem {
+        use bookrack_core::Problem;
+        match self {
+            // The embed leaf writes its own wording; the wrapper's own
+            // `Display` ("embed error") names a module, not a failure.
+            SearchError::Embed(e) => e.explain(),
+            // The store leaves write no wording of their own: their
+            // flattened chain, without this wrapper's name in front.
+            SearchError::Corpus(e) => Problem::from_error_chain(e),
+            SearchError::Catalog(e) => Problem::from_error_chain(e),
+            SearchError::Vectors(e) => Problem::from_error_chain(e),
+            SearchError::EmptyEmbedding => Problem::from_error_chain(self),
+            SearchError::EmptyQuery => Problem::from_error_chain(self)
+                .hint("Pass a non-empty natural-language phrase to search for."),
+        }
+    }
 }
 
 /// A fallible `search` operation.
 pub type Result<T> = std::result::Result<T, SearchError>;
+
+/// Refuse a query that is empty or whitespace-only with
+/// [`SearchError::EmptyQuery`].
+///
+/// [`embed_query`] applies it before embedding; a caller that resolves
+/// libraries, intakes, or stores before it reaches an embed applies it
+/// first, so the refusal does not depend on their state.
+pub fn reject_empty_query(query: &str) -> Result<()> {
+    if query.trim().is_empty() {
+        return Err(SearchError::EmptyQuery);
+    }
+    Ok(())
+}
 
 /// One search result: a passage and where to cite it from.
 ///
@@ -212,9 +244,7 @@ pub async fn retrieve_with<E: Embedder>(
 /// query is [`SearchError::EmptyQuery`]; an embedder that answers with
 /// no vector is [`SearchError::EmptyEmbedding`].
 pub async fn embed_query<E: Embedder>(query: &str, embedder: &E) -> Result<Vec<f32>> {
-    if query.trim().is_empty() {
-        return Err(SearchError::EmptyQuery);
-    }
+    reject_empty_query(query)?;
     let input = build_query_input(query);
     let embed_started = Instant::now();
     let mut vectors = embedder.embed_batch(std::slice::from_ref(&input)).await?;
@@ -542,6 +572,29 @@ mod tests {
     use std::future::Future;
 
     const DIM: usize = 4;
+
+    /// Every variant must have a judgement registered in
+    /// `bookrack-ops`'s `error_class::from_search`. Adding one here
+    /// without adding it there means it is judged a fault, `-32603` on
+    /// the wire, whatever the caller could have done about it.
+    ///
+    /// The guard lives beside the type rather than beside the mapping
+    /// because [`SearchError`] is `#[non_exhaustive]`: a downstream
+    /// `match` cannot be exhaustive, so only a same-crate one binds.
+    #[test]
+    fn every_variant_is_registered_for_wire_mapping() {
+        fn assert_classified(e: &SearchError) {
+            match e {
+                SearchError::Corpus(_)
+                | SearchError::Catalog(_)
+                | SearchError::Embed(_)
+                | SearchError::Vectors(_)
+                | SearchError::EmptyEmbedding
+                | SearchError::EmptyQuery => {}
+            }
+        }
+        assert_classified(&SearchError::EmptyQuery);
+    }
 
     #[test]
     fn filename_stem_drops_directories_and_extensions() {

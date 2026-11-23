@@ -36,6 +36,8 @@ bookrack-refs.workspace = true
 bookrack-catalog = { path = "../catalog" }
 # Reranker error values the mapping tests build by hand.
 bookrack-rerank = { path = "../rerank" }
+# Search-layer error values the mapping tests build by hand.
+bookrack-search = { path = "../search" }
 # The cached extraction envelope a re-audit test grades a book from.
 bookrack-extract = { path = "../extract" }
 # Stamp a `user_version` the build does not read onto a fixture

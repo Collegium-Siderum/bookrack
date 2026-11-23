@@ -429,6 +429,26 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A search reports its own embed round trip and its stores with the
+  code each failure takes elsewhere.** Every failure a search met while
+  embedding its query, recalling, or citing answered `-32603` and
+  `bookrack search` exited 1, with the wrappers' names
+  (`search error: embed error: …`) leading the message. An Ollama that
+  did not answer, or answered that it is overloaded, now answers
+  `-32017` on the control socket and over MCP, with `retryable: true`,
+  and the CLI exits 4; a model the backend does not hold answers
+  `-32602` with the `ollama pull` step in the hint, and the CLI exits
+  2; and a vector store, corpus, or catalog this build cannot serve
+  answers `-32018` with its next step. The message is the failing
+  layer's own wording.
+- **An empty search query is refused the same way in every state.**
+  `library.search`, `library.search_in_book`, `library.search_in_paper`,
+  their MCP tools, and `bookrack search` refuse a query that is empty
+  or only whitespace with `-32602` and a hint, and the CLI exits 2. It
+  answered `-32603` where the search reached its embed step, and an
+  empty result where it did not — a side with no vector store, or an
+  intake id no catalog registers. The summary no longer carries the
+  remedy, which moved to the hint.
 - **A reranker that does not answer is a backend the caller may retry.**
   A search whose rerank stage could not reach its server, or was told
   the server is overloaded or still loading its model, answered

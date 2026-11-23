@@ -537,4 +537,29 @@ mod explain_tests {
             p.summary
         );
     }
+
+    /// The same delegation through the search layer, the shape a
+    /// search's own embed round trip fails in.
+    #[test]
+    fn ops_delegates_through_query_and_search_to_the_embed_leaf() {
+        let e = OpsError::Query(QueryError::Search(bookrack_search::SearchError::Embed(
+            EmbedError::ModelNotFound {
+                model: "test-model".into(),
+                reason: "model not found".into(),
+            },
+        )));
+        let p = e.explain();
+        let hint = p
+            .data
+            .hint
+            .expect("the leaf's hint must survive three wrappers");
+        assert!(hint.contains("ollama pull test-model"), "{hint}");
+        for wrapper in ["query error", "search error", "embed error"] {
+            assert!(
+                !p.summary.contains(wrapper),
+                "a wrapper's placeholder Display must not reach the summary: {}",
+                p.summary
+            );
+        }
+    }
 }

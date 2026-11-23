@@ -25,7 +25,9 @@
 //! Classification is recursive: a wrapper's `from_*` delegates every
 //! variant that holds a leaf to that leaf's own `from_*`, so a leaf
 //! takes the same kind whether a command raised it bare or a wrapper
-//! (or two — `OpsError::Query(QueryError::Vectors(..))`) carried it.
+//! (or two — `OpsError::Query(QueryError::Vectors(..))` — or three, as
+//! a search's `OpsError::Query(QueryError::Search(SearchError::Embed(..)))`)
+//! carried it.
 //! The one shape the recursion cannot see through is
 //! `OpsError::Other(eyre::Report)`: the report inside is opaque to the
 //! `match`, so whatever typed error it holds takes the residual kind,
@@ -61,6 +63,7 @@ use bookrack_embed::EmbedError;
 use bookrack_query::QueryError;
 use bookrack_refs::RefsError;
 use bookrack_rerank::RerankError;
+use bookrack_search::SearchError;
 use bookrack_vectors::{TrainingLimit, VectorsError};
 use eyre::Report;
 
@@ -484,20 +487,45 @@ fn from_glean(e: &GleanError) -> ClassifiedError {
     ClassifiedError::new(kind, e.explain())
 }
 
-/// Judge a query-layer wrapper. Every variant but the two the query
-/// layer raises itself (`Search`, `EmptyProbe`) carries a leaf and
-/// delegates to it; those two are faults in this binary.
+/// Judge a query-layer wrapper. Every variant but the one the query
+/// layer raises itself (`EmptyProbe`, a fault in this binary) carries a
+/// leaf or the search layer and delegates to it.
+///
+/// The wildcard is forced: [`QueryError`] is `#[non_exhaustive]` and
+/// this is a downstream crate. The guard against a new variant landing
+/// silently on [`ErrorKind::Internal`] lives beside the type instead,
+/// in `bookrack-query`'s own tests.
 fn from_query(e: &QueryError) -> ClassifiedError {
     match e {
         QueryError::Embed(e) => from_embed(e),
         QueryError::Vectors(e) => from_vectors(e),
         QueryError::Corpus(e) => from_corpus(e),
         QueryError::Catalog(e) => from_catalog(e),
-        QueryError::Search(_) | QueryError::EmptyProbe => {
-            ClassifiedError::new(ErrorKind::Internal, e.explain())
-        }
-        // `QueryError` is `#[non_exhaustive]`; a variant this build does
-        // not know is a fault until someone judges otherwise.
+        QueryError::Search(e) => from_search(e),
+        QueryError::EmptyProbe => ClassifiedError::new(ErrorKind::Internal, e.explain()),
+        _ => ClassifiedError::new(ErrorKind::Internal, e.explain()),
+    }
+}
+
+/// Judge a search-layer failure: the embed round trip for the query,
+/// the recall, and the citation each fail in a leaf this module already
+/// reads, and take that leaf's judgement. Of the two the search layer
+/// raises itself, an empty query is the caller's input and an embedder
+/// that answered with no vector broke its contract. The wording is the
+/// search layer's own.
+///
+/// The wildcard is forced: [`SearchError`] is `#[non_exhaustive]` and
+/// this is a downstream crate. The guard against a new variant landing
+/// silently on [`ErrorKind::Internal`] lives beside the type instead,
+/// in `bookrack-search`'s own tests.
+fn from_search(e: &SearchError) -> ClassifiedError {
+    match e {
+        SearchError::Embed(e) => from_embed(e),
+        SearchError::Vectors(e) => from_vectors(e),
+        SearchError::Corpus(e) => from_corpus(e),
+        SearchError::Catalog(e) => from_catalog(e),
+        SearchError::EmptyQuery => ClassifiedError::new(ErrorKind::InvalidParams, e.explain()),
+        SearchError::EmptyEmbedding => ClassifiedError::new(ErrorKind::Internal, e.explain()),
         _ => ClassifiedError::new(ErrorKind::Internal, e.explain()),
     }
 }
@@ -946,6 +974,7 @@ mod tests {
             IngestError::Embed(model_not_found()).into(),
             GleanError::Embed(model_not_found()).into(),
             OpsError::Query(QueryError::Embed(model_not_found())).into(),
+            OpsError::Query(QueryError::Search(SearchError::Embed(model_not_found()))).into(),
         ];
         for err in wrapped {
             let label = format!("{err:#}");
@@ -1016,6 +1045,31 @@ mod tests {
                     existing: "aaa".into(),
                     requested: "bbb".into(),
                 })
+                .into(),
+            ),
+            (
+                "ops > query > search > vectors",
+                OpsError::Query(QueryError::Search(SearchError::Vectors(
+                    VectorsError::MissingPqParam("num_sub_vectors"),
+                )))
+                .into(),
+            ),
+            (
+                "ops > query > search > corpus",
+                OpsError::Query(QueryError::Search(SearchError::Corpus(
+                    CorpusError::InvalidIntakeId(-1),
+                )))
+                .into(),
+            ),
+            (
+                "ops > query > search > catalog",
+                OpsError::Query(QueryError::Search(SearchError::Catalog(
+                    CatalogError::DerivedFromConflict {
+                        intake_id: 7,
+                        existing: "aaa".into(),
+                        requested: "bbb".into(),
+                    },
+                )))
                 .into(),
             ),
         ];
@@ -1359,6 +1413,26 @@ mod tests {
                     required: 9,
                     current: 3,
                 }
+                .into(),
+            ),
+            (
+                "vectors DimensionMismatch (ops > query > search)",
+                OpsError::Query(QueryError::Search(SearchError::Vectors(
+                    VectorsError::DimensionMismatch {
+                        got: 768,
+                        expected: 1024,
+                    },
+                )))
+                .into(),
+            ),
+            (
+                "corpus ReaderTooOld (ops > query > search)",
+                OpsError::Query(QueryError::Search(SearchError::Corpus(
+                    CorpusError::ReaderTooOld {
+                        required: 9,
+                        current: 3,
+                    },
+                )))
                 .into(),
             ),
         ];
@@ -1718,6 +1792,88 @@ mod tests {
         ] {
             let label = format!("{e:?}");
             let c = from_ops(&OpsError::Rerank(e));
+            assert_eq!(c.kind, ErrorKind::Internal, "{label}");
+            assert!(!data(&c).retryable, "{label}");
+        }
+    }
+
+    /// The shape a search's own embed round trip fails in: the embed
+    /// leaf under the search layer, under the query wrapper. An Ollama
+    /// that did not answer, or answered that it is overloaded, takes the
+    /// backend kind and the leaf's own wording, with none of the
+    /// wrappers' names in the summary. Asserted against the literal
+    /// kind, bare and under a caller's context.
+    #[test]
+    fn an_embed_backend_that_did_not_answer_during_a_search_is_backend_unavailable() {
+        let shapes = || {
+            [
+                EmbedError::Unreachable("connection refused".into()),
+                EmbedError::Overloaded {
+                    status: 503,
+                    body: "no runner slots are available".into(),
+                },
+            ]
+            .map(|e| OpsError::Query(QueryError::Search(SearchError::Embed(e))))
+        };
+        let cases = shapes().into_iter().map(Report::from).chain(
+            shapes()
+                .into_iter()
+                .map(|e| Report::from(e).wrap_err("library.search")),
+        );
+        for err in cases {
+            let label = format!("{err:#}");
+            let c = classified(err);
+            assert_eq!(
+                c.kind,
+                ErrorKind::BackendUnavailable,
+                "{label}: {}",
+                c.problem.summary
+            );
+            assert!(data(&c).retryable, "{label}");
+            let summary = &c.problem.summary;
+            assert!(summary.contains("Ollama"), "{label}: {summary}");
+            for wrapper in ["search error", "embed error", "query error"] {
+                assert!(
+                    !summary.contains(wrapper),
+                    "{label}: a wrapper's name is not a failure: {summary}"
+                );
+            }
+            assert!(data(&c).hint.is_some(), "{label}: the leaf's hint is lost");
+        }
+    }
+
+    /// A search query that is empty or only whitespace is the caller's
+    /// input: the parameter kind, a summary that states the fact and no
+    /// remedy, and the remedy as the hint.
+    #[test]
+    fn an_empty_search_query_is_caller_input_with_a_next_step() {
+        let c = classified(OpsError::Query(QueryError::Search(SearchError::EmptyQuery)));
+        assert_eq!(c.kind, ErrorKind::InvalidParams, "{}", c.problem.summary);
+        assert_eq!(c.problem.summary, "query text is empty");
+        let hint = data(&c)
+            .hint
+            .as_deref()
+            .expect("an empty query has a next step");
+        assert!(hint.contains("non-empty"), "{hint}");
+        assert!(!data(&c).retryable);
+    }
+
+    /// The search layer's own faults stay faults: an embedder that
+    /// answered with no vector broke its contract, and a request the
+    /// backend refused was assembled by this binary. Neither widens to
+    /// the backend or the parameter kind through the search wrapper.
+    #[test]
+    fn a_search_fault_stays_internal() {
+        let cases = [
+            SearchError::EmptyEmbedding,
+            SearchError::Embed(EmbedError::BadRequest {
+                status: 400,
+                body: "malformed input".into(),
+            }),
+        ];
+        for e in cases {
+            let label = format!("{e:?}");
+            let c = classified(OpsError::Query(QueryError::Search(e)));
             assert_eq!(c.kind, ErrorKind::Internal, "{label}");
             assert!(!data(&c).retryable, "{label}");
         }

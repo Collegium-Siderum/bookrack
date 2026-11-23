@@ -192,6 +192,38 @@ mod tests {
         assert!(data.retryable);
     }
 
+    /// An Ollama that answered a search's own embed round trip with
+    /// "overloaded" takes the backend code over MCP, retryable, worded
+    /// by the embed leaf rather than by the wrappers it came up through.
+    #[test]
+    fn an_overloaded_embedder_during_a_search_is_backend_unavailable_and_retryable() {
+        use bookrack_search::SearchError;
+        let err = ops_error_to_mcp(OpsError::Query(QueryError::Search(SearchError::Embed(
+            EmbedError::Overloaded {
+                status: 503,
+                body: "no runner slots are available".into(),
+            },
+        ))));
+        assert_eq!(err.code, ErrorCode(BACKEND_UNAVAILABLE), "{}", err.message);
+        assert!(!err.message.contains("search error"), "{}", err.message);
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(err.data.expect("data slot filled")).expect("ProblemData");
+        assert!(data.retryable);
+    }
+
+    /// An empty search query is the agent's own input: the parameter
+    /// code over MCP, with the remedy in the hint.
+    #[test]
+    fn an_empty_search_query_is_invalid_params_with_a_hint() {
+        use bookrack_search::SearchError;
+        let err = ops_error_to_mcp(OpsError::Query(QueryError::Search(SearchError::EmptyQuery)));
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "{}", err.message);
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(err.data.expect("data slot filled")).expect("ProblemData");
+        assert!(data.hint.is_some_and(|h| !h.trim().is_empty()));
+        assert!(!data.retryable);
+    }
+
     #[test]
     fn a_store_this_build_cannot_serve_is_state_unusable_with_a_hint() {
         let e = OpsError::Catalog(CatalogError::SchemaTooNew {

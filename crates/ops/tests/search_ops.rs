@@ -27,8 +27,9 @@ use bookrack_ops::reads::search::{
     search, search_in_book, search_in_paper, search_paper, search_unified,
 };
 use bookrack_ops::{Caller, Ops, OpsError, PapersPaths, RerankStage};
-use bookrack_query::{Library, SearchOptions};
+use bookrack_query::{Library, QueryError, SearchOptions};
 use bookrack_rerank::RerankClient;
+use bookrack_search::SearchError;
 use bookrack_vectors::{ChunkRow, ChunkStore};
 use tempfile::TempDir;
 
@@ -552,6 +553,72 @@ async fn search_in_paper_reports_an_unknown_intake() {
         matches!(err, OpsError::IntakeNotFound { intake_id: 999 }),
         "{err:?}"
     );
+}
+
+/// An empty or whitespace-only query is refused by every search op
+/// before any library, intake, or store is consulted: over libraries
+/// with no vector store behind them, for an intake no catalog
+/// registers, and on an `Ops` with no warm library at all. The refusal
+/// is the caller's input whatever state the library is in.
+#[tokio::test]
+async fn an_empty_query_is_refused_by_every_search_op_before_any_state_is_read() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let storeless = |paths: StorePaths, name: &str| StorePaths {
+        lancedb_dir: tmp.path().join(format!("{name}-no-store")),
+        ..paths
+    };
+    let book_paths = storeless(seed_store(tmp.path(), "books", &[]).await, "books");
+    let paper_paths = storeless(seed_store(tmp.path(), "papers", &[]).await, "papers");
+    let book_library = open_library(&book_paths, Fixed::unit_x()).await;
+    let paper_library = open_library(&paper_paths, Fixed::unit_x())
+        .await
+        .with_kind(ItemKind::Paper);
+    let warm = attach_papers(
+        ops_over(&tmp, &book_paths, book_library),
+        &tmp,
+        &paper_paths,
+        paper_library,
+    );
+    let cold = Ops::<Fixed>::catalog_only(
+        book_paths.corpus_db.clone(),
+        book_paths.catalog_db.clone(),
+        &book_paths.lancedb_dir,
+        tmp.path().join("books"),
+        tmp.path().join("backup"),
+        Caller::cli(),
+    );
+
+    for (state, ops) in [("no vector store", &warm), ("no warm library", &cold)] {
+        for query in ["", "  \t\n"] {
+            let none = SearchOptions::default;
+            let results = [
+                ("search", search(ops, query, none(), None).await),
+                ("search_paper", search_paper(ops, query, none(), None).await),
+                (
+                    "search_unified",
+                    search_unified(ops, query, none(), none(), None).await,
+                ),
+                (
+                    "search_in_book",
+                    search_in_book(ops, 999, query, none(), None).await,
+                ),
+                (
+                    "search_in_paper",
+                    search_in_paper(ops, 999, query, none(), None).await,
+                ),
+            ];
+            for (op, result) in results {
+                let err = result.expect_err("an empty query is refused");
+                assert!(
+                    matches!(
+                        err,
+                        OpsError::Query(QueryError::Search(SearchError::EmptyQuery))
+                    ),
+                    "{state} / {op} / {query:?}: {err:?}"
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]

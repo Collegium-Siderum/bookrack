@@ -2,6 +2,11 @@
 
 //! Dense retrieval ops.
 //!
+//! Every function here first refuses an empty or whitespace-only query
+//! with [`bookrack_search::SearchError::EmptyQuery`], before any library,
+//! intake, or store is read, so that refusal does not depend on their
+//! state.
+//!
 //! Search requires a warm [`bookrack_query::Library`]. An [`Ops`] built
 //! with [`Ops::catalog_only`](crate::Ops::catalog_only) returns
 //! [`OpsError::SearchUnavailable`] from every function here. The
@@ -14,7 +19,7 @@ use std::path::Path;
 use bookrack_catalog::NewRetrievalCall;
 use bookrack_core::PartitionIdx;
 use bookrack_embed::Embedder;
-use bookrack_query::{Citation, Library, SearchOptions};
+use bookrack_query::{Citation, Library, QueryError, SearchOptions};
 
 use crate::Ops;
 use crate::OpsError;
@@ -96,6 +101,7 @@ pub async fn search<E: Embedder>(
         }),
     );
     let result = async {
+        bookrack_search::reject_empty_query(query).map_err(QueryError::from)?;
         let library = ops.library().ok_or(OpsError::SearchUnavailable)?;
         match ops.rerank_stage() {
             None => Ok(library.search_with(query, overrides, top_k).await?),
@@ -140,6 +146,7 @@ pub async fn search_in_book<E: Embedder>(
         }),
     );
     let result = async {
+        bookrack_search::reject_empty_query(query).map_err(QueryError::from)?;
         let library = ops.library().ok_or(OpsError::SearchUnavailable)?;
         let known = match crate::reads::open_book_catalog(ops)? {
             Some(catalog) => catalog.intake_by_id(intake_id)?.is_some(),
@@ -189,6 +196,7 @@ pub async fn search_paper<E: Embedder>(
         }),
     );
     let result = async {
+        bookrack_search::reject_empty_query(query).map_err(QueryError::from)?;
         let papers_library = ops
             .papers_library()
             .ok_or(OpsError::PapersBackendNotConfigured)?;
@@ -234,6 +242,7 @@ pub async fn search_in_paper<E: Embedder>(
         }),
     );
     let result = async {
+        bookrack_search::reject_empty_query(query).map_err(QueryError::from)?;
         let papers_library = ops
             .papers_library()
             .ok_or(OpsError::PapersBackendNotConfigured)?;
@@ -308,6 +317,7 @@ pub async fn search_unified<E: Embedder>(
             },
         }),
         {
+            bookrack_search::reject_empty_query(query).map_err(QueryError::from)?;
             let books = ops.library().ok_or(OpsError::SearchUnavailable)?;
             let papers = ops
                 .papers_library()

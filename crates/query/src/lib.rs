@@ -67,6 +67,9 @@ impl bookrack_core::Explain for QueryError {
             // The embed leaf writes its own wording; the wrapper's own
             // `Display` ("embed error") names a module, not a failure.
             QueryError::Embed(e) => e.explain(),
+            // The search layer words its own failures and those of the
+            // leaves it carries.
+            QueryError::Search(e) => e.explain(),
             other => bookrack_core::Problem::from_error_chain(other),
         }
     }
@@ -442,6 +445,29 @@ fn current_stamps(embed_model: &str, vector_dim: u32) -> IndexStamps {
 mod tests {
     use super::*;
     use std::error::Error;
+
+    /// Every variant must have a judgement registered in
+    /// `bookrack-ops`'s `error_class::from_query`. Adding one here
+    /// without adding it there means it is judged a fault, `-32603` on
+    /// the wire, whatever it carries.
+    ///
+    /// The guard lives beside the type rather than beside the mapping
+    /// because [`QueryError`] is `#[non_exhaustive]`: a downstream
+    /// `match` cannot be exhaustive, so only a same-crate one binds.
+    #[test]
+    fn every_variant_is_registered_for_wire_mapping() {
+        fn assert_classified(e: &QueryError) {
+            match e {
+                QueryError::Embed(_)
+                | QueryError::Vectors(_)
+                | QueryError::Corpus(_)
+                | QueryError::Catalog(_)
+                | QueryError::Search(_)
+                | QueryError::EmptyProbe => {}
+            }
+        }
+        assert_classified(&QueryError::EmptyProbe);
+    }
 
     #[test]
     fn wrapper_variant_display_does_not_embed_source_message() {
