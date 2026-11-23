@@ -40,7 +40,6 @@ impl Fixture {
             &lancedb_dir,
             books_dir,
             backup_dir,
-            Caller::cli(),
         );
         Fixture {
             _tmp: tmp,
@@ -134,7 +133,7 @@ fn books_titled(fx: &Fixture, needle: &str) -> Vec<i64> {
         title_substring: Some(needle.to_string()),
         ..BookFilter::default()
     };
-    let page = find_books(&fx.ops, filter, 100, 0).expect("find");
+    let page = find_books(&fx.ops, &Caller::cli(), filter, 100, 0).expect("find");
     let ids: Vec<i64> = page.books.iter().map(|b| b.intake_id).collect();
     assert_eq!(
         page.total as usize,
@@ -167,6 +166,7 @@ fn find_books_matches_the_title_it_reports() {
 
     let row = find_books(
         &fx.ops,
+        &Caller::cli(),
         BookFilter {
             title_substring: Some("Widgets".to_string()),
             ..BookFilter::default()
@@ -207,7 +207,14 @@ fn find_books_reports_not_truncated_when_the_page_holds_every_match() {
     // total still fits in one clamped page, so `truncated` must be
     // false.
     let request_over_max = MAX_LIST_LIMIT + 50;
-    let page = find_books(&fx.ops, BookFilter::default(), request_over_max, 0).expect("find");
+    let page = find_books(
+        &fx.ops,
+        &Caller::cli(),
+        BookFilter::default(),
+        request_over_max,
+        0,
+    )
+    .expect("find");
     assert_eq!(page.total, 2);
     assert_eq!(page.books.len(), 2);
     assert!(
@@ -223,7 +230,7 @@ fn find_books_reports_truncated_when_more_rows_remain() {
     let _ = fx.seed_book("sha-b", "Bravo");
     let _ = fx.seed_book("sha-c", "Charlie");
 
-    let page = find_books(&fx.ops, BookFilter::default(), 2, 0).expect("find");
+    let page = find_books(&fx.ops, &Caller::cli(), BookFilter::default(), 2, 0).expect("find");
     assert_eq!(page.total, 3);
     assert_eq!(page.books.len(), 2);
     assert!(page.truncated, "one row remains past this page");
@@ -239,7 +246,7 @@ fn find_books_batched_enrichment_resolves_title_per_intake() {
         .map(|n| fx.seed_book(&format!("sha-{n}"), &format!("Title {n}")))
         .collect();
 
-    let page = find_books(&fx.ops, BookFilter::default(), 10, 0).expect("find");
+    let page = find_books(&fx.ops, &Caller::cli(), BookFilter::default(), 10, 0).expect("find");
     assert_eq!(page.total, 5);
     assert_eq!(page.books.len(), 5);
     for (n, intake_id) in ids.iter().enumerate() {
@@ -264,7 +271,14 @@ fn find_books_caps_the_page_at_max_list_limit() {
         let _ = fx.seed_book(&format!("sha-{n}"), &format!("Title {n}"));
     }
 
-    let page = find_books(&fx.ops, BookFilter::default(), MAX_LIST_LIMIT + 100, 0).expect("find");
+    let page = find_books(
+        &fx.ops,
+        &Caller::cli(),
+        BookFilter::default(),
+        MAX_LIST_LIMIT + 100,
+        0,
+    )
+    .expect("find");
     assert_eq!(page.total, over_the_clamp as u64);
     assert_eq!(
         page.books.len(),
@@ -278,6 +292,7 @@ fn find_books_caps_the_page_at_max_list_limit() {
 
     let tail = find_books(
         &fx.ops,
+        &Caller::cli(),
         BookFilter::default(),
         MAX_LIST_LIMIT,
         MAX_LIST_LIMIT,
@@ -304,7 +319,7 @@ fn find_books_narrows_the_page_to_the_requested_categories() {
         categories: vec!["philosophy".to_string()],
         ..BookFilter::default()
     };
-    let page = find_books(&fx.ops, filter, 10, 0).expect("find");
+    let page = find_books(&fx.ops, &Caller::cli(), filter, 10, 0).expect("find");
     assert_eq!(
         page.books.iter().map(|b| b.intake_id).collect::<Vec<_>>(),
         vec![philosophy],
@@ -320,7 +335,7 @@ fn find_books_narrows_the_page_to_the_requested_categories() {
         categories: vec!["philosophy".to_string(), "biography".to_string()],
         ..BookFilter::default()
     };
-    let page = find_books(&fx.ops, either, 10, 0).expect("find either");
+    let page = find_books(&fx.ops, &Caller::cli(), either, 10, 0).expect("find either");
     let mut ids: Vec<i64> = page.books.iter().map(|b| b.intake_id).collect();
     ids.sort_unstable();
     let mut expected = vec![philosophy, biography];
@@ -339,8 +354,14 @@ fn list_metadata_reports_not_truncated_when_the_clamped_page_covers_everything()
     let _ = fx.seed_book("sha-b", "Bravo");
 
     let request_over_max = MAX_LIST_LIMIT + 1;
-    let page =
-        list_metadata(&fx.ops, MetadataFilter::default(), request_over_max, 0).expect("list");
+    let page = list_metadata(
+        &fx.ops,
+        &Caller::cli(),
+        MetadataFilter::default(),
+        request_over_max,
+        0,
+    )
+    .expect("list");
     assert_eq!(page.total, 2);
     assert_eq!(page.rows.len(), 2);
     assert!(!page.truncated);
@@ -370,7 +391,7 @@ fn the_two_listings_read_opposite_layers_of_the_same_book() {
         title_substring: Some("Widgts".to_string()),
         ..MetadataFilter::default()
     };
-    let page = list_metadata(&fx.ops, filter, 100, 0).expect("list");
+    let page = list_metadata(&fx.ops, &Caller::cli(), filter, 100, 0).expect("list");
     let ids: Vec<i64> = page.rows.iter().map(|r| r.intake_id).collect();
     assert_eq!(
         ids,
@@ -402,9 +423,10 @@ fn the_review_queue_preset_matches_the_filter_that_spells_it_out() {
     fx.set_confidence(low, "low");
     fx.set_confidence(high, "high");
 
-    let preset = list_pending_reviews(&fx.ops, 100, 0).expect("preset");
+    let preset = list_pending_reviews(&fx.ops, &Caller::cli(), 100, 0).expect("preset");
     let spelled_out = list_metadata(
         &fx.ops,
+        &Caller::cli(),
         MetadataFilter {
             confidence_in: vec!["low".to_string(), "medium".to_string()],
             review_status_in: vec!["pending".to_string(), "acknowledged".to_string()],
@@ -433,6 +455,7 @@ fn find_books_filters_on_language() {
 
     let page = find_books(
         &fx.ops,
+        &Caller::cli(),
         BookFilter {
             language: vec!["de".to_string()],
             ..BookFilter::default()
@@ -463,7 +486,7 @@ fn category_counts_list_the_tags_find_books_can_match_and_the_rest_as_uncategori
     fx.tag(a, "history");
     fx.tag(b, "philosophy");
 
-    let counts = category_counts(&fx.ops).expect("category counts");
+    let counts = category_counts(&fx.ops, &Caller::cli()).expect("category counts");
     assert_eq!(
         counts.categories,
         [
@@ -484,6 +507,7 @@ fn category_counts_list_the_tags_find_books_can_match_and_the_rest_as_uncategori
     for line in &counts.categories {
         let page = find_books(
             &fx.ops,
+            &Caller::cli(),
             BookFilter {
                 categories: vec![line.category.clone()],
                 ..BookFilter::default()

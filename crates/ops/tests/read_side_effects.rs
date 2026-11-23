@@ -32,7 +32,6 @@ impl Fixture {
             &tmp.path().join("lancedb"),
             tmp.path().join("books"),
             tmp.path().join("backup"),
-            Caller::cli(),
         );
         Fixture { tmp, ops }
     }
@@ -67,7 +66,7 @@ fn entries(dir: &Path) -> Vec<PathBuf> {
 #[tokio::test]
 async fn library_info_on_an_empty_root_reports_absence_and_creates_nothing() {
     let fx = Fixture::empty_root();
-    let info = show_library_info(&fx.ops, fx.info_ctx())
+    let info = show_library_info(&fx.ops, &Caller::cli(), fx.info_ctx())
         .await
         .expect("info on an empty root");
 
@@ -84,7 +83,9 @@ async fn library_info_on_an_empty_root_reports_absence_and_creates_nothing() {
 #[tokio::test]
 async fn vectors_status_on_an_empty_root_reports_empty_and_creates_nothing() {
     let fx = Fixture::empty_root();
-    let status = vectors_status(&fx.ops).await.expect("status");
+    let status = vectors_status(&fx.ops, &Caller::cli())
+        .await
+        .expect("status");
     assert!(status.row_count.is_none());
     assert!(status.indices.is_empty());
     assert_eq!(entries(fx.root()), Vec::<PathBuf>::new());
@@ -93,7 +94,7 @@ async fn vectors_status_on_an_empty_root_reports_empty_and_creates_nothing() {
 #[test]
 fn stats_on_an_empty_root_count_zero_and_create_nothing() {
     let fx = Fixture::empty_root();
-    let stats = show_stats(&fx.ops).expect("stats on an empty root");
+    let stats = show_stats(&fx.ops, &Caller::cli()).expect("stats on an empty root");
     assert!(
         stats.intake_counts_by_status.values().all(|n| *n == 0),
         "{:?}",
@@ -110,7 +111,7 @@ async fn library_info_reports_unreadable_stores_instead_of_posing_as_missing() {
     std::fs::write(fx.root().join("catalog.db"), b"not a database").expect("catalog garbage");
     std::fs::write(fx.root().join("corpus.db"), b"not a database").expect("corpus garbage");
 
-    let info = show_library_info(&fx.ops, fx.info_ctx())
+    let info = show_library_info(&fx.ops, &Caller::cli(), fx.info_ctx())
         .await
         .expect("info stays informational on a broken library");
     assert!(info.catalog_error.is_some(), "catalog_error must be set");
@@ -126,7 +127,7 @@ async fn library_info_carries_the_parse_reason_of_an_unreadable_vectors_meta() {
     std::fs::create_dir_all(&lancedb).expect("lancedb dir");
     std::fs::write(lancedb.join("vectors_meta.json"), b"not json").expect("meta garbage");
 
-    let info = show_library_info(&fx.ops, fx.info_ctx())
+    let info = show_library_info(&fx.ops, &Caller::cli(), fx.info_ctx())
         .await
         .expect("info stays informational on a broken sidecar");
     let reason = info

@@ -9,6 +9,7 @@ use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 
+use crate::Caller;
 use crate::Ops;
 use crate::OpsError;
 use crate::Result;
@@ -18,13 +19,18 @@ use crate::dto::metadata_report::{
 };
 use crate::dto::{BookDetail, MetadataFilter, TocStats, clamp_limit};
 use crate::reads::open_book_catalog;
-use crate::recorder::record_call_sync;
+use crate::recorder::record_call_with_caller_sync;
 
 /// Read the metadata-status record for one book: bibliographic detail
 /// plus the persisted audit verdict, confidence, and review status.
-pub fn show_metadata_audit<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<MetadataReport> {
-    record_call_sync!(
+pub fn show_metadata_audit<E: Embedder>(
+    ops: &Ops<E>,
+    caller: &Caller,
+    intake_id: i64,
+) -> Result<MetadataReport> {
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "library.show_metadata_audit",
         serde_json::json!({ "intake_id": intake_id }),
         {
@@ -68,12 +74,14 @@ pub fn show_metadata_audit<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<
 /// `metadata.reaudit` is the write path that refreshes the rollup.
 pub fn show_metadata_report<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     intake_id: i64,
     audit_data: &crate::pipeline::book::AuditData,
     audit_profile: &crate::pipeline::book::AuditProfile,
 ) -> Result<MetadataAuditReport> {
-    record_call_sync!(
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "library.show_metadata_report",
         serde_json::json!({ "intake_id": intake_id }),
         {
@@ -139,12 +147,14 @@ pub(crate) fn needs_review_filter() -> IntakeFilter<'static> {
 /// [`reads::books::find_books`](crate::reads::books::find_books).
 pub fn list_metadata<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     filter: MetadataFilter,
     limit: u32,
     offset: u32,
 ) -> Result<MetadataListPage> {
-    record_call_sync!(
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "library.list_metadata",
         serde_json::json!({
             "title_substring": filter.title_substring,
@@ -180,11 +190,13 @@ pub fn list_metadata<E: Embedder>(
 /// that function's filter shape rather than a second query.
 pub fn list_pending_reviews<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     limit: u32,
     offset: u32,
 ) -> Result<MetadataListPage> {
-    record_call_sync!(
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "library.list_pending_reviews",
         serde_json::json!({ "limit": limit, "offset": offset }),
         {
@@ -277,9 +289,14 @@ pub(crate) fn list_metadata_inner(
 /// whether the `intake_id` is still registered. Only when no rows
 /// exist AND no `intake` is registered for the id is it reported as
 /// [`OpsError::IntakeNotFound`] — that is the "ghost id" case.
-pub fn show_audit_trail<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<Vec<AuditTrailEntry>> {
-    record_call_sync!(
+pub fn show_audit_trail<E: Embedder>(
+    ops: &Ops<E>,
+    caller: &Caller,
+    intake_id: i64,
+) -> Result<Vec<AuditTrailEntry>> {
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "library.show_audit_trail",
         serde_json::json!({ "intake_id": intake_id }),
         {

@@ -21,9 +21,9 @@
 //!   an unknown intake, a malformed `kind`, and params that do not fit
 //!   a tool all surface as `invalid_params`, while an environmental
 //!   fault surfaces as `internal_error`;
-//! * every recorded tool-call row carries `source = "mcp"` even
-//!   though the shared `Ops` was built for another surface — the
-//!   `call_tool` caller override the audit trail depends on;
+//! * every recorded tool-call row carries `source = "mcp"`: the
+//!   shared `Ops` carries no caller, and the tool passes its own to
+//!   the read it runs;
 //! * `library.info` for a selected library reports that library's
 //!   root and name, not the ones of the library the daemon came up
 //!   on;
@@ -326,9 +326,7 @@ fn resolve(name: &str) -> Arc<Config> {
     )
 }
 
-/// A library handle over `cfg`. Deliberately a CLI-surface Ops: the
-/// `source = "mcp"` assertion can then only pass through the
-/// `call_tool` caller override. The configuration names the same root
+/// A library handle over `cfg`. The configuration names the same root
 /// the catalog was opened under, so the handle's two halves are one
 /// library's.
 fn handle(name: &str, cfg: Arc<Config>) -> Arc<LibraryHandle<OllamaEmbedClient>> {
@@ -338,7 +336,6 @@ fn handle(name: &str, cfg: Arc<Config>) -> Arc<LibraryHandle<OllamaEmbedClient>>
         &cfg.lancedb_dir(),
         cfg.books_dir(),
         cfg.backup_dir(),
-        Caller::cli(),
     );
     LibraryHandle::new(name, cfg, ops)
 }
@@ -515,8 +512,8 @@ async fn a_tool_call_round_trips_and_is_attributed_to_the_mcp_surface() {
     assert_eq!(total, 1, "one seeded intake, got: {body}");
     assert_eq!(body["intake_count_by_format"]["epub"], 1);
 
-    // The registry's Ops carries `Caller::cli()`, so only the
-    // `call_tool` override can make the recorded source read "mcp".
+    // The handle is shared by every surface and names none, so the
+    // recorded source is the one the tool passed with the read.
     let catalog = Catalog::open_for_write_unbacked(&fx.catalog_db).expect("reopen catalog");
     let rows = catalog
         .tool_calls_for_tool("library.stats")

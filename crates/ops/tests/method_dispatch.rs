@@ -118,7 +118,6 @@ impl Fixture {
             &root.join("lancedb"),
             root.join("books"),
             root.join("backup"),
-            Caller::cli(),
         )
         .with_papers(
             papers_library,

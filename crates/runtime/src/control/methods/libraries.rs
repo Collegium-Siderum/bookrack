@@ -330,7 +330,6 @@ mod tests {
 
     use bookrack_core::ItemKind;
     use bookrack_core::queue::{JobState, QueueState};
-    use bookrack_ops::Caller;
 
     use super::super::queue_writes::enqueue_against;
     use super::super::{test_library_handle, test_method_context};
@@ -355,7 +354,6 @@ mod tests {
         ctx.mounter = Some(Arc::new(Mounter::new(
             Arc::clone(&ctx.registry),
             None,
-            Caller::cli(),
             Arc::clone(&ctx.daemon_config),
         )));
         ctx

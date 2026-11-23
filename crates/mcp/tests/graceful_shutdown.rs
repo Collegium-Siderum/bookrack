@@ -20,8 +20,8 @@ use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_mcp::ProcessEndpoints;
 use bookrack_obs::LogStreamHandle;
+use bookrack_ops::Ops;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
-use bookrack_ops::{Caller, Ops};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio::time::timeout;
@@ -48,7 +48,6 @@ fn stub_registry() -> Arc<LibraryRegistry<OllamaEmbedClient>> {
         &cfg.lancedb_dir(),
         cfg.books_dir(),
         cfg.backup_dir(),
-        Caller::mcp(),
     );
     LibraryRegistry::single(LibraryHandle::new("shutdown-stub", cfg, ops))
 }

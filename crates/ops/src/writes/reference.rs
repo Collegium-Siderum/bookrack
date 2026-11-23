@@ -218,7 +218,6 @@ mod tests {
             &cfg.lancedb_dir(),
             cfg.books_dir(),
             cfg.backup_dir(),
-            Caller::cli(),
         );
         let handle = LibraryHandle::new("alpha", Arc::clone(&cfg), ops);
         let sink = Arc::new(RecordingSink::default());

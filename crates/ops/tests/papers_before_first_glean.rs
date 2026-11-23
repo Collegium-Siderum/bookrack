@@ -76,7 +76,6 @@ impl Fixture {
             &tmp.path().join("lancedb"),
             tmp.path().join("books"),
             tmp.path().join("backup"),
-            Caller::cli(),
         )
         .with_papers(
             papers_library,
@@ -109,7 +108,8 @@ fn assert_intake_not_found<T: std::fmt::Debug>(what: &str, result: Result<T, Ops
 #[tokio::test]
 async fn list_papers_is_an_empty_page() {
     let fx = Fixture::build().await;
-    let page = list_papers(&fx.ops, 10, 0).expect("list_papers on a library without papers");
+    let page = list_papers(&fx.ops, &Caller::cli(), 10, 0)
+        .expect("list_papers on a library without papers");
     assert!(page.papers.is_empty(), "{:?}", page.papers);
     assert_eq!(page.total, 0);
     assert!(!page.truncated);
@@ -122,7 +122,7 @@ async fn list_papers_is_an_empty_page() {
 #[tokio::test]
 async fn stats_report_zero_papers_in_every_status() {
     let fx = Fixture::build().await;
-    let stats = show_stats(&fx.ops).expect("stats on a library without papers");
+    let stats = show_stats(&fx.ops, &Caller::cli()).expect("stats on a library without papers");
     let papers = stats
         .papers
         .expect("papers backend is configured, so the section is present");
@@ -143,13 +143,13 @@ async fn stats_report_zero_papers_in_every_status() {
 #[tokio::test]
 async fn metadata_listings_are_empty_pages() {
     let fx = Fixture::build().await;
-    let page = list_paper_metadata(&fx.ops, MetadataFilter::default(), 10, 0)
+    let page = list_paper_metadata(&fx.ops, &Caller::cli(), MetadataFilter::default(), 10, 0)
         .expect("list_paper_metadata on a library without papers");
     assert!(page.rows.is_empty());
     assert_eq!(page.total, 0);
     assert!(!page.truncated);
 
-    let page = list_paper_pending_reviews(&fx.ops, 10, 0)
+    let page = list_paper_pending_reviews(&fx.ops, &Caller::cli(), 10, 0)
         .expect("list_paper_pending_reviews on a library without papers");
     assert!(page.rows.is_empty());
     assert_eq!(page.total, 0);
@@ -163,14 +163,17 @@ async fn metadata_listings_are_empty_pages() {
 #[tokio::test]
 async fn per_paper_reads_report_the_intake_as_unknown() {
     let fx = Fixture::build().await;
-    assert_intake_not_found("show_paper", show_paper(&fx.ops, 1));
+    assert_intake_not_found("show_paper", show_paper(&fx.ops, &Caller::cli(), 1));
     assert_intake_not_found(
         "show_paper_toc",
-        show_paper_toc(&fx.ops, 1, &ShowTocArgs::default()),
+        show_paper_toc(&fx.ops, &Caller::cli(), 1, &ShowTocArgs::default()),
     );
-    assert_intake_not_found("export_csl", export_csl(&fx.ops, 1));
-    assert_intake_not_found("fetch_source", fetch_source(&fx.ops, 1));
-    assert_intake_not_found("show_paper_audit_trail", show_paper_audit_trail(&fx.ops, 1));
+    assert_intake_not_found("export_csl", export_csl(&fx.ops, &Caller::cli(), 1));
+    assert_intake_not_found("fetch_source", fetch_source(&fx.ops, &Caller::cli(), 1));
+    assert_intake_not_found(
+        "show_paper_audit_trail",
+        show_paper_audit_trail(&fx.ops, &Caller::cli(), 1),
+    );
     assert!(
         !fx.papers_catalog_db.exists(),
         "a lookup must not create the paper catalog"

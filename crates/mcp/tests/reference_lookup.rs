@@ -239,7 +239,6 @@ fn handle(name: &str, cfg: Arc<Config>) -> Arc<LibraryHandle<OllamaEmbedClient>>
         &cfg.lancedb_dir(),
         cfg.books_dir(),
         cfg.backup_dir(),
-        Caller::cli(),
     );
     LibraryHandle::new(name, cfg, ops)
 }

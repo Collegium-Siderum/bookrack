@@ -5,12 +5,13 @@
 use bookrack_core::PartitionIdx;
 use bookrack_embed::Embedder;
 
+use crate::Caller;
 use crate::Ops;
 use crate::OpsError;
 use crate::Result;
 use crate::dto::audit::PipelineAuditEntry;
 use crate::reads::open_book_catalog;
-use crate::recorder::record_call_sync;
+use crate::recorder::record_call_with_caller_sync;
 
 /// Read the book-level pipeline audit trail for one book, oldest first.
 ///
@@ -22,10 +23,12 @@ use crate::recorder::record_call_sync;
 /// [`OpsError::IntakeNotFound`] — that is the "ghost id" case.
 pub fn show_pipeline_trail<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     intake_id: i64,
 ) -> Result<Vec<PipelineAuditEntry>> {
-    record_call_sync!(
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "library.show_pipeline_trail",
         serde_json::json!({ "intake_id": intake_id }),
         {

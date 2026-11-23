@@ -9,13 +9,14 @@ use bookrack_corpus::{Corpus, VECTOR_DIM_KEY};
 use bookrack_embed::Embedder;
 use bookrack_vectors::ChunkReader;
 
+use crate::Caller;
 use crate::Ops;
 use crate::Result;
 use crate::dto::vectors_status::{
     VectorsAnnConfig, VectorsIndexStats, VectorsIndexStatus, VectorsMetaDrift, VectorsMetaSummary,
     VectorsStatus,
 };
-use crate::recorder::record_call_async;
+use crate::recorder::record_call_with_caller_async;
 
 /// Snapshot the vector store. Read-only end to end: opens the corpus
 /// read-only, attaches to the lancedb directory through
@@ -27,87 +28,93 @@ use crate::recorder::record_call_async;
 /// no `vector_dim` stamp yet — i.e. no chunks have ever been ingested
 /// — or when the stamp is present but the lance store is not on disk:
 /// a status query must not materialise an empty layout to report on it.
-pub async fn status<E: Embedder>(ops: &Ops<E>) -> Result<VectorsStatus> {
-    record_call_async!(ops, "library.vectors_status", serde_json::Value::Null, {
-        if !ops.corpus_db().exists() {
-            return Ok(empty_status());
-        }
-        let corpus = Corpus::open_read_only(ops.corpus_db())?;
-        let Some(dim_str) = corpus.meta_get(VECTOR_DIM_KEY)? else {
-            return Ok(empty_status());
-        };
-        // The dimension itself is not needed to attach read-only, but
-        // an unparseable stamp is a health failure, not an empty store.
-        let _dim: usize = dim_str.parse().map_err(|e| {
-            crate::OpsError::Other(eyre::eyre!("parse vector_dim stamp {dim_str:?}: {e}"))
-        })?;
-        drop(corpus);
-
-        let lancedb_dir = ops.lancedb_dir();
-        let Some(store) = ChunkReader::open(lancedb_dir).await? else {
-            return Ok(empty_status());
-        };
-        let row_count = store.count_rows().await?;
-        let raw_indices = store.list_indices().await?;
-        let ann_cfg = store.current_ann_cfg(lancedb_dir)?;
-        let meta = bookrack_vectors::meta::load(lancedb_dir)?;
-
-        // LanceDB occasionally enumerates the same index name twice
-        // after repeated rebuilds. Keep the first occurrence, drop the
-        // duplicates, preserve the order LanceDB returned.
-        let mut seen = HashSet::new();
-        let unique_indices: Vec<String> = raw_indices
-            .into_iter()
-            .filter(|n| seen.insert(n.clone()))
-            .collect();
-
-        let mut indices = Vec::with_capacity(unique_indices.len());
-        for name in &unique_indices {
-            let stats = store.index_stats(name).await?.map(|s| VectorsIndexStats {
-                index_type: format!("{:?}", s.index_type),
-                num_indexed_rows: s.num_indexed_rows,
-                num_unindexed_rows: s.num_unindexed_rows,
-                num_indices: s.num_indices,
-                loss: s.loss,
-            });
-            indices.push(VectorsIndexStatus {
-                name: name.clone(),
-                stats,
-            });
-        }
-
-        let ann_config = ann_cfg.map(|c| VectorsAnnConfig {
-            kind: c.kind.as_str().to_string(),
-            num_partitions: c.num_partitions,
-            nprobes: c.nprobes,
-            refine_factor: c.refine_factor,
-        });
-
-        let meta_drift = meta.as_ref().and_then(|m| {
-            if m.kind != "brute-force" && !unique_indices.contains(&m.lance_index_name) {
-                Some(VectorsMetaDrift {
-                    expected_index: m.lance_index_name.clone(),
-                    found_indices: unique_indices.clone(),
-                })
-            } else {
-                None
+pub async fn status<E: Embedder>(ops: &Ops<E>, caller: &Caller) -> Result<VectorsStatus> {
+    record_call_with_caller_async!(
+        ops,
+        caller,
+        "library.vectors_status",
+        serde_json::Value::Null,
+        {
+            if !ops.corpus_db().exists() {
+                return Ok(empty_status());
             }
-        });
+            let corpus = Corpus::open_read_only(ops.corpus_db())?;
+            let Some(dim_str) = corpus.meta_get(VECTOR_DIM_KEY)? else {
+                return Ok(empty_status());
+            };
+            // The dimension itself is not needed to attach read-only, but
+            // an unparseable stamp is a health failure, not an empty store.
+            let _dim: usize = dim_str.parse().map_err(|e| {
+                crate::OpsError::Other(eyre::eyre!("parse vector_dim stamp {dim_str:?}: {e}"))
+            })?;
+            drop(corpus);
 
-        let meta_summary = meta.map(|m| VectorsMetaSummary {
-            kind: m.kind,
-            lance_index_name: m.lance_index_name,
-            churn_since_rebuild: m.churn_since_rebuild,
-        });
+            let lancedb_dir = ops.lancedb_dir();
+            let Some(store) = ChunkReader::open(lancedb_dir).await? else {
+                return Ok(empty_status());
+            };
+            let row_count = store.count_rows().await?;
+            let raw_indices = store.list_indices().await?;
+            let ann_cfg = store.current_ann_cfg(lancedb_dir)?;
+            let meta = bookrack_vectors::meta::load(lancedb_dir)?;
 
-        Ok(VectorsStatus {
-            row_count: Some(row_count),
-            indices,
-            ann_config,
-            meta: meta_summary,
-            meta_drift,
-        })
-    })
+            // LanceDB occasionally enumerates the same index name twice
+            // after repeated rebuilds. Keep the first occurrence, drop the
+            // duplicates, preserve the order LanceDB returned.
+            let mut seen = HashSet::new();
+            let unique_indices: Vec<String> = raw_indices
+                .into_iter()
+                .filter(|n| seen.insert(n.clone()))
+                .collect();
+
+            let mut indices = Vec::with_capacity(unique_indices.len());
+            for name in &unique_indices {
+                let stats = store.index_stats(name).await?.map(|s| VectorsIndexStats {
+                    index_type: format!("{:?}", s.index_type),
+                    num_indexed_rows: s.num_indexed_rows,
+                    num_unindexed_rows: s.num_unindexed_rows,
+                    num_indices: s.num_indices,
+                    loss: s.loss,
+                });
+                indices.push(VectorsIndexStatus {
+                    name: name.clone(),
+                    stats,
+                });
+            }
+
+            let ann_config = ann_cfg.map(|c| VectorsAnnConfig {
+                kind: c.kind.as_str().to_string(),
+                num_partitions: c.num_partitions,
+                nprobes: c.nprobes,
+                refine_factor: c.refine_factor,
+            });
+
+            let meta_drift = meta.as_ref().and_then(|m| {
+                if m.kind != "brute-force" && !unique_indices.contains(&m.lance_index_name) {
+                    Some(VectorsMetaDrift {
+                        expected_index: m.lance_index_name.clone(),
+                        found_indices: unique_indices.clone(),
+                    })
+                } else {
+                    None
+                }
+            });
+
+            let meta_summary = meta.map(|m| VectorsMetaSummary {
+                kind: m.kind,
+                lance_index_name: m.lance_index_name,
+                churn_since_rebuild: m.churn_since_rebuild,
+            });
+
+            Ok(VectorsStatus {
+                row_count: Some(row_count),
+                indices,
+                ann_config,
+                meta: meta_summary,
+                meta_drift,
+            })
+        }
+    )
 }
 
 fn empty_status() -> VectorsStatus {

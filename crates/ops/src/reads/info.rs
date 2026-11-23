@@ -17,10 +17,11 @@ use bookrack_corpus::{
 use bookrack_embed::Embedder;
 use bookrack_vectors::ChunkReader;
 
+use crate::Caller;
 use crate::Ops;
 use crate::Result;
 use crate::dto::info::{CorpusStamps, DiskUsage, LibraryInfo, PapersInfo};
-use crate::recorder::record_call_async;
+use crate::recorder::record_call_with_caller_async;
 
 /// Static facts about the library being inspected. The caller fills
 /// this from its [`bookrack_config::Config`] before calling
@@ -63,9 +64,10 @@ pub struct LibraryInfoContext {
 // Parallel implementation: store-health.
 pub async fn show_library_info<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     ctx: LibraryInfoContext,
 ) -> Result<LibraryInfo> {
-    record_call_async!(ops, "library.info", serde_json::Value::Null, {
+    record_call_with_caller_async!(ops, caller, "library.info", serde_json::Value::Null, {
         let (corpus_stamps, corpus_error) = match read_corpus_stamps(ops.corpus_db()) {
             Ok(stamps) => (stamps, None),
             Err(e) => (CorpusStamps::default(), Some(e.to_string())),

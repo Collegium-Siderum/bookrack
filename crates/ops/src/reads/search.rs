@@ -21,10 +21,11 @@ use bookrack_core::PartitionIdx;
 use bookrack_embed::Embedder;
 use bookrack_query::{Citation, Library, QueryError, SearchOptions};
 
+use crate::Caller;
 use crate::Ops;
 use crate::OpsError;
 use crate::Result;
-use crate::recorder::{Recorder, record_call_async};
+use crate::recorder::{Recorder, record_call_with_caller_async};
 
 /// An exclusion list that names the wrong side of the library for the
 /// requested `kind`. Both control surfaces render it as an
@@ -87,12 +88,14 @@ pub fn exclusions_to_partitions(ids: &[i64]) -> Vec<PartitionIdx> {
 // Parallel implementation: ops-reads-search.
 pub async fn search<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     query: &str,
     overrides: SearchOptions,
     top_k: Option<usize>,
 ) -> Result<Vec<Citation>> {
-    let recorder = Recorder::start(
-        ops,
+    let recorder = Recorder::start_with_caller(
+        ops.catalog_db(),
+        caller,
         "library.search",
         serde_json::json!({
             "query": query,
@@ -130,13 +133,15 @@ pub async fn search<E: Embedder>(
 // Parallel implementation: ops-reads-search.
 pub async fn search_in_book<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     intake_id: i64,
     query: &str,
     overrides: SearchOptions,
     top_k: Option<usize>,
 ) -> Result<Vec<Citation>> {
-    let recorder = Recorder::start(
-        ops,
+    let recorder = Recorder::start_with_caller(
+        ops.catalog_db(),
+        caller,
         "library.search_in_book",
         serde_json::json!({
             "intake_id": intake_id,
@@ -182,12 +187,14 @@ pub async fn search_in_book<E: Embedder>(
 // Parallel implementation: ops-reads-search.
 pub async fn search_paper<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     query: &str,
     overrides: SearchOptions,
     top_k: Option<usize>,
 ) -> Result<Vec<Citation>> {
-    let recorder = Recorder::start(
-        ops,
+    let recorder = Recorder::start_with_caller(
+        ops.catalog_db(),
+        caller,
         "library.search_paper",
         serde_json::json!({
             "query": query,
@@ -226,13 +233,15 @@ pub async fn search_paper<E: Embedder>(
 // Parallel implementation: ops-reads-search.
 pub async fn search_in_paper<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     intake_id: i64,
     query: &str,
     overrides: SearchOptions,
     top_k: Option<usize>,
 ) -> Result<Vec<Citation>> {
-    let recorder = Recorder::start(
-        ops,
+    let recorder = Recorder::start_with_caller(
+        ops.catalog_db(),
+        caller,
         "library.search_in_paper",
         serde_json::json!({
             "intake_id": intake_id,
@@ -300,13 +309,15 @@ pub async fn search_in_paper<E: Embedder>(
 /// per-store ops remain the recorded surface.
 pub async fn search_unified<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     query: &str,
     book_overrides: SearchOptions,
     paper_overrides: SearchOptions,
     top_k: Option<usize>,
 ) -> Result<Vec<Citation>> {
-    record_call_async!(
+    record_call_with_caller_async!(
         ops,
+        caller,
         "library.search.unified",
         serde_json::json!({
             "query": query,

@@ -18,10 +18,12 @@
 //!   the Ollama probe cost. Search ops on this variant fail with
 //!   [`OpsError::SearchUnavailable`].
 //!
-//! Reads open the catalog read-only per call; writes (added in a later
-//! phase) open it read-write per call and record a
-//! [`bookrack_catalog::MetadataAudit`] row tagged with the [`Caller`]
-//! this [`Ops`] was built with.
+//! Reads open the catalog read-only per call and take the [`Caller`]
+//! their tool-call row is attributed to; writes run in a
+//! [`write_session::WriteSession`], which carries the caller their
+//! [`bookrack_catalog::MetadataAudit`] rows are tagged with. An [`Ops`]
+//! carries no caller of its own: one handle per library serves every
+//! surface.
 
 pub mod audit_overlay;
 pub mod dto;
@@ -53,7 +55,6 @@ pub use bookrack_metadata::paper::{
 };
 pub use bookrack_query::{Citation, SearchOptions};
 pub use dto::audit::Caller;
-pub use recorder::with_caller_override;
 
 /// Why an op failed.
 #[derive(Debug, thiserror::Error)]
@@ -277,7 +278,6 @@ pub struct Ops<E: Embedder> {
     papers_library: Option<Library<E>>,
     papers_paths: Option<PapersPaths>,
     rerank: Option<RerankStage>,
-    caller: Caller,
 }
 
 impl<E: Embedder> Ops<E> {
@@ -290,7 +290,6 @@ impl<E: Embedder> Ops<E> {
         lancedb_dir: &Path,
         books_dir: PathBuf,
         backup_dir: PathBuf,
-        caller: Caller,
     ) -> Ops<E> {
         Ops {
             library: Some(library),
@@ -302,7 +301,6 @@ impl<E: Embedder> Ops<E> {
             papers_library: None,
             papers_paths: None,
             rerank: None,
-            caller,
         }
     }
 
@@ -341,7 +339,6 @@ impl<E: Embedder> Ops<E> {
         lancedb_dir: &Path,
         books_dir: PathBuf,
         backup_dir: PathBuf,
-        caller: Caller,
     ) -> Ops<E> {
         Ops {
             library: None,
@@ -353,22 +350,7 @@ impl<E: Embedder> Ops<E> {
             papers_library: None,
             papers_paths: None,
             rerank: None,
-            caller,
         }
-    }
-
-    /// The caller identity this `Ops` was built with.
-    pub fn caller(&self) -> &Caller {
-        &self.caller
-    }
-
-    /// The caller identity to stamp on rows recorded by the current
-    /// call: the task-scope override installed by
-    /// [`with_caller_override`] when one is active (e.g. for tool calls
-    /// arriving over MCP on a shared `Ops`), otherwise the caller this
-    /// `Ops` was built with.
-    pub fn effective_caller(&self) -> Caller {
-        recorder::caller_override().unwrap_or_else(|| self.caller.clone())
     }
 
     /// The embedding dimension the vector store was opened at, if this

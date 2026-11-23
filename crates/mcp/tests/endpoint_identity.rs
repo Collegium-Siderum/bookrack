@@ -24,8 +24,8 @@ use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_mcp::ProcessEndpoints;
 use bookrack_obs::LogStreamHandle;
+use bookrack_ops::Ops;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
-use bookrack_ops::{Caller, Ops};
 use bookrack_runtime::mcp_endpoint::{McpEndpointState, probe_endpoint};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -41,7 +41,6 @@ fn stub_registry() -> Arc<LibraryRegistry<OllamaEmbedClient>> {
         &cfg.lancedb_dir(),
         cfg.books_dir(),
         cfg.backup_dir(),
-        Caller::mcp(),
     );
     LibraryRegistry::single(LibraryHandle::new("identity-stub", cfg, ops))
 }

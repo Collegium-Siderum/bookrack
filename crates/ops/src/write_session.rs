@@ -519,7 +519,6 @@ mod tests {
             &cfg.lancedb_dir(),
             cfg.books_dir(),
             cfg.backup_dir(),
-            Caller::cli(),
         );
         LibraryHandle::new(name, cfg, ops)
     }

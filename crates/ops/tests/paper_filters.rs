@@ -69,7 +69,6 @@ impl Fixture {
             &tmp.path().join("lancedb"),
             tmp.path().join("books"),
             tmp.path().join("backup"),
-            Caller::cli(),
         )
         .with_papers(
             papers_library,
@@ -147,7 +146,7 @@ impl Fixture {
 /// Ids `find_papers` returns for a filter, with the page and the total
 /// held to the same set.
 fn papers_matching(fx: &Fixture, filter: PaperFilter) -> Vec<i64> {
-    let page = find_papers(&fx.ops, filter, 100, 0).expect("find");
+    let page = find_papers(&fx.ops, &Caller::cli(), filter, 100, 0).expect("find");
     let ids: Vec<i64> = page.papers.iter().map(|p| p.intake_id).collect();
     assert_eq!(
         page.total as usize,

@@ -17,6 +17,7 @@ use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 
+use crate::Caller;
 use crate::Ops;
 use crate::OpsError;
 use crate::Result;
@@ -26,7 +27,7 @@ use crate::dto::{
     Toc, TocNodes, TocStats, clamp_limit,
 };
 use crate::reads::open_book_catalog;
-use crate::recorder::record_call_sync;
+use crate::recorder::record_call_with_caller_sync;
 
 /// The audit-row args JSON of one TOC read: the intake id plus every
 /// requested parameter that differs from its default.
@@ -51,12 +52,18 @@ pub(crate) fn toc_call_args(intake_id: i64, args: &ShowTocArgs) -> serde_json::V
 }
 
 /// List books in catalog order, paginated.
-pub fn list_books<E: Embedder>(ops: &Ops<E>, limit: u32, offset: u32) -> Result<ListBooksResult> {
-    record_call_sync!(
+pub fn list_books<E: Embedder>(
+    ops: &Ops<E>,
+    caller: &Caller,
+    limit: u32,
+    offset: u32,
+) -> Result<ListBooksResult> {
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "library.list_books",
         serde_json::json!({ "limit": limit, "offset": offset }),
-        { find_books(ops, BookFilter::default(), limit, offset) }
+        { find_books(ops, caller, BookFilter::default(), limit, offset) }
     )
 }
 
@@ -72,6 +79,7 @@ pub fn list_books<E: Embedder>(ops: &Ops<E>, limit: u32, offset: u32) -> Result<
 /// [`reads::metadata::list_metadata`](crate::reads::metadata::list_metadata).
 pub fn find_books<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     filter: BookFilter,
     limit: u32,
     offset: u32,
@@ -92,7 +100,7 @@ pub fn find_books<E: Embedder>(
         "limit": limit,
         "offset": offset,
     });
-    record_call_sync!(ops, "library.find_books", args, {
+    record_call_with_caller_sync!(ops, caller, "library.find_books", args, {
         let Some(catalog) = open_book_catalog(ops)? else {
             return Ok(ListBooksResult {
                 books: Vec::new(),
@@ -161,31 +169,37 @@ pub fn find_books<E: Embedder>(
 /// number of books carrying it, most-used first, plus the books no
 /// category reaches. Read this before filtering `find_books` on
 /// `categories`; it is where the library's tag vocabulary can be seen.
-pub fn category_counts<E: Embedder>(ops: &Ops<E>) -> Result<CategoryCounts> {
-    record_call_sync!(ops, "library.categories", serde_json::Value::Null, {
-        let Some(catalog) = open_book_catalog(ops)? else {
-            return Ok(CategoryCounts {
-                categories: Vec::new(),
-                uncategorised: 0,
-                total: 0,
-            });
-        };
-        let categories = catalog
-            .category_counts(ItemKind::Book)?
-            .into_iter()
-            .map(|c| CategoryBooks {
-                category: c.category,
-                books: c.items,
+pub fn category_counts<E: Embedder>(ops: &Ops<E>, caller: &Caller) -> Result<CategoryCounts> {
+    record_call_with_caller_sync!(
+        ops,
+        caller,
+        "library.categories",
+        serde_json::Value::Null,
+        {
+            let Some(catalog) = open_book_catalog(ops)? else {
+                return Ok(CategoryCounts {
+                    categories: Vec::new(),
+                    uncategorised: 0,
+                    total: 0,
+                });
+            };
+            let categories = catalog
+                .category_counts(ItemKind::Book)?
+                .into_iter()
+                .map(|c| CategoryBooks {
+                    category: c.category,
+                    books: c.items,
+                })
+                .collect();
+            let uncategorised = catalog.count_intakes_without_category(ItemKind::Book)?;
+            let total = catalog.count_intakes(bookrack_core::ItemKind::Book)?;
+            Ok(CategoryCounts {
+                categories,
+                uncategorised,
+                total,
             })
-            .collect();
-        let uncategorised = catalog.count_intakes_without_category(ItemKind::Book)?;
-        let total = catalog.count_intakes(bookrack_core::ItemKind::Book)?;
-        Ok(CategoryCounts {
-            categories,
-            uncategorised,
-            total,
-        })
-    })
+        }
+    )
 }
 
 /// Fetch the full bibliographic record of one book by intake id,
@@ -193,9 +207,10 @@ pub fn category_counts<E: Embedder>(ops: &Ops<E>) -> Result<CategoryCounts> {
 /// book has no corpus nodes).
 ///
 /// Returns [`OpsError::IntakeNotFound`] when no such intake is registered.
-pub fn show_book<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<BookDetail> {
-    record_call_sync!(
+pub fn show_book<E: Embedder>(ops: &Ops<E>, caller: &Caller, intake_id: i64) -> Result<BookDetail> {
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "library.show_book",
         serde_json::json!({ "intake_id": intake_id }),
         {
@@ -239,39 +254,50 @@ pub fn show_book<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<BookDetail
 /// Returns [`OpsError::IntakeNotFound`] when no such intake is
 /// registered. An intake that exists but has no organizing nodes
 /// produces an empty [`Toc`] with `total = 0`.
-pub fn show_toc<E: Embedder>(ops: &Ops<E>, intake_id: i64, args: &ShowTocArgs) -> Result<Toc> {
-    record_call_sync!(ops, "library.show_toc", toc_call_args(intake_id, args), {
-        let Some(catalog) = open_book_catalog(ops)? else {
-            return Err(OpsError::IntakeNotFound { intake_id });
-        };
-        if catalog.intake_by_id(intake_id)?.is_none() {
-            return Err(OpsError::IntakeNotFound { intake_id });
+pub fn show_toc<E: Embedder>(
+    ops: &Ops<E>,
+    caller: &Caller,
+    intake_id: i64,
+    args: &ShowTocArgs,
+) -> Result<Toc> {
+    record_call_with_caller_sync!(
+        ops,
+        caller,
+        "library.show_toc",
+        toc_call_args(intake_id, args),
+        {
+            let Some(catalog) = open_book_catalog(ops)? else {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            };
+            if catalog.intake_by_id(intake_id)?.is_none() {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            }
+            let corpus = Corpus::open_read_only(ops.corpus_db())?;
+            let book_root_id = PartitionIdx::new(intake_id).root();
+            let q = args.to_query();
+            let total = corpus.count_toc_nodes(book_root_id, &q)?;
+            let nodes = corpus.toc_for_book(book_root_id, &q)?;
+            let projected = TocNodes::project(&nodes, args.titles_only);
+            let end = u64::from(args.offset) + projected.len() as u64;
+            let next_offset = if end < total {
+                u32::try_from(end).ok()
+            } else {
+                None
+            };
+            Ok(Toc {
+                intake_id,
+                nodes: projected,
+                total,
+                truncated: next_offset.is_some(),
+                next_offset,
+            })
         }
-        let corpus = Corpus::open_read_only(ops.corpus_db())?;
-        let book_root_id = PartitionIdx::new(intake_id).root();
-        let q = args.to_query();
-        let total = corpus.count_toc_nodes(book_root_id, &q)?;
-        let nodes = corpus.toc_for_book(book_root_id, &q)?;
-        let projected = TocNodes::project(&nodes, args.titles_only);
-        let end = u64::from(args.offset) + projected.len() as u64;
-        let next_offset = if end < total {
-            u32::try_from(end).ok()
-        } else {
-            None
-        };
-        Ok(Toc {
-            intake_id,
-            nodes: projected,
-            total,
-            truncated: next_offset.is_some(),
-            next_offset,
-        })
-    })
+    )
 }
 
 /// Aggregate counts across the catalog.
-pub fn show_stats<E: Embedder>(ops: &Ops<E>) -> Result<LibraryStats> {
-    record_call_sync!(ops, "library.stats", serde_json::Value::Null, {
+pub fn show_stats<E: Embedder>(ops: &Ops<E>, caller: &Caller) -> Result<LibraryStats> {
+    record_call_with_caller_sync!(ops, caller, "library.stats", serde_json::Value::Null, {
         let Some(catalog) = open_book_catalog(ops)? else {
             // A catalog not yet created counts zero in every status, so
             // the section keeps its shape on a root nothing has

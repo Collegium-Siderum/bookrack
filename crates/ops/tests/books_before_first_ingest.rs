@@ -42,7 +42,6 @@ impl Fixture {
             &tmp.path().join("lancedb"),
             tmp.path().join("books"),
             tmp.path().join("backup"),
-            Caller::cli(),
         );
         assert!(
             !catalog_db.exists(),
@@ -83,12 +82,13 @@ fn assert_intake_not_found<T: std::fmt::Debug>(what: &str, result: Result<T, Ops
 fn listings_are_empty_pages() {
     let fx = Fixture::empty_root();
 
-    let page = list_books(&fx.ops, 10, 0).expect("list_books on a root without a catalog");
+    let page =
+        list_books(&fx.ops, &Caller::cli(), 10, 0).expect("list_books on a root without a catalog");
     assert!(page.books.is_empty(), "{:?}", page.books);
     assert_eq!(page.total, 0);
     assert!(!page.truncated);
 
-    let page = find_books(&fx.ops, BookFilter::default(), 10, 0)
+    let page = find_books(&fx.ops, &Caller::cli(), BookFilter::default(), 10, 0)
         .expect("find_books on a root without a catalog");
     assert!(page.books.is_empty(), "{:?}", page.books);
     assert_eq!(page.total, 0);
@@ -98,7 +98,7 @@ fn listings_are_empty_pages() {
         awaiting_text: true,
         ..BookFilter::default()
     };
-    let page = find_books(&fx.ops, awaiting_text, 10, 0)
+    let page = find_books(&fx.ops, &Caller::cli(), awaiting_text, 10, 0)
         .expect("find_books for scans on a root without a catalog");
     assert!(page.books.is_empty(), "{:?}", page.books);
     assert_eq!(page.total, 0);
@@ -110,13 +110,13 @@ fn listings_are_empty_pages() {
 fn metadata_listings_are_empty_pages() {
     let fx = Fixture::empty_root();
 
-    let page = list_metadata(&fx.ops, MetadataFilter::default(), 10, 0)
+    let page = list_metadata(&fx.ops, &Caller::cli(), MetadataFilter::default(), 10, 0)
         .expect("list_metadata on a root without a catalog");
     assert!(page.rows.is_empty(), "{:?}", page.rows);
     assert_eq!(page.total, 0);
     assert!(!page.truncated);
 
-    let page = list_pending_reviews(&fx.ops, 10, 0)
+    let page = list_pending_reviews(&fx.ops, &Caller::cli(), 10, 0)
         .expect("list_pending_reviews on a root without a catalog");
     assert!(page.rows.is_empty(), "{:?}", page.rows);
     assert_eq!(page.total, 0);
@@ -129,7 +129,7 @@ fn metadata_listings_are_empty_pages() {
 fn aggregates_count_zero() {
     let fx = Fixture::empty_root();
 
-    let stats = show_stats(&fx.ops).expect("stats on a root without a catalog");
+    let stats = show_stats(&fx.ops, &Caller::cli()).expect("stats on a root without a catalog");
     for status in IntakeStatus::ALL {
         assert_eq!(
             stats.intake_counts_by_status.get(status.as_str()),
@@ -146,7 +146,8 @@ fn aggregates_count_zero() {
         "no papers backend is configured, so the section is absent"
     );
 
-    let counts = category_counts(&fx.ops).expect("categories on a root without a catalog");
+    let counts =
+        category_counts(&fx.ops, &Caller::cli()).expect("categories on a root without a catalog");
     assert!(counts.categories.is_empty(), "{:?}", counts.categories);
     assert_eq!(counts.uncategorised, 0);
     assert_eq!(counts.total, 0);
@@ -158,20 +159,33 @@ fn aggregates_count_zero() {
 fn per_book_reads_report_the_intake_as_unknown() {
     let fx = Fixture::empty_root();
 
-    assert_intake_not_found("show_book", show_book(&fx.ops, 1));
-    assert_intake_not_found("show_toc", show_toc(&fx.ops, 1, &ShowTocArgs::default()));
-    assert_intake_not_found("show_metadata_audit", show_metadata_audit(&fx.ops, 1));
+    assert_intake_not_found("show_book", show_book(&fx.ops, &Caller::cli(), 1));
+    assert_intake_not_found(
+        "show_toc",
+        show_toc(&fx.ops, &Caller::cli(), 1, &ShowTocArgs::default()),
+    );
+    assert_intake_not_found(
+        "show_metadata_audit",
+        show_metadata_audit(&fx.ops, &Caller::cli(), 1),
+    );
     assert_intake_not_found(
         "show_metadata_report",
         show_metadata_report(
             &fx.ops,
+            &Caller::cli(),
             1,
             &AuditData::default_data(),
             &AuditProfile::default(),
         ),
     );
-    assert_intake_not_found("show_audit_trail", show_audit_trail(&fx.ops, 1));
-    assert_intake_not_found("show_pipeline_trail", show_pipeline_trail(&fx.ops, 1));
+    assert_intake_not_found(
+        "show_audit_trail",
+        show_audit_trail(&fx.ops, &Caller::cli(), 1),
+    );
+    assert_intake_not_found(
+        "show_pipeline_trail",
+        show_pipeline_trail(&fx.ops, &Caller::cli(), 1),
+    );
 
     fx.assert_nothing_created("a lookup");
 }

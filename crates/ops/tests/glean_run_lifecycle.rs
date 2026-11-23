@@ -14,7 +14,7 @@ use bookrack_core::ItemKind;
 use bookrack_embed::{Embedder, Result as EmbedResult};
 use bookrack_ops::pipeline::paper::GleanParams;
 use bookrack_ops::registry::LibraryHandle;
-use bookrack_ops::{Caller, Ops, PapersPaths};
+use bookrack_ops::{Ops, PapersPaths};
 use bookrack_query::Library;
 
 /// A constant-vector embedder: the dimension probe and the abstract
@@ -79,7 +79,6 @@ async fn registry_glean_records_a_pipeline_run_on_the_paper_catalog() {
         &cfg.lancedb_dir(),
         cfg.books_dir(),
         cfg.backup_dir(),
-        Caller::cli(),
     )
     .with_papers(
         papers_library,

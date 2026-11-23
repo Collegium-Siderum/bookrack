@@ -52,8 +52,9 @@ pub trait HostContext: Send + Sync {
 pub struct DispatchContext<'a, E: Embedder> {
     /// The libraries the call may be routed to.
     pub registry: &'a LibraryRegistry<E>,
-    /// Who the call is attributed to: every write session opened for it
-    /// records this caller.
+    /// Who the call is attributed to: every read records this caller on
+    /// its tool-call row, and every write session opened for it records
+    /// it on its audit rows.
     pub caller: &'a Caller,
     /// The host's side of the methods that need it.
     pub host: &'a dyn HostContext,
@@ -115,7 +116,7 @@ where
                 .host
                 .library_info_context(handle.cfg())
                 .map_err(|report| DispatchError::Host { method, report })?;
-            let info = reads::info::show_library_info(handle.ops(), info_context)
+            let info = reads::info::show_library_info(handle.ops(), ctx.caller, info_context)
                 .await
                 .map_err(ops)?;
             reply(&info)
@@ -123,19 +124,23 @@ where
         "library.stats" => {
             let p: LibraryOnlyParams = parse(method, params)?;
             let handle = resolve(ctx, &p)?;
-            reply(&reads::books::show_stats(handle.ops()).map_err(ops)?)
+            reply(&reads::books::show_stats(handle.ops(), ctx.caller).map_err(ops)?)
         }
         "library.categories" => {
             let p: LibraryOnlyParams = parse(method, params)?;
             let handle = resolve(ctx, &p)?;
-            reply(&reads::books::category_counts(handle.ops()).map_err(ops)?)
+            reply(&reads::books::category_counts(handle.ops(), ctx.caller).map_err(ops)?)
         }
         "library.list_books" => {
             let p: ListBooksParams = parse(method, params)?;
             let handle = resolve(ctx, &p)?;
-            let page =
-                reads::books::list_books(handle.ops(), page_limit(p.limit), offset(p.offset))
-                    .map_err(ops)?;
+            let page = reads::books::list_books(
+                handle.ops(),
+                ctx.caller,
+                page_limit(p.limit),
+                offset(p.offset),
+            )
+            .map_err(ops)?;
             reply(&page)
         }
         "library.find_books" => {
@@ -155,6 +160,7 @@ where
             };
             let page = reads::books::find_books(
                 handle.ops(),
+                ctx.caller,
                 filter,
                 page_limit(p.limit),
                 offset(p.offset),
@@ -165,13 +171,18 @@ where
         "library.show_book" => {
             let p: BookIdParams = parse(method, params)?;
             let handle = resolve(ctx, &p)?;
-            or_null(reads::books::show_book(handle.ops(), p.intake_id))
+            or_null(reads::books::show_book(
+                handle.ops(),
+                ctx.caller,
+                p.intake_id,
+            ))
         }
         "library.show_toc" => {
             let p: ShowTocParams = parse(method, params)?;
             let handle = resolve(ctx, &p)?;
             or_null(reads::books::show_toc(
                 handle.ops(),
+                ctx.caller,
                 p.intake_id,
                 &p.toc_args(),
             ))
@@ -191,6 +202,7 @@ where
             };
             node_or_null(reads::passages::read_context(
                 handle.ops(),
+                ctx.caller,
                 target,
                 before,
                 after,
@@ -205,6 +217,7 @@ where
             };
             node_or_null(reads::passages::read_span(
                 handle.ops(),
+                ctx.caller,
                 target,
                 p.start_after,
             ))
@@ -214,6 +227,7 @@ where
             let handle = resolve(ctx, &p)?;
             or_null(reads::metadata::show_metadata_audit(
                 handle.ops(),
+                ctx.caller,
                 p.intake_id,
             ))
         }
@@ -227,6 +241,7 @@ where
             let audit_profile = audit_overlay::load_audit_profile(handle.cfg(), None);
             or_null(reads::metadata::show_metadata_report(
                 handle.ops(),
+                ctx.caller,
                 p.intake_id,
                 &audit_data,
                 &audit_profile,
@@ -238,6 +253,7 @@ where
             let filter = metadata_filter(&p)?;
             let page = reads::metadata::list_metadata(
                 handle.ops(),
+                ctx.caller,
                 filter,
                 page_limit(p.limit),
                 offset(p.offset),
@@ -250,6 +266,7 @@ where
             let handle = resolve(ctx, &p)?;
             let page = reads::metadata::list_pending_reviews(
                 handle.ops(),
+                ctx.caller,
                 page_limit(p.limit),
                 offset(p.offset),
             )
@@ -259,22 +276,31 @@ where
         "library.show_audit_trail" => {
             let p: BookIdParams = parse(method, params)?;
             let handle = resolve(ctx, &p)?;
-            or_null(reads::metadata::show_audit_trail(handle.ops(), p.intake_id))
+            or_null(reads::metadata::show_audit_trail(
+                handle.ops(),
+                ctx.caller,
+                p.intake_id,
+            ))
         }
         "library.show_pipeline_trail" => {
             let p: BookIdParams = parse(method, params)?;
             let handle = resolve(ctx, &p)?;
             or_null(reads::pipeline::show_pipeline_trail(
                 handle.ops(),
+                ctx.caller,
                 p.intake_id,
             ))
         }
         "library.list_papers" => {
             let p: ListPapersParams = parse(method, params)?;
             let handle = resolve(ctx, &p)?;
-            let page =
-                reads::papers::list_papers(handle.ops(), page_limit(p.limit), offset(p.offset))
-                    .map_err(ops)?;
+            let page = reads::papers::list_papers(
+                handle.ops(),
+                ctx.caller,
+                page_limit(p.limit),
+                offset(p.offset),
+            )
+            .map_err(ops)?;
             reply(&page)
         }
         "library.find_papers" => {
@@ -294,6 +320,7 @@ where
             };
             let page = reads::papers::find_papers(
                 handle.ops(),
+                ctx.caller,
                 filter,
                 page_limit(p.limit),
                 offset(p.offset),
@@ -304,13 +331,18 @@ where
         "library.show_paper" => {
             let p: PaperIdParams = parse(method, params)?;
             let handle = resolve(ctx, &p)?;
-            or_null(reads::papers::show_paper(handle.ops(), p.intake_id))
+            or_null(reads::papers::show_paper(
+                handle.ops(),
+                ctx.caller,
+                p.intake_id,
+            ))
         }
         "library.show_paper_toc" => {
             let p: ShowTocParams = parse(method, params)?;
             let handle = resolve(ctx, &p)?;
             or_null(reads::papers::show_paper_toc(
                 handle.ops(),
+                ctx.caller,
                 p.intake_id,
                 &p.toc_args(),
             ))
@@ -330,6 +362,7 @@ where
             let audit_data = audit_overlay::load_paper_audit_data(handle.cfg());
             or_null(reads::papers_metadata::show_paper_metadata_report(
                 handle.ops(),
+                ctx.caller,
                 p.intake_id,
                 &audit_data,
                 &audit_profile,
@@ -340,6 +373,7 @@ where
             let handle = resolve(ctx, &p)?;
             or_null(reads::papers_metadata::show_paper_audit_trail(
                 handle.ops(),
+                ctx.caller,
                 p.intake_id,
             ))
         }
@@ -349,6 +383,7 @@ where
             let filter = metadata_filter(&p)?;
             let page = reads::papers_metadata::list_paper_metadata(
                 handle.ops(),
+                ctx.caller,
                 filter,
                 page_limit(p.limit),
                 offset(p.offset),
@@ -361,6 +396,7 @@ where
             let handle = resolve(ctx, &p)?;
             let page = reads::papers_metadata::list_paper_pending_reviews(
                 handle.ops(),
+                ctx.caller,
                 page_limit(p.limit),
                 offset(p.offset),
             )
@@ -370,12 +406,20 @@ where
         "papers.export_csl" => {
             let p: PaperIdParams = parse(method, params)?;
             let handle = resolve(ctx, &p)?;
-            or_null(reads::papers::export_csl(handle.ops(), p.intake_id))
+            or_null(reads::papers::export_csl(
+                handle.ops(),
+                ctx.caller,
+                p.intake_id,
+            ))
         }
         "papers.fetch_source" => {
             let p: PaperIdParams = parse(method, params)?;
             let handle = resolve(ctx, &p)?;
-            or_null(reads::papers::fetch_source(handle.ops(), p.intake_id))
+            or_null(reads::papers::fetch_source(
+                handle.ops(),
+                ctx.caller,
+                p.intake_id,
+            ))
         }
         "library.search" => {
             let p: SearchParams = parse(method, params)?;
@@ -384,13 +428,23 @@ where
             let book = p.overrides_excluding(&p.exclude_book_intake_ids);
             let paper = p.overrides_excluding(&p.exclude_paper_intake_ids);
             let hits = match kind {
-                "book" => reads::search::search(handle.ops(), &p.query, book, p.top_k).await,
+                "book" => {
+                    reads::search::search(handle.ops(), ctx.caller, &p.query, book, p.top_k).await
+                }
                 "paper" => {
-                    reads::search::search_paper(handle.ops(), &p.query, paper, p.top_k).await
+                    reads::search::search_paper(handle.ops(), ctx.caller, &p.query, paper, p.top_k)
+                        .await
                 }
                 "all" => {
-                    reads::search::search_unified(handle.ops(), &p.query, book, paper, p.top_k)
-                        .await
+                    reads::search::search_unified(
+                        handle.ops(),
+                        ctx.caller,
+                        &p.query,
+                        book,
+                        paper,
+                        p.top_k,
+                    )
+                    .await
                 }
                 other => {
                     return Err(refused(ParamsError::UnknownSearchKind {
@@ -408,6 +462,7 @@ where
             let handle = resolve(ctx, &p)?;
             let result = reads::search::search_in_book(
                 handle.ops(),
+                ctx.caller,
                 p.intake_id,
                 &p.query,
                 p.overrides(),
@@ -421,6 +476,7 @@ where
             let handle = resolve(ctx, &p)?;
             let result = reads::search::search_in_paper(
                 handle.ops(),
+                ctx.caller,
                 p.intake_id,
                 &p.query,
                 p.overrides(),
@@ -432,7 +488,11 @@ where
         "library.vectors_status" => {
             let p: LibraryOnlyParams = parse(method, params)?;
             let handle = resolve(ctx, &p)?;
-            reply(&reads::vectors::status(handle.ops()).await.map_err(ops)?)
+            reply(
+                &reads::vectors::status(handle.ops(), ctx.caller)
+                    .await
+                    .map_err(ops)?,
+            )
         }
         "reference.lookup" => {
             let p: ReferenceLookupParams = parse(method, params)?;

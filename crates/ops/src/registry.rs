@@ -1164,7 +1164,7 @@ mod tests {
 
     use bookrack_config::Config;
 
-    use crate::{Caller, Ops};
+    use crate::Ops;
 
     use super::{LibraryHandle, LibraryRegistry, RegistryError};
 
@@ -1196,7 +1196,6 @@ mod tests {
             &cfg.lancedb_dir(),
             cfg.books_dir(),
             cfg.backup_dir(),
-            Caller::cli(),
         )
     }
 

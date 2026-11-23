@@ -23,9 +23,9 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use bookrack_core::DaemonIdentity;
 use bookrack_core::queue::QueueState;
 use bookrack_obs::LogStreamHandle;
+use bookrack_ops::Caller;
 use bookrack_ops::methods::dispatch::{DispatchContext, Reply, dispatch};
 use bookrack_ops::methods::{LIBRARY_METHODS, MethodSpec, Output, Surface};
-use bookrack_ops::{Caller, with_caller_override};
 use bookrack_runtime::control::events::EventStreamHandle;
 use bookrack_runtime::control::methods::session::{
     self, SESSION_TOOLS, SessionContext, SessionTool,
@@ -265,23 +265,6 @@ impl ServerHandler for BookrackServer {
              review status, and `reference.overlay_set` edits a reference entry."
                     .to_string(),
             )
-    }
-
-    /// Override the `#[tool_handler]`-generated dispatch so every tool
-    /// call runs attributed to [`Caller::mcp`], regardless of the
-    /// [`Caller`] baked into the shared `Ops` handle. The daemon builds
-    /// one `Ops` per library tagged with the control plane
-    /// (`Caller::control_plane()`) and shares it across the control
-    /// socket, HTTP, and queue worker; without this wrap, the recorded
-    /// tool-call `source` of a read would carry the host surface's
-    /// identity instead of `mcp`.
-    async fn call_tool(
-        &self,
-        request: rmcp::model::CallToolRequestParams,
-        context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
-        let tcc = ToolCallContext::new(self, request, context);
-        with_caller_override(Caller::mcp(), self.tool_router.call(tcc)).await
     }
 }
 

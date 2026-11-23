@@ -4,70 +4,35 @@
 //! public op call.
 //!
 //! Every public function in [`crate::reads`] and [`crate::writes`] wraps
-//! its body in [`record_call_sync!`] (or [`record_call_async!`] for async
-//! ops). The macro builds a [`Recorder`] before the body, runs the body,
-//! and writes one row to `mcp_tool_calls` after the body settles —
-//! capturing `source` (cli / mcp), `tool` (the public name agents see),
+//! its body in [`record_call_with_caller_sync!`] (or
+//! [`record_call_with_caller_async!`] for async ops). The macro builds a
+//! [`Recorder`] before the body, runs the body, and writes one row to
+//! `mcp_tool_calls` after the body settles — capturing `source` (the
+//! surface the call arrived on), `tool` (the public name agents see),
 //! `status` (ok / error), `duration_ms`, the JSON-encoded `args`, and
 //! the stable error class on failure.
+//!
+//! The caller is always passed in: a read takes it as a parameter and a
+//! write takes it from its [`crate::write_session::WriteSession`]. One
+//! [`crate::Ops`] handle per library is shared by every surface the
+//! daemon serves, so the handle carries no caller of its own.
 //!
 //! Recording is opportunistic: if the catalog write fails, the recorder
 //! logs a `tracing::warn!` and drops the row, so observability never
 //! corrupts the operation's [`Result`].
-//!
-//! A task-local override lets a host surface swap the effective
-//! [`Caller`] for the duration of one call without rebuilding [`Ops`].
-//! The MCP server uses this to attribute tool calls arriving over HTTP
-//! to `Caller::mcp()` — both the recorded `source` here and the
-//! `actor_kind` / `actor_detail` stamped on write audit rows — where
-//! the underlying [`Ops`] is a single per-library handle shared by
-//! REPL, HTTP, and queue worker.
 
-use std::future::Future;
 use std::path::Path;
 use std::time::Instant;
 
 use bookrack_catalog::{Catalog, NewMcpToolCall, NewRetrievalCall};
-use bookrack_embed::Embedder;
 
-use crate::{Caller, Ops, OpsError};
-
-tokio::task_local! {
-    /// When set inside a `scope`, [`Ops::effective_caller`] returns this
-    /// [`Caller`] instead of the one baked into [`Ops`], so both the
-    /// recorded tool-call `source` and the audit-row actor columns follow
-    /// the surface that initiated the call. Lets a host that drives a
-    /// shared `Ops` (the `bookrack run` daemon, where REPL and HTTP route
-    /// through the same registry) relabel each call without cloning ops
-    /// or threading the caller through every entry point.
-    static CALLER_OVERRIDE: Caller;
-}
-
-/// Run `fut` with the effective [`Caller`] swapped to `caller` for every
-/// tool-call row and audit row that fires inside the future.
-///
-/// Scopes nest: an inner call to [`with_caller_override`] supersedes the
-/// outer caller for the duration of its own future, then the outer one
-/// resumes. Scopes do not cross [`tokio::spawn`] boundaries (the new task
-/// runs without the override); callers that fan out work must re-wrap
-/// each spawned future.
-pub fn with_caller_override<F: Future>(
-    caller: Caller,
-    fut: F,
-) -> tokio::task::futures::TaskLocalFuture<Caller, F> {
-    CALLER_OVERRIDE.scope(caller, fut)
-}
-
-/// The [`Caller`] override installed for the current task scope, if any.
-pub(crate) fn caller_override() -> Option<Caller> {
-    CALLER_OVERRIDE.try_with(Caller::clone).ok()
-}
+use crate::{Caller, OpsError};
 
 /// Guard that times one op call and writes a row to `mcp_tool_calls`
 /// when [`Recorder::finish`] consumes it.
 ///
-/// Constructed by [`Recorder::start`] from an [`Ops`] handle. The
-/// catalog connection is opened lazily inside [`Recorder::finish`], so
+/// Constructed by [`Recorder::start_with_caller`]. The catalog
+/// connection is opened lazily inside [`Recorder::finish`], so
 /// recording adds no work to a successful read besides building the
 /// args JSON.
 pub struct Recorder<'a> {
@@ -79,27 +44,15 @@ pub struct Recorder<'a> {
 }
 
 impl<'a> Recorder<'a> {
-    /// Start timing one call on `ops` of `tool`, carrying `args` (as a
-    /// JSON value) into the recorded row.
+    /// Start timing one call of `tool` attributed to `caller`, whose row
+    /// lands in the catalog at `catalog_db`, carrying `args` (as a JSON
+    /// value) into the recorded row.
     ///
     /// `tool` is the public name the call is advertised as — e.g.
     /// `library.list_books` — not the internal function name. `args` is
     /// serialized at construction time so a `Value::Null` becomes `None`
-    /// rather than the literal string `"null"`.
-    pub fn start<E: Embedder>(
-        ops: &'a Ops<E>,
-        tool: &'static str,
-        args: serde_json::Value,
-    ) -> Recorder<'a> {
-        Recorder::start_with_caller(ops.catalog_db(), &ops.effective_caller(), tool, args)
-    }
-
-    /// Start timing one call of `tool` attributed to `caller`, whose row
-    /// lands in the catalog at `catalog_db`, carrying `args` as
-    /// [`Recorder::start`] does.
-    ///
-    /// The recorded `source` is the caller's `actor_detail`, or its
-    /// actor kind when it has none.
+    /// rather than the literal string `"null"`. The recorded `source` is
+    /// the caller's `actor_detail`, or its actor kind when it has none.
     pub fn start_with_caller(
         catalog_db: &'a Path,
         caller: &Caller,
@@ -126,7 +79,7 @@ impl<'a> Recorder<'a> {
 
     /// Test-only constructor that accepts the catalog path and source
     /// string directly, so tests can exercise the writer path without
-    /// building an [`Ops`].
+    /// building a [`Caller`].
     #[cfg(test)]
     pub(crate) fn for_test(
         catalog_db: &'a Path,
@@ -263,34 +216,19 @@ fn error_kind(err: &OpsError) -> &'static str {
 #[cfg(test)]
 pub(crate) const DEFAULT_SOURCE: &str = crate::ACTOR_DETAIL_CLI;
 
-/// Wrap a synchronous op body so the recorder writes a row before the
-/// op returns.
+/// Wrap a synchronous op body so the recorder writes a row, attributed
+/// to `$caller` (a `&Caller`), before the op returns. The row lands in
+/// `$ops`'s catalog.
 ///
 /// ```ignore
-/// pub fn list_books<E: Embedder>(...) -> Result<ListBooksResult> {
-///     record_call_sync!(ops, "library.list_books",
+/// pub fn list_books<E: Embedder>(ops: &Ops<E>, caller: &Caller, ...) -> Result<ListBooksResult> {
+///     record_call_with_caller_sync!(ops, caller, "library.list_books",
 ///         serde_json::json!({"limit": limit, "offset": offset}), {
-///             find_books(ops, BookFilter::default(), limit, offset)
+///             find_books(ops, caller, BookFilter::default(), limit, offset)
 ///         }
 ///     )
 /// }
 /// ```
-macro_rules! record_call_sync {
-    ($ops:expr, $tool:expr, $args:expr, $body:block) => {{
-        let __ops = $ops;
-        $crate::recorder::record_call_with_caller_sync!(
-            __ops,
-            &__ops.effective_caller(),
-            $tool,
-            $args,
-            $body
-        )
-    }};
-}
-
-/// [`record_call_sync!`] for a call attributed to an explicit
-/// `$caller` (a `&Caller`) rather than to the caller `$ops` resolves.
-/// The row lands in `$ops`'s catalog.
 macro_rules! record_call_with_caller_sync {
     ($ops:expr, $caller:expr, $tool:expr, $args:expr, $body:block) => {{
         let __recorder =
@@ -305,37 +243,17 @@ macro_rules! record_call_with_caller_sync {
     }};
 }
 
-/// Wrap an asynchronous op body so the recorder writes a row before the
-/// op returns. The body block must evaluate to a [`crate::Result<T>`];
-/// the macro `.await`s it before the row is written, so the recorded
-/// duration spans the whole future.
+/// Wrap an asynchronous op body so the recorder writes a row, attributed
+/// to `$caller`, before the op returns. The body block must evaluate to
+/// a [`crate::Result<T>`]; the macro `.await`s it before the row is
+/// written, so the recorded duration spans the whole future.
 ///
 /// ```ignore
-/// pub async fn search<E: Embedder>(...) -> Result<Vec<Citation>> {
-///     record_call_async!(ops, "library.search",
-///         serde_json::json!({"top_k": top_k}), {
-///             let library = ops.library().ok_or(OpsError::SearchUnavailable)?;
-///             Ok(library.search(query, top_k).await?)
-///         }
-///     )
+/// pub async fn status<E: Embedder>(ops: &Ops<E>, caller: &Caller) -> Result<VectorsStatus> {
+///     record_call_with_caller_async!(ops, caller, "library.vectors_status",
+///         serde_json::Value::Null, { ... })
 /// }
 /// ```
-macro_rules! record_call_async {
-    ($ops:expr, $tool:expr, $args:expr, $body:block) => {{
-        let __ops = $ops;
-        $crate::recorder::record_call_with_caller_async!(
-            __ops,
-            &__ops.effective_caller(),
-            $tool,
-            $args,
-            $body
-        )
-    }};
-}
-
-/// [`record_call_async!`] for a call attributed to an explicit
-/// `$caller` (a `&Caller`) rather than to the caller `$ops` resolves.
-/// The row lands in `$ops`'s catalog.
 macro_rules! record_call_with_caller_async {
     ($ops:expr, $caller:expr, $tool:expr, $args:expr, $body:block) => {{
         let __recorder = $crate::recorder::Recorder::start_with_caller(
@@ -350,8 +268,6 @@ macro_rules! record_call_with_caller_async {
     }};
 }
 
-pub(crate) use record_call_async;
-pub(crate) use record_call_sync;
 pub(crate) use record_call_with_caller_async;
 pub(crate) use record_call_with_caller_sync;
 
@@ -406,76 +322,35 @@ mod tests {
     }
 
     #[test]
-    fn caller_override_visible_inside_scope_and_unset_outside() {
-        // The task local is the contract by which a host surface
-        // relabels attribution on a shared `Ops` — assert both that
-        // the scope sets it and that the value disappears once the
-        // future resolves, so a leaking scope cannot pollute a
-        // sibling call recorded later on the same task.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .expect("build runtime");
-        runtime.block_on(async {
-            let inside = with_caller_override(crate::Caller::mcp(), async { caller_override() })
-                .await
-                .expect("override set inside scope");
-            assert_eq!(inside.actor_kind.as_str(), "llm");
-            assert_eq!(inside.actor_detail.as_deref(), Some("mcp"));
-            assert!(caller_override().is_none());
-        });
-    }
-
-    /// Test stub: implements [`Embedder`] without any network or model,
-    /// so `Recorder::start` can be exercised on a real [`Ops`] handle.
-    struct FakeEmbedder;
-
-    impl bookrack_embed::Embedder for FakeEmbedder {
-        async fn embed_batch(
-            &self,
-            _texts: &[String],
-        ) -> std::result::Result<Vec<Vec<f32>>, bookrack_embed::EmbedError> {
-            Ok(Vec::new())
-        }
-    }
-
-    /// A catalog-only [`Ops`] whose catalog path is the seeded temp
-    /// catalog, so rows recorded through `Recorder::start` land where
-    /// the test can read them back. The other paths are never opened.
-    fn ops_over(catalog_db: &std::path::Path) -> crate::Ops<FakeEmbedder> {
-        let dir = catalog_db.parent().expect("catalog dir");
-        crate::Ops::catalog_only(
-            dir.join("corpus.db"),
-            catalog_db.to_path_buf(),
-            &dir.join("lancedb"),
-            dir.join("books"),
-            dir.join("backup"),
-            crate::Caller::cli(),
-        )
-    }
-
-    #[test]
-    fn start_drops_null_args_to_none() {
+    fn start_drops_null_args_to_none_and_records_the_callers_surface() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (path, catalog) = open_catalog(&tmp);
-        let ops = ops_over(&path);
 
-        Recorder::start(&ops, "library.null_args", serde_json::Value::Null).finish::<()>(&Ok(()));
+        Recorder::start_with_caller(
+            &path,
+            &Caller::mcp(),
+            "library.null_args",
+            serde_json::Value::Null,
+        )
+        .finish::<()>(&Ok(()));
         let rows = catalog
             .tool_calls_for_tool("library.null_args")
             .expect("read");
         assert_eq!(rows.len(), 1);
         assert!(rows[0].args.is_none());
-        assert_eq!(rows[0].source, "cli");
+        assert_eq!(rows[0].source, "mcp");
 
         // The complementary branch: non-null args are serialized into
         // the row rather than dropped.
         let args = serde_json::json!({"top_k": 3});
-        Recorder::start(&ops, "library.real_args", args).finish::<()>(&Ok(()));
+        Recorder::start_with_caller(&path, &Caller::control_plane(), "library.real_args", args)
+            .finish::<()>(&Ok(()));
         let rows = catalog
             .tool_calls_for_tool("library.real_args")
             .expect("read");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].args.as_deref(), Some("{\"top_k\":3}"));
+        assert_eq!(rows[0].source, "control_plane");
     }
 
     #[test]

@@ -354,7 +354,6 @@ fn ops_over<E: Embedder>(tmp: &TempDir, paths: &StorePaths, library: Library<E>)
         &paths.lancedb_dir,
         tmp.path().join("books"),
         tmp.path().join("backup"),
-        Caller::cli(),
     )
 }
 
@@ -455,25 +454,24 @@ async fn catalog_only_search_ops_report_their_missing_backend() {
         &tmp.path().join("lancedb"),
         tmp.path().join("books"),
         tmp.path().join("backup"),
-        Caller::cli(),
     );
 
-    let err = search(&ops, "q", SearchOptions::default(), None)
+    let err = search(&ops, &Caller::cli(), "q", SearchOptions::default(), None)
         .await
         .expect_err("no warm library");
     assert!(matches!(err, OpsError::SearchUnavailable), "{err:?}");
-    let err = search_in_book(&ops, 1, "q", SearchOptions::default(), None)
+    let err = search_in_book(&ops, &Caller::cli(), 1, "q", SearchOptions::default(), None)
         .await
         .expect_err("no warm library");
     assert!(matches!(err, OpsError::SearchUnavailable), "{err:?}");
-    let err = search_paper(&ops, "q", SearchOptions::default(), None)
+    let err = search_paper(&ops, &Caller::cli(), "q", SearchOptions::default(), None)
         .await
         .expect_err("no papers backend");
     assert!(
         matches!(err, OpsError::PapersBackendNotConfigured),
         "{err:?}"
     );
-    let err = search_in_paper(&ops, 1, "q", SearchOptions::default(), None)
+    let err = search_in_paper(&ops, &Caller::cli(), 1, "q", SearchOptions::default(), None)
         .await
         .expect_err("no papers backend");
     assert!(
@@ -482,6 +480,7 @@ async fn catalog_only_search_ops_report_their_missing_backend() {
     );
     let err = search_unified(
         &ops,
+        &Caller::cli(),
         "q",
         SearchOptions::default(),
         SearchOptions::default(),
@@ -505,16 +504,23 @@ async fn search_in_book_reports_an_unknown_intake() {
     let ops = ops_over(&tmp, &paths, library);
 
     // The registered intake answers…
-    let hits = search_in_book(&ops, 1, "q", SearchOptions::default(), None)
+    let hits = search_in_book(&ops, &Caller::cli(), 1, "q", SearchOptions::default(), None)
         .await
         .expect("known intake");
     assert_eq!(hits.len(), 1);
 
     // …an unregistered one is refused by the catalog check, without a
     // vector roundtrip.
-    let err = search_in_book(&ops, 999, "q", SearchOptions::default(), None)
-        .await
-        .expect_err("unknown intake");
+    let err = search_in_book(
+        &ops,
+        &Caller::cli(),
+        999,
+        "q",
+        SearchOptions::default(),
+        None,
+    )
+    .await
+    .expect_err("unknown intake");
     assert!(
         matches!(err, OpsError::IntakeNotFound { intake_id: 999 }),
         "{err:?}"
@@ -542,13 +548,20 @@ async fn search_in_paper_reports_an_unknown_intake() {
         paper_library,
     );
 
-    let hits = search_in_paper(&ops, 1, "q", SearchOptions::default(), None)
+    let hits = search_in_paper(&ops, &Caller::cli(), 1, "q", SearchOptions::default(), None)
         .await
         .expect("known paper intake");
     assert_eq!(hits.len(), 1);
-    let err = search_in_paper(&ops, 999, "q", SearchOptions::default(), None)
-        .await
-        .expect_err("unknown paper intake");
+    let err = search_in_paper(
+        &ops,
+        &Caller::cli(),
+        999,
+        "q",
+        SearchOptions::default(),
+        None,
+    )
+    .await
+    .expect_err("unknown paper intake");
     assert!(
         matches!(err, OpsError::IntakeNotFound { intake_id: 999 }),
         "{err:?}"
@@ -585,26 +598,31 @@ async fn an_empty_query_is_refused_by_every_search_op_before_any_state_is_read()
         &book_paths.lancedb_dir,
         tmp.path().join("books"),
         tmp.path().join("backup"),
-        Caller::cli(),
     );
 
     for (state, ops) in [("no vector store", &warm), ("no warm library", &cold)] {
         for query in ["", "  \t\n"] {
             let none = SearchOptions::default;
             let results = [
-                ("search", search(ops, query, none(), None).await),
-                ("search_paper", search_paper(ops, query, none(), None).await),
+                (
+                    "search",
+                    search(ops, &Caller::cli(), query, none(), None).await,
+                ),
+                (
+                    "search_paper",
+                    search_paper(ops, &Caller::cli(), query, none(), None).await,
+                ),
                 (
                     "search_unified",
-                    search_unified(ops, query, none(), none(), None).await,
+                    search_unified(ops, &Caller::cli(), query, none(), none(), None).await,
                 ),
                 (
                     "search_in_book",
-                    search_in_book(ops, 999, query, none(), None).await,
+                    search_in_book(ops, &Caller::cli(), 999, query, none(), None).await,
                 ),
                 (
                     "search_in_paper",
-                    search_in_paper(ops, 999, query, none(), None).await,
+                    search_in_paper(ops, &Caller::cli(), 999, query, none(), None).await,
                 ),
             ];
             for (op, result) in results {
@@ -661,6 +679,7 @@ async fn search_unified_orders_across_stores_and_truncates_to_top_k() {
 
     let citations = search_unified(
         &ops,
+        &Caller::cli(),
         "q",
         SearchOptions::default(),
         SearchOptions::default(),
@@ -713,6 +732,7 @@ async fn search_unified_embeds_the_query_once_when_both_stores_share_a_model() {
 
     let citations = search_unified(
         &ops,
+        &Caller::cli(),
         "q",
         SearchOptions::default(),
         SearchOptions::default(),
@@ -767,6 +787,7 @@ async fn search_unified_embeds_per_store_when_the_models_differ() {
 
     let citations = search_unified(
         &ops,
+        &Caller::cli(),
         "q",
         SearchOptions::default(),
         SearchOptions::default(),
@@ -824,6 +845,7 @@ async fn search_unified_excludes_each_side_with_its_own_list() {
     // All three candidates answer the unfiltered query.
     let baseline = search_unified(
         &ops,
+        &Caller::cli(),
         "q",
         SearchOptions::default(),
         SearchOptions::default(),
@@ -838,6 +860,7 @@ async fn search_unified_excludes_each_side_with_its_own_list() {
     // other book and the paper — which shares the id — untouched.
     let filtered = search_unified(
         &ops,
+        &Caller::cli(),
         "q",
         SearchOptions {
             exclude_partitions: bookrack_ops::reads::search::exclusions_to_partitions(&[1]),
@@ -855,6 +878,7 @@ async fn search_unified_excludes_each_side_with_its_own_list() {
     // whole, including the book that shares the excluded id.
     let filtered = search_unified(
         &ops,
+        &Caller::cli(),
         "q",
         SearchOptions::default(),
         SearchOptions {
@@ -897,7 +921,7 @@ async fn a_reranker_stage_reorders_and_caps_the_results() {
 
     // keep = min(final_k = default 5, top_k_out = 2): the stage width
     // caps the caller's ask.
-    let hits = search(&ops, "q", SearchOptions::default(), None)
+    let hits = search(&ops, &Caller::cli(), "q", SearchOptions::default(), None)
         .await
         .expect("reranked search");
     assert_eq!(hits.len(), 2, "top_k_out caps the stage output");
@@ -908,7 +932,7 @@ async fn a_reranker_stage_reorders_and_caps_the_results() {
 
     // keep = min(final_k = 1, top_k_out = 2): the caller's ask caps
     // the stage width.
-    let hits = search(&ops, "q", SearchOptions::default(), Some(1))
+    let hits = search(&ops, &Caller::cli(), "q", SearchOptions::default(), Some(1))
         .await
         .expect("reranked search with top_k=1");
     assert_eq!(hits.len(), 1, "final_k caps the stage output");
@@ -929,7 +953,7 @@ async fn a_failed_rerank_stage_fails_the_search() {
 
     // Candidates exist, the stage is unreachable: the search fails
     // rather than silently returning the unreranked order.
-    let err = search(&ops, "q", SearchOptions::default(), None)
+    let err = search(&ops, &Caller::cli(), "q", SearchOptions::default(), None)
         .await
         .expect_err("stage failure fails the search");
     assert!(matches!(err, OpsError::Rerank(_)), "{err:?}");
@@ -951,7 +975,7 @@ async fn an_unreachable_rerank_stage_is_judged_a_backend_unavailable() {
     let library = open_library(&paths, Fixed::unit_x()).await;
     let ops = ops_over(&tmp, &paths, library).with_reranker(stage_at(&dead_address(), 10, 2));
 
-    let err = search(&ops, "q", SearchOptions::default(), None)
+    let err = search(&ops, &Caller::cli(), "q", SearchOptions::default(), None)
         .await
         .expect_err("stage failure fails the search");
     let classified = from_ops(&err);
@@ -968,7 +992,7 @@ async fn an_empty_recall_skips_the_rerank_stage() {
     // stage is never called and the search still succeeds.
     let ops = ops_over(&tmp, &paths, library).with_reranker(stage_at(&dead_address(), 10, 2));
 
-    let hits = search(&ops, "q", SearchOptions::default(), None)
+    let hits = search(&ops, &Caller::cli(), "q", SearchOptions::default(), None)
         .await
         .expect("empty recall bypasses the stage");
     assert!(hits.is_empty());
@@ -999,14 +1023,14 @@ async fn single_item_search_without_a_catalog_reports_the_intake_on_both_sides()
         paper_library,
     );
 
-    let err = search_in_book(&ops, 1, "q", SearchOptions::default(), None)
+    let err = search_in_book(&ops, &Caller::cli(), 1, "q", SearchOptions::default(), None)
         .await
         .expect_err("no book catalog on disk");
     assert!(
         matches!(err, OpsError::IntakeNotFound { intake_id: 1 }),
         "book side: {err:?}"
     );
-    let err = search_in_paper(&ops, 1, "q", SearchOptions::default(), None)
+    let err = search_in_paper(&ops, &Caller::cli(), 1, "q", SearchOptions::default(), None)
         .await
         .expect_err("no paper catalog on disk");
     assert!(

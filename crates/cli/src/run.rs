@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use bookrack_cli::error::BookrackCliError;
 use bookrack_config::{DaemonConfig, DaemonFlags, EnvSnapshot, LibrarySelection};
 use bookrack_core::Explain;
-use bookrack_ops::Caller;
 use bookrack_ops::registry::UnmountedLibrary;
 use bookrack_runtime::backend_probe::PreflightRefusal;
 use bookrack_runtime::control::{HealthProbe, SessionLockState, classify_session_lock_at};
@@ -91,7 +90,6 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
         daemon_config,
         claimed_variables: Some(bookrack_cli::config_knobs::claimed_variables()),
         spawn_queue_worker: true,
-        caller: Caller::control_plane(),
         mcp_tools: bookrack_mcp::list_tools(),
     };
 

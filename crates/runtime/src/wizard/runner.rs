@@ -269,11 +269,16 @@ async fn smoke_search(cfg: &Config, embed_cfg: &EmbedConfig) -> Result<usize> {
         &cfg.lancedb_dir(),
         cfg.books_dir(),
         cfg.backup_dir(),
-        Caller::cli(),
     );
-    let hits = reads::search::search(&ops, SMOKE_QUERY, SearchOptions::default(), None)
-        .await
-        .context("smoke search")?;
+    let hits = reads::search::search(
+        &ops,
+        &Caller::cli(),
+        SMOKE_QUERY,
+        SearchOptions::default(),
+        None,
+    )
+    .await
+    .context("smoke search")?;
     Ok(hits.len())
 }
 

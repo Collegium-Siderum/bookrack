@@ -73,7 +73,6 @@ impl Fixture {
             &tmp.path().join("lancedb"),
             tmp.path().join("books"),
             tmp.path().join("backup"),
-            Caller::cli(),
         )
         .with_papers(
             papers_library,
@@ -167,7 +166,7 @@ impl Fixture {
 /// Ids `find_papers` returns for a filter, with the page and the total
 /// held to the same set.
 fn papers_matching(fx: &Fixture, filter: PaperFilter) -> Vec<i64> {
-    let page = find_papers(&fx.ops, filter, 100, 0).expect("find");
+    let page = find_papers(&fx.ops, &Caller::cli(), filter, 100, 0).expect("find");
     let ids: Vec<i64> = page.papers.iter().map(|p| p.intake_id).collect();
     assert_eq!(
         page.total as usize,
@@ -249,7 +248,7 @@ async fn list_rows_name_the_source_file() {
     let fx = Fixture::build().await;
     let intake_id = fx.seed_paper("sha-summary", "inbox/2020/a-paper.pdf", 4096, 14);
 
-    let page = find_papers(&fx.ops, PaperFilter::default(), 10, 0).expect("find");
+    let page = find_papers(&fx.ops, &Caller::cli(), PaperFilter::default(), 10, 0).expect("find");
     let row = page
         .papers
         .iter()
@@ -275,7 +274,7 @@ async fn a_list_row_without_a_recorded_path_carries_a_null_filename() {
     let fx = Fixture::build().await;
     let intake_id = fx.seed_bare_paper("sha-pathless");
 
-    let page = find_papers(&fx.ops, PaperFilter::default(), 10, 0).expect("find");
+    let page = find_papers(&fx.ops, &Caller::cli(), PaperFilter::default(), 10, 0).expect("find");
     let row = page
         .papers
         .iter()
@@ -297,7 +296,7 @@ async fn the_detail_read_carries_the_source_record_of_its_intake_row() {
     let fx = Fixture::build().await;
     let intake_id = fx.seed_paper("sha-detail", "inbox/2020/another-paper.pdf", 8192, 22);
 
-    let detail = show_paper(&fx.ops, intake_id).expect("show");
+    let detail = show_paper(&fx.ops, &Caller::cli(), intake_id).expect("show");
     let value = serde_json::to_value(&detail).expect("serialize");
 
     assert_eq!(
@@ -322,7 +321,7 @@ async fn the_detail_read_reports_absent_source_columns_as_null() {
     let fx = Fixture::build().await;
     let intake_id = fx.seed_bare_paper("sha-bare");
 
-    let detail = show_paper(&fx.ops, intake_id).expect("show");
+    let detail = show_paper(&fx.ops, &Caller::cli(), intake_id).expect("show");
     let value = serde_json::to_value(&detail).expect("serialize");
 
     // Present and null, not absent: each key is on the wire carrying

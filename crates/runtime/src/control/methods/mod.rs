@@ -34,11 +34,11 @@ use bookrack_core::DaemonIdentity;
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::stream::LogStreamHandle;
-use bookrack_ops::OpsError;
 use bookrack_ops::methods::{Access, LIBRARY_METHODS, MethodSpec, Selection, library_method};
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::write_session::{ChangeSet, Region, SessionRunError, WriteSession};
+use bookrack_ops::{Caller, OpsError};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
@@ -674,10 +674,9 @@ where
         + Send
         + 'static,
 {
-    let caller = handle.ops().caller().clone();
     let session = ctx
         .registry
-        .begin_write(handle, Region::Library, caller)
+        .begin_write(handle, Region::Library, Caller::control_plane())
         .map_err(|busy| super::error_map::ops_err(OpsError::WriteBusy(busy)))?;
     let library = handle.name().to_string();
     session
@@ -845,8 +844,8 @@ pub(crate) fn test_library_handle(
     dir: &std::path::Path,
     name: &str,
 ) -> Arc<bookrack_ops::registry::LibraryHandle<OllamaEmbedClient>> {
+    use bookrack_ops::Ops;
     use bookrack_ops::registry::LibraryHandle;
-    use bookrack_ops::{Caller, Ops};
 
     let ops = Ops::<OllamaEmbedClient>::catalog_only(
         dir.join("corpus.db"),
@@ -854,7 +853,6 @@ pub(crate) fn test_library_handle(
         &dir.join("lancedb"),
         dir.join("books"),
         dir.join("backup"),
-        Caller::cli(),
     );
     let cfg = Arc::new(Config::new(dir.to_path_buf()));
     LibraryHandle::new(name, cfg, ops)

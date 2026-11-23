@@ -35,10 +35,6 @@ impl Fixture {
         Fixture::with_caller(Caller::cli())
     }
 
-    fn mcp() -> Fixture {
-        Fixture::with_caller(Caller::mcp())
-    }
-
     fn with_caller(caller: Caller) -> Fixture {
         let tmp = tempfile::tempdir().expect("tempdir");
         let catalog_db = tmp.path().join("catalog.db");
@@ -53,7 +49,6 @@ impl Fixture {
             &lancedb_dir,
             books_dir,
             backup_dir,
-            caller.clone(),
         );
         Fixture {
             _tmp: tmp,
@@ -97,7 +92,7 @@ impl Fixture {
 #[test]
 fn record_call_sync_writes_one_ok_row() {
     let fx = Fixture::cli();
-    list_books(&fx.ops, 10, 0).expect("list books");
+    list_books(&fx.ops, &fx.caller, 10, 0).expect("list books");
     let rows = fx.rows("library.list_books");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, "ok");
@@ -108,7 +103,7 @@ fn record_call_sync_writes_one_ok_row() {
 #[test]
 fn record_call_sync_writes_one_error_row_on_unknown_intake() {
     let fx = Fixture::cli();
-    let err = show_book(&fx.ops, 9999).expect_err("must miss");
+    let err = show_book(&fx.ops, &fx.caller, 9999).expect_err("must miss");
     assert!(matches!(err, OpsError::IntakeNotFound { intake_id: 9999 }));
     let rows = fx.rows("library.show_book");
     assert_eq!(rows.len(), 1);
@@ -119,7 +114,7 @@ fn record_call_sync_writes_one_error_row_on_unknown_intake() {
 #[test]
 fn record_call_records_args_as_json() {
     let fx = Fixture::cli();
-    list_books(&fx.ops, 25, 7).expect("list books");
+    list_books(&fx.ops, &fx.caller, 25, 7).expect("list books");
     let rows = fx.rows("library.list_books");
     let args = rows[0].args.as_deref().expect("args present");
     // Parse rather than string-compare so the column order does not
@@ -130,14 +125,19 @@ fn record_call_records_args_as_json() {
 }
 
 #[test]
-fn record_call_sync_distinguishes_cli_from_mcp_caller() {
-    let cli = Fixture::cli();
-    list_books(&cli.ops, 10, 0).expect("list books");
-    assert_eq!(cli.rows("library.list_books")[0].source, "cli");
-
-    let mcp = Fixture::mcp();
-    list_books(&mcp.ops, 10, 0).expect("list books");
-    assert_eq!(mcp.rows("library.list_books")[0].source, "mcp");
+fn one_shared_ops_records_the_caller_each_read_is_given() {
+    // One handle serves every surface, so the source on a row is the
+    // caller passed with the read, not anything the handle carries.
+    let fx = Fixture::cli();
+    list_books(&fx.ops, &Caller::cli(), 10, 0).expect("list books");
+    list_books(&fx.ops, &Caller::mcp(), 10, 0).expect("list books");
+    list_books(&fx.ops, &Caller::control_plane(), 10, 0).expect("list books");
+    let sources: Vec<String> = fx
+        .rows("library.list_books")
+        .into_iter()
+        .map(|row| row.source)
+        .collect();
+    assert_eq!(sources, ["cli", "mcp", "control_plane"]);
 }
 
 #[test]
@@ -182,7 +182,9 @@ async fn record_call_async_writes_one_ok_row() {
         embed_model_configured: "test-model".to_string(),
         mcp_addr: String::new(),
     };
-    show_library_info(&fx.ops, ctx).await.expect("info");
+    show_library_info(&fx.ops, &fx.caller, ctx)
+        .await
+        .expect("info");
     let rows = fx.rows("library.info");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, "ok");
@@ -200,7 +202,7 @@ fn recording_a_read_on_a_behind_catalog_neither_migrates_nor_backs_it_up() {
     let behind = fixtures::CURRENT_VERSION - 1;
 
     // The read's own result is not under test: the row it would record is.
-    let _ = list_books(&fx.ops, 10, 0);
+    let _ = list_books(&fx.ops, &fx.caller, 10, 0);
 
     assert_eq!(
         fixtures::user_version(&fx.catalog_db),

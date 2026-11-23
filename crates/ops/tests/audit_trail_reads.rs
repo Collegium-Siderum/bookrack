@@ -37,7 +37,6 @@ impl Fixture {
             &lancedb_dir,
             books_dir,
             backup_dir,
-            Caller::cli(),
         );
         Fixture {
             _tmp: tmp,
@@ -94,14 +93,16 @@ fn audit_trail_reads_survive_a_removed_intake() {
         "intake row is gone after delete"
     );
 
-    let meta_trail = show_audit_trail(&fx.ops, id).expect("audit trail after remove");
+    let meta_trail =
+        show_audit_trail(&fx.ops, &Caller::cli(), id).expect("audit trail after remove");
     assert_eq!(
         meta_trail.len(),
         1,
         "metadata_audit row preserved across remove"
     );
 
-    let pipe_trail = show_pipeline_trail(&fx.ops, id).expect("pipeline trail after remove");
+    let pipe_trail =
+        show_pipeline_trail(&fx.ops, &Caller::cli(), id).expect("pipeline trail after remove");
     assert_eq!(
         pipe_trail.len(),
         1,
@@ -116,11 +117,11 @@ fn audit_trail_reads_report_intake_not_found_for_a_ghost_id() {
     // rather than returning an empty trail.
     let fx = Fixture::build();
     assert!(matches!(
-        show_audit_trail(&fx.ops, 999),
+        show_audit_trail(&fx.ops, &Caller::cli(), 999),
         Err(OpsError::IntakeNotFound { intake_id: 999 })
     ));
     assert!(matches!(
-        show_pipeline_trail(&fx.ops, 999),
+        show_pipeline_trail(&fx.ops, &Caller::cli(), 999),
         Err(OpsError::IntakeNotFound { intake_id: 999 })
     ));
 }
@@ -132,9 +133,11 @@ fn audit_trail_reads_return_empty_for_a_registered_intake_with_no_history() {
     let fx = Fixture::build();
     let id = fx.seed_intake("sha-quiet");
 
-    let meta_trail = show_audit_trail(&fx.ops, id).expect("audit trail for quiet intake");
+    let meta_trail =
+        show_audit_trail(&fx.ops, &Caller::cli(), id).expect("audit trail for quiet intake");
     assert!(meta_trail.is_empty());
 
-    let pipe_trail = show_pipeline_trail(&fx.ops, id).expect("pipeline trail for quiet intake");
+    let pipe_trail =
+        show_pipeline_trail(&fx.ops, &Caller::cli(), id).expect("pipeline trail for quiet intake");
     assert!(pipe_trail.is_empty());
 }

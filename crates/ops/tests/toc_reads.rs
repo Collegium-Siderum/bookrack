@@ -44,7 +44,6 @@ impl Fixture {
             &lancedb_dir,
             books_dir,
             backup_dir,
-            Caller::cli(),
         );
         Fixture {
             _tmp: tmp,
@@ -126,7 +125,7 @@ fn pages_chain_through_the_cursor_until_it_terminates() {
     let mut walked = Vec::new();
     let mut pages = 0;
     loop {
-        let page = show_toc(&fx.ops, intake_id, &args).expect("page");
+        let page = show_toc(&fx.ops, &Caller::cli(), intake_id, &args).expect("page");
         assert_eq!(page.total, 6);
         assert_eq!(page.truncated, page.next_offset.is_some());
         walked.extend(titles(&page));
@@ -138,7 +137,7 @@ fn pages_chain_through_the_cursor_until_it_terminates() {
     }
     assert_eq!(pages, 3);
 
-    let full = show_toc(&fx.ops, intake_id, &ShowTocArgs::default()).expect("full");
+    let full = show_toc(&fx.ops, &Caller::cli(), intake_id, &ShowTocArgs::default()).expect("full");
     assert_eq!(full.total, 6);
     assert_eq!(full.next_offset, None);
     assert_eq!(walked, titles(&full), "pages must chain without gaps");
@@ -151,7 +150,8 @@ fn entries_past_the_page_cap_are_reachable_by_offset() {
     // Root + MAX_TOC_NODES chapters: one entry more than a default page.
     seed_chapters(&mut fx.corpus, intake_id, MAX_TOC_NODES as u32);
 
-    let first = show_toc(&fx.ops, intake_id, &ShowTocArgs::default()).expect("first page");
+    let first =
+        show_toc(&fx.ops, &Caller::cli(), intake_id, &ShowTocArgs::default()).expect("first page");
     assert_eq!(first.nodes.len(), MAX_TOC_NODES);
     assert_eq!(first.total, MAX_TOC_NODES as u64 + 1);
     assert_eq!(first.next_offset, Some(MAX_TOC_NODES as u32));
@@ -160,6 +160,7 @@ fn entries_past_the_page_cap_are_reachable_by_offset() {
     // A limit above the cap clamps back down to it.
     let clamped = show_toc(
         &fx.ops,
+        &Caller::cli(),
         intake_id,
         &ShowTocArgs {
             offset: 0,
@@ -173,6 +174,7 @@ fn entries_past_the_page_cap_are_reachable_by_offset() {
     // The entry past the cap comes back on the second page.
     let second = show_toc(
         &fx.ops,
+        &Caller::cli(),
         intake_id,
         &ShowTocArgs {
             offset: MAX_TOC_NODES as u32,
@@ -194,7 +196,7 @@ fn an_intake_without_corpus_nodes_reads_as_an_empty_toc() {
     let fx = Fixture::build();
     let intake_id = fx.register_book("sha-empty");
 
-    let toc = show_toc(&fx.ops, intake_id, &ShowTocArgs::default()).expect("toc");
+    let toc = show_toc(&fx.ops, &Caller::cli(), intake_id, &ShowTocArgs::default()).expect("toc");
     assert!(toc.nodes.is_empty());
     assert_eq!(toc.total, 0);
     assert_eq!(toc.next_offset, None);
@@ -209,6 +211,7 @@ fn titles_only_projects_slim_entries_over_the_same_walk() {
 
     let slim = show_toc(
         &fx.ops,
+        &Caller::cli(),
         intake_id,
         &ShowTocArgs {
             titles_only: true,
@@ -225,7 +228,8 @@ fn titles_only_projects_slim_entries_over_the_same_walk() {
 
     // The slim walk addresses the same nodes as the full walk, so a
     // node_id picked from it feeds a span read unchanged.
-    let full = show_toc(&fx.ops, intake_id, &ShowTocArgs::default()).expect("full toc");
+    let full =
+        show_toc(&fx.ops, &Caller::cli(), intake_id, &ShowTocArgs::default()).expect("full toc");
     let TocNodes::Full(full_nodes) = &full.nodes else {
         panic!("the default projection must carry full nodes");
     };
@@ -252,13 +256,14 @@ fn max_depth_narrows_the_walk_and_scopes_the_total() {
     }
 
     // Unfiltered: root + 3 chapters + 2 sections.
-    let full = show_toc(&fx.ops, intake_id, &ShowTocArgs::default()).expect("full");
+    let full = show_toc(&fx.ops, &Caller::cli(), intake_id, &ShowTocArgs::default()).expect("full");
     assert_eq!(full.total, 6);
 
     // max_depth 1 keeps the root and the chapters only, and `total`
     // counts the filtered walk, not the whole tree.
     let shallow = show_toc(
         &fx.ops,
+        &Caller::cli(),
         intake_id,
         &ShowTocArgs {
             max_depth: Some(1),
@@ -276,6 +281,7 @@ fn max_depth_narrows_the_walk_and_scopes_the_total() {
     // set and the total stays scoped to it.
     let page = show_toc(
         &fx.ops,
+        &Caller::cli(),
         intake_id,
         &ShowTocArgs {
             offset: 2,
@@ -300,6 +306,7 @@ fn title_substring_narrows_the_walk_to_matching_titles() {
     // exact-title match.
     let hits = show_toc(
         &fx.ops,
+        &Caller::cli(),
         intake_id,
         &ShowTocArgs {
             title_substring: Some("Chapter 1".to_string()),
@@ -313,6 +320,7 @@ fn title_substring_narrows_the_walk_to_matching_titles() {
     // A needle matching nothing reads as an empty page, not an error.
     let none = show_toc(
         &fx.ops,
+        &Caller::cli(),
         intake_id,
         &ShowTocArgs {
             title_substring: Some("Epilogue".to_string()),
@@ -334,6 +342,7 @@ fn title_substring_composes_with_projection_and_pagination() {
     // Slim projection over the filtered walk.
     let slim = show_toc(
         &fx.ops,
+        &Caller::cli(),
         intake_id,
         &ShowTocArgs {
             titles_only: true,
@@ -349,6 +358,7 @@ fn title_substring_composes_with_projection_and_pagination() {
     // Pagination walks the filtered set and `total` stays scoped to it.
     let page = show_toc(
         &fx.ops,
+        &Caller::cli(),
         intake_id,
         &ShowTocArgs {
             offset: 2,
@@ -378,9 +388,10 @@ fn show_book_toc_stats_match_the_full_walk() {
         )
         .expect("section");
 
-    let detail = show_book(&fx.ops, intake_id).expect("detail");
+    let detail = show_book(&fx.ops, &Caller::cli(), intake_id).expect("detail");
     let stats = detail.toc_stats.expect("stats present");
-    let full = show_toc(&fx.ops, intake_id, &ShowTocArgs::default()).expect("full toc");
+    let full =
+        show_toc(&fx.ops, &Caller::cli(), intake_id, &ShowTocArgs::default()).expect("full toc");
     assert_eq!(stats.entry_count, full.total);
     assert_eq!(stats.entry_count, 5);
     assert_eq!(stats.max_depth, 2);
@@ -390,7 +401,7 @@ fn show_book_toc_stats_match_the_full_walk() {
 fn show_book_toc_stats_are_none_without_corpus_nodes() {
     let fx = Fixture::build();
     let intake_id = fx.register_book("sha-no-corpus");
-    let detail = show_book(&fx.ops, intake_id).expect("detail");
+    let detail = show_book(&fx.ops, &Caller::cli(), intake_id).expect("detail");
     assert!(detail.toc_stats.is_none());
 }
 
@@ -398,7 +409,7 @@ fn show_book_toc_stats_are_none_without_corpus_nodes() {
 fn an_unknown_intake_is_intake_not_found() {
     let fx = Fixture::build();
     assert!(matches!(
-        show_toc(&fx.ops, 404, &ShowTocArgs::default()),
+        show_toc(&fx.ops, &Caller::cli(), 404, &ShowTocArgs::default()),
         Err(OpsError::IntakeNotFound { intake_id: 404 })
     ));
 }
@@ -458,7 +469,6 @@ async fn paper_toc_pages_with_the_same_contract() {
         &tmp.path().join("lancedb"),
         tmp.path().join("books"),
         tmp.path().join("backup"),
-        Caller::cli(),
     )
     .with_papers(
         papers_library,
@@ -473,6 +483,7 @@ async fn paper_toc_pages_with_the_same_contract() {
     // Root + 3 chapters = 4 entries, read in pages of two.
     let first = show_paper_toc(
         &ops,
+        &Caller::cli(),
         intake_id,
         &ShowTocArgs {
             offset: 0,
@@ -487,6 +498,7 @@ async fn paper_toc_pages_with_the_same_contract() {
 
     let second = show_paper_toc(
         &ops,
+        &Caller::cli(),
         intake_id,
         &ShowTocArgs {
             offset: 2,
@@ -500,7 +512,7 @@ async fn paper_toc_pages_with_the_same_contract() {
     assert!(!second.truncated);
 
     // The paper detail carries the same aggregate the walk reports.
-    let detail = show_paper(&ops, intake_id).expect("paper detail");
+    let detail = show_paper(&ops, &Caller::cli(), intake_id).expect("paper detail");
     let stats = detail.toc_stats.expect("stats present");
     assert_eq!(stats.entry_count, 4);
     assert_eq!(stats.max_depth, 1);

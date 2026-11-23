@@ -38,7 +38,6 @@ impl Fixture {
             &lancedb_dir,
             books_dir,
             backup_dir,
-            Caller::cli(),
         );
         Fixture {
             _tmp: tmp,
@@ -173,7 +172,14 @@ fn read_context_centres_the_window_across_chapter_boundaries() {
     // Anchor at position 5 (chapter two's first leaf); the window
     // reaches back into chapter one because context follows document
     // order, not the organizing tree.
-    let window = read_context(&fx.ops, KindedNodeId::book(book.leaves[5]), 2, 2).expect("window");
+    let window = read_context(
+        &fx.ops,
+        &Caller::cli(),
+        KindedNodeId::book(book.leaves[5]),
+        2,
+        2,
+    )
+    .expect("window");
     assert_eq!(window.intake_id, 1);
     assert_eq!(window.anchor_node_id, book.leaves[5].get());
     let positions: Vec<i64> = window.passages.iter().map(|p| p.toc_position).collect();
@@ -198,7 +204,14 @@ fn read_context_returns_structural_leaves_with_their_kind() {
     let book = seed_small_book(&mut fx.corpus, 1);
 
     // Position 7 is a table; it is returned in place, tagged by kind.
-    let window = read_context(&fx.ops, KindedNodeId::book(book.leaves[6]), 0, 1).expect("window");
+    let window = read_context(
+        &fx.ops,
+        &Caller::cli(),
+        KindedNodeId::book(book.leaves[6]),
+        0,
+        1,
+    )
+    .expect("window");
     let kinds: Vec<&str> = window
         .passages
         .iter()
@@ -212,7 +225,14 @@ fn read_context_at_the_book_edge_returns_what_exists() {
     let mut fx = Fixture::build();
     let book = seed_small_book(&mut fx.corpus, 1);
 
-    let window = read_context(&fx.ops, KindedNodeId::book(book.leaves[0]), 3, 1).expect("window");
+    let window = read_context(
+        &fx.ops,
+        &Caller::cli(),
+        KindedNodeId::book(book.leaves[0]),
+        3,
+        1,
+    )
+    .expect("window");
     let positions: Vec<i64> = window.passages.iter().map(|p| p.toc_position).collect();
     assert_eq!(positions, vec![0, 1]);
     assert!(
@@ -228,6 +248,7 @@ fn read_context_clamps_the_radius_and_reports_it() {
 
     let window = read_context(
         &fx.ops,
+        &Caller::cli(),
         KindedNodeId::book(book.leaves[5]),
         MAX_CONTEXT_RADIUS + 5,
         0,
@@ -245,7 +266,8 @@ fn read_context_budget_keeps_the_leaves_nearest_the_anchor() {
 
     // Three big leaves fit the budget: the anchor and its two
     // immediate neighbours survive, the rest of the window drops.
-    let window = read_context(&fx.ops, KindedNodeId::book(leaves[5]), 4, 4).expect("window");
+    let window =
+        read_context(&fx.ops, &Caller::cli(), KindedNodeId::book(leaves[5]), 4, 4).expect("window");
     let positions: Vec<i64> = window.passages.iter().map(|p| p.toc_position).collect();
     assert_eq!(positions, vec![4, 5, 6]);
     assert!(window.truncated);
@@ -256,12 +278,24 @@ fn read_context_refuses_non_leaf_anchors() {
     let mut fx = Fixture::build();
     let book = seed_small_book(&mut fx.corpus, 1);
 
-    let err = read_context(&fx.ops, KindedNodeId::book(book.chapter_one), 1, 1)
-        .expect_err("organizing anchor");
+    let err = read_context(
+        &fx.ops,
+        &Caller::cli(),
+        KindedNodeId::book(book.chapter_one),
+        1,
+        1,
+    )
+    .expect_err("organizing anchor");
     assert!(matches!(err, OpsError::NotALeaf { node_id } if node_id == book.chapter_one.get()));
 
-    let err = read_context(&fx.ops, KindedNodeId::book(NodeId::new(999_999_999)), 1, 1)
-        .expect_err("unknown node");
+    let err = read_context(
+        &fx.ops,
+        &Caller::cli(),
+        KindedNodeId::book(NodeId::new(999_999_999)),
+        1,
+        1,
+    )
+    .expect_err("unknown node");
     assert!(matches!(err, OpsError::NodeNotFound { node_id } if node_id == 999_999_999));
 }
 
@@ -270,7 +304,13 @@ fn read_span_reads_a_whole_chapter_in_one_page() {
     let mut fx = Fixture::build();
     let book = seed_small_book(&mut fx.corpus, 1);
 
-    let span = read_span(&fx.ops, KindedNodeId::book(book.chapter_two), None).expect("span");
+    let span = read_span(
+        &fx.ops,
+        &Caller::cli(),
+        KindedNodeId::book(book.chapter_two),
+        None,
+    )
+    .expect("span");
     assert_eq!(span.intake_id, 1);
     assert_eq!(span.title.as_deref(), Some("Chapter Two"));
     assert_eq!((span.toc_lo, span.toc_hi), (Some(5), Some(9)));
@@ -289,7 +329,8 @@ fn read_span_pages_through_an_oversized_chapter() {
     let mut cursor = None;
     let mut pages = Vec::new();
     loop {
-        let span = read_span(&fx.ops, KindedNodeId::book(chapter), cursor).expect("span");
+        let span =
+            read_span(&fx.ops, &Caller::cli(), KindedNodeId::book(chapter), cursor).expect("span");
         assert_eq!(span.truncated, span.next_offset.is_some());
         pages.push(
             span.passages
@@ -316,7 +357,13 @@ fn read_span_of_an_empty_chapter_is_empty_not_an_error() {
     let mut fx = Fixture::build();
     let book = seed_small_book(&mut fx.corpus, 1);
 
-    let span = read_span(&fx.ops, KindedNodeId::book(book.empty_chapter), None).expect("span");
+    let span = read_span(
+        &fx.ops,
+        &Caller::cli(),
+        KindedNodeId::book(book.empty_chapter),
+        None,
+    )
+    .expect("span");
     assert_eq!(span.title.as_deref(), Some("Empty Chapter"));
     assert_eq!((span.toc_lo, span.toc_hi), (None, None));
     assert!(span.passages.is_empty());
@@ -329,12 +376,22 @@ fn read_span_refuses_leaf_targets() {
     let mut fx = Fixture::build();
     let book = seed_small_book(&mut fx.corpus, 1);
 
-    let err =
-        read_span(&fx.ops, KindedNodeId::book(book.leaves[0]), None).expect_err("leaf target");
+    let err = read_span(
+        &fx.ops,
+        &Caller::cli(),
+        KindedNodeId::book(book.leaves[0]),
+        None,
+    )
+    .expect_err("leaf target");
     assert!(matches!(err, OpsError::NotOrganizing { node_id } if node_id == book.leaves[0].get()));
 
-    let err = read_span(&fx.ops, KindedNodeId::book(NodeId::new(999_999_999)), None)
-        .expect_err("unknown node");
+    let err = read_span(
+        &fx.ops,
+        &Caller::cli(),
+        KindedNodeId::book(NodeId::new(999_999_999)),
+        None,
+    )
+    .expect_err("unknown node");
     assert!(matches!(err, OpsError::NodeNotFound { node_id } if node_id == 999_999_999));
 }
 
@@ -351,7 +408,7 @@ fn read_context_refuses_the_reference_kind() {
         node_id: book.leaves[5],
     };
 
-    let err = read_context(&fx.ops, target, 1, 1).expect_err("reference kind");
+    let err = read_context(&fx.ops, &Caller::cli(), target, 1, 1).expect_err("reference kind");
     assert!(
         matches!(
             err,
@@ -376,7 +433,7 @@ fn read_span_refuses_the_reference_kind() {
         node_id: book.chapter_one,
     };
 
-    let err = read_span(&fx.ops, target, None).expect_err("reference kind");
+    let err = read_span(&fx.ops, &Caller::cli(), target, None).expect_err("reference kind");
     assert!(
         matches!(
             err,

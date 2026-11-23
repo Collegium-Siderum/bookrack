@@ -23,8 +23,8 @@ use std::sync::Arc;
 use bookrack_config::{Config, DaemonConfig, LibrarySelection};
 use bookrack_core::Problem;
 use bookrack_embed::OllamaEmbedClient;
+use bookrack_ops::RerankStage;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry, MountGuard, RegistryError};
-use bookrack_ops::{Caller, RerankStage};
 use bookrack_session::{RootLock, is_root_lock_conflict, root_lock_path};
 
 use crate::backend_probe::PreflightRefusal;
@@ -141,12 +141,10 @@ impl Drop for MountedSet {
 ///
 /// Holds what a mount needs and a [`crate::control::methods::MethodContext`]
 /// does not carry on its own: the reranker stage handles are cloned
-/// from, the [`Caller`] attribution baked into a new handle's writes,
-/// and the registry itself.
+/// from, and the registry itself.
 pub struct Mounter {
     registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     rerank_stage: Option<RerankStage>,
-    caller: Caller,
     daemon_config: Arc<DaemonConfig>,
 }
 
@@ -155,13 +153,11 @@ impl Mounter {
     pub fn new(
         registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
         rerank_stage: Option<RerankStage>,
-        caller: Caller,
         daemon_config: Arc<DaemonConfig>,
     ) -> Mounter {
         Mounter {
             registry,
             rerank_stage,
-            caller,
             daemon_config,
         }
     }
@@ -223,7 +219,6 @@ impl Mounter {
             &self.daemon_config,
             name,
             self.rerank_stage.as_ref(),
-            self.caller.clone(),
             guard,
         )
         .await?;
@@ -433,8 +428,8 @@ fn canonical(root: &std::path::Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bookrack_ops::Ops;
     use bookrack_ops::registry::JobTemplates;
-    use bookrack_ops::{Caller, Ops};
 
     /// A catalog-only handle whose mount guard is the real root lock
     /// on `dir`, so releasing it is observable as the lock becoming
@@ -446,7 +441,6 @@ mod tests {
             &dir.join("lancedb"),
             dir.join("books"),
             dir.join("backup"),
-            Caller::cli(),
         );
         let cfg = Arc::new(Config::new(dir.to_path_buf()));
         let lock =
@@ -498,7 +492,6 @@ mod tests {
         let mounter = Mounter::new(
             Arc::clone(&registry),
             None,
-            Caller::cli(),
             Arc::new(crate::cmd::test_fixtures::test_daemon()),
         );
         let facts = UnmountFacts {

@@ -44,7 +44,6 @@ impl Fixture {
             &lancedb_dir,
             books_dir,
             backup_dir,
-            Caller::cli(),
         );
         Fixture {
             _tmp: tmp,
@@ -80,7 +79,7 @@ fn list_rows_name_the_source_file() {
     let fx = Fixture::build();
     let intake_id = fx.seed_book("sha-summary", "shelf/imported/a-book.pdf", 4096, 612);
 
-    let page = find_books(&fx.ops, BookFilter::default(), 10, 0).expect("find");
+    let page = find_books(&fx.ops, &Caller::cli(), BookFilter::default(), 10, 0).expect("find");
     let row = page
         .books
         .iter()
@@ -112,7 +111,7 @@ fn a_list_row_without_a_recorded_path_carries_a_null_filename() {
         .intake_id;
     drop(catalog);
 
-    let page = find_books(&fx.ops, BookFilter::default(), 10, 0).expect("find");
+    let page = find_books(&fx.ops, &Caller::cli(), BookFilter::default(), 10, 0).expect("find");
     let row = page
         .books
         .iter()
@@ -130,7 +129,7 @@ fn the_detail_read_carries_the_page_count_and_byte_size_of_its_intake_row() {
     let fx = Fixture::build();
     let intake_id = fx.seed_book("sha-detail", "shelf/imported/another-book.pdf", 8192, 240);
 
-    let detail = show_book(&fx.ops, intake_id).expect("show");
+    let detail = show_book(&fx.ops, &Caller::cli(), intake_id).expect("show");
     let value = serde_json::to_value(&detail).expect("serialize");
 
     assert_eq!(
@@ -158,7 +157,7 @@ fn the_detail_read_reports_absent_source_columns_as_null() {
         .intake_id;
     drop(catalog);
 
-    let detail = show_book(&fx.ops, intake_id).expect("show");
+    let detail = show_book(&fx.ops, &Caller::cli(), intake_id).expect("show");
     let value = serde_json::to_value(&detail).expect("serialize");
 
     // Reflow formats never get a page count, and a row may predate the
@@ -216,7 +215,7 @@ fn awaiting_text_rows(fx: &Fixture) -> Vec<serde_json::Value> {
         awaiting_text: true,
         ..BookFilter::default()
     };
-    let page = find_books(&fx.ops, filter, 10, 0).expect("find");
+    let page = find_books(&fx.ops, &Caller::cli(), filter, 10, 0).expect("find");
     assert_eq!(page.total, page.books.len() as u64);
     page.books
         .iter()
@@ -305,7 +304,8 @@ fn the_needs_ocr_count_keeps_a_scan_whose_text_is_in_the_library() {
     drop(catalog);
 
     assert!(awaiting_text_rows(&fx).is_empty());
-    let stats = serde_json::to_value(show_stats(&fx.ops).expect("stats")).expect("serialize");
+    let stats = serde_json::to_value(show_stats(&fx.ops, &Caller::cli()).expect("stats"))
+        .expect("serialize");
     assert_eq!(stats["intake_counts_by_status"]["needs_ocr"], 1);
 }
 
@@ -314,7 +314,7 @@ fn an_unfiltered_row_has_no_awaiting_text_key_even_for_a_scan() {
     let fx = Fixture::build();
     let scan = seed_scan(&fx, "sha-scan", "inbox/scan.pdf", None);
 
-    let page = find_books(&fx.ops, BookFilter::default(), 10, 0).expect("find");
+    let page = find_books(&fx.ops, &Caller::cli(), BookFilter::default(), 10, 0).expect("find");
     let row = page
         .books
         .iter()

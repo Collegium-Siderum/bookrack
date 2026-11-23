@@ -18,6 +18,7 @@ use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 
+use crate::Caller;
 use crate::Ops;
 use crate::OpsError;
 use crate::Result;
@@ -27,15 +28,21 @@ use crate::dto::{
 };
 use crate::reads::books::toc_call_args;
 use crate::reads::open_papers_catalog;
-use crate::recorder::record_call_sync;
+use crate::recorder::record_call_with_caller_sync;
 
 /// List papers in catalog order, paginated.
-pub fn list_papers<E: Embedder>(ops: &Ops<E>, limit: u32, offset: u32) -> Result<ListPapersResult> {
-    record_call_sync!(
+pub fn list_papers<E: Embedder>(
+    ops: &Ops<E>,
+    caller: &Caller,
+    limit: u32,
+    offset: u32,
+) -> Result<ListPapersResult> {
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "library.list_papers",
         serde_json::json!({ "limit": limit, "offset": offset }),
-        { find_papers(ops, PaperFilter::default(), limit, offset) }
+        { find_papers(ops, caller, PaperFilter::default(), limit, offset) }
     )
 }
 
@@ -49,6 +56,7 @@ pub fn list_papers<E: Embedder>(ops: &Ops<E>, limit: u32, offset: u32) -> Result
 /// under, and not by ones it was corrected away from.
 pub fn find_papers<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     filter: PaperFilter,
     limit: u32,
     offset: u32,
@@ -65,7 +73,7 @@ pub fn find_papers<E: Embedder>(
         "limit": limit,
         "offset": offset,
     });
-    record_call_sync!(ops, "library.find_papers", args, {
+    record_call_with_caller_sync!(ops, caller, "library.find_papers", args, {
         let Some(catalog) = open_papers_catalog(ops)? else {
             return Ok(ListPapersResult {
                 papers: Vec::new(),
@@ -137,9 +145,14 @@ pub fn find_papers<E: Embedder>(
 /// registered on the paper catalog, or
 /// [`OpsError::PapersBackendNotConfigured`] when the calling `Ops`
 /// has no papers backend.
-pub fn show_paper<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<PaperDetail> {
-    record_call_sync!(
+pub fn show_paper<E: Embedder>(
+    ops: &Ops<E>,
+    caller: &Caller,
+    intake_id: i64,
+) -> Result<PaperDetail> {
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "library.show_paper",
         serde_json::json!({ "intake_id": intake_id }),
         {
@@ -194,11 +207,13 @@ pub fn show_paper<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<PaperDeta
 /// has no papers backend.
 pub fn show_paper_toc<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     intake_id: i64,
     args: &ShowTocArgs,
 ) -> Result<Toc> {
-    record_call_sync!(
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "library.show_paper_toc",
         toc_call_args(intake_id, args),
         {
@@ -243,9 +258,14 @@ pub fn show_paper_toc<E: Embedder>(
 /// registered on the paper catalog, or
 /// [`OpsError::PapersBackendNotConfigured`] when the calling `Ops`
 /// has no papers backend.
-pub fn export_csl<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<bookrack_catalog::CslItem> {
-    record_call_sync!(
+pub fn export_csl<E: Embedder>(
+    ops: &Ops<E>,
+    caller: &Caller,
+    intake_id: i64,
+) -> Result<bookrack_catalog::CslItem> {
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "papers.export_csl",
         serde_json::json!({ "intake_id": intake_id }),
         {
@@ -276,9 +296,14 @@ pub fn export_csl<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<bookrack_
 /// the row predates Phase 0), and
 /// [`OpsError::PapersBackendNotConfigured`] when the calling `Ops`
 /// has no papers backend.
-pub fn fetch_source<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<PaperSource> {
-    record_call_sync!(
+pub fn fetch_source<E: Embedder>(
+    ops: &Ops<E>,
+    caller: &Caller,
+    intake_id: i64,
+) -> Result<PaperSource> {
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "papers.fetch_source",
         serde_json::json!({ "intake_id": intake_id }),
         {

@@ -15,8 +15,8 @@ use bookrack_embed::Embedder;
 use crate::dto::{
     ContextWindow, MAX_CONTEXT_RADIUS, MAX_READ_CHARS, MAX_SPAN_LEAVES, Passage, SpanText,
 };
-use crate::recorder::record_call_sync;
-use crate::{Ops, OpsError, Result};
+use crate::recorder::record_call_with_caller_sync;
+use crate::{Caller, Ops, OpsError, Result};
 
 /// Read the leaves around one anchor leaf, in document order.
 ///
@@ -36,13 +36,15 @@ use crate::{Ops, OpsError, Result};
 // Parallel implementation: kind-to-paths.
 pub fn read_context<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     target: KindedNodeId,
     before: u32,
     after: u32,
 ) -> Result<ContextWindow> {
     let node_id = target.node_id.get();
-    record_call_sync!(
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "library.read_context",
         serde_json::json!({
             "kind": target.kind.as_scope_str(),
@@ -108,12 +110,14 @@ pub fn read_context<E: Embedder>(
 // Parallel implementation: kind-to-paths.
 pub fn read_span<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     target: KindedNodeId,
     start_after: Option<i64>,
 ) -> Result<SpanText> {
     let node_id = target.node_id.get();
-    record_call_sync!(
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "library.read_span",
         serde_json::json!({
             "kind": target.kind.as_scope_str(),

@@ -19,6 +19,7 @@ use bookrack_catalog::IntakeFilter;
 use bookrack_core::ItemKind;
 use bookrack_embed::Embedder;
 
+use crate::Caller;
 use crate::Ops;
 use crate::OpsError;
 use crate::Result;
@@ -29,7 +30,7 @@ use crate::reads::metadata::{
     empty_page, list_metadata_inner, needs_review_filter, show_audit_trail_inner,
 };
 use crate::reads::open_papers_catalog;
-use crate::recorder::record_call_sync;
+use crate::recorder::record_call_with_caller_sync;
 
 /// Recompute the metadata plausibility audit for one paper from its
 /// cached extraction envelope and return the full per-field report —
@@ -42,12 +43,14 @@ use crate::recorder::record_call_sync;
 /// path that brings the row back in line.
 pub fn show_paper_metadata_report<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     intake_id: i64,
     audit_data: &bookrack_metadata::paper::PaperAuditData,
     audit_profile: &bookrack_metadata::paper::PaperAuditProfile,
 ) -> Result<PaperMetadataAuditReport> {
-    record_call_sync!(
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "library.show_paper_metadata_report",
         serde_json::json!({ "intake_id": intake_id }),
         {
@@ -92,10 +95,12 @@ pub fn show_paper_metadata_report<E: Embedder>(
 /// [`OpsError::IntakeNotFound`] — the "ghost id" case.
 pub fn show_paper_audit_trail<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     intake_id: i64,
 ) -> Result<Vec<AuditTrailEntry>> {
-    record_call_sync!(
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "library.show_paper_audit_trail",
         serde_json::json!({ "intake_id": intake_id }),
         {
@@ -117,12 +122,14 @@ pub fn show_paper_audit_trail<E: Embedder>(
 /// [`reads::papers::find_papers`](crate::reads::papers::find_papers).
 pub fn list_paper_metadata<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     filter: MetadataFilter,
     limit: u32,
     offset: u32,
 ) -> Result<MetadataListPage> {
-    record_call_sync!(
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "library.list_paper_metadata",
         serde_json::json!({
             "title_substring": filter.title_substring,
@@ -159,11 +166,13 @@ pub fn list_paper_metadata<E: Embedder>(
 /// pipelines.
 pub fn list_paper_pending_reviews<E: Embedder>(
     ops: &Ops<E>,
+    caller: &Caller,
     limit: u32,
     offset: u32,
 ) -> Result<MetadataListPage> {
-    record_call_sync!(
+    record_call_with_caller_sync!(
         ops,
+        caller,
         "library.list_paper_pending_reviews",
         serde_json::json!({ "limit": limit, "offset": offset }),
         {

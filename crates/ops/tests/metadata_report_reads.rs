@@ -43,7 +43,6 @@ impl Fixture {
             &lancedb_dir,
             books_dir.clone(),
             backup_dir,
-            Caller::cli(),
         );
         Fixture {
             _tmp: tmp,
@@ -134,6 +133,7 @@ fn report_grades_the_effective_view_and_writes_nothing() {
 
     let report = show_metadata_report(
         &fx.ops,
+        &Caller::cli(),
         id,
         &AuditData::default_data(),
         &AuditProfile::default(),
@@ -189,6 +189,7 @@ fn unknown_book_maps_to_intake_not_found() {
     let fx = Fixture::build();
     let err = show_metadata_report(
         &fx.ops,
+        &Caller::cli(),
         9999,
         &AuditData::default_data(),
         &AuditProfile::default(),
@@ -215,6 +216,7 @@ fn missing_envelope_is_an_error() {
 
     let err = show_metadata_report(
         &fx.ops,
+        &Caller::cli(),
         id,
         &AuditData::default_data(),
         &AuditProfile::default(),

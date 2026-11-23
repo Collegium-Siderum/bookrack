@@ -27,7 +27,7 @@ use bookrack_ops::writes::metadata::{
     acknowledge_metadata_gap, add_contributor, approve_metadata, clear_metadata_field,
     reject_metadata, remove_contributor, set_metadata_field, void_metadata_field,
 };
-use bookrack_ops::{Caller, Ops, with_caller_override};
+use bookrack_ops::{Caller, Ops};
 use tempfile::TempDir;
 
 struct Fixture {
@@ -57,7 +57,6 @@ impl Fixture {
             &cfg.lancedb_dir(),
             cfg.books_dir(),
             backup_dir.clone(),
-            Caller::cli(),
         );
         let handle = LibraryHandle::new("default", cfg, ops);
         let registry = LibraryRegistry::single(Arc::clone(&handle));
@@ -568,30 +567,23 @@ fn cli_and_mcp_writes_are_distinguishable_by_actor_kind() {
 }
 
 #[test]
-fn the_session_caller_labels_a_write_whatever_the_ops_caller_and_override() {
-    // The fixture's `Ops` is built with `Caller::cli()`, and the write
-    // below runs inside a task-scope `Caller::mcp()` override. Neither
-    // reaches the write: the audit row, the call row, and the reported
-    // outcome all carry the session's own caller.
+fn the_session_caller_labels_the_audit_row_the_call_row_and_the_outcome() {
+    // The fixture's `Ops` is shared and names no caller: the write's
+    // audit row, its call row, and the reported outcome all carry the
+    // session's own.
     let fx = Fixture::build();
-    let id = fx.seed_intake("sha-override");
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("build runtime");
-    let outcome = runtime
-        .block_on(with_caller_override(Caller::mcp(), async {
-            set_metadata_field(
-                &mut fx.session_as(Caller::control_plane()),
-                SetMetadataFieldRequest {
-                    intake_id: id,
-                    field: "title".to_string(),
-                    value: "From the control plane".to_string(),
-                    reason: None,
-                    confirmed: false,
-                },
-            )
-        }))
-        .expect("set inside override scope");
+    let id = fx.seed_intake("sha-session-caller");
+    let outcome = set_metadata_field(
+        &mut fx.session_as(Caller::control_plane()),
+        SetMetadataFieldRequest {
+            intake_id: id,
+            field: "title".to_string(),
+            value: "From the control plane".to_string(),
+            reason: None,
+            confirmed: false,
+        },
+    )
+    .expect("set");
     assert_eq!(outcome.actor_kind, "human");
     assert_eq!(outcome.actor_detail.as_deref(), Some("control_plane"));
 
@@ -638,7 +630,7 @@ fn the_audit_trail_reads_cli_and_control_plane_rows_back_as_written() {
         .expect("set");
     }
 
-    let trail = show_audit_trail(fx.ops(), id).expect("trail");
+    let trail = show_audit_trail(fx.ops(), &Caller::cli(), id).expect("trail");
     let rows: Vec<(&str, Option<&str>, Option<&str>)> = trail
         .iter()
         .map(|e| {
@@ -670,7 +662,7 @@ fn show_book_lists_active_overrides_with_their_curation_trail() {
     base.title = Some("Base Title".to_string());
     fx.catalog().upsert_publication_attrs(&base).expect("base");
 
-    let detail = show_book(fx.ops(), id).expect("show before");
+    let detail = show_book(fx.ops(), &Caller::cli(), id).expect("show before");
     assert!(detail.overrides.is_empty());
 
     set_metadata_field(
@@ -685,7 +677,7 @@ fn show_book_lists_active_overrides_with_their_curation_trail() {
     )
     .expect("set");
 
-    let detail = show_book(fx.ops(), id).expect("show after set");
+    let detail = show_book(fx.ops(), &Caller::cli(), id).expect("show after set");
     assert_eq!(detail.overrides.len(), 1);
     let entry = &detail.overrides[0];
     assert_eq!(entry.field, "title");
@@ -705,7 +697,7 @@ fn show_book_lists_active_overrides_with_their_curation_trail() {
         },
     )
     .expect("clear");
-    let detail = show_book(fx.ops(), id).expect("show after clear");
+    let detail = show_book(fx.ops(), &Caller::cli(), id).expect("show after clear");
     assert!(detail.overrides.is_empty());
     assert_eq!(
         detail.effective_biblio.get("title").map(String::as_str),
@@ -730,7 +722,7 @@ fn contributor_add_makes_the_book_findable_by_name() {
     )
     .expect("add");
 
-    let detail = show_book(fx.ops(), id).expect("show");
+    let detail = show_book(fx.ops(), &Caller::cli(), id).expect("show");
     let entry = detail
         .contributors
         .iter()
@@ -744,7 +736,7 @@ fn contributor_add_makes_the_book_findable_by_name() {
         contributor_name: Some("A Missing Author".to_string()),
         ..Default::default()
     };
-    let found = find_books(fx.ops(), filter, 10, 0).expect("find");
+    let found = find_books(fx.ops(), &Caller::cli(), filter, 10, 0).expect("find");
     assert!(found.books.iter().any(|b| b.intake_id == id));
 
     let audit = fx
@@ -811,7 +803,7 @@ fn contributor_remove_strips_a_wrong_extracted_attribution() {
     .expect("remove");
     assert!(outcome.changed);
 
-    let detail = show_book(fx.ops(), id).expect("show");
+    let detail = show_book(fx.ops(), &Caller::cli(), id).expect("show");
     assert!(detail.contributors.is_empty());
 
     let audit = fx
@@ -868,7 +860,7 @@ fn void_suppresses_the_extracted_value_until_cleared() {
         .expect("effective");
     assert!(effective.get("publisher").is_none());
 
-    let detail = show_book(fx.ops(), id).expect("show");
+    let detail = show_book(fx.ops(), &Caller::cli(), id).expect("show");
     let entry = detail
         .overrides
         .iter()

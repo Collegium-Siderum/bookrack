@@ -47,7 +47,7 @@ use bookrack_ops::pipeline::book::IngestParams;
 use bookrack_ops::pipeline::paper::GleanParams;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{JobTemplates, LibraryHandle, LibraryRegistry, MountGuard};
-use bookrack_ops::{Caller, Ops, PapersPaths};
+use bookrack_ops::{Ops, PapersPaths};
 use bookrack_query::Library;
 use bookrack_session::{
     RootLock, TtyLock, is_root_lock_conflict, resolve_runtime_dir, root_lock_path, tty_lock_name,
@@ -92,12 +92,6 @@ pub struct RuntimeOpts {
     ///
     /// [`headless`]: RuntimeOpts::headless
     pub spawn_queue_worker: bool,
-    /// [`Caller`] baked into each served library's [`Ops`]: the
-    /// attribution for calls that arrive through the control socket,
-    /// [`Caller::control_plane`] unless a host says otherwise. Tool
-    /// calls arriving over MCP are attributed per call to
-    /// `Caller::mcp()` and never read this value.
-    pub caller: Caller,
     /// Every `BOOKRACK_…` variable some knob of this build reads,
     /// supplied by a host that links the whole knob inventory.
     /// `daemon.config` subtracts it from the environment to report the
@@ -144,7 +138,6 @@ impl RuntimeOpts {
             daemon_config: DaemonConfig::resolve(&EnvSnapshot::capture(), &flags),
             claimed_variables: None,
             spawn_queue_worker: false,
-            caller: Caller::control_plane(),
             mcp_tools: Vec::new(),
         }
     }
@@ -783,7 +776,6 @@ impl DaemonRuntime {
                 &daemon_config,
                 &name,
                 reranker.as_ref().map(|r| &r.stage),
-                opts.caller.clone(),
                 guard,
             )
             .await
@@ -1147,7 +1139,6 @@ impl DaemonRuntime {
             mounter: Some(Arc::new(crate::mount::Mounter::new(
                 Arc::clone(&registry),
                 reranker.as_ref().map(|r| r.stage.clone()),
-                opts.caller.clone(),
                 Arc::clone(&daemon_config),
             ))),
         };
@@ -1441,9 +1432,8 @@ impl Candidate {
 /// handle wraps.
 ///
 /// Inputs are one per-library [`Config`] plus process-level shared
-/// state: the reranker stage (when the daemon brought one up; it is
-/// cloned into the handle's `Ops`) and the [`Caller`] attribution
-/// baked into control-socket writes. The handle is registered under
+/// state: the reranker stage, when the daemon brought one up; it is
+/// cloned into the handle's `Ops`. The handle is registered under
 /// `name`. Every handle built here is fully serveable
 /// (`Ops::with_library`) — read, ingest, and glean paths all work,
 /// unlike an `Ops::catalog_only` handle, whose pipeline entry points
@@ -1453,7 +1443,6 @@ pub(crate) async fn build_library_handle(
     daemon: &DaemonConfig,
     name: &str,
     reranker_stage: Option<&bookrack_ops::RerankStage>,
-    caller: Caller,
     mount_guard: Option<MountGuard>,
 ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>> {
     let cfg = cfg_arc.as_ref();
@@ -1573,7 +1562,6 @@ pub(crate) async fn build_library_handle(
         &cfg.lancedb_dir(),
         cfg.books_dir(),
         cfg.backup_dir(),
-        caller,
     )
     .with_papers(papers_library, papers_paths);
     let ops = match reranker_stage {
