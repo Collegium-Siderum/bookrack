@@ -612,7 +612,7 @@ mod tests {
     use std::str::FromStr;
 
     use bookrack_cli::render::OutputMode;
-    use bookrack_runtime::control::methods::REGISTRY;
+    use bookrack_runtime::control::methods::method_signatures;
 
     use super::super::papers::paper_list_output;
     use super::*;
@@ -946,7 +946,7 @@ mod tests {
     fn every_method_this_verb_sends_is_routed_by_the_daemon() {
         for side in sides(Scope::All) {
             for method in [side.list_method, side.find_method] {
-                let sig = REGISTRY
+                let sig = method_signatures()
                     .iter()
                     .find(|sig| sig.name == method)
                     .unwrap_or_else(|| panic!("`{method}` is not in the daemon's method table"));

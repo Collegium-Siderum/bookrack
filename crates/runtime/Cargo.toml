@@ -34,9 +34,7 @@ async-trait.workspace = true
 chrono.workspace = true
 # `cmd::libraries::CopyMode` and `cmd::audit_profile::AuditProfileAction`
 # derive clap traits so the cli `bin` consumes them directly. The
-# runtime crate hosts those definitions and re-exports the derives;
-# `cmd::metadata::WriteMetadataAction` lives in `bookrack-cli-grammar`
-# and is re-exported through `cmd::metadata`.
+# runtime crate hosts those definitions and re-exports the derives.
 clap.workspace = true
 # `pdfium_install` downloads the pinned PDFium archive over HTTPS and
 # unpacks it (gzip + tar) into the managed directory.
@@ -45,6 +43,9 @@ flate2.workspace = true
 # has no std equivalent and would otherwise be a per-platform syscall.
 fs2.workspace = true
 reqwest.workspace = true
+# The session tools' parameter and result types describe themselves to
+# the MCP tool list.
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # `cmd::dryrun` hashes file contents to name per-book JSONL outputs;

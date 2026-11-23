@@ -86,8 +86,30 @@ release workflow extracts the matching section verbatim from this file.
   vector index; restarting the daemon releases them. See
   [control-plane.md](docs/control-plane.md).
 
+- **`reference.overlay_set` is a control-plane method.** It layers a
+  user edit on one reference entry and takes the params the MCP tool of
+  the same name takes — `library`, `book_slug`, `entry_key`, `overlay`,
+  `reason` — answering with the same receipt. `library` is required,
+  as it is for the tool. An overlay key outside the property catalog is
+  `-32602`, judged before the write mutex is asked for; while another
+  write holds the mutex the call answers `-32001`. An edit that lands
+  announces `library.changed`. See
+  [control-plane.md](docs/control-plane.md).
+
 ### Changed
 
+- **The control-plane `library.show_metadata_report` grades under the
+  library's overlays.** The report graded against the shipped audit
+  profile and data lists, while `metadata.reaudit` stores under the
+  library's `audit-rules/` overlays, so the report could show a flag the
+  re-audit it recommends would not store. It now reads both overlays
+  when the call arrives, as `library.show_paper_metadata_report`
+  already did. The MCP tool of the same name still grades under the
+  shipped profile.
+- **`config fixed` lists `mcp.queue_status_recent` under `runtime`.**
+  The MCP session tools' bodies live in the daemon's runtime, which owns
+  the cap on the recent jobs `session.queue_status` returns; the value
+  is unchanged.
 - **The `reference.overlay_set` MCP tool takes the daemon's write
   mutex.** While another write holds it, the tool answers `-32001` with
   `retryable: true` and writes nothing, instead of writing alongside it.

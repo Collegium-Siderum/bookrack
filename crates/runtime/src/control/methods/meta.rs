@@ -43,7 +43,7 @@ pub struct McpToolInfo {
 }
 
 pub fn methods(_ctx: &MethodContext) -> Value {
-    json!({ "methods": super::REGISTRY })
+    json!({ "methods": super::method_signatures() })
 }
 
 pub fn mcp_tools(ctx: &MethodContext) -> Value {
@@ -67,11 +67,11 @@ pub fn mcp_tools_rpc(
 
 #[cfg(test)]
 mod tests {
-    use super::super::REGISTRY;
+    use super::super::{HOST_METHODS, method_signatures};
     use super::*;
 
-    /// The `daemon.methods` response lists every registry row, in
-    /// registry order, under its registered name.
+    /// The `daemon.methods` response lists every row of both tables,
+    /// the host's first, under its registered name.
     #[tokio::test]
     async fn daemon_methods_enumerates_the_whole_registry() {
         let dir = tempfile::tempdir().unwrap();
@@ -83,13 +83,21 @@ mod tests {
             .iter()
             .map(|row| row["name"].as_str().expect("name"))
             .collect();
-        let expected: Vec<&str> = REGISTRY.iter().map(|sig| sig.name).collect();
+        let expected: Vec<&str> = HOST_METHODS
+            .iter()
+            .map(|sig| sig.name)
+            .chain(
+                bookrack_ops::methods::LIBRARY_METHODS
+                    .iter()
+                    .map(|spec| spec.name),
+            )
+            .collect();
         assert_eq!(names, expected);
     }
 
     #[test]
     fn registry_names_are_unique() {
-        let mut names: Vec<&str> = REGISTRY.iter().map(|m| m.name).collect();
+        let mut names: Vec<&str> = method_signatures().iter().map(|m| m.name).collect();
         names.sort_unstable();
         for pair in names.windows(2) {
             assert_ne!(
@@ -128,10 +136,10 @@ mod tests {
             "library.vectors_status",
             "reference.lookup",
         ] {
-            let entry = REGISTRY
+            let entry = method_signatures()
                 .iter()
                 .find(|m| m.name == name)
-                .unwrap_or_else(|| panic!("library read proxy {name} is missing from REGISTRY"));
+                .unwrap_or_else(|| panic!("library read proxy {name} is not a method"));
             assert_eq!(
                 entry.kind, "read",
                 "{name} should be classified as a read method"
@@ -139,9 +147,36 @@ mod tests {
         }
     }
 
+    /// A name is served by one table only: a host row shadowing an ops
+    /// table row would never be reached, since the table is asked first.
+    #[test]
+    fn no_method_is_declared_by_both_tables() {
+        for sig in HOST_METHODS {
+            assert!(
+                bookrack_ops::methods::library_method(sig.name).is_none(),
+                "{} is declared by the host and by the ops table",
+                sig.name
+            );
+        }
+    }
+
+    /// The reference book's overlay edit is a control-plane write,
+    /// selected by `library`, served without a queue worker.
+    #[test]
+    fn the_overlay_edit_is_a_routed_write() {
+        let entry = method_signatures()
+            .iter()
+            .find(|m| m.name == "reference.overlay_set")
+            .expect("reference.overlay_set is a method");
+        assert_eq!(entry.kind, "write");
+        assert_eq!(entry.selection, "routed");
+        assert_eq!(entry.library_key, Some("library"));
+        assert!(!entry.queue_bound);
+    }
+
     #[test]
     fn registry_kinds_are_known() {
-        for sig in REGISTRY {
+        for sig in method_signatures() {
             assert!(
                 matches!(sig.kind, "read" | "write" | "stream"),
                 "method {} has unknown kind {:?}",
@@ -162,10 +197,10 @@ mod tests {
             "papers.stamps_reconcile",
             "papers.dryrun",
         ] {
-            let entry = REGISTRY
+            let entry = method_signatures()
                 .iter()
                 .find(|m| m.name == name)
-                .unwrap_or_else(|| panic!("paper maintenance method {name} missing from REGISTRY"));
+                .unwrap_or_else(|| panic!("paper maintenance method {name} is not a method"));
             assert_eq!(
                 entry.kind, "write",
                 "{name} should be classified as a write method"

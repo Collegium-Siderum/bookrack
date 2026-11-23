@@ -14,7 +14,6 @@ pub mod index_profile;
 pub mod ingest;
 pub mod input_error;
 pub mod libraries;
-pub mod metadata;
 pub mod papers_corpus;
 pub mod papers_dryrun;
 pub mod papers_stamps;

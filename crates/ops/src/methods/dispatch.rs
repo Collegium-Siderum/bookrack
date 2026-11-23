@@ -13,6 +13,8 @@
 //! happens and carries its own three-part problem.
 //! `scripts/error-boundary-check.sh` holds this file to that rule.
 
+// Parallel implementation: control-metadata.
+
 use std::sync::Arc;
 
 use bookrack_config::Config;

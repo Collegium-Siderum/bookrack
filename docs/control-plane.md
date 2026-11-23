@@ -1128,13 +1128,16 @@ must carry `yes = true`.
 
 ## Methods (library read proxies)
 
-Operator-facing read pathway: each method below mirrors the MCP
-`library.*` read tool of the same name. The JSON params shape, the
-returned body, and the underlying `bookrack_ops::reads::*` call are
-identical, so `bookrack rpc call <method> '<json>'` over the control
-socket reaches the same code path agents exercise over MCP HTTP. None
-of these methods take the write mutex; they read straight from the
-catalog and corpus handles the daemon already holds.
+Operator-facing read pathway: each method below is a row of the one
+method table in `bookrack-ops` that the MCP tools are served from too —
+the `library.*` reads, `reference.lookup` and `reference.overlay_set`,
+and the book-side `metadata.*` writes. A row declares its params once
+and runs one body whichever transport the call arrived on, so `bookrack
+rpc call <method> '<json>'` over the control socket reaches the same
+code path agents exercise over MCP HTTP, and a read returns the body
+the MCP tool of the same name returns. None of the reads take the write
+mutex; they read straight from the catalog and corpus handles the
+daemon already holds.
 
 All of them accept an optional `library` param naming a mounted
 library; absent, the call is routed by the rule under *Unnamed calls*.
@@ -1201,7 +1204,10 @@ overloaded, is `-32017`, retryable; a store this build cannot serve is
   anchor leaf or organizing node.
 - `library.show_metadata_audit` / `library.show_metadata_report` —
   stored audit verdict and the recomputed per-field plausibility
-  report.
+  report. The report grades under the library's audit profile and audit
+  data overlays under `<data_root>/audit-rules/`, read when the call
+  arrives — the rules `metadata.reaudit` stores under — so a report and
+  the re-audit it recommends agree. Nothing is written back.
 - `library.list_metadata` / `library.list_pending_reviews` —
   paginated review-queue browse. `library.list_metadata` accepts
   `title_substring`, `confidence_in` (`low` / `medium` / `high`) and
@@ -1300,10 +1306,21 @@ overloaded, is `-32017`, retryable; a store this build cannot serve is
   the store's state; a store at a schema this build does not read, or
   stamped for a newer reader, is `-32018`, with the direction of the
   mismatch in the hint; a store that exists but cannot be inspected or
-  opened is `-32603`. The MCP tool `reference.overlay_set` answers the
-  same three states with the same code, judges its arguments before it
-  opens the store, and snapshots a store that is behind before
-  migrating it.
+  opened is `-32603`. `reference.overlay_set` answers the same three
+  states with the same code, judges its arguments before it opens the
+  store, and snapshots a store that is behind before migrating it.
+- `reference.overlay_set` — `{ library, book_slug, entry_key, overlay,
+  reason }` → `{ book_slug, entry_key, edited_at }`; layers a user edit
+  on one reference entry, the same call as the MCP tool of the same
+  name. `library` is required: a write never lands on whichever library
+  an unnamed call would be routed to. Every key of `overlay` must be a
+  property-catalog key; a key outside it, or an `overlay` that is not a
+  JSON object, is `-32602`, judged before the write mutex is asked for.
+  The edit is a write like the `metadata.*` methods: while another write
+  holds the mutex it answers `-32001` with `retryable: true` and writes
+  nothing, it pauses MCP for its duration, and once the overlay is on
+  disk it announces `library.changed`. `reason` is recorded on the
+  overlay row, and `edited_at` is the daemon's UTC time.
 
 ## MCP tool surface
 
@@ -1356,11 +1373,11 @@ The read set includes `library.show_paper_metadata_report`,
 `library.show_paper_audit_trail`, `library.list_paper_metadata` and
 `library.list_paper_pending_reviews` — the paper peers of
 `library.show_metadata_report`, `library.show_audit_trail`,
-`library.list_metadata` and `library.list_pending_reviews`. Both run
-the built-in default audit profile rather than the overlay-resolved
-one, matching the book-side tool; the control-plane method resolves the
-overlay, so the two surfaces can grade the same paper differently and
-the tool description says which one it ran. The write tool
+`library.list_metadata` and `library.list_pending_reviews`. The two
+report tools run the built-in default audit profiles rather than the
+library's overlays; the control-plane methods of the same names grade
+under the overlays, so the two surfaces can grade the same item
+differently, and the tool description says which one it ran. The write tool
 `library.metadata.reaudit` does not share that rule: like the
 control-plane `metadata.reaudit`, it grades under the library's audit
 data and audit profile overlays, read when the call arrives. So on this

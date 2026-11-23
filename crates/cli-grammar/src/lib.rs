@@ -516,9 +516,9 @@ pub enum RetrievalAction {
     },
 }
 
-/// Metadata-side write commands. Lives in the grammar crate so both
-/// the daemon-side runner (`bookrack_runtime::cmd::metadata::run_write`)
-/// and the REPL client can parse them.
+/// Metadata-side write commands. Lives in the grammar crate so the
+/// binary and the REPL client parse them alike; each becomes a call to
+/// the daemon's `metadata.*` method of the same name.
 // Parallel implementation: clap-paired-args.
 #[derive(clap::Subcommand, Debug)]
 pub enum WriteMetadataAction {

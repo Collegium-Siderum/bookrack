@@ -6,6 +6,15 @@
 //! [`Request`] and a [`MethodContext`], get back either the JSON
 //! payload that becomes the response's `result` or an [`RpcError`].
 //!
+//! Two tables declare what the control plane serves. The methods that
+//! act on one library — the library reads, the reference book's lookup
+//! and overlay edit, the book-side metadata writes — are
+//! [`bookrack_ops::methods::LIBRARY_METHODS`], whose bodies both
+//! transports reach through the ops dispatcher. The host's own methods
+//! are [`HOST_METHODS`], declared below. Reflection
+//! ([`method_signatures`], [`library_key_for`], [`refuses_library`])
+//! reads both.
+//!
 //! Phase 1 carries `daemon.*`, `status`, `doctor.gather`,
 //! `queue.list`, `library.*`, and `events.snapshot`; Phase 2 layers
 //! `ingest.*`, `metadata.*`, `vectors.*`, `corpus.rebuild`,
@@ -16,7 +25,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 #[cfg(test)]
 use bookrack_config::Config;
@@ -26,6 +35,7 @@ use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::stream::LogStreamHandle;
 use bookrack_ops::OpsError;
+use bookrack_ops::methods::{Access, LIBRARY_METHODS, MethodSpec, Selection, library_method};
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::write_session::{ChangeSet, Region, SessionRunError, WriteSession};
@@ -38,25 +48,10 @@ use super::jsonrpc::{CONFIRMATION_REQUIRED, INVALID_PARAMS, METHOD_NOT_FOUND, Re
 use super::plan_registry::PlanRegistry;
 use crate::cmd::input_error::CmdInputError;
 
-/// A params type that carries a library selection.
-///
-/// The implementation is what makes a `routed` row in [`methods!`]
-/// checkable: the row names the params type, the impl names the key
-/// and reads the field behind it, so a method filed as routed whose
-/// params have no such field fails to compile. Without it the axis
-/// would be a hand-kept assertion about code somewhere else, and the
-/// failure mode of a wrong row is silent — a selection the caller
-/// spelled out reaches a handler that never looks for it.
-pub trait RoutedParams {
-    /// The params key that names the library. `"library"` for every
-    /// method but `library.info`, whose own `name` parameter predates
-    /// the shared spelling.
-    const LIBRARY_KEY: &'static str;
-
-    /// The selection this call carries, `None` when the caller left
-    /// the key out and the registry's default applies.
-    fn library(&self) -> Option<&str>;
-}
+/// A params type that carries a library selection: the trait the ops
+/// method table checks its rows against, implemented here for the
+/// host's own params types.
+pub use bookrack_ops::methods::RoutedParams;
 
 /// Implement [`RoutedParams`] for params types that spell the key
 /// `library`. Invoked in the module that owns the type, so the field
@@ -82,9 +77,9 @@ pub mod glean;
 pub mod host_session;
 pub mod ingest;
 pub mod libraries;
+mod library;
 pub mod logs;
 pub mod meta;
-pub mod metadata;
 pub mod papers_corpus;
 pub mod papers_dryrun;
 pub mod papers_metadata;
@@ -93,9 +88,8 @@ pub mod papers_stamps;
 pub mod papers_vectors;
 pub mod queue_writes;
 pub mod reads;
-pub mod reads_library;
-pub mod reads_reference;
 pub mod remove;
+pub mod session;
 pub mod stamps;
 pub mod vectors;
 pub mod verify;
@@ -120,11 +114,15 @@ pub(super) fn input_err(e: CmdInputError) -> RpcError {
     rpc_from_problem(INVALID_PARAMS, e.explain())
 }
 
+/// The registry of libraries a daemon serves, over the embedder the
+/// daemon runs.
+pub type DaemonRegistry = LibraryRegistry<OllamaEmbedClient>;
+
 /// Read-mostly handles the dispatcher reaches into. The runtime owns
 /// the originals; the dispatcher only clones cheap shared handles.
 #[derive(Clone)]
 pub struct MethodContext {
-    pub registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
+    pub registry: Arc<DaemonRegistry>,
     pub info_context: LibraryInfoContext,
     pub queue_state: Arc<Mutex<QueueState>>,
     pub queue_state_path: PathBuf,
@@ -210,11 +208,6 @@ use dryrun::DryrunParams;
 use glean::GleanSubmitParams;
 use ingest::IngestSubmitParams;
 use libraries::LibraryForkParams;
-use metadata::{
-    MetadataAckParams, MetadataApproveParams, MetadataClearParams, MetadataContributorAddParams,
-    MetadataContributorRemoveParams, MetadataReauditParams, MetadataRejectParams,
-    MetadataSetParams, MetadataVoidParams,
-};
 use papers_corpus::PapersCorpusRebuildParams;
 use papers_dryrun::PapersDryrunParams;
 use papers_metadata::{
@@ -228,19 +221,13 @@ use papers_vectors::{
     PapersVectorsDropParams, PapersVectorsRebuildParams, PapersVectorsReembedParams,
     PapersVectorsResetParams,
 };
-use reads::LibraryInfoParams;
-use reads_library::{
-    BookIdParams, FindBooksParams, FindPapersParams, LibraryOnlyParams, ListMetadataParams,
-    PageParams, PaperAuditReadParams, ReadContextParams, ReadSpanParams, SearchInBookParams,
-    SearchInPaperParams, SearchParams, ShowTocParams,
-};
-use reads_reference::ReferenceLookupParams;
 use remove::RemoveParams;
 use stamps::ReconcileParams as BookStampsReconcileParams;
 use vectors::{VectorsDropParams, VectorsRebuildParams, VectorsReembedParams, VectorsResetParams};
 use verify::VerifyParams;
 
-/// Single source of truth for every control-plane method.
+/// Single source of truth for every control-plane method the host
+/// serves itself; the library methods are the ops table's.
 ///
 /// Each row declares five facts about one method:
 ///
@@ -275,20 +262,20 @@ use verify::VerifyParams;
 /// 5. The method `name` and `=> handler` path (omitted for `sidebar`
 ///    entries).
 ///
-/// The macro emits both the public `REGISTRY` const consumed by
-/// `daemon.methods` / `daemon.mcp_tools` and the `dispatch_normal`
-/// match table from this list, so the two tables cannot drift.
-/// `is_queue_bound_method`, [`library_key_for`], and
-/// [`refuses_library`] query `REGISTRY` directly for the same reason.
-/// Sidebar rows still appear in `REGISTRY` but emit no arm in
-/// `dispatch_normal`; their wire behaviour is implemented in
+/// The macro emits both the public `HOST_METHODS` const and the
+/// `dispatch_normal` match table from this list, so the two tables
+/// cannot drift. [`method_signatures`] — what `daemon.methods` lists,
+/// and what `is_queue_bound_method`, [`library_key_for`], and
+/// [`refuses_library`] read — is these rows followed by the ops
+/// table's. Sidebar rows still appear in `HOST_METHODS` but emit no arm
+/// in `dispatch_normal`; their wire behaviour is implemented in
 /// `dispatch` itself.
 macro_rules! methods {
     (
         $( $kind:ident $queue:ident $shape:ident $selection:ident $( ( $params:path ) )?
            $name:literal $( => $handler:path )? ),* $(,)?
     ) => {
-        pub const REGISTRY: &[meta::MethodSignature] = &[
+        pub const HOST_METHODS: &[meta::MethodSignature] = &[
             $(
                 meta::MethodSignature {
                     name: $name,
@@ -366,73 +353,11 @@ methods! {
 
     // library admin
     read  no_queue sync    unrouted                   "library.list" => reads::library_list_rpc,
-    read  no_queue async   routed(LibraryInfoParams)  "library.info" => reads::library_info,
     write no_queue async   routed(LibraryForkParams)  "library.fork" => libraries::fork,
     write no_queue async   unrouted
         "library.set_default" => libraries::set_default,
     write no_queue async   unrouted                   "library.mount" => libraries::mount,
     write no_queue async   unrouted                   "library.unmount" => libraries::unmount,
-
-    // library reads (sync, parametrised)
-    read  no_queue sync    routed(LibraryOnlyParams)  "library.stats" => reads_library::stats,
-    read  no_queue sync    routed(LibraryOnlyParams)
-        "library.categories" => reads_library::categories,
-    read  no_queue sync    routed(PageParams)
-        "library.list_books" => reads_library::list_books,
-    read  no_queue sync    routed(FindBooksParams)
-        "library.find_books" => reads_library::find_books,
-    read  no_queue sync    routed(BookIdParams)
-        "library.show_book" => reads_library::show_book,
-    read  no_queue sync    routed(ShowTocParams)      "library.show_toc" => reads_library::show_toc,
-    read  no_queue sync    routed(ReadContextParams)
-        "library.read_context" => reads_library::read_context,
-    read  no_queue sync    routed(ReadSpanParams)
-        "library.read_span" => reads_library::read_span,
-    read  no_queue sync    routed(BookIdParams)
-        "library.show_metadata_audit" => reads_library::show_metadata_audit,
-    read  no_queue sync    routed(BookIdParams)
-        "library.show_metadata_report" => reads_library::show_metadata_report,
-    read  no_queue sync    routed(ListMetadataParams)
-        "library.list_metadata" => reads_library::list_metadata,
-    read  no_queue sync    routed(PageParams)
-        "library.list_pending_reviews" => reads_library::list_pending_reviews,
-    read  no_queue sync    routed(BookIdParams)
-        "library.show_audit_trail" => reads_library::show_audit_trail,
-    read  no_queue sync    routed(BookIdParams)
-        "library.show_pipeline_trail" => reads_library::show_pipeline_trail,
-    read  no_queue sync    routed(PageParams)
-        "library.list_papers" => reads_library::list_papers,
-    read  no_queue sync    routed(FindPapersParams)
-        "library.find_papers" => reads_library::find_papers,
-    read  no_queue sync    routed(BookIdParams)
-        "library.show_paper" => reads_library::show_paper,
-    read  no_queue sync    routed(ShowTocParams)
-        "library.show_paper_toc" => reads_library::show_paper_toc,
-    read  no_queue sync    routed(PaperAuditReadParams)
-        "library.show_paper_metadata_report" => reads_library::show_paper_metadata_report,
-    read  no_queue sync    routed(BookIdParams)
-        "library.show_paper_audit_trail" => reads_library::show_paper_audit_trail,
-    read  no_queue sync    routed(ListMetadataParams)
-        "library.list_paper_metadata" => reads_library::list_paper_metadata,
-    read  no_queue sync    routed(PageParams)
-        "library.list_paper_pending_reviews" => reads_library::list_paper_pending_reviews,
-    read  no_queue sync    routed(BookIdParams)
-        "papers.export_csl" => reads_library::papers_export_csl,
-    read  no_queue sync    routed(BookIdParams)
-        "papers.fetch_source" => reads_library::papers_fetch_source,
-
-    // library reads (async)
-    read  no_queue async   routed(SearchParams)       "library.search" => reads_library::search,
-    read  no_queue async   routed(SearchInBookParams)
-        "library.search_in_book" => reads_library::search_in_book,
-    read  no_queue async   routed(SearchInPaperParams)
-        "library.search_in_paper" => reads_library::search_in_paper,
-    read  no_queue async   routed(LibraryOnlyParams)
-        "library.vectors_status" => reads_library::vectors_status,
-
-    // reference reads
-    read  no_queue sync    routed(ReferenceLookupParams)
-        "reference.lookup" => reads_reference::lookup,
 
     // events
     stream no_queue sidebar process                    "events.subscribe",
@@ -442,19 +367,6 @@ methods! {
     write queue    async   routed(IngestSubmitParams) "ingest.submit" => ingest::submit,
     write queue    async   process                    "ingest.cancel" => ingest::cancel,
     write queue    async   routed(GleanSubmitParams)  "glean.submit" => glean::submit,
-
-    // book metadata curation
-    write no_queue async   routed(MetadataSetParams)  "metadata.set" => metadata::set,
-    write no_queue async   routed(MetadataClearParams) "metadata.clear" => metadata::clear,
-    write no_queue async   routed(MetadataVoidParams) "metadata.void" => metadata::void,
-    write no_queue async   routed(MetadataReauditParams) "metadata.reaudit" => metadata::reaudit,
-    write no_queue async   routed(MetadataContributorAddParams)
-        "metadata.contributor_add" => metadata::contributor_add,
-    write no_queue async   routed(MetadataContributorRemoveParams)
-        "metadata.contributor_remove" => metadata::contributor_remove,
-    write no_queue async   routed(MetadataAckParams)  "metadata.ack" => metadata::ack,
-    write no_queue async   routed(MetadataApproveParams) "metadata.approve" => metadata::approve,
-    write no_queue async   routed(MetadataRejectParams) "metadata.reject" => metadata::reject,
 
     // book vectors / corpus / stamps
     write queue    async   routed(VectorsRebuildParams) "vectors.rebuild" => vectors::rebuild,
@@ -524,9 +436,15 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
         ));
     }
 
+    if let Some(spec) = library_method(req.method.as_str()) {
+        return library::dispatch(spec, &req.params, ctx)
+            .await
+            .map(DispatchOutcome::Result);
+    }
+
     // Sidebar: methods whose handler shape does not fit
     // `dispatch_normal` (a non-`Result` outcome or an inline literal).
-    // These names also appear in `REGISTRY` so `daemon.methods`
+    // These names also appear in `HOST_METHODS` so `daemon.methods`
     // enumerates them; `sidebar_methods_appear_in_registry` enforces
     // that.
     match req.method.as_str() {
@@ -579,12 +497,45 @@ fn unknown_method_message(method: &str, mcp_tools: &[meta::McpToolInfo]) -> Stri
 // setting: internal -- a JSON-RPC application code callers match on, not a value to tune
 pub const QUEUE_WORKER_DISABLED: i32 = -32002;
 
+/// Every method the control plane serves, as `daemon.methods` lists
+/// it: the host's rows in declaration order, then the ops table's.
+pub fn method_signatures() -> &'static [meta::MethodSignature] {
+    static ALL: LazyLock<Vec<meta::MethodSignature>> = LazyLock::new(|| {
+        HOST_METHODS
+            .iter()
+            .cloned()
+            .chain(LIBRARY_METHODS.iter().map(library_signature))
+            .collect()
+    });
+    &ALL
+}
+
+/// The `daemon.methods` row of one ops table method.
+fn library_signature(spec: &MethodSpec) -> meta::MethodSignature {
+    let (selection, library_key) = match spec.selection {
+        Selection::Routed { control_key, .. } => ("routed", Some(control_key)),
+        Selection::Process => ("process", None),
+        Selection::Unrouted => ("unrouted", None),
+    };
+    meta::MethodSignature {
+        name: spec.name,
+        kind: match spec.access {
+            Access::Read => "read",
+            Access::Write { .. } | Access::Bookkeeping => "write",
+            Access::Stream => "stream",
+        },
+        queue_bound: spec.needs_queue,
+        selection,
+        library_key,
+    }
+}
+
 /// Returns `true` when a host that spawns no queue worker refuses the
-/// method before it runs. Backed by `REGISTRY.queue_bound`, which the
+/// method before it runs. Backed by the rows' `queue_bound`, which the
 /// `methods!` macro emits in lockstep with the dispatch arm — the two
 /// cannot drift.
 fn is_queue_bound_method(method: &str) -> bool {
-    REGISTRY
+    method_signatures()
         .iter()
         .any(|sig| sig.name == method && sig.queue_bound)
 }
@@ -600,7 +551,7 @@ fn is_queue_bound_method(method: &str) -> bool {
 /// method this build does not have would put words in the caller's
 /// mouth.
 pub fn library_key_for(method: &str) -> Option<&'static str> {
-    REGISTRY
+    method_signatures()
         .iter()
         .find(|sig| sig.name == method)
         .and_then(|sig| sig.library_key)
@@ -613,7 +564,7 @@ pub fn library_key_for(method: &str) -> Option<&'static str> {
 /// False for a method this build does not know, for the same reason
 /// [`library_key_for`] answers `None`.
 pub fn refuses_library(method: &str) -> bool {
-    REGISTRY
+    method_signatures()
         .iter()
         .any(|sig| sig.name == method && sig.selection == "unrouted")
 }
@@ -1125,7 +1076,7 @@ mod tests {
     fn the_ocr_intake_methods_are_not_in_the_dispatch_table() {
         for name in ["intake.ocr", "library.list_ocr_pending"] {
             assert!(
-                REGISTRY.iter().all(|method| method.name != name),
+                method_signatures().iter().all(|method| method.name != name),
                 "{name} is still dispatched"
             );
             assert!(!is_queue_bound_method(name), "{name} is still queue-bound");
@@ -1136,7 +1087,7 @@ mod tests {
     #[test]
     fn the_metadata_advance_method_is_not_in_the_dispatch_table() {
         assert!(
-            REGISTRY
+            method_signatures()
                 .iter()
                 .all(|method| method.name != "metadata.advance"),
             "metadata.advance is still dispatched"
@@ -1237,8 +1188,10 @@ mod tests {
     #[tokio::test]
     async fn tray_focus_is_not_a_method() {
         assert!(
-            !REGISTRY.iter().any(|sig| sig.name == "tray.focus"),
-            "tray.focus must not be in REGISTRY"
+            !method_signatures()
+                .iter()
+                .any(|sig| sig.name == "tray.focus"),
+            "tray.focus must not be a method"
         );
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_method_context(dir.path(), None);
@@ -1258,8 +1211,8 @@ mod tests {
     fn sidebar_methods_appear_in_registry() {
         for name in SIDEBAR_METHODS {
             assert!(
-                REGISTRY.iter().any(|sig| sig.name == *name),
-                "sidebar method {name} must be added to REGISTRY so \
+                HOST_METHODS.iter().any(|sig| sig.name == *name),
+                "sidebar method {name} must be added to HOST_METHODS so \
                  daemon.methods enumerates it"
             );
         }

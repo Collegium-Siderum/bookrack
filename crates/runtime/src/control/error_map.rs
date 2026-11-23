@@ -49,6 +49,7 @@ use bookrack_core::{Explain, Problem, ProblemData};
 use bookrack_ops::OpsError;
 use bookrack_ops::dto::UnknownFilterValue;
 use bookrack_ops::error_class::{self, ClassifiedError, ErrorKind};
+use bookrack_ops::methods::dispatch::DispatchError;
 use bookrack_ops::reads::reference::ReferenceError;
 use bookrack_ops::registry::RegistryError;
 use eyre::Report;
@@ -57,6 +58,7 @@ use super::jsonrpc::{
     BACKEND_UNAVAILABLE, BUSY, INTERNAL_ERROR, INVALID_LIBRARY, INVALID_PARAMS, PLAN_KIND_MISMATCH,
     PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND, PLAN_TARGET_DRIFTED, RpcError, STATE_UNUSABLE,
 };
+use super::methods::session::SessionError;
 use super::plan_registry::PlanLookupError;
 use crate::cmd::input_error::CmdInputError;
 use crate::cmd::state_error::CmdStateError;
@@ -239,6 +241,29 @@ pub fn ops_err(e: OpsError) -> RpcError {
 /// carrying its full cause chain.
 pub fn reference_err(e: ReferenceError) -> RpcError {
     rpc_from_classified(error_class::from_reference(&e))
+}
+
+/// Map a failure of a method from the ops method table. A failure the
+/// dispatcher judged takes its kind's code; a failure of the host's own
+/// hook is judged here, as any handler's error is.
+pub fn dispatch_err(e: DispatchError) -> RpcError {
+    match e {
+        DispatchError::Judged(classified) => rpc_from_classified(classified),
+        DispatchError::Host { method, report } => handler_err(method, report),
+    }
+}
+
+/// Map a session tool's failure: a registry that could not be read and
+/// a poisoned queue lock are faults, an unknown state filter is caller
+/// input.
+pub fn session_err(e: SessionError) -> RpcError {
+    match &e {
+        SessionError::Registry(registry) => {
+            rpc_from_classified(error_class::from_registry(registry))
+        }
+        SessionError::UnknownState(unknown) => unknown_filter_value(unknown),
+        SessionError::QueueStateLock => rpc_from_classified(error_class::from_server_fault(&e)),
+    }
 }
 
 /// Map a directly-held [`RegistryError`] without an `anyhow` round-trip.

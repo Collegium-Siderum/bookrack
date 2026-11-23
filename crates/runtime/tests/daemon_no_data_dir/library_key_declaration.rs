@@ -25,7 +25,7 @@
 
 #![cfg(unix)]
 
-use bookrack_runtime::control::methods::{REGISTRY, library_key_for, refuses_library};
+use bookrack_runtime::control::methods::{library_key_for, method_signatures, refuses_library};
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use bookrack_test_support::{ProcessEnv, process_env};
 use eyre::{Result, eyre};
@@ -88,7 +88,7 @@ async fn call(
 /// the selection.
 #[test]
 fn every_row_declares_a_selection_and_a_key_that_agree() {
-    for sig in REGISTRY {
+    for sig in method_signatures() {
         assert!(
             matches!(sig.selection, "routed" | "process" | "unrouted"),
             "{} declares an unknown selection {:?}",
@@ -106,7 +106,10 @@ fn every_row_declares_a_selection_and_a_key_that_agree() {
     }
     // The table is only worth asserting if it is populated: a registry
     // that lost its routed rows would satisfy every check above.
-    let routed = REGISTRY.iter().filter(|s| s.selection == "routed").count();
+    let routed = method_signatures()
+        .iter()
+        .filter(|s| s.selection == "routed")
+        .count();
     assert!(
         routed > 60,
         "only {routed} routed methods; the axis lost rows"

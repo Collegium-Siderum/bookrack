@@ -36,6 +36,9 @@ bookrack_core::fixed_settings! {
     "mcp.probe_timeout" = crate::mcp_endpoint::PROBE_TIMEOUT,
         "how long the health probe waits for the MCP endpoint to answer",
         acts on "doctor and bring-up, which report the endpoint unreachable past it";
+    "mcp.queue_status_recent" = crate::control::methods::session::SESSION_QUEUE_STATUS_RECENT,
+        "recent jobs one queue-status answer carries alongside the counts",
+        acts on "session.queue_status";
     "reranker.crashloop_attempts" = crate::daemon::RERANK_CRASHLOOP_ATTEMPTS,
         "respawns within one outage after which the backend counts as crash-looping",
         acts on "the degraded state doctor and the status card report";

@@ -16,19 +16,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use axum::response::sse::{Event, KeepAlive, Sse};
-use bookrack_core::queue::{JobState, QueueState};
-use bookrack_core::{DaemonIdentity, ItemKind, KindedNodeId, NodeId, Problem};
+use bookrack_core::queue::QueueState;
+use bookrack_core::{DaemonIdentity, ItemKind, KindedNodeId, NodeId};
 use bookrack_embed::OllamaEmbedClient;
-use bookrack_obs::{LogEvent, LogStreamHandle};
-use bookrack_ops::dto::{
-    BookFilter, MetadataFilter, PaperFilter, UnknownFilterValue, parse_statuses,
-};
+use bookrack_obs::LogStreamHandle;
+use bookrack_ops::dto::{BookFilter, MetadataFilter, PaperFilter, parse_statuses};
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::write_session::{ChangeSet, Region, SessionRunError, WriteSession};
 use bookrack_ops::{
     Caller, OpsError, SearchOptions, audit_overlay, reads, with_caller_override, writes,
 };
 use bookrack_runtime::control::events::EventStreamHandle;
+use bookrack_runtime::control::methods::session;
 use eyre::WrapErr;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -40,11 +39,11 @@ use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
 
 mod error_map;
 use error_map::{
-    internal_message, invalid_params_err, invalid_params_message, mcp_from_problem,
-    ops_error_to_mcp, reference_error_to_mcp, registry_err, report_to_mcp, respond_with,
+    invalid_params_err, invalid_params_message, mcp_from_problem, ops_error_to_mcp,
+    reference_error_to_mcp, registry_err, report_to_mcp, respond_with, session_error_to_mcp,
     unknown_filter_value_to_mcp,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
@@ -531,205 +530,6 @@ pub struct LibraryOnlyArgs {
     #[serde(default)]
     pub library: Option<String>,
 }
-
-/// Arguments for `session.info`. The tool takes no inputs.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
-pub struct SessionInfoArgs {}
-
-/// Response shape returned by `session.info`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct SessionInfoResult {
-    /// A UUIDv7 the daemon drew when it started; distinct for every
-    /// start.
-    pub instance_id: String,
-    /// `bookrack` workspace version the daemon was built from.
-    pub version: String,
-    /// The daemon's process id.
-    pub pid: u32,
-    /// The runtime directory holding the daemon's session lock.
-    pub runtime_dir: String,
-    /// The control-plane endpoint the daemon answers on, when it has
-    /// one.
-    pub control_sock: Option<String>,
-    /// When the daemon entered service, RFC 3339.
-    pub started_at: String,
-    /// Wall-clock seconds since the daemon started.
-    pub uptime_seconds: u64,
-    /// Every library this session has mounted, one row each, sorted by
-    /// name.
-    pub libraries: Vec<SessionLibrary>,
-    /// Name of the row in `libraries` marked `default` — the library a
-    /// tool call without a `library` selector resolves to — or empty
-    /// when no row carries the mark.
-    pub default_library: String,
-    /// The registered libraries bring-up did not mount, one row each,
-    /// sorted by name, each with its root and the reason; empty when
-    /// every registered library came up. Read in the same instant as
-    /// `libraries`, so no name appears in both.
-    pub unmounted: Vec<SessionUnmounted>,
-    /// MCP listener address (`host:port`), or `disabled` when the
-    /// daemon is running without `/mcp`.
-    pub mcp_addr: String,
-    /// Ollama HTTP endpoint the daemon will reach.
-    pub ollama_url: String,
-}
-
-/// One mounted library in a [`SessionInfoResult`]. The control plane's
-/// `status.served` rows carry the same three fields plus a `primary`
-/// bit, which an MCP client has no use for: it reaches a library by
-/// name or through the default.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct SessionLibrary {
-    /// The library's registered short name.
-    pub name: String,
-    /// The library's own data root (rendered), taken from its handle's
-    /// configuration.
-    pub data_dir: String,
-    /// Whether this is the library a tool call without a `library`
-    /// selector resolves to.
-    pub default: bool,
-}
-
-/// One registered library the daemon did not mount, as `session.info`
-/// reports it.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct SessionUnmounted {
-    /// The library's registered short name.
-    pub name: String,
-    /// The data root the registry records for it (rendered).
-    pub data_dir: String,
-    /// Why bring-up did not mount it.
-    pub reason: SessionProblem,
-}
-
-/// A three-part diagnostic as `session.info` carries it: the same four
-/// fields a `Problem` serializes to, mirrored so the tool's schema can
-/// describe them.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct SessionProblem {
-    /// One line stating what failed.
-    pub summary: String,
-    /// Implementation-level evidence for the summary.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-    /// What the operator should do next.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hint: Option<String>,
-    /// Whether the same action, repeated unchanged, may succeed.
-    pub retryable: bool,
-}
-
-/// Arguments for `session.logs_tail`.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
-pub struct SessionLogsTailArgs {
-    /// Maximum number of log events to return, from the most recent.
-    /// Capped server-side at [`bookrack_obs::stream::TAIL_REQUEST_MAX`];
-    /// defaults to [`bookrack_obs::stream::TAIL_REQUEST_DEFAULT`] when
-    /// omitted.
-    #[serde(default)]
-    pub n: Option<usize>,
-}
-
-/// Response shape returned by `session.logs_tail`: a slice of the
-/// daemon's in-memory log ring buffer, oldest first.
-#[derive(Debug, Serialize)]
-pub struct SessionLogsTailResult {
-    /// The events themselves.
-    pub events: Vec<LogEvent>,
-    /// How many events the tool returned (`<= n` capped by buffer
-    /// occupancy).
-    pub returned: usize,
-}
-
-/// Arguments for `session.queue_status`.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
-pub struct SessionQueueStatusArgs {
-    /// List only jobs in this lifecycle state in `recent`, under the
-    /// same cap and order. The names are the ones a row reports in its
-    /// `state`: `pending`, `running`, `done`, `skipped_duplicate`,
-    /// `needs_ocr`, `failed`, `cancelled`. The counts cover the whole
-    /// queue either way. An unrecognised name is refused rather than
-    /// dropped.
-    #[serde(default)]
-    pub state: Option<String>,
-}
-
-/// Compact projection of one queued ingest job, used in the `recent`
-/// list returned by `session.queue_status`.
-#[derive(Debug, Serialize)]
-pub struct QueueJobSummary {
-    /// UUIDv7 string identifying the job.
-    pub id: String,
-    /// Lifecycle state, lowercased to match the persisted serde form.
-    pub state: String,
-    /// Library name the job runs against.
-    pub library: String,
-    /// The file the job reads; absent for a job that reads none.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    /// When the job reached its terminal state; absent while it has not
-    /// reached one, as for a pending or running job.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// The failure the job recorded — a `failed` job's cause, as one
-    /// flattened chain — or absent when it recorded none.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// The failure as the daemon classified it — summary, detail, hint,
-    /// `retryable` — when it did; absent otherwise.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub problem: Option<Problem>,
-}
-
-/// Response shape returned by `session.queue_status`: counts by state
-/// and a small recent-job tail.
-#[derive(Debug, Serialize)]
-pub struct SessionQueueStatusResult {
-    /// Whether the worker is currently paused.
-    pub paused: bool,
-    /// Jobs in `Pending` state.
-    pub pending: usize,
-    /// Jobs in `Running` state.
-    pub running: usize,
-    /// Jobs in `Done` state.
-    pub done: usize,
-    /// Jobs in `SkippedDuplicate` state: the worker short-circuited
-    /// because the source was already in the catalog with matching
-    /// stamps, so no new intake row was written.
-    pub skipped_duplicate: usize,
-    /// Jobs in `NeedsOcr` state: the source had no usable text layer and
-    /// was registered as a `needs_ocr` anchor until its text is ingested.
-    pub needs_ocr: usize,
-    /// Jobs in `Failed` state.
-    pub failed: usize,
-    /// Jobs in `Cancelled` state.
-    pub cancelled: usize,
-    /// The [`SESSION_QUEUE_STATUS_RECENT`] most recently enqueued jobs,
-    /// newest first; with `state`, the most recently enqueued jobs in
-    /// that state.
-    pub recent: Vec<QueueJobSummary>,
-}
-
-/// Cap on the `recent` field returned by `session.queue_status`.
-// setting: mcp.queue_status_recent
-pub const SESSION_QUEUE_STATUS_RECENT: usize = 10;
-
-/// Parse a `session.queue_status` `state` filter from the wire token a
-/// row reports ([`JobState::as_wire_str`]).
-fn parse_job_state(value: &str) -> Result<JobState, UnknownFilterValue> {
-    JobState::ALL
-        .into_iter()
-        .find(|state| state.as_wire_str() == value)
-        .ok_or_else(|| UnknownFilterValue {
-            parameter: "state",
-            value: value.to_string(),
-            accepted: JobState::ALL.map(JobState::as_wire_str).to_vec(),
-        })
-}
-
-/// Arguments for `session.shutdown`. The tool takes no inputs.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
-pub struct SessionShutdownArgs {}
 
 /// Arguments for `library.metadata.set`. Requires `library`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1886,58 +1686,16 @@ impl BookrackServer {
     )]
     async fn session_info(
         &self,
-        Parameters(_): Parameters<SessionInfoArgs>,
+        Parameters(_): Parameters<session::SessionInfoParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        // One registry read yields the mounted rows, the default name,
-        // and the unmounted rows, so a default pointer moved mid-call
-        // cannot leave the card naming one default and marking another,
-        // and a mount landing mid-call cannot list one name twice.
-        let snapshot = self
-            .registry
-            .snapshot()
-            .map_err(|e| internal_message(format!("read library registry: {e}")))?;
-        let libraries: Vec<SessionLibrary> = snapshot
-            .mounted
-            .into_iter()
-            .map(|s| SessionLibrary {
-                name: s.name,
-                data_dir: s.data_dir.display().to_string(),
-                default: s.is_default,
-            })
-            .collect();
-        let unmounted: Vec<SessionUnmounted> = snapshot
-            .unmounted
-            .iter()
-            .map(|library| SessionUnmounted {
-                name: library.name().to_string(),
-                data_dir: library.data_dir().display().to_string(),
-                reason: SessionProblem {
-                    summary: library.reason().summary.clone(),
-                    detail: library.reason().data.detail.clone(),
-                    hint: library.reason().data.hint.clone(),
-                    retryable: library.reason().data.retryable,
-                },
-            })
-            .collect();
-        let default_library = libraries
-            .iter()
-            .find(|row| row.default)
-            .map(|row| row.name.clone())
-            .unwrap_or_default();
-        let result = SessionInfoResult {
-            instance_id: self.identity.instance_id.clone(),
-            version: self.identity.version.clone(),
-            pid: self.identity.pid,
-            runtime_dir: self.identity.runtime_dir.clone(),
-            control_sock: self.identity.control_sock.clone(),
-            started_at: self.identity.started_at.clone(),
-            uptime_seconds: self.started_at.elapsed().as_secs(),
-            libraries,
-            default_library,
-            unmounted,
-            mcp_addr: self.endpoints.mcp_addr.clone(),
-            ollama_url: self.endpoints.ollama_url.clone(),
-        };
+        let result = session::info(
+            &self.registry,
+            &self.identity,
+            self.started_at,
+            &self.endpoints.mcp_addr,
+            &self.endpoints.ollama_url,
+        )
+        .map_err(session_error_to_mcp)?;
         respond_with(&result)
     }
 
@@ -1952,15 +1710,9 @@ impl BookrackServer {
     )]
     async fn session_logs_tail(
         &self,
-        Parameters(args): Parameters<SessionLogsTailArgs>,
+        Parameters(args): Parameters<session::SessionLogsTailParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let n = args
-            .n
-            .unwrap_or(bookrack_obs::stream::TAIL_REQUEST_DEFAULT)
-            .min(bookrack_obs::stream::TAIL_REQUEST_MAX);
-        let events = self.log_stream.tail(n);
-        let returned = events.len();
-        respond_with(&SessionLogsTailResult { events, returned })
+        respond_with(&session::logs_tail(&self.log_stream, &args))
     }
 
     /// Snapshot the daemon's ingest queue: counts by lifecycle
@@ -1983,61 +1735,10 @@ impl BookrackServer {
     )]
     async fn session_queue_status(
         &self,
-        Parameters(args): Parameters<SessionQueueStatusArgs>,
+        Parameters(args): Parameters<session::SessionQueueStatusParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let wanted = args
-            .state
-            .as_deref()
-            .map(parse_job_state)
-            .transpose()
-            .map_err(|unknown| unknown_filter_value_to_mcp(&unknown))?;
-        let state = self
-            .queue_state
-            .lock()
-            .map_err(|e| internal_message(format!("queue state lock: {e}")))?;
-        let mut counts = [0usize; 7];
-        for job in &state.jobs {
-            let idx = match job.state {
-                JobState::Pending => 0,
-                JobState::Running => 1,
-                JobState::Done => 2,
-                JobState::SkippedDuplicate => 3,
-                JobState::NeedsOcr => 4,
-                JobState::Failed => 5,
-                JobState::Cancelled => 6,
-            };
-            counts[idx] += 1;
-        }
-        let recent: Vec<QueueJobSummary> = state
-            .jobs
-            .iter()
-            .rev()
-            .filter(|j| wanted.is_none_or(|state| j.state == state))
-            .take(SESSION_QUEUE_STATUS_RECENT)
-            .map(|j| QueueJobSummary {
-                id: j.id.clone(),
-                // The stable snake_case wire token, not `Debug`, so a
-                // multi-word state reads `needs_ocr` rather than
-                // `needsocr`.
-                state: j.state.as_wire_str().to_string(),
-                library: j.library.clone(),
-                path: j.source_path().map(|path| path.display().to_string()),
-                finished_at: j.finished_at,
-                error: j.error.clone(),
-                problem: j.problem.clone(),
-            })
-            .collect();
-        let result = SessionQueueStatusResult {
-            paused: state.paused,
-            pending: counts[0],
-            running: counts[1],
-            done: counts[2],
-            skipped_duplicate: counts[3],
-            needs_ocr: counts[4],
-            failed: counts[5],
-            cancelled: counts[6],
-            recent,
-        };
+        let result =
+            session::queue_status(&self.queue_state, &args).map_err(session_error_to_mcp)?;
         respond_with(&result)
     }
 
@@ -2060,10 +1761,9 @@ impl BookrackServer {
     )]
     async fn session_shutdown(
         &self,
-        Parameters(_): Parameters<SessionShutdownArgs>,
+        Parameters(_): Parameters<session::SessionShutdownParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        bookrack_runtime::control::events::initiate_shutdown(&self.event_stream, &self.shutdown_tx);
-        respond_with(&serde_json::json!({"status": "shutting down"}))
+        respond_with(&session::shutdown(&self.event_stream, &self.shutdown_tx))
     }
 
     /// Snapshot the vector store.
@@ -2652,13 +2352,6 @@ pub fn spawn_listener(
         )
         .await
     }))
-}
-
-bookrack_core::fixed_settings! {
-    owner = "mcp";
-    "mcp.queue_status_recent" = SESSION_QUEUE_STATUS_RECENT,
-        "recent jobs one queue-status answer carries alongside the counts",
-        acts on "session.queue_status";
 }
 
 /// Enumerate every MCP tool the live server exposes. Calls into the

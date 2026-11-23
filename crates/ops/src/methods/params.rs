@@ -17,6 +17,7 @@
 //! here, the control plane's named after `metadata.*` and MCP's after
 //! `library.metadata.*`.
 
+// Parallel implementation: frontend-param-mirror.
 // Parallel implementation: metadata-write-param-mirror.
 
 use bookrack_core::{ItemKind, Problem};

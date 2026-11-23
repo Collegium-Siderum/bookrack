@@ -4,19 +4,17 @@
 //!
 //! Carries the Phase 1 surface — `daemon.version` / `daemon.shutdown`
 //! / `status` / `doctor.gather` / `queue.list` / `library.list` /
-//! `library.info` / `events.snapshot` — plus the snapshot bundle the
+//! `events.snapshot` — plus the snapshot bundle the
 //! socket layer emits on `events.subscribe`. Phase 2 expands the
 //! snapshot channels with `queue.tick`, `library.changed`, and
 //! `mcp.availability` so a reconnecting client sees the same view as a
 //! freshly connected one.
 
-use bookrack_ops::reads::info::show_library_info;
 use bookrack_ops::registry::{LibrarySummary, UnmountedLibrary};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::MethodContext;
-use crate::control::error_map::registry_err;
 use crate::control::events::{Event, JobOutcomeSummary, QueueTick};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::doctor;
@@ -385,60 +383,6 @@ fn library_list_value(summaries: Vec<bookrack_ops::registry::LibrarySummary>) ->
         })
         .collect();
     Value::Array(rows)
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub struct LibraryInfoParams {
-    #[serde(default)]
-    name: Option<String>,
-}
-
-/// `library.info` selects its library under `name` rather than the
-/// `library` every other routed method takes: this parameter predates
-/// the shared spelling and is part of a published surface. The key
-/// travels with the type so a client injecting a selection reads it
-/// off the registry instead of special-casing the method.
-impl super::RoutedParams for LibraryInfoParams {
-    const LIBRARY_KEY: &'static str = "name";
-
-    fn library(&self) -> Option<&str> {
-        self.name.as_deref()
-    }
-}
-
-pub async fn library_info(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let parsed: LibraryInfoParams = match params {
-        Some(v) if !v.is_null() => serde_json::from_value(v.clone()).map_err(|e| {
-            RpcError::new(INVALID_PARAMS, format!("invalid library.info params: {e}"))
-        })?,
-        _ => LibraryInfoParams::default(),
-    };
-    let handle = ctx
-        .registry
-        .get(parsed.name.as_deref())
-        .map_err(registry_err)?;
-    // The card's identity is built from the library the handle names,
-    // not from the bring-up snapshot in `ctx`: the counts below already
-    // come from this handle, and a card pairing one library's counts
-    // with another's root is the one an operator cannot read. The MCP
-    // address is the exception — a property of the process — and is
-    // carried over from the snapshot.
-    // Routed through the shared classifier: a reference naming no
-    // defined profile is `CmdInputError::BadArgument` carrying the
-    // accepted set, which the write side already reports as caller
-    // input, and a flat `INTERNAL_ERROR` here would drop both the code
-    // and the set.
-    let info_context = crate::daemon::library_info_context_for(
-        handle.cfg(),
-        &ctx.daemon_config.ollama_url,
-        &ctx.info_context.mcp_addr,
-    )
-    .map_err(|e| crate::control::error_map::handler_err("library.info", e))?;
-    let info = show_library_info(handle.ops(), info_context)
-        .await
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("library info failed: {e}")))?;
-    serde_json::to_value(info)
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("serialise library info: {e}")))
 }
 
 #[derive(Debug, Deserialize)]

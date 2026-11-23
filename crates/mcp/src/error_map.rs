@@ -21,6 +21,7 @@ use bookrack_ops::OpsError;
 use bookrack_ops::dto::UnknownFilterValue;
 use bookrack_ops::reads::reference::ReferenceError;
 use bookrack_ops::registry::RegistryError;
+use bookrack_runtime::control::methods::session::SessionError;
 use rmcp::ErrorData;
 use rmcp::model::{CallToolResult, ContentBlock, ErrorCode};
 use serde::Serialize;
@@ -47,12 +48,6 @@ pub(crate) fn mcp_from_problem(code: ErrorCode, problem: Problem) -> ErrorData {
         problem.summary,
         serde_json::to_value(problem.data).ok(),
     )
-}
-
-/// An `internal_error` envelope for a server-side failure a tool body
-/// words itself.
-pub(crate) fn internal_message(message: String) -> ErrorData {
-    envelope(ErrorCode::INTERNAL_ERROR, message, None)
 }
 
 /// An `invalid_params` envelope for a refusal a tool body words itself.
@@ -143,6 +138,13 @@ pub(crate) fn report_to_mcp(method: &str, e: eyre::Report) -> ErrorData {
 /// control-plane method answer one failure with one code.
 pub(crate) fn reference_error_to_mcp(e: ReferenceError) -> ErrorData {
     let rpc = bookrack_runtime::control::error_map::reference_err(e);
+    envelope(ErrorCode(rpc.code), rpc.message, rpc.data)
+}
+
+/// Map a session tool's failure onto the MCP envelope through the
+/// control plane's classifier, as [`ops_error_to_mcp`] does.
+pub(crate) fn session_error_to_mcp(e: SessionError) -> ErrorData {
+    let rpc = bookrack_runtime::control::error_map::session_err(e);
     envelope(ErrorCode(rpc.code), rpc.message, rpc.data)
 }
 

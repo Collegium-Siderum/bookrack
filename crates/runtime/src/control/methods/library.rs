@@ -1,39 +1,61 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `reference.lookup`: one keyed read over a library's reference
-//! store, mirroring the MCP tool of the same name. Both surfaces run
-//! [`bookrack_ops::reads::reference::lookup_at`], so they accept the
-//! same parameters, answer the same body and take the same error
-//! codes.
+//! The library methods of [`bookrack_ops::methods::LIBRARY_METHODS`],
+//! served over the control socket.
+//!
+//! The method bodies live in the ops dispatcher, which both transports
+//! call; this module supplies what the control plane contributes — the
+//! caller every write records, the process-side half of `library.info`,
+//! and the mapping of a judged failure onto a JSON-RPC envelope.
 
-use bookrack_ops::reads::reference::{self, ReferenceLookup};
-use serde::Deserialize;
+use bookrack_config::Config;
+use bookrack_ops::Caller;
+use bookrack_ops::methods::dispatch::{DispatchContext, HostContext, dispatch as run};
+use bookrack_ops::methods::{MethodSpec, Surface};
+use bookrack_ops::reads::info::LibraryInfoContext;
 use serde_json::Value;
 
 use super::MethodContext;
-use super::reads_library::{parse, resolve, to_value};
-use crate::control::error_map::reference_err;
+use crate::control::error_map::dispatch_err;
 use crate::control::jsonrpc::RpcError;
 
-/// The `reference.lookup` params: the library selector beside the
-/// lookup request itself.
-#[derive(Debug, Deserialize)]
-pub struct ReferenceLookupParams {
-    #[serde(default)]
-    pub library: Option<String>,
-    #[serde(flatten)]
-    pub lookup: ReferenceLookup,
+/// The control plane's half of the methods that need the host.
+struct ControlHost<'a> {
+    ollama_url: &'a str,
+    mcp_addr: &'a str,
 }
 
-routed_params!(ReferenceLookupParams);
+impl HostContext for ControlHost<'_> {
+    /// The card's identity is the library the handle names: the counts
+    /// already come from that handle, and a card pairing one library's
+    /// counts with another's root is the one an operator cannot read.
+    /// The Ollama endpoint and the MCP address belong to the process.
+    fn library_info_context(&self, cfg: &Config) -> eyre::Result<LibraryInfoContext> {
+        crate::daemon::library_info_context_for(cfg, self.ollama_url, self.mcp_addr)
+    }
+}
 
-pub fn lookup(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let p: ReferenceLookupParams = parse(params, "reference.lookup")?;
-    let handle = resolve(ctx, p.library.as_deref())?;
-    let catalogs = reference::catalogs().map_err(reference_err)?;
-    let result = reference::lookup_at(&handle.ops().reference_db_path(), catalogs, &p.lookup)
-        .map_err(reference_err)?;
-    to_value(&result)
+/// Run `spec` for a control-plane call, attributed to
+/// [`Caller::control_plane`].
+pub(super) async fn dispatch(
+    spec: &MethodSpec,
+    params: &Option<Value>,
+    ctx: &MethodContext,
+) -> Result<Value, RpcError> {
+    let host = ControlHost {
+        ollama_url: &ctx.daemon_config.ollama_url,
+        mcp_addr: &ctx.info_context.mcp_addr,
+    };
+    let caller = Caller::control_plane();
+    let dispatch_ctx = DispatchContext {
+        registry: &ctx.registry,
+        caller: &caller,
+        host: &host,
+    };
+    run(&dispatch_ctx, spec, Surface::ControlPlane, params.clone())
+        .await
+        .map(|reply| reply.value)
+        .map_err(dispatch_err)
 }
 
 #[cfg(test)]
@@ -41,11 +63,32 @@ mod tests {
     use std::path::Path;
 
     use bookrack_refs::{NewBook, NewEntry, Refs};
-    use serde_json::json;
+    use serde_json::{Value, json};
 
-    use super::super::test_method_context;
-    use super::*;
-    use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, STATE_UNUSABLE};
+    use super::super::{DispatchOutcome, dispatch, test_method_context};
+    use crate::control::jsonrpc::{
+        INTERNAL_ERROR, INVALID_PARAMS, Request, RpcError, STATE_UNUSABLE,
+    };
+
+    /// Call `method` through the control plane's dispatcher on a
+    /// one-library context rooted at `dir`.
+    async fn call(dir: &Path, method: &str, params: Option<Value>) -> Result<Value, RpcError> {
+        let ctx = test_method_context(dir, Some("alpha"));
+        let req = Request {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: method.to_string(),
+            params,
+        };
+        match dispatch(&req, &ctx).await? {
+            DispatchOutcome::Result(value) => Ok(value),
+            DispatchOutcome::Shutdown(value) => panic!("{method} is not a shutdown: {value}"),
+        }
+    }
+
+    async fn lookup(dir: &Path, params: Value) -> Result<Value, RpcError> {
+        call(dir, "reference.lookup", Some(params)).await
+    }
 
     fn book(slug: &str, rank: i64) -> NewBook {
         NewBook {
@@ -107,19 +150,40 @@ mod tests {
             .expect("stamp the version");
     }
 
-    fn call(dir: &Path, params: Value) -> Result<Value, RpcError> {
-        let ctx = test_method_context(dir, Some("alpha"));
-        lookup(&Some(params), &ctx)
+    /// A read whose params are all optional takes none at all, absent
+    /// or `null`.
+    #[tokio::test]
+    async fn a_read_with_only_optional_params_takes_none() {
+        let dir = tempfile::tempdir().unwrap();
+        for params in [None, Some(Value::Null)] {
+            let page = call(dir.path(), "library.list_books", params.clone())
+                .await
+                .unwrap_or_else(|e| panic!("{params:?}: {e:?}"));
+            assert_eq!(page["books"], json!([]), "{page}");
+        }
     }
 
-    #[test]
-    fn an_exact_key_answers_its_hits_in_authority_order() {
+    /// A call missing a required field is refused as invalid params
+    /// naming the method.
+    #[tokio::test]
+    async fn a_missing_required_field_is_refused_naming_the_method() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = call(dir.path(), "library.show_book", None)
+            .await
+            .expect_err("intake_id is required");
+        assert_eq!(err.code, INVALID_PARAMS);
+        assert!(err.message.contains("library.show_book"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn an_exact_key_answers_its_hits_in_authority_order() {
         let dir = tempfile::tempdir().unwrap();
         seed(dir.path());
-        let body = call(
+        let body = lookup(
             dir.path(),
             json!({ "book": "*", "entry_key": "ashgrovewren" }),
         )
+        .await
         .unwrap();
         assert_eq!(body["entry_key"], "ashgrovewren");
         assert_eq!(body["hits"].as_array().unwrap().len(), 2);
@@ -128,14 +192,15 @@ mod tests {
         assert_eq!(body["redirect_followed"], Value::Null);
     }
 
-    #[test]
-    fn the_headword_as_written_reaches_the_entry_through_its_latin_form() {
+    #[tokio::test]
+    async fn the_headword_as_written_reaches_the_entry_through_its_latin_form() {
         let dir = tempfile::tempdir().unwrap();
         seed(dir.path());
-        let body = call(
+        let body = lookup(
             dir.path(),
             json!({ "book": "book_a", "entry_key": "Ashgrove, Wren" }),
         )
+        .await
         .unwrap();
         assert_eq!(body["entry_key"], "Ashgrove, Wren", "the query is echoed");
         assert_eq!(body["hits"].as_array().unwrap().len(), 1);
@@ -146,27 +211,29 @@ mod tests {
         assert_eq!(body["redirect_followed"], Value::Null);
     }
 
-    #[test]
-    fn a_key_nobody_wrote_answers_no_hits() {
+    #[tokio::test]
+    async fn a_key_nobody_wrote_answers_no_hits() {
         let dir = tempfile::tempdir().unwrap();
         seed(dir.path());
-        let body = call(
+        let body = lookup(
             dir.path(),
             json!({ "book": "book_a", "entry_key": "nobody" }),
         )
+        .await
         .unwrap();
         assert_eq!(body["entry_key"], "nobody");
         assert_eq!(body["hits"], json!([]));
         assert_eq!(body["primary_by_authority"], Value::Null);
     }
 
-    #[test]
-    fn a_library_without_a_reference_store_answers_no_hits() {
+    #[tokio::test]
+    async fn a_library_without_a_reference_store_answers_no_hits() {
         let dir = tempfile::tempdir().unwrap();
-        let body = call(
+        let body = lookup(
             dir.path(),
             json!({ "book": "book_a", "entry_key": "ashgrovewren" }),
         )
+        .await
         .unwrap();
         assert_eq!(body["entry_key"], "ashgrovewren");
         assert_eq!(body["hits"], json!([]));
@@ -176,8 +243,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_bad_argument_is_refused_whether_or_not_the_store_exists() {
+    #[tokio::test]
+    async fn a_bad_argument_is_refused_whether_or_not_the_store_exists() {
         let bad = [
             (json!({ "book": "", "entry_key": "x" }), "`book`"),
             (
@@ -195,7 +262,9 @@ mod tests {
                 seed(dir.path());
             }
             for (params, field) in &bad {
-                let err = call(dir.path(), params.clone()).expect_err("a bad argument is refused");
+                let err = lookup(dir.path(), params.clone())
+                    .await
+                    .expect_err("a bad argument is refused");
                 assert_eq!(err.code, INVALID_PARAMS, "seeded={seeded}: {err:?}");
                 assert!(
                     err.message.contains(field),
@@ -206,21 +275,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_store_path_that_is_a_directory_is_an_error_not_an_empty_answer() {
+    #[tokio::test]
+    async fn a_store_path_that_is_a_directory_is_an_error_not_an_empty_answer() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("reference.db")).unwrap();
-        let err = call(dir.path(), json!({ "book": "book_a", "entry_key": "x" }))
+        let err = lookup(dir.path(), json!({ "book": "book_a", "entry_key": "x" }))
+            .await
             .expect_err("a directory where the store should be is a fault");
         assert_eq!(err.code, INTERNAL_ERROR, "{err:?}");
     }
 
-    #[test]
-    fn a_store_from_a_newer_build_is_unusable_with_its_path_in_the_detail() {
+    #[tokio::test]
+    async fn a_store_from_a_newer_build_is_unusable_with_its_path_in_the_detail() {
         let dir = tempfile::tempdir().unwrap();
         seed(dir.path());
         stamp_user_version(dir.path(), bookrack_refs::TARGET_VERSION + 1);
-        let err = call(dir.path(), json!({ "book": "book_a", "entry_key": "x" }))
+        let err = lookup(dir.path(), json!({ "book": "book_a", "entry_key": "x" }))
+            .await
             .expect_err("a newer schema is refused");
         assert_eq!(err.code, STATE_UNUSABLE, "{err:?}");
         assert_eq!(err.message, "cannot read the reference store");
@@ -236,12 +307,13 @@ mod tests {
         assert!(hint.contains("older than the store"), "{hint}");
     }
 
-    #[test]
-    fn a_store_from_an_older_build_is_unusable_with_the_rebuild_in_the_hint() {
+    #[tokio::test]
+    async fn a_store_from_an_older_build_is_unusable_with_the_rebuild_in_the_hint() {
         let dir = tempfile::tempdir().unwrap();
         seed(dir.path());
         stamp_user_version(dir.path(), 0);
-        let err = call(dir.path(), json!({ "book": "book_a", "entry_key": "x" }))
+        let err = lookup(dir.path(), json!({ "book": "book_a", "entry_key": "x" }))
+            .await
             .expect_err("an older schema is refused");
         assert_eq!(err.code, STATE_UNUSABLE, "{err:?}");
         let data = err.data.expect("detail and hint");

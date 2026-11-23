@@ -326,7 +326,7 @@ fn join_values(items: &[Value]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use bookrack_runtime::control::methods::REGISTRY;
+    use bookrack_runtime::control::methods::method_signatures;
 
     use super::*;
 
@@ -436,7 +436,9 @@ mod tests {
         for id in one_of_each() {
             let Ok(call) = call_for(&id) else { continue };
             assert!(
-                REGISTRY.iter().any(|sig| sig.name == call.method),
+                method_signatures()
+                    .iter()
+                    .any(|sig| sig.name == call.method),
                 "{id} projects onto `{}`, which the daemon's method table does not carry",
                 call.method
             );

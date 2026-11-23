@@ -171,7 +171,6 @@ paths = [
   "crates/runtime/src/control/methods/diagnose.rs",
   "crates/runtime/src/control/methods/papers_metadata.rs",
   "crates/runtime/src/control/methods/papers_remove.rs",
-  "crates/runtime/src/control/methods/reads_library.rs",
   "crates/runtime/src/control/methods/remove.rs",
 ]
 reason = "transitional"
@@ -563,11 +562,11 @@ exit = "one handler takes the kind as a parameter"
 id = "control-metadata"
 summary = "metadata control-plane handlers, one file per kind"
 sites = [
-  "crates/runtime/src/control/methods/metadata.rs",
+  "crates/ops/src/methods/dispatch.rs",
   "crates/runtime/src/control/methods/papers_metadata.rs",
 ]
 reason = "transitional"
-detail = "book handlers go through cmd::metadata::run_write on a catalog-only Ops; paper handlers call the handle's ops directly; reopen exists only for papers"
+detail = "book writes run in the method table's dispatcher, one body for both transports; paper handlers call the handle's ops directly; reopen exists only for papers"
 agreement = "divergent"
 exit = "one handler takes the kind as a parameter"
 
@@ -594,33 +593,6 @@ reason = "transitional"
 detail = "each maps its own pipeline's error enum, and the variants differ: EmptyExtraction on the ingest side, IntakeNotRebuildable on the glean side"
 agreement = "divergent"
 exit = "the merged pipeline has one error type"
-
-[[parallel]]
-id = "control-reads-library"
-summary = "library read handlers, one per kind"
-sites = [
-  "crates/runtime/src/control/methods/reads_library.rs::find_books",
-  "crates/runtime/src/control/methods/reads_library.rs::find_papers",
-  "crates/runtime/src/control/methods/reads_library.rs::list_books",
-  "crates/runtime/src/control/methods/reads_library.rs::list_papers",
-  "crates/runtime/src/control/methods/reads_library.rs::list_metadata",
-  "crates/runtime/src/control/methods/reads_library.rs::list_paper_metadata",
-  "crates/runtime/src/control/methods/reads_library.rs::list_pending_reviews",
-  "crates/runtime/src/control/methods/reads_library.rs::list_paper_pending_reviews",
-  "crates/runtime/src/control/methods/reads_library.rs::search_in_book",
-  "crates/runtime/src/control/methods/reads_library.rs::search_in_paper",
-  "crates/runtime/src/control/methods/reads_library.rs::show_book",
-  "crates/runtime/src/control/methods/reads_library.rs::show_paper",
-  "crates/runtime/src/control/methods/reads_library.rs::show_audit_trail",
-  "crates/runtime/src/control/methods/reads_library.rs::show_paper_audit_trail",
-  "crates/runtime/src/control/methods/reads_library.rs::show_metadata_report",
-  "crates/runtime/src/control/methods/reads_library.rs::show_paper_metadata_report",
-  "crates/runtime/src/control/methods/reads_library.rs::show_toc",
-  "crates/runtime/src/control/methods/reads_library.rs::show_paper_toc",
-]
-reason = "transitional"
-agreement = "unverified"
-exit = "handlers are generated from one method table"
 
 [[parallel]]
 id = "runtime-audit-helpers"
@@ -995,20 +967,20 @@ sites = [
   "crates/mcp/src/lib.rs::ReadSpanArgs",
   "crates/mcp/src/lib.rs::LibraryOnlyArgs",
   "crates/mcp/src/lib.rs::MetadataPageArgs",
-  "crates/runtime/src/control/methods/reads_library.rs::SearchParams",
-  "crates/runtime/src/control/methods/reads_library.rs::SearchInBookParams",
-  "crates/runtime/src/control/methods/reads_library.rs::FindBooksParams",
-  "crates/runtime/src/control/methods/reads_library.rs::BookIdParams",
-  "crates/runtime/src/control/methods/reads_library.rs::ShowTocParams",
-  "crates/runtime/src/control/methods/reads_library.rs::FindPapersParams",
-  "crates/runtime/src/control/methods/reads_library.rs::SearchInPaperParams",
-  "crates/runtime/src/control/methods/reads_library.rs::ReadContextParams",
-  "crates/runtime/src/control/methods/reads_library.rs::ReadSpanParams",
-  "crates/runtime/src/control/methods/reads_library.rs::LibraryOnlyParams",
-  "crates/runtime/src/control/methods/reads_library.rs::PageParams",
+  "crates/ops/src/methods/params.rs::SearchParams",
+  "crates/ops/src/methods/params.rs::SearchInBookParams",
+  "crates/ops/src/methods/params.rs::FindBooksParams",
+  "crates/ops/src/methods/params.rs::BookIdParams",
+  "crates/ops/src/methods/params.rs::ShowTocParams",
+  "crates/ops/src/methods/params.rs::FindPapersParams",
+  "crates/ops/src/methods/params.rs::SearchInPaperParams",
+  "crates/ops/src/methods/params.rs::ReadContextParams",
+  "crates/ops/src/methods/params.rs::ReadSpanParams",
+  "crates/ops/src/methods/params.rs::LibraryOnlyParams",
+  "crates/ops/src/methods/params.rs::ListMetadataParams",
 ]
 reason = "transitional"
-detail = "library.info selects its library by name on the control plane and by library over MCP"
+detail = "the MCP pending-review tools take three filters they ignore, and its paper report takes no audit_profile"
 agreement = "divergent"
 exit = "both transports read one method table"
 

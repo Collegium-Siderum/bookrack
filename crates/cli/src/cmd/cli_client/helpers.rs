@@ -802,7 +802,7 @@ where
 mod tests {
     use super::*;
     use bookrack_cli::render::job_report::{JobOutcomeRecord, JobOutcomeState};
-    use bookrack_runtime::control::methods::REGISTRY;
+    use bookrack_runtime::control::methods::method_signatures;
     use serde_json::json;
 
     /// With a `served` list to read, the row whose root is the one asked
@@ -922,7 +922,7 @@ mod tests {
         );
         for (file, method) in &sent {
             assert!(
-                REGISTRY.iter().any(|sig| sig.name == method),
+                method_signatures().iter().any(|sig| sig.name == method),
                 "{file} sends `{method}`, which the daemon's method table does not carry"
             );
         }

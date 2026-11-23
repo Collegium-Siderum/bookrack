@@ -18,6 +18,7 @@ mod daemon_identity;
 mod daemon_lifecycle;
 mod doctor_gather;
 mod glean_submit;
+mod library_methods;
 mod mcp_endpoint;
 mod metadata_write_reports;
 mod papers_maintenance;
