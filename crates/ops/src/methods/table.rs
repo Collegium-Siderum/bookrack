@@ -292,11 +292,12 @@ pub const LIBRARY_METHODS: &[MethodSpec] = &[
          and the CSL type the required-field matrix was selected by. \
          Each response also carries the judgement stored on the paper's \
          audit row; the two disagreeing means the paper was edited after \
-         that judgement was made, and papers.metadata.reaudit is the \
-         write path that brings the row back in line. Grades under the \
-         library's paper audit profile and audit data overlays, or under \
-         the built-in profile `audit_profile` names; nothing is written \
-         back. Returns null when no such paper is registered.",
+         that judgement was made. Grades under the library's paper audit \
+         profile and audit data overlays, or under the built-in profile \
+         `audit_profile` names; nothing is written back. No tool writes \
+         paper metadata: the operator's `bookrack papers metadata \
+         reaudit <intake_id>` brings the stored row back in line. \
+         Returns null when no such paper is registered.",
     ),
     method!(
         "library.show_paper_audit_trail",

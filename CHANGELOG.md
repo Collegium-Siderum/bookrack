@@ -612,6 +612,12 @@ release workflow extracts the matching section verbatim from this file.
   store. One consequence: a paper with no abstract, in a library where
   no paper has been embedded yet, is run again on every submission,
   because nothing has stamped the store; it sends no embedding request.
+- **The MCP `library.show_paper_metadata_report` tool no longer points
+  at a write MCP does not carry.** Its description named the
+  control-plane method `papers.metadata.reaudit` as the write that
+  brings a paper's stored audit row back in line, a call no MCP client
+  can make. It now states that no tool writes paper metadata and names
+  the operator's `bookrack papers metadata reaudit` instead.
 
 ### Removed
 

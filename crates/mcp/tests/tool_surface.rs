@@ -167,6 +167,46 @@ fn the_logs_tail_description_states_the_bounds_the_server_applies() {
 }
 
 #[test]
+fn every_method_a_description_names_is_a_published_tool() {
+    // An agent client reads the description as a list of things it can
+    // do next. A control-plane method MCP does not carry is not one of
+    // them, so a description that names one points the client at a
+    // call it cannot make. Only dotted names are scanned: an undotted
+    // one (`status`, `ping`) cannot be told apart from the English word.
+    let tools = bookrack_mcp::list_tools();
+    let published: BTreeSet<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+    let control_plane: BTreeSet<&str> = bookrack_runtime::control::methods::method_signatures()
+        .iter()
+        .map(|signature| signature.name)
+        .filter(|name| name.contains('.'))
+        .collect();
+
+    let mut references = 0;
+    let mut unreachable = Vec::new();
+    for tool in &tools {
+        let words = tool
+            .description
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+            .map(|word| word.trim_end_matches('.'));
+        for word in words.filter(|word| control_plane.contains(word)) {
+            references += 1;
+            if !published.contains(word) {
+                unreachable.push(format!("{} names {word}", tool.name));
+            }
+        }
+    }
+    assert!(
+        references > 0,
+        "no description names a control-plane method, so the scan matched nothing"
+    );
+    assert!(
+        unreachable.is_empty(),
+        "a tool description names a control-plane method MCP does not publish: \
+         {unreachable:?}"
+    );
+}
+
+#[test]
 fn every_metadata_write_tool_names_its_reason_requirement() {
     // Each `library.metadata.*` write records an audit row carrying an
     // operator-supplied reason. A client picks the tool from the
