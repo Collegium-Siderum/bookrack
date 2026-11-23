@@ -7,15 +7,15 @@
 //! over `tools/list`. Tool names are a compatibility surface: renaming
 //! or removing one breaks every client keyed on the old name, and
 //! adding one widens what an agent may do without an operator in the
-//! loop. Nothing else in the workspace asserts the list, so this file
-//! holds it as two hand-written literals — the read bucket and the
-//! write bucket — and requires that their union be exactly the live
-//! set. A new tool therefore fails this test until it is filed into
-//! one of the two buckets, which is the moment the version discipline
-//! (a tool-surface change is a minor bump) applies.
+//! loop. This file holds the list as two hand-written literals — the
+//! read bucket and the write bucket — and requires that their union be
+//! exactly the live set. A new tool therefore fails this test until it
+//! is filed into one of the two buckets, which is the moment the
+//! version discipline (a tool-surface change is a minor bump) applies.
 //!
 //! The buckets are the ones `docs/control-plane.md` documents under
-//! *MCP tool surface*.
+//! *MCP tool surface*; `table_parity.rs` holds that list to the live
+//! set.
 
 use std::collections::BTreeSet;
 

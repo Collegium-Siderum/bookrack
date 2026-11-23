@@ -31,6 +31,7 @@ mod queue_retry;
 mod retired_hold;
 mod rule_job;
 mod rule_submit;
+mod search_ann_overrides;
 mod search_backend_failure;
 mod unusable_vector_ingest;
 mod vector_reset_failure;

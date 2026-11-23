@@ -445,6 +445,11 @@ unchanged.
 
 ## Methods (Phase 1)
 
+<!-- control-methods:start -->
+<!-- Every top-level entry between the control-methods anchors names
+     control-plane methods, and every method the daemon serves has one;
+     crates/mcp/tests/table_parity.rs holds the two sets equal. -->
+
 - `daemon.version` — the daemon's identity, `{ instance_id, version,
   pid, runtime_dir, control_sock, started_at }`. `instance_id` is a
   UUIDv7 drawn at start, so two starts never share one, a restart on
@@ -492,8 +497,7 @@ unchanged.
   queue_worker_enabled, library, data_dir, served, unmounted,
   auto_registered, fds }`, plus the six identity fields of
   `daemon.version` at the top level, with the same values.
-  The canonical name; `status` is a compatibility alias answered by
-  the same handler.
+  The canonical name; `status` is its alias.
   `state` is one of
   `idle`, `writing`, `working`, `degraded`, `stopping`; see the
   `daemon.state` event for the semantics of each value.
@@ -546,6 +550,8 @@ unchanged.
   or with no limit, and `unknown` when `open` is `null`. Descriptors
   can accumulate across a long session of ingests into a library with a
   vector index, and a restart releases them; `high` is the cue for one.
+- `status` — the compatibility alias of `daemon.status`, answered by
+  the same handler with the same body.
 - `doctor.gather` — `{ library? }` → JSON serialisation of the same
   report the `bookrack doctor` subcommand prints. The library-level
   rows — data root, store files and their stamps, open pipeline runs,
@@ -885,8 +891,8 @@ unchanged.
   re-runs the plausibility audit from the book's cached extraction
   envelope, refreshing the stored verdict / confidence; the review
   status is untouched.
-- `metadata.contributor_add` / `metadata.contributor_remove` (same
-  vintage) — curate the contributor rows: `contributor_add` writes an
+- `metadata.contributor_add` / `metadata.contributor_remove` — curate
+  the contributor rows: `contributor_add` writes an
   `origin = "user"` attribution that re-ingest preserves and
   `find_books` matches; `contributor_remove` deletes one row by the
   `contributor_id` that `show_book` lists, whatever its origin.
@@ -1020,7 +1026,8 @@ unchanged.
   None of them enqueue work, so all of them serve on a daemon without a
   queue worker.
 
-- `remove` — `{ intake_id?, sha?, dry_run?, yes?, plan_id?, library? }`.
+- `remove` / `papers.remove` — `{ intake_id?, sha?, dry_run?, yes?,
+  plan_id?, library? }`.
   Exactly
   one of `intake_id` or `sha` must be set on the dry-run leg; the
   execute leg presents the `plan_id` returned by dry-run and the
@@ -1030,8 +1037,8 @@ unchanged.
   plan target drifted` when the plan resolved but its target moved
   since the dry run — the intake is gone, or its state no longer
   matches the fingerprint the plan pinned; the plan id is consumed
-  either way, so recovery is a fresh dry-run leg. Paper-side peer:
-  `papers.remove`, with the same three refusals.
+  either way, so recovery is a fresh dry-run leg. `papers.remove` is
+  the paper-side peer, with the same three refusals.
 - `dryrun` — `{ path, out?, stdout?, no_chunk?, audit_profile?,
   library? }`.
   Writes the JSONL plus a summary sidecar under `<data_root>/dryruns/`.
@@ -1284,6 +1291,19 @@ overloaded, is `-32017`, retryable; a store this build cannot serve is
   sends it, because that verb defaults to `"all"`. Its `--json` wraps
   the hits this method returns as a bare array, so that payload is not
   this method's response verbatim either.
+
+  All three take the per-call ANN overrides: `bypass_index` (default
+  `false`) scans every row instead of probing the index; `nprobes`
+  sets the number of IVF partitions probed; `refine_factor` sets the
+  IVF-PQ refinement multiplier. They apply to the call alone. An
+  omitted `nprobes` or `refine_factor` falls back to the value the
+  index was built with (`vectors_meta.json`), and with no ANN index
+  present the search is exhaustive whatever they say. The overrides
+  a call set are recorded under `overrides` in the arguments of its
+  `mcp_tool_calls` row — for a `kind` `"all"` search, as one set
+  under `books` and one under `papers`; an unset one is left out. A
+  misspelt name is not refused: it is ignored, as every field these
+  methods do not know is, and so is absent from the row.
 - `library.vectors_status` — vector-store snapshot for the library.
 - `reference.lookup` — `{ library?, book, entry_key, fields?,
   min_severity?, exclude_books? }` → one keyed read over the library's
@@ -1321,6 +1341,8 @@ overloaded, is `-32017`, retryable; a store this build cannot serve is
   nothing, it pauses MCP for its duration, and once the overlay is on
   disk it announces `library.changed`. `reason` is recorded on the
   overlay row, and `edited_at` is the daemon's UTC time.
+
+<!-- control-methods:end -->
 
 ## MCP tool surface
 
@@ -1370,6 +1392,37 @@ A client on a protocol version before 2026-07-28 is sent the same, less
 anything the MCP SDK withholds from such a client: it strips an output
 schema or structured content whose root is not an object.
 
+<!-- mcp-tools:start -->
+<!-- Every top-level entry between the mcp-tools anchors names
+     published tools, and every published tool has one;
+     crates/mcp/tests/table_parity.rs holds the two sets equal. -->
+
+Thirty-two of the tools read:
+
+- `library.info` / `library.stats` / `library.categories` /
+  `library.vectors_status` — the library's status card, counts, tag
+  vocabulary, and vector-store snapshot.
+- `library.list_books` / `library.find_books` / `library.show_book` /
+  `library.show_toc` — the book registry and one book's record and
+  outline.
+- `library.list_papers` / `library.find_papers` / `library.show_paper` /
+  `library.show_paper_toc` / `papers.fetch_source` — the paper peers,
+  and the archived source PDF of one paper.
+- `library.search` / `library.search_in_book` /
+  `library.search_in_paper` / `library.read_context` /
+  `library.read_span` — cited passage search and passage windows.
+- `library.show_metadata_audit` / `library.show_metadata_report` /
+  `library.list_metadata` / `library.list_pending_reviews` /
+  `library.show_audit_trail` / `library.show_pipeline_trail` — book
+  metadata review.
+- `library.show_paper_metadata_report` /
+  `library.list_paper_metadata` /
+  `library.list_paper_pending_reviews` /
+  `library.show_paper_audit_trail` — paper metadata review.
+- `reference.lookup` — one keyed read over the reference store.
+- `session.info` / `session.logs_tail` / `session.queue_status` — the
+  daemon's libraries, recent log events, and queue.
+
 Eleven of the tools write:
 
 - `library.metadata.set` / `library.metadata.clear` — add or remove an
@@ -1382,6 +1435,8 @@ Eleven of the tools write:
   `library.metadata.reject` — move the review row.
 - `reference.overlay_set` — layer a user edit on a reference entry.
 - `session.shutdown` — stop the daemon.
+
+<!-- mcp-tools:end -->
 
 `session.info` reports the same served and unmounted sets as
 `daemon.status`: `libraries` and `unmounted` are read from the registry
