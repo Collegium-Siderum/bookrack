@@ -26,6 +26,7 @@
 pub mod audit_overlay;
 pub mod dto;
 pub mod error_class;
+pub mod methods;
 pub mod pipeline;
 pub mod reads;
 pub(crate) mod recorder;

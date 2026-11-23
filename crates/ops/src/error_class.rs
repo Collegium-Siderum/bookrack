@@ -69,6 +69,7 @@ use eyre::Report;
 
 use crate::OpsError;
 use crate::dto::UnknownFilterValue;
+use crate::methods::params::ParamsError;
 use crate::pipeline::book::IngestError;
 use crate::pipeline::paper::GleanError;
 use crate::reads::reference::ReferenceError;
@@ -762,6 +763,20 @@ pub fn from_registry(e: &RegistryError) -> ClassifiedError {
         | RegistryError::LibsLockPoisoned => ErrorKind::Internal,
     };
     ClassifiedError::new(kind, e.explain())
+}
+
+/// Judge a refusal the method dispatcher made on a call's params as
+/// caller input. The wording is the refusal's own.
+pub fn from_params(e: &ParamsError) -> ClassifiedError {
+    ClassifiedError::new(ErrorKind::InvalidParams, e.explain())
+}
+
+/// Judge a failure on the serving side that no caller input explains —
+/// a write task that did not join, a vector store that did not rebind
+/// after a write, a reply that did not serialize — as a fault carrying
+/// its full cause chain.
+pub fn from_server_fault(e: &(dyn Error + 'static)) -> ClassifiedError {
+    ClassifiedError::new(ErrorKind::Internal, Problem::from_error_chain(e))
 }
 
 /// Judge a registry configuration failure. An unknown library named

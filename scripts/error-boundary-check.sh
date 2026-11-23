@@ -56,6 +56,7 @@ fi
 
 boundary_files="
 crates/ops/src/error_class.rs
+crates/ops/src/methods/dispatch.rs
 crates/runtime/src/control/error_map.rs
 crates/runtime/src/control/methods/reads_library.rs
 crates/runtime/src/unmounted.rs

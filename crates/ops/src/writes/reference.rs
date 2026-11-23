@@ -35,7 +35,7 @@ pub struct ReferenceOverlaySetRequest {
 }
 
 /// The receipt of a written overlay.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ReferenceOverlaySetResult {
     /// The reference book the entry belongs to.
     pub book_slug: String,

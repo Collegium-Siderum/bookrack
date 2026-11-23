@@ -1013,6 +1013,34 @@ agreement = "divergent"
 exit = "both transports read one method table"
 
 [[parallel]]
+id = "metadata-write-param-mirror"
+summary = "book-side metadata write parameters, one type per transport"
+sites = [
+  "crates/ops/src/methods/params.rs::MetadataSetParams",
+  "crates/ops/src/methods/params.rs::LibraryMetadataSetParams",
+  "crates/ops/src/methods/params.rs::MetadataClearParams",
+  "crates/ops/src/methods/params.rs::LibraryMetadataClearParams",
+  "crates/ops/src/methods/params.rs::MetadataVoidParams",
+  "crates/ops/src/methods/params.rs::LibraryMetadataVoidParams",
+  "crates/ops/src/methods/params.rs::MetadataReauditParams",
+  "crates/ops/src/methods/params.rs::LibraryMetadataReauditParams",
+  "crates/ops/src/methods/params.rs::MetadataContributorAddParams",
+  "crates/ops/src/methods/params.rs::LibraryMetadataContributorAddParams",
+  "crates/ops/src/methods/params.rs::MetadataContributorRemoveParams",
+  "crates/ops/src/methods/params.rs::LibraryMetadataContributorRemoveParams",
+  "crates/ops/src/methods/params.rs::MetadataAckParams",
+  "crates/ops/src/methods/params.rs::LibraryMetadataAckParams",
+  "crates/ops/src/methods/params.rs::MetadataApproveParams",
+  "crates/ops/src/methods/params.rs::LibraryMetadataApproveParams",
+  "crates/ops/src/methods/params.rs::MetadataRejectParams",
+  "crates/ops/src/methods/params.rs::LibraryMetadataRejectParams",
+]
+reason = "transitional"
+detail = "control-plane metadata.* uses book and optional reason while MCP library.metadata.* uses intake_id, required library and reason"
+agreement = "divergent"
+exit = "step 7 unifies control-plane metadata.* and MCP library.metadata.* wire contracts"
+
+[[parallel]]
 id = "frontend-error-map"
 summary = "mapping ops and store errors to wire errors"
 sites = [
