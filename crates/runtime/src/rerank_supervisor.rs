@@ -975,6 +975,11 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// Write an executable shell script fixture and return its path.
+    ///
+    /// A fixture standing in for a server `exec`s its long-running
+    /// command, so the pid the supervisor records and signals is the
+    /// only process the fixture runs: a child forked by the shell
+    /// would outlive a signal sent to the shell.
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
@@ -1129,7 +1134,7 @@ mod tests {
     #[tokio::test]
     async fn a_child_that_never_serves_times_out() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let bin = script(dir.path(), "fake-server", "#!/bin/sh\nsleep 60\n");
+        let bin = script(dir.path(), "fake-server", "#!/bin/sh\nexec sleep 60\n");
         let mut config = test_config(bin, dead_port(), dir.path());
         config.ready_timeout = Duration::from_millis(300);
         let err = RerankSupervisor::start(config, None).await.unwrap_err();
@@ -1153,7 +1158,7 @@ mod tests {
     #[tokio::test]
     async fn ready_then_shutdown_stops_the_child_and_clears_the_pid_file() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let bin = script(dir.path(), "fake-server", "#!/bin/sh\nsleep 60\n");
+        let bin = script(dir.path(), "fake-server", "#!/bin/sh\nexec sleep 60\n");
         let port = health_stub().await;
         let config = test_config(bin, port, dir.path());
         let pid_path = config.pid_file.clone().expect("pid file");
@@ -1175,7 +1180,7 @@ mod tests {
     #[tokio::test]
     async fn a_killed_child_is_restarted_to_ready() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let bin = script(dir.path(), "fake-server", "#!/bin/sh\nsleep 60\n");
+        let bin = script(dir.path(), "fake-server", "#!/bin/sh\nexec sleep 60\n");
         let port = health_stub().await;
         let config = test_config(bin, port, dir.path());
         let observed: Arc<std::sync::Mutex<Vec<SupervisorState>>> =
@@ -1237,7 +1242,7 @@ mod tests {
         let bin = script(
             dir.path(),
             "fake-server",
-            "#!/bin/sh\ntrap '' TERM\nwhile :; do sleep 0.2; done\n",
+            "#!/bin/sh\ntrap '' TERM\nexec sleep 60\n",
         );
         let port = health_stub().await;
         let config = test_config(bin, port, dir.path());
@@ -1256,12 +1261,28 @@ mod tests {
     async fn a_recorded_orphan_is_killed_before_the_next_start() {
         let dir = tempfile::tempdir().expect("tempdir");
         // The orphan's command line must name llama-server, as a real
-        // leftover's would.
-        let orphan_bin = script(dir.path(), "llama-server", "#!/bin/sh\nsleep 60\n");
-        let mut orphan = std::process::Command::new(&orphan_bin)
+        // leftover's would. It announces itself, then blocks in the
+        // `read` builtin on a stdin the test holds: one process, with
+        // no child of its own for a kill of its pid to leave running.
+        let orphan_bin = script(
+            dir.path(),
+            "llama-server",
+            "#!/bin/sh\necho up\nread line\n",
+        );
+        let mut orphan = Command::new(&orphan_bin)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .expect("spawn orphan");
-        let orphan_pid = orphan.id();
+        let mut output = BufReader::new(orphan.stdout.take().expect("piped stdout"));
+        let mut banner = String::new();
+        tokio::time::timeout(Duration::from_secs(5), output.read_line(&mut banner))
+            .await
+            .expect("orphan announces itself")
+            .expect("read orphan output");
+        assert_eq!(banner, "up\n");
+        let orphan_pid = orphan.id().expect("orphan pid");
         let pid_path = dir.path().join(LLAMA_SERVER_PID_FILENAME);
         std::fs::write(&pid_path, format!("{orphan_pid}\n0\n")).expect("write pid file");
 
@@ -1278,12 +1299,20 @@ mod tests {
             .await,
             "orphan was killed"
         );
+        // EOF arrives once no process holds the orphan's stdout.
+        let mut rest = Vec::new();
+        let drained =
+            tokio::time::timeout(Duration::from_secs(2), output.read_to_end(&mut rest)).await;
+        assert!(
+            matches!(drained, Ok(Ok(0))),
+            "a process holding the orphan's output outlived the kill: {drained:?}"
+        );
     }
 
     #[tokio::test]
     async fn a_stale_pid_file_with_a_dead_pid_is_tolerated() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let bin = script(dir.path(), "fake-server", "#!/bin/sh\nsleep 60\n");
+        let bin = script(dir.path(), "fake-server", "#!/bin/sh\nexec sleep 60\n");
         let port = health_stub().await;
         let config = test_config(bin, port, dir.path());
         let pid_path = config.pid_file.clone().expect("pid file");
