@@ -167,6 +167,16 @@ jobs:
       - run: ./scripts/dep-stamp-check.sh
       # shellcheck ships with the runner image.
       - run: git ls-files -z '*.sh' | xargs -0 shellcheck
+      - name: Lint the tracked Markdown
+        # rumdl, prebuilt and pinned. The sha256 check makes a corrupt
+        # download or a silently re-cut upstream asset fail loudly here.
+        # `.rumdl.toml` holds the scope and the rule set.
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/rumdl.tgz" \
+            https://github.com/rvben/rumdl/releases/download/v0.3.5/rumdl-v0.3.5-x86_64-unknown-linux-musl.tar.gz
+          echo "47acba7706ff7a57aa38ecacde5953dacd411feca4d36e2d6c994b1a33253ec4  $RUNNER_TEMP/rumdl.tgz" | sha256sum -c -
+          tar zxf "$RUNNER_TEMP/rumdl.tgz" -C "$RUNNER_TEMP" rumdl
+          "$RUNNER_TEMP/rumdl" check .
       # `cargo metadata` is the one thing here that needs a toolchain;
       # nothing is compiled.
       - uses: dtolnay/rust-toolchain@1.95.0
