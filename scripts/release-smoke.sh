@@ -137,6 +137,8 @@ row=$(jq -c '[.rows[] | select(.label == "PDFium library")]
   fail "doctor --json did not carry exactly one PDFium library row"
 }
 status=$(printf '%s' "$row" | jq -r .status)
+# tr reads the two-character escape '\\' as one backslash.
+# shellcheck disable=SC1003
 found=$(printf '%s' "$row" | jq -r .value | tr '\\' '/')
 if [ "$payload" = . ]; then
   want=/$stage/$pdfium_lib

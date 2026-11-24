@@ -165,6 +165,8 @@ jobs:
       - run: ./scripts/leak-check.sh
       - run: ./scripts/error-boundary-check.sh
       - run: ./scripts/dep-stamp-check.sh
+      # shellcheck ships with the runner image.
+      - run: git ls-files -z '*.sh' | xargs -0 shellcheck
       # `cargo metadata` is the one thing here that needs a toolchain;
       # nothing is compiled.
       - uses: dtolnay/rust-toolchain@1.95.0

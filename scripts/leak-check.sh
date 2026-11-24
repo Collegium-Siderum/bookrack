@@ -185,6 +185,8 @@ if [ -f "$denylist" ] && command -v perl >/dev/null 2>&1; then
   escaped=$(git grep -lE '\\u\{?[0-9a-fA-F]' -- \
     '*.rs' '*.toml' '*.md' '*.ts' '*.svelte' '*.json' '*.html' '*.css' '*.js' || true)
   if [ -n "$escaped" ]; then
+    # The single-quoted argument is a Perl program; perl expands it.
+    # shellcheck disable=SC2016
     hits=$(printf '%s\n' "$escaped" | xargs perl -CSD -ne '
         $raw = $_;
         s/\\{1,2}u\{([0-9a-fA-F]{1,6})\}/chr(hex($1))/ge;
