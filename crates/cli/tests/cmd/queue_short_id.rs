@@ -22,9 +22,12 @@ use bookrack_test_support::{DaemonProcess, EmbedStub, Sandbox, bookrack_cmd};
 use serde_json::{Value, json};
 use tokio::process::Command;
 
+/// The name the sandbox's data root is registered under.
+const LIBRARY: &str = "main";
+
 /// Run one client command and return its exit code, stdout and stderr.
 async fn client(sandbox: &Sandbox, args: &[&str]) -> (Option<i32>, String, String) {
-    let output = Command::from(bookrack_cmd!(sandbox).build())
+    let output = Command::from(bookrack_cmd!(sandbox).library(LIBRARY).build())
         .args(args)
         .output()
         .await
@@ -58,6 +61,7 @@ fn id_cell<'a>(listing: &'a str, file: &str) -> &'a str {
 #[tokio::test]
 async fn the_listed_id_locates_its_job() {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir(LIBRARY);
     let lock_path = sandbox.tty_lock_path();
     let batch = sandbox.path().join("batch");
     std::fs::create_dir_all(&batch).expect("create the batch directory");
@@ -67,6 +71,7 @@ async fn the_listed_id_locates_its_job() {
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
+            .library(LIBRARY)
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );

@@ -19,7 +19,7 @@ use eyre::Result;
 /// Run `config effective` with the given extra arguments and
 /// environment, returning the raw output.
 async fn run(sandbox: &Sandbox, args: &[&str], extra: &[(&str, &str)]) -> Result<Output> {
-    let mut spawn = bookrack_cmd!(sandbox).without_data_dir();
+    let mut spawn = bookrack_cmd!(sandbox);
     for (key, value) in extra {
         spawn = spawn.extra_env(key, value);
     }
@@ -284,7 +284,6 @@ CI=1
         "XDG_DATA_HOME"
     };
     let spawn = bookrack_cmd!(&sandbox)
-        .without_data_dir()
         .without_env("CI")
         .without_env("EXAMPLE_FOREIGN_KNOB")
         .without_env(bookrack_config::DAEMON_STATE_DIR_ENV)

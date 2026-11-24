@@ -50,7 +50,8 @@ pub struct Spawn {
     /// named override replacing the entry of the same name.
     locations: Vec<(&'static str, PathBuf)>,
     cwd: PathBuf,
-    data_dir: Option<PathBuf>,
+    library: Option<String>,
+    data_dir_env: Option<PathBuf>,
     registry: Option<PathBuf>,
     ollama_url: Option<String>,
     extra: Vec<(OsString, OsString)>,
@@ -68,7 +69,8 @@ impl Spawn {
             bin: bin.as_ref().to_path_buf(),
             locations: sandbox.host_vars(),
             cwd: sandbox.cwd(),
-            data_dir: Some(sandbox.data_dir()),
+            library: None,
+            data_dir_env: None,
             registry: Some(sandbox.registry_path()),
             ollama_url: None,
             extra: Vec::new(),
@@ -77,23 +79,27 @@ impl Spawn {
         }
     }
 
-    /// The sandbox tool's preset: the same isolation as a test's, routed
-    /// through the registry rather than a data root, so a sandbox can
-    /// serve several libraries.
+    /// The sandbox tool's preset: the same isolation as a test's. It
+    /// names no library, so each call the tool runs names its own.
     pub(crate) fn for_tool(bin: &Path, sandbox: &Sandbox) -> Spawn {
-        Spawn::__with_bin(bin, sandbox).without_data_dir()
+        Spawn::__with_bin(bin, sandbox)
     }
 
-    /// Leave the data root unset, so the child resolves one through the
-    /// registry or reports that none is configured.
-    pub fn without_data_dir(mut self) -> Spawn {
-        self.data_dir = None;
+    /// Name the library the child uses: `--library <name>` goes ahead
+    /// of every argument the caller adds to the built command, so it
+    /// reaches the command line as the global flag, before the
+    /// subcommand. Register the name first, normally with
+    /// [`Sandbox::name_data_dir`].
+    pub fn library(mut self, name: impl Into<String>) -> Spawn {
+        self.library = Some(name.into());
         self
     }
 
-    /// Point the data root somewhere other than the sandbox default.
-    pub fn data_dir(mut self, path: impl AsRef<Path>) -> Spawn {
-        self.data_dir = Some(path.as_ref().to_path_buf());
+    /// Set `BOOKRACK_DATA_DIR` on the child, for a test whose subject
+    /// is how that variable selects a root. Every other test names its
+    /// library with [`Spawn::library`].
+    pub fn data_dir_env(mut self, path: impl AsRef<Path>) -> Spawn {
+        self.data_dir_env = Some(path.as_ref().to_path_buf());
         self
     }
 
@@ -189,11 +195,15 @@ impl Spawn {
     /// Pure form of [`Spawn::build`]: `host` stands in for the parent
     /// process's variables, so the sweep can be tested against a host
     /// shape without mutating this process's environment.
-    fn build_from(self, host: impl Iterator<Item = (OsString, OsString)>) -> Command {
+    fn build_from(mut self, host: impl Iterator<Item = (OsString, OsString)>) -> Command {
         let bin = self.bin.clone();
+        let library = self.library.take();
         let plan = self.plan(host);
         let mut cmd = Command::new(bin);
         plan.apply(&mut cmd);
+        if let Some(name) = library {
+            cmd.arg("--library").arg(name);
+        }
         cmd
     }
 
@@ -202,8 +212,11 @@ impl Spawn {
     /// tripwires read back.
     ///
     /// `set` is assembled by key, later entries overriding earlier
-    /// ones: the locations, then the MCP address, then the data root,
-    /// registry and embedder, then [`Spawn::extra_env`]. A key named by
+    /// ones: the locations, then the MCP address, then the data root
+    /// [`Spawn::data_dir_env`] names, the registry and the embedder,
+    /// then [`Spawn::extra_env`]. The library [`Spawn::library`] names
+    /// is an argument, not an environment variable, so it is not part
+    /// of the plan. A key named by
     /// [`Spawn::without_env`] is taken out of `set` and put in `remove`,
     /// and so is every `BOOKRACK_*` variable `host` carries that `set`
     /// does not name.
@@ -225,7 +238,7 @@ impl Spawn {
         // a test that has nothing to do with MCP starts at all. A test
         // about the address passes `--mcp-addr`, which outranks this.
         assign(MCP_ADDR_ENV.into(), "127.0.0.1:0".into());
-        if let Some(path) = self.data_dir {
+        if let Some(path) = self.data_dir_env {
             assign(DATA_DIR_ENV.into(), path.into());
         }
         if let Some(path) = self.registry {
@@ -376,7 +389,6 @@ mod tests {
             "XDG_DATA_HOME",
             "XDG_CACHE_HOME",
             "XDG_RUNTIME_DIR",
-            DATA_DIR_ENV,
             REGISTRY_ENV,
             RUNTIME_DIR_ENV,
             DAEMON_STATE_DIR_ENV,
@@ -525,26 +537,81 @@ mod tests {
         }
     }
 
-    /// The named weakenings are what they say: no data root, no
-    /// registry.
+    /// A child selects no data root by default: the host's
+    /// `BOOKRACK_DATA_DIR` is swept like any other name and the builder
+    /// sets none of its own, so a test reaches a library only by naming
+    /// it.
     #[test]
-    fn the_named_deviations_unset_exactly_what_they_name() {
+    fn the_default_selects_no_data_root() {
         let sandbox = Sandbox::new();
+        let cmd = spawn(&sandbox).build_from(hostile_host());
+        assert_eq!(
+            envs(&cmd).get(DATA_DIR_ENV),
+            Some(&None),
+            "the child carries a data root nobody named",
+        );
+        assert_eq!(cmd.get_args().count(), 0, "the child names a library");
+    }
+
+    /// A named library goes ahead of the caller's arguments, so it is
+    /// the global flag and the subcommand's own positionals and `--`
+    /// stay where the caller put them.
+    #[test]
+    fn a_named_library_precedes_the_callers_arguments() {
+        let sandbox = Sandbox::new();
+        let mut cmd = spawn(&sandbox).library("main").build_from(hostile_host());
+        cmd.args(["search", "--", "--library"]);
+        let args: Vec<&OsStr> = cmd.get_args().collect();
+        assert_eq!(args, ["--library", "main", "search", "--", "--library"]);
+        assert_eq!(
+            envs(&cmd).get(DATA_DIR_ENV),
+            Some(&None),
+            "naming a library set a data root as well",
+        );
+    }
+
+    /// The data-root variable reaches the child only when a test asks
+    /// for it by name, and with the value it named.
+    #[test]
+    fn the_data_root_variable_is_set_only_when_named() {
+        let sandbox = Sandbox::new();
+        let root = sandbox.data_root("alpha");
         let envs = envs(
             &spawn(&sandbox)
-                .without_data_dir()
-                .without_registry()
+                .data_dir_env(&root)
                 .build_from(hostile_host()),
         );
         assert_eq!(
             envs.get(DATA_DIR_ENV),
-            Some(&None),
-            "the host data root survived without_data_dir",
+            Some(&Some(root.to_string_lossy().into_owned())),
+        );
+    }
+
+    /// The named weakening is what it says: no registry.
+    #[test]
+    fn without_registry_unsets_exactly_the_registry() {
+        let sandbox = Sandbox::new();
+        let with = envs(&spawn(&sandbox).build_from(hostile_host()));
+        let without = envs(
+            &spawn(&sandbox)
+                .without_registry()
+                .build_from(hostile_host()),
         );
         assert_eq!(
-            envs.get(REGISTRY_ENV),
+            without.get(REGISTRY_ENV),
             Some(&None),
             "the host registry survived without_registry",
+        );
+        let rest = |envs: &BTreeMap<String, Option<String>>| {
+            envs.iter()
+                .filter(|(k, _)| k.as_str() != REGISTRY_ENV)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rest(&with),
+            rest(&without),
+            "without_registry changed another name"
         );
     }
 

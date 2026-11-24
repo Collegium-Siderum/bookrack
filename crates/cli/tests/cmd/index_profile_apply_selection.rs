@@ -126,7 +126,6 @@ async fn apply_executes_under_each_library_selector() {
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -144,11 +143,7 @@ async fn apply_executes_under_each_library_selector() {
     let book_arg = book.to_str().expect("utf-8 path");
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        let (code, _, stderr) = run(
-            bookrack_cmd!(&sandbox).without_data_dir(),
-            &["ingest", book_arg],
-        )
-        .await;
+        let (code, _, stderr) = run(bookrack_cmd!(&sandbox), &["ingest", book_arg]).await;
         if code == Some(0) {
             break;
         }
@@ -163,17 +158,17 @@ async fn apply_executes_under_each_library_selector() {
     let cases: [(&str, Spawn, Vec<&str>); 3] = [
         (
             "--library",
-            bookrack_cmd!(&sandbox).without_data_dir(),
+            bookrack_cmd!(&sandbox),
             vec!["--library", LIBRARY],
         ),
         (
             "--data-dir",
-            bookrack_cmd!(&sandbox).without_data_dir(),
+            bookrack_cmd!(&sandbox),
             vec!["--data-dir", root_arg],
         ),
         (
             "the data-root variable",
-            bookrack_cmd!(&sandbox).data_dir(&root),
+            bookrack_cmd!(&sandbox).data_dir_env(&root),
             vec![],
         ),
     ];
@@ -203,7 +198,7 @@ async fn apply_executes_under_each_library_selector() {
     // The library already runs the profile and was told: nothing to
     // execute, and no note.
     let (code, stdout, stderr) = run(
-        bookrack_cmd!(&sandbox).without_data_dir(),
+        bookrack_cmd!(&sandbox),
         &[
             "--library",
             LIBRARY,
@@ -225,7 +220,7 @@ async fn apply_executes_under_each_library_selector() {
     for mode in ["--quiet", "--json"] {
         restore_default_model(&sandbox).await;
         let (code, stdout, stderr) = run(
-            bookrack_cmd!(&sandbox).without_data_dir(),
+            bookrack_cmd!(&sandbox),
             &[
                 mode,
                 "--library",
@@ -240,7 +235,7 @@ async fn apply_executes_under_each_library_selector() {
         assert_eq!(code, Some(0), "{mode}: {stderr}");
         assert!(!stdout.contains(NOTE), "{mode}: {stdout}");
         let (_, stdout, _) = run(
-            bookrack_cmd!(&sandbox).without_data_dir(),
+            bookrack_cmd!(&sandbox),
             &[
                 "--library",
                 LIBRARY,
@@ -267,13 +262,13 @@ async fn apply_executes_under_each_library_selector() {
 /// the next apply has a reset to run.
 async fn restore_default_model(sandbox: &Sandbox) {
     let (code, _, stderr) = run(
-        bookrack_cmd!(sandbox).without_data_dir(),
+        bookrack_cmd!(sandbox),
         &["libraries", "config", LIBRARY, "--unset", "index_profile"],
     )
     .await;
     assert_eq!(code, Some(0), "drop the reference: {stderr}");
     let (code, _, stderr) = run(
-        bookrack_cmd!(sandbox).without_data_dir(),
+        bookrack_cmd!(sandbox),
         &["--library", LIBRARY, "vectors", "reset", "--yes"],
     )
     .await;
@@ -286,7 +281,7 @@ async fn restore_default_model(sandbox: &Sandbox) {
 /// never reach the daemon.
 async fn assert_plan_is_reset_then_drop(sandbox: &Sandbox, selector: &str) {
     let (code, stdout, stderr) = run(
-        bookrack_cmd!(sandbox).without_data_dir(),
+        bookrack_cmd!(sandbox),
         &[
             "--library",
             LIBRARY,

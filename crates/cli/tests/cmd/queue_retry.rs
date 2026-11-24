@@ -36,8 +36,8 @@ const FINISHED_AT: &str = "2026-01-02T03:05:05Z";
 const FAILURE_TEXT: &str =
     "ingest: registry-mediated ingest: reading the source file failed: no such file";
 
-/// The name the root `BOOKRACK_DATA_DIR` selects is served under.
-const SERVED_LIBRARY: &str = "default";
+/// The name the sandbox's data root is registered and served under.
+const SERVED_LIBRARY: &str = "main";
 
 fn row(id: &str, state: &str, error: Option<&str>, merged_into: Option<i64>) -> Value {
     let terminal = state != "pending";
@@ -110,6 +110,7 @@ fn job<'a>(listing: &'a Value, id: &str) -> &'a Value {
 #[tokio::test]
 async fn retry_reruns_terminal_rows_through_the_command_entry() {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir(SERVED_LIBRARY);
     let lock_path = sandbox.tty_lock_path();
     std::fs::write(
         sandbox.daemon_state_dir().join("queue.json"),
@@ -119,6 +120,7 @@ async fn retry_reruns_terminal_rows_through_the_command_entry() {
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
+            .library(SERVED_LIBRARY)
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );

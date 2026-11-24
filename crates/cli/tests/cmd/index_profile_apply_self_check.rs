@@ -94,7 +94,6 @@ async fn a_dimension_left_divergent_is_reported_with_both_values() {
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -110,11 +109,7 @@ async fn a_dimension_left_divergent_is_reported_with_both_values() {
     let book_arg = book.to_str().expect("utf-8 path");
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        let (code, _, stderr) = run(
-            bookrack_cmd!(&sandbox).without_data_dir(),
-            &["ingest", book_arg],
-        )
-        .await;
+        let (code, _, stderr) = run(bookrack_cmd!(&sandbox), &["ingest", book_arg]).await;
         if code == Some(0) {
             break;
         }
@@ -137,7 +132,7 @@ async fn a_dimension_left_divergent_is_reported_with_both_values() {
     }
 
     let (code, stdout, stderr) = run(
-        bookrack_cmd!(&sandbox).without_data_dir(),
+        bookrack_cmd!(&sandbox),
         &[
             "--library",
             LIBRARY,
@@ -154,7 +149,7 @@ async fn a_dimension_left_divergent_is_reported_with_both_values() {
     assert!(!stdout.contains("vectors drop"), "{stdout}");
 
     let (code, stdout, stderr) = run(
-        bookrack_cmd!(&sandbox).without_data_dir(),
+        bookrack_cmd!(&sandbox),
         &[
             "--library",
             LIBRARY,

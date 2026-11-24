@@ -70,7 +70,7 @@ async fn a_zero_refine_factor_is_refused_at_both_write_entrances() {
         .expect("write the user profile");
 
     let (code, stdout, stderr) = run(
-        bookrack_cmd!(&sandbox).without_data_dir(),
+        bookrack_cmd!(&sandbox),
         &["index-profile", "validate", PROFILE],
     )
     .await;
@@ -99,7 +99,7 @@ async fn a_zero_refine_factor_is_refused_at_both_write_entrances() {
         ),
     ];
     for (entrance, args) in entrances {
-        let (code, stdout, stderr) = run(bookrack_cmd!(&sandbox).without_data_dir(), &args).await;
+        let (code, stdout, stderr) = run(bookrack_cmd!(&sandbox), &args).await;
         assert_eq!(code, Some(2), "{entrance} refuses: {stdout} {stderr}");
         assert!(
             stderr.contains(&format!("index profile '{PROFILE}' has validation errors")),

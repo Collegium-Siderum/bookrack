@@ -51,7 +51,6 @@ async fn the_card_counts_the_library_it_names() {
     let lock_path = sandbox.tty_lock_path();
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -62,7 +61,7 @@ async fn the_card_counts_the_library_it_names() {
         .await
         .expect("bookrack run did not become ready");
 
-    let output = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let output = Command::from(bookrack_cmd!(&sandbox).build())
         .args(["--json", "status"])
         .output()
         .await

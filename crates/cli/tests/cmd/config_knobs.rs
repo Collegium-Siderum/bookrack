@@ -18,7 +18,7 @@ use eyre::Result;
 
 /// Run `config knobs` with the given extra arguments and environment.
 async fn run(sandbox: &Sandbox, args: &[&str], extra: &[(&str, &str)]) -> Result<Output> {
-    let mut spawn = bookrack_cmd!(sandbox).without_data_dir();
+    let mut spawn = bookrack_cmd!(sandbox);
     for (key, value) in extra {
         spawn = spawn.extra_env(key, value);
     }

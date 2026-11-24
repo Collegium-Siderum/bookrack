@@ -16,9 +16,14 @@ use bookrack_test_support::{DaemonProcess, EmbedStub, Sandbox, bookrack_cmd};
 use serde_json::Value;
 use tokio::process::Command;
 
-/// Run one client command and return its exit code, stdout and stderr.
+/// The name the sandbox's data root is registered under.
+const LIBRARY: &str = "main";
+
+/// Run one client command against [`LIBRARY`] and return its exit
+/// code, stdout and stderr. The queue verbs take no library and leave
+/// the selection alone.
 async fn client(sandbox: &Sandbox, args: &[&str]) -> (Option<i32>, String, String) {
-    let output = Command::from(bookrack_cmd!(sandbox).build())
+    let output = Command::from(bookrack_cmd!(sandbox).library(LIBRARY).build())
         .args(args)
         .output()
         .await
@@ -57,6 +62,7 @@ fn job_id_for(listing: &Value, file: &str) -> String {
 #[tokio::test]
 async fn a_submission_not_waited_on_is_reported_in_the_mode_asked_for() {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir(LIBRARY);
     let lock_path = sandbox.tty_lock_path();
     let alpha = sandbox.path().join("alpha.epub");
     let paper = sandbox.path().join("paper.epub");
@@ -76,6 +82,7 @@ async fn a_submission_not_waited_on_is_reported_in_the_mode_asked_for() {
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
+            .library(LIBRARY)
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );

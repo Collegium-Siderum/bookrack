@@ -131,7 +131,11 @@ async fn two_libraries_without_a_registry_default_refuse_an_unnamed_call() -> Re
 async fn a_dangling_default_refuses_unnamed_reads_and_submits() -> Result<()> {
     let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
     let beta = sandbox.data_root("beta-root");
-    sandbox.write_registry_entries(Some("ghost"), &[("beta", beta.as_path())]);
+    let registry = sandbox.write_registry_entries(None, &[("beta", beta.as_path())]);
+    // The registry writers refuse a default naming no entry, so the
+    // dangling pointer goes into the file by hand, ahead of the tables.
+    let entries = std::fs::read_to_string(&registry)?;
+    std::fs::write(&registry, format!("default = \"ghost\"\n{entries}"))?;
     let runtime_root = tempfile::tempdir()?;
     let fixture_dir = tempfile::tempdir()?;
     let book = fixture_dir.path().join("synthetic-ledger.txt");

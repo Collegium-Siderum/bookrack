@@ -14,21 +14,25 @@
 
 #![cfg(unix)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use bookrack_config::LibrarySelection;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
-use bookrack_test_support::{DaemonProcess, EmbedStub, ProcessEnv, bookrack_cmd, process_env};
+use bookrack_test_support::{
+    DaemonProcess, EmbedStub, ProcessEnv, Sandbox, bookrack_cmd, process_env,
+};
 use eyre::Result;
 
-fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
-    let mut opts = RuntimeOpts::headless(Some(data_dir), None);
+/// The name the test's data root is registered under, for the daemon in
+/// this process and for every spawned `bookrack run`.
+const LIBRARY: &str = "main";
+
+/// Register `data_dir` as [`LIBRARY`] and return headless options that
+/// serve it by that name from `runtime_dir`.
+fn build_opts(sandbox: &Sandbox, data_dir: &Path, runtime_dir: PathBuf) -> RuntimeOpts {
+    sandbox.write_registry_entries(None, &[(LIBRARY, data_dir)]);
+    let mut opts = RuntimeOpts::headless(None, Some(LIBRARY.to_string()));
     opts.runtime_dir = Some(runtime_dir);
-    opts.selection = LibrarySelection {
-        data_dir: opts.selection.data_dir,
-        library: opts.selection.library,
-    };
     opts
 }
 
@@ -38,7 +42,8 @@ async fn cli_second_launch_prints_addr_and_exits_zero() -> Result<()> {
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = DaemonRuntime::start(build_opts(
-        data_root.path().into(),
+        sandbox,
+        data_root.path(),
         runtime_root.path().into(),
     ))
     .await?;
@@ -47,17 +52,16 @@ async fn cli_second_launch_prints_addr_and_exits_zero() -> Result<()> {
     let shutdown_tx = runtime.shutdown_tx.clone();
     let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
 
-    // The spawned binary resolves its library from the environment, so
-    // both directories are pinned explicitly; otherwise the test would
-    // depend on whatever library the host machine has configured.
+    // The spawned binary names the library registered at the daemon's
+    // data root and shares its runtime directory, so the second launch
+    // meets the first one's lock.
     let runtime_dir_for_subprocess = runtime_root.path().to_path_buf();
-    let data_dir_for_subprocess = data_root.path().to_path_buf();
     let subprocess = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
         tokio::process::Command::from(
             bookrack_cmd!(sandbox)
                 .runtime_dir(runtime_dir_for_subprocess)
-                .data_dir(data_dir_for_subprocess)
+                .library(LIBRARY)
                 .ollama_url(EmbedStub::shared().url())
                 .build(),
         )
@@ -87,7 +91,8 @@ async fn status_against_a_live_daemon_prints_the_card() -> Result<()> {
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = DaemonRuntime::start(build_opts(
-        data_root.path().into(),
+        sandbox,
+        data_root.path(),
         runtime_root.path().into(),
     ))
     .await?;
@@ -95,13 +100,11 @@ async fn status_against_a_live_daemon_prints_the_card() -> Result<()> {
     let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
 
     let runtime_dir_for_subprocess = runtime_root.path().to_path_buf();
-    let data_dir_for_subprocess = data_root.path().to_path_buf();
     let subprocess = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
         tokio::process::Command::from(
             bookrack_cmd!(sandbox)
                 .runtime_dir(runtime_dir_for_subprocess)
-                .data_dir(data_dir_for_subprocess)
                 .ollama_url(EmbedStub::shared().url())
                 .build(),
         )
@@ -158,13 +161,14 @@ async fn stale_lock_exits_three() -> Result<()> {
     )?;
     writer.flush()?;
 
-    // A pinned data dir keeps the run from depending on the host's
-    // configured library; the stale-lock check must be what terminates
-    // the process, not library resolution.
+    // A registered library keeps the run from failing on library
+    // resolution; the stale-lock check must be what terminates the
+    // process.
+    sandbox.write_registry_entries(None, &[(LIBRARY, data_root.path())]);
     let out = tokio::process::Command::from(
         bookrack_cmd!(sandbox)
             .runtime_dir(runtime_root.path())
-            .data_dir(data_root.path())
+            .library(LIBRARY)
             .ollama_url(EmbedStub::shared().url())
             .build(),
     )
@@ -194,7 +198,7 @@ async fn stale_lock_exits_three() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn daemon_shutdown_rpc_exits_cleanly() -> Result<()> {
-    process_env(ProcessEnv::daemon());
+    let sandbox = process_env(ProcessEnv::daemon());
     // Covers one leg of the three shutdown paths that go through
     // `initiate_shutdown`: the control-plane `daemon.shutdown` RPC. The
     // other two, a platform signal and the MCP `session.shutdown` tool,
@@ -202,7 +206,8 @@ async fn daemon_shutdown_rpc_exits_cleanly() -> Result<()> {
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = DaemonRuntime::start(build_opts(
-        data_root.path().into(),
+        sandbox,
+        data_root.path(),
         runtime_root.path().into(),
     ))
     .await?;
@@ -251,21 +256,24 @@ async fn held_lock_pointing_to_foreign_socket_is_refused_without_dialing() -> Re
     writeln!(writer, "control_sock={}", foreign.display())?;
     writer.flush()?;
 
+    sandbox.write_registry_entries(None, &[(LIBRARY, data_root.path())]);
     for (args, code) in [
         (&["run", "--no-mcp"][..], 1),
         (&["status"][..], 1),
         (&["queue", "list"][..], 2),
     ] {
-        let out = tokio::process::Command::from(
-            bookrack_cmd!(sandbox)
-                .runtime_dir(runtime_root.path())
-                .data_dir(data_root.path())
-                .ollama_url(EmbedStub::shared().url())
-                .build(),
-        )
-        .args(args)
-        .output()
-        .await?;
+        let spawn = bookrack_cmd!(sandbox)
+            .runtime_dir(runtime_root.path())
+            .ollama_url(EmbedStub::shared().url());
+        let spawn = if args[0] == "run" {
+            spawn.library(LIBRARY)
+        } else {
+            spawn
+        };
+        let out = tokio::process::Command::from(spawn.build())
+            .args(args)
+            .output()
+            .await?;
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(code), "{args:?} stderr: {stderr}");
         assert!(
@@ -295,10 +303,11 @@ async fn a_relative_runtime_dir_is_recorded_as_a_clean_absolute_path() -> Result
         std::fs::create_dir(work.path().join("side"))?;
         let runtime_dir = work.path().join("rt");
         let lock_path = runtime_dir.join("bookrack.tty.lock");
+        sandbox.write_registry_entries(None, &[(LIBRARY, data_root.path())]);
 
         let mut daemon_cmd = tokio::process::Command::from(
             bookrack_cmd!(sandbox)
-                .data_dir(data_root.path())
+                .library(LIBRARY)
                 .ollama_url(EmbedStub::shared().url())
                 .build(),
         );
@@ -329,10 +338,7 @@ async fn a_relative_runtime_dir_is_recorded_as_a_clean_absolute_path() -> Result
 
         for args in [&["status"][..], &["quit"][..]] {
             let out = tokio::process::Command::from(
-                bookrack_cmd!(sandbox)
-                    .runtime_dir(&runtime_dir)
-                    .data_dir(data_root.path())
-                    .build(),
+                bookrack_cmd!(sandbox).runtime_dir(&runtime_dir).build(),
             )
             .args(args)
             .output()

@@ -63,7 +63,6 @@ async fn a_retired_variable_is_logged_when_the_daemon_starts() {
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .extra_env("BOOKRACK_SEARCH_TOP_K", "5")
             .build(),
@@ -75,7 +74,7 @@ async fn a_retired_variable_is_logged_when_the_daemon_starts() {
         .await
         .expect("bookrack run did not become ready");
 
-    let quit = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let quit = Command::from(bookrack_cmd!(&sandbox).build())
         .arg("quit")
         .output()
         .await

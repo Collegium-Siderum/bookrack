@@ -28,6 +28,7 @@ async fn run_against_a_newer_queue_document(
     extra: &[&str],
 ) -> (Option<i32>, String, String, String, String) {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir("main");
     let queue_path = sandbox.daemon_state_dir().join("queue.json");
     let doc = format!(
         "{{\"schema_version\": {}, \"paused\": false, \"jobs\": [], \
@@ -40,6 +41,7 @@ async fn run_against_a_newer_queue_document(
     args.push("run");
     let output = Command::from(
         bookrack_cmd!(&sandbox)
+            .library("main")
             .ollama_url(EmbedStub::shared().url())
             .build(),
     )

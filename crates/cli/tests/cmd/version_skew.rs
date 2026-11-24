@@ -145,17 +145,18 @@ impl StandIn {
 
     /// Run the binary against this stand-in.
     pub(crate) async fn run(&self, args: &[&str]) -> std::process::Output {
-        Command::from(bookrack_cmd!(&self.sandbox).without_data_dir().build())
+        Command::from(bookrack_cmd!(&self.sandbox).build())
             .args(args)
             .output()
             .await
             .expect("run bookrack")
     }
 
-    /// Run a second `bookrack run` against this stand-in, on the
-    /// sandbox's own data root.
+    /// Run a second `bookrack run` against this stand-in, naming the
+    /// library registered at the sandbox's own data root.
     async fn second_launch(&self) -> std::process::Output {
-        Command::from(bookrack_cmd!(&self.sandbox).build())
+        self.sandbox.name_data_dir("main");
+        Command::from(bookrack_cmd!(&self.sandbox).library("main").build())
             .args(["run", "--no-mcp"])
             .output()
             .await

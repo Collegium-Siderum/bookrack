@@ -52,8 +52,8 @@ impl World {
     fn run(&self, args: &[&str], data_dir_env: Option<&Path>) -> Output {
         let spawn = bookrack_cmd!(&self.sandbox);
         let spawn = match data_dir_env {
-            Some(dir) => spawn.data_dir(dir),
-            None => spawn.without_data_dir(),
+            Some(dir) => spawn.data_dir_env(dir),
+            None => spawn,
         };
         spawn.build().args(args).output().expect("spawn bookrack")
     }

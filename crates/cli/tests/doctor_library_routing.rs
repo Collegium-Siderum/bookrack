@@ -75,7 +75,6 @@ async fn the_named_library_reaches_doctor_and_diagnose_through_the_daemon() -> R
             let out = tokio::process::Command::from(
                 bookrack_cmd!(sandbox)
                     .runtime_dir(&runtime_dir_for_child)
-                    .without_data_dir()
                     .build(),
             )
             .args(args)

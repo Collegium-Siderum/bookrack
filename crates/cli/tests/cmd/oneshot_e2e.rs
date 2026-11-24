@@ -32,9 +32,14 @@ const NOT_RUNNING: &str = "bookrack: no daemon is running\n";
 /// a daemon.
 const NOT_RUNNING_HINT: &str = "  hint: Start one with `bookrack run`";
 
+/// The name a test registers the sandbox's data root under, for the
+/// commands that act on one library.
+const LIBRARY: &str = "main";
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir(LIBRARY);
     let cases: &[(&[&str], CaseExpect)] = &[
         (
             &["ingest", "/tmp/phase4-fixture.txt"],
@@ -79,14 +84,18 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
         // `status_without_daemon_prints_a_short_card_and_exits_zero`.
         (&["quit"], CaseExpect::Quit),
     ];
+    // Every case names the library: the library-level verbs act on
+    // one, and the process-level ones (`queue list`, `logs`, `rpc
+    // list`, `quit`) take the selection and leave it alone.
     for (argv, expect) in cases {
-        let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
-            .args(argv.iter().copied())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output =
+            tokio::process::Command::from(bookrack_cmd!(&sandbox).library(LIBRARY).build())
+                .args(argv.iter().copied())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .await?;
         match expect {
             CaseExpect::NotRunning => {
                 assert_eq!(
@@ -135,7 +144,8 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn doctor_without_daemon_falls_back_to_local_probe() -> Result<()> {
     let sandbox = Sandbox::new();
-    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+    sandbox.name_data_dir(LIBRARY);
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).library(LIBRARY).build())
         .args(["doctor", "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -212,9 +222,10 @@ async fn audit_profile_is_refused_before_the_early_dispatches() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn doctor_json_keeps_stderr_clean_when_the_lock_cannot_be_read() -> Result<()> {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir(LIBRARY);
     std::fs::create_dir_all(sandbox.tty_lock_path())?;
 
-    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).library(LIBRARY).build())
         .args(["doctor", "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -372,18 +383,14 @@ async fn libraries_list_renders_the_registry_offline() -> Result<()> {
          data_dir = \"/roots/beta\"\n\
          kind = \"test\"\n",
     )?;
-    let output = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "list"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let output =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "list"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -423,18 +430,14 @@ async fn libraries_default_writes_the_registry_offline() -> Result<()> {
          alpha = \"/roots/alpha\"\n\
          beta = \"/roots/beta\"\n",
     )?;
-    let output = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "default", "beta"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let output =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "default", "beta"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -500,18 +503,14 @@ async fn libraries_config_unset_index_profile_clears_every_reference_site() -> R
          kind = \"test\"\n\
          index_profile = \"qwen3-0.6b-default\"\n",
     )?;
-    let output = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "config", "alpha", "--unset", "index_profile"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let output =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "config", "alpha", "--unset", "index_profile"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -544,18 +543,14 @@ async fn libraries_config_unset_index_profile_clears_every_reference_site() -> R
         "config.toml still records the profile: {config_written}",
     );
     // The reference is gone from both sites, so `current` reports none.
-    let output = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["index-profile", "current", "--library", "alpha"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let output =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["index-profile", "current", "--library", "alpha"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -598,23 +593,19 @@ async fn libraries_config_set_index_profile_declares_into_the_manifest() -> Resu
         "index_profile = \"qwen3-0.6b-default\"\n\n[search]\ntop_k = 9\n",
     )?;
 
-    let output = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args([
-        "libraries",
-        "config",
-        "alpha",
-        "index_profile=qwen3-0.6b-default",
-    ])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let output =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args([
+                "libraries",
+                "config",
+                "alpha",
+                "index_profile=qwen3-0.6b-default",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -648,18 +639,14 @@ async fn libraries_config_set_index_profile_declares_into_the_manifest() -> Resu
     );
 
     // `current` reads it back from its new home, with nothing drifted.
-    let output = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["index-profile", "current", "--library", "alpha", "--json"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let output =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["index-profile", "current", "--library", "alpha", "--json"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -707,17 +694,12 @@ async fn a_stale_registry_reference_is_reported_as_drift_and_scan_repairs_it() -
     )?;
 
     let current = || {
-        tokio::process::Command::from(
-            bookrack_cmd!(&sandbox)
-                .registry(&registry_path)
-                .without_data_dir()
-                .build(),
-        )
-        .args(["index-profile", "current", "--library", "alpha", "--json"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["index-profile", "current", "--library", "alpha", "--json"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
     };
 
     let output = current().await?;
@@ -738,20 +720,16 @@ async fn a_stale_registry_reference_is_reported_as_drift_and_scan_repairs_it() -
     );
 
     // `scan --register` re-reads the manifests and refreshes the cache.
-    let output = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "scan"])
-    .arg(holder.path())
-    .arg("--register")
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let output =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "scan"])
+            .arg(holder.path())
+            .arg("--register")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -779,18 +757,14 @@ async fn libraries_default_rejects_an_unknown_name_with_exit_2() -> Result<()> {
     let registry_dir = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
     std::fs::write(&registry_path, "[libraries]\nalpha = \"/roots/alpha\"\n")?;
-    let output = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "default", "ghost"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let output =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "default", "ghost"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(
         output.status.code(),
         Some(2),
@@ -825,6 +799,7 @@ enum Reached {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_typed_paper_id_reaches_the_control_plane_client() -> Result<()> {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir(LIBRARY);
     let cases: &[(&str, Reached)] = &[
         // The prefixed form of an id this namespace addresses.
         ("paper:101", Reached::Dispatch),
@@ -834,13 +809,14 @@ async fn a_typed_paper_id_reaches_the_control_plane_client() -> Result<()> {
         ("book:12", Reached::Grammar),
     ];
     for (id, reached) in cases {
-        let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
-            .args(["papers", "show", id])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output =
+            tokio::process::Command::from(bookrack_cmd!(&sandbox).library(LIBRARY).build())
+                .args(["papers", "show", id])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .await?;
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(
             output.status.code(),
@@ -890,7 +866,8 @@ async fn a_typed_paper_id_reaches_the_control_plane_client() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_bare_id_at_the_top_level_is_refused_with_a_hint() -> Result<()> {
     let sandbox = Sandbox::new();
-    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+    sandbox.name_data_dir(LIBRARY);
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).library(LIBRARY).build())
         .args(["show", "12"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -926,7 +903,8 @@ async fn a_bare_id_at_the_top_level_is_refused_with_a_hint() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reference_id_is_refused_before_a_daemon_is_looked_for() -> Result<()> {
     let sandbox = Sandbox::new();
-    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+    sandbox.name_data_dir(LIBRARY);
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).library(LIBRARY).build())
         .args(["show", "reference:name_alpha"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -963,14 +941,16 @@ async fn a_reference_id_is_refused_before_a_daemon_is_looked_for() -> Result<()>
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_readable_kind_reaches_the_control_plane_client() -> Result<()> {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir(LIBRARY);
     for id in ["book:12", "paper:101", "reference:name_alpha/smith"] {
-        let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
-            .args(["show", id])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output =
+            tokio::process::Command::from(bookrack_cmd!(&sandbox).library(LIBRARY).build())
+                .args(["show", id])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .await?;
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(2), "{id:?} stderr={stderr}");
         assert!(
@@ -1007,7 +987,7 @@ async fn libraries_detect_confirms_a_manifest_root_offline() -> Result<()> {
     let sandbox = Sandbox::new();
     let root = tempfile::tempdir()?;
     write_manifest(root.path(), "alpha");
-    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
         .args(["libraries", "detect"])
         .arg(root.path())
         .stdin(Stdio::null())
@@ -1035,7 +1015,7 @@ async fn libraries_detect_confirms_a_manifest_root_offline() -> Result<()> {
 async fn libraries_detect_on_a_plain_dir_exits_1() -> Result<()> {
     let sandbox = Sandbox::new();
     let root = tempfile::tempdir()?;
-    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
         .args(["libraries", "detect"])
         .arg(root.path())
         .stdin(Stdio::null())
@@ -1057,7 +1037,7 @@ async fn libraries_detect_on_a_plain_dir_exits_1() -> Result<()> {
 async fn libraries_detect_on_a_missing_path_exits_2() -> Result<()> {
     let sandbox = Sandbox::new();
     let root = tempfile::tempdir()?;
-    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
         .args(["libraries", "detect"])
         .arg(root.path().join("nope"))
         .stdin(Stdio::null())
@@ -1083,7 +1063,7 @@ async fn libraries_scan_lists_child_roots_offline() -> Result<()> {
     let lib = parent.path().join("lib-a");
     std::fs::create_dir(&lib)?;
     write_manifest(&lib, "alpha");
-    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
         .args(["--json", "libraries", "scan"])
         .arg(parent.path())
         .stdin(Stdio::null())
@@ -1110,7 +1090,7 @@ async fn libraries_scan_lists_child_roots_offline() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_scan_requires_a_target() -> Result<()> {
     let sandbox = Sandbox::new();
-    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
         .args(["libraries", "scan"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1158,20 +1138,16 @@ async fn libraries_scan_register_rebuilds_the_registry() -> Result<()> {
     std::fs::create_dir(&b)?;
     write_manifest_uuid(&a, "alpha", "01890a5d-0000-7000-8000-00000000000a");
     write_manifest_uuid(&b, "beta", "01890a5d-0000-7000-8000-00000000000b");
-    let output = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "scan"])
-    .arg(parent.path())
-    .arg("--register")
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let output =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "scan"])
+            .arg(parent.path())
+            .arg("--register")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -1204,18 +1180,14 @@ async fn libraries_scan_register_rebuilds_the_registry() -> Result<()> {
     );
     // The rebuilt registry serves `libraries list` again: both roots
     // show up under their manifest names, closing the recovery loop.
-    let list = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "list"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let list =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "list"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(
         list.status.code(),
         Some(0),
@@ -1249,20 +1221,16 @@ async fn libraries_register_degrades_on_a_read_only_root() -> Result<()> {
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).ok();
         return Ok(());
     }
-    let output = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "register"])
-    .arg(root.path())
-    .args(["--name", "ro", "--yes"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let output =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "register"])
+            .arg(root.path())
+            .args(["--name", "ro", "--yes"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     // Restore write permission so tempdir teardown can remove the root.
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).ok();
     assert_eq!(
@@ -1296,19 +1264,15 @@ async fn libraries_add_on_a_closed_stdin_is_a_user_error() -> Result<()> {
     let registry_dir = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
     let root = tempfile::tempdir()?;
-    let output = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "add", "fresh"])
-    .arg(root.path())
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let output =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "add", "fresh"])
+            .arg(root.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         output.status.code(),
@@ -1343,18 +1307,14 @@ async fn libraries_remove_purge_refuses_a_non_library_target() -> Result<()> {
         &registry_path,
         format!("[libraries]\nvictim = \"{}\"\n", target.path().display()),
     )?;
-    let output = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "remove", "victim", "--purge", "--yes"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let output =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "remove", "victim", "--purge", "--yes"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(
         output.status.code(),
         Some(2),
@@ -1383,18 +1343,14 @@ async fn libraries_remove_purge_deletes_a_confirmed_root() -> Result<()> {
         &registry_path,
         format!("[libraries]\ngone = \"{}\"\n", root.display()),
     )?;
-    let output = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "remove", "gone", "--purge", "--yes"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let output =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "remove", "gone", "--purge", "--yes"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -1458,7 +1414,6 @@ fn spawn_purge(
 ) -> Result<tokio::process::Child> {
     let mut spawn = bookrack_cmd!(&fixture.sandbox)
         .registry(&fixture.registry_path)
-        .without_data_dir()
         .stdin_pipe();
     if let Some(secs) = timeout_secs {
         // `CONFIRM_TIMEOUT_ENV` lives in the `bookrack` binary crate,
@@ -1673,18 +1628,14 @@ async fn libraries_remove_purge_refuses_a_root_in_use() -> Result<()> {
     )?;
     let held = RootLock::acquire(&root, std::process::id(), "daemon")?;
 
-    let output = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "remove", "busy", "--purge", "--yes"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let output =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "remove", "busy", "--purge", "--yes"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         output.status.code(),
@@ -1718,19 +1669,14 @@ async fn libraries_register_rejects_a_derived_name_clash() -> Result<()> {
     write_manifest_uuid(first.path(), "dup", "01890a5d-0000-7000-8000-000000000001");
     write_manifest_uuid(second.path(), "dup", "01890a5d-0000-7000-8000-000000000002");
     let register = |root: &std::path::Path| {
-        tokio::process::Command::from(
-            bookrack_cmd!(&sandbox)
-                .registry(&registry_path)
-                .without_data_dir()
-                .build(),
-        )
-        .args(["libraries", "register"])
-        .arg(root)
-        .arg("--yes")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "register"])
+            .arg(root)
+            .arg("--yes")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
     };
     let first_out = register(first.path()).await?;
     assert_eq!(
@@ -1778,18 +1724,14 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
         "# operator note: leave this here\n[search]\ntop_k = 3\n",
     )?;
 
-    let output = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "config", "prod", "search.top_k=8"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let output =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "config", "prod", "search.top_k=8"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -1821,18 +1763,14 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
     );
 
     // No pairs: dump the file verbatim, comment included.
-    let dump = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "config", "prod"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let dump =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "config", "prod"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(dump.status.code(), Some(0));
     let dump_out = String::from_utf8_lossy(&dump.stdout);
     assert!(
@@ -1857,18 +1795,14 @@ async fn libraries_config_rejects_an_unknown_key_with_exit_2() -> Result<()> {
             toml_escape(root.path()),
         ),
     )?;
-    let output = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "config", "prod", "not_a_key=1"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let output =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "config", "prod", "not_a_key=1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(
         output.status.code(),
         Some(2),
@@ -1913,18 +1847,13 @@ async fn a_root_config_with_a_retired_key_is_reported_until_the_line_goes() -> R
     )?;
 
     let doctor = || async {
-        tokio::process::Command::from(
-            bookrack_cmd!(&sandbox)
-                .registry(&registry_path)
-                .without_data_dir()
-                .build(),
-        )
-        .args(["--library", "prod", "doctor"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["--library", "prod", "doctor"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
     };
 
     // The root resolves, and `doctor` names both the key and the way
@@ -1948,18 +1877,14 @@ async fn a_root_config_with_a_retired_key_is_reported_until_the_line_goes() -> R
     );
 
     // The way out works while the stale line is still there.
-    let unset = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "config", "prod", "--unset", "embed_model"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let unset =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "config", "prod", "--unset", "embed_model"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(
         unset.status.code(),
         Some(0),
@@ -1983,18 +1908,14 @@ async fn a_root_config_with_a_retired_key_is_reported_until_the_line_goes() -> R
     );
 
     // And setting it back is refused: the key no longer exists.
-    let reset = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "config", "prod", "embed_model=whatever"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let reset =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "config", "prod", "embed_model=whatever"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(
         reset.status.code(),
         Some(2),
@@ -2025,18 +1946,14 @@ async fn a_root_config_with_a_process_level_key_is_reported_and_annotated() -> R
         "mcp_addr = \"127.0.0.1:9999\"\nlog_directive = \"debug\"\n\n[search]\ntop_k = 9\n",
     )?;
 
-    let doctor = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["--library", "prod", "doctor"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let doctor =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["--library", "prod", "doctor"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     let report = String::from_utf8_lossy(&doctor.stdout);
     let row = config_toml_row(&report);
     assert!(
@@ -2054,18 +1971,14 @@ async fn a_root_config_with_a_process_level_key_is_reported_and_annotated() -> R
 
     // The verbatim dump still prints the file -- an operator has to see
     // what to delete -- and annotates each retired line on stderr.
-    let dump = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["libraries", "config", "prod"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let dump =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["libraries", "config", "prod"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(dump.status.code(), Some(0));
     let dumped = String::from_utf8_lossy(&dump.stdout);
     assert!(
@@ -2083,26 +1996,22 @@ async fn a_root_config_with_a_process_level_key_is_reported_and_annotated() -> R
     );
 
     // Both lines go in one invocation, and the row clears.
-    let unset = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args([
-        "libraries",
-        "config",
-        "prod",
-        "--unset",
-        "mcp_addr",
-        "--unset",
-        "log_directive",
-    ])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let unset =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args([
+                "libraries",
+                "config",
+                "prod",
+                "--unset",
+                "mcp_addr",
+                "--unset",
+                "log_directive",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     assert_eq!(
         unset.status.code(),
         Some(0),
@@ -2117,18 +2026,14 @@ async fn a_root_config_with_a_process_level_key_is_reported_and_annotated() -> R
         "the rest of the file survives: {written}"
     );
 
-    let cured = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .registry(&registry_path)
-            .without_data_dir()
-            .build(),
-    )
-    .args(["--library", "prod", "doctor"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let cured =
+        tokio::process::Command::from(bookrack_cmd!(&sandbox).registry(&registry_path).build())
+            .args(["--library", "prod", "doctor"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
     let report = String::from_utf8_lossy(&cured.stdout);
     let row = config_toml_row(&report);
     assert!(
@@ -2149,14 +2054,16 @@ async fn a_root_config_with_a_process_level_key_is_reported_and_annotated() -> R
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_paper_filter_is_refused_before_the_call_goes_out() -> Result<()> {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir(LIBRARY);
     for scope in ["all", "book"] {
-        let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
-            .args(["find", "--year", "2020", "--scope", scope])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output =
+            tokio::process::Command::from(bookrack_cmd!(&sandbox).library(LIBRARY).build())
+                .args(["find", "--year", "2020", "--scope", scope])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .await?;
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(
             output.status.code(),
@@ -2188,20 +2095,22 @@ async fn a_paper_filter_is_refused_before_the_call_goes_out() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_side_specific_filter_requires_a_scope() -> Result<()> {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir(LIBRARY);
     for args in [
         &["--year", "x"][..],
         &["--format", "x"],
         &["--awaiting-text"],
     ] {
         let flag = args[0];
-        let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
-            .arg("find")
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output =
+            tokio::process::Command::from(bookrack_cmd!(&sandbox).library(LIBRARY).build())
+                .arg("find")
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .await?;
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(
             output.status.code(),

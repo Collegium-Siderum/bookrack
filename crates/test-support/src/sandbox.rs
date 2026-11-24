@@ -6,7 +6,9 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use bookrack_config::{DAEMON_STATE_DIR_ENV, DEFAULT_REGISTRY_NAME};
+use bookrack_config::{
+    DAEMON_STATE_DIR_ENV, DEFAULT_REGISTRY_NAME, LibraryEntryFields, LibraryKind,
+};
 use bookrack_session::RUNTIME_DIR_ENV;
 use tempfile::TempDir;
 
@@ -203,7 +205,8 @@ impl Sandbox {
         self.path().join("xdg-runtime")
     }
 
-    /// Data root named by `BOOKRACK_DATA_DIR`.
+    /// The sandbox's own data root. Nothing selects it until
+    /// [`Sandbox::name_data_dir`] registers it under a name.
     pub fn data_dir(&self) -> PathBuf {
         self.path().join("data")
     }
@@ -277,25 +280,89 @@ impl Sandbox {
         path
     }
 
-    /// Overwrite the registry with `entries` in the table form, plus an
-    /// optional `default`, and return its path.
+    /// Overwrite the registry with `entries`, plus an optional
+    /// `default`, and return its path.
+    ///
+    /// Each entry is registered the way [`Sandbox::name_data_dir`]
+    /// registers the data root, so a root that exists carries a
+    /// manifest and its entry the manifest's identity. `default` must name one of `entries`; a
+    /// registry whose default points nowhere is written with
+    /// [`Sandbox::write_registry`].
     pub fn write_registry_entries(
         &self,
         default: Option<&str>,
         entries: &[(&str, &Path)],
     ) -> PathBuf {
-        let mut toml = String::new();
-        if let Some(name) = default {
-            toml.push_str(&format!("default = {}\n\n", toml_string(name)));
-        }
+        let path = self.write_registry("");
         for (name, root) in entries {
-            toml.push_str(&format!("[libraries.{name}]\n"));
-            toml.push_str(&format!(
-                "data_dir = {}\n\n",
-                toml_string(&root.display().to_string()),
-            ));
+            self.register_root(name, root);
         }
-        self.write_registry(&toml)
+        if let Some(name) = default {
+            bookrack_config::set_default_library(&path, name).unwrap_or_else(|err| {
+                panic!("point the sandbox registry's default at {name}: {err}")
+            });
+        }
+        path
+    }
+
+    /// Register [`Sandbox::data_dir`] under `name` in the sandbox
+    /// registry, beside any entry already there, and return the root.
+    /// A child then reaches it with [`crate::Spawn::library`].
+    ///
+    /// The root gets a manifest named `name`, of kind `prod`, unless it
+    /// already holds one, and the entry caches the manifest's identity,
+    /// as an operator's registration does.
+    pub fn name_data_dir(&self, name: &str) -> PathBuf {
+        let root = self.data_dir();
+        self.register_root(name, &root);
+        root
+    }
+
+    /// Add or replace the entry `name` → `root` in the sandbox
+    /// registry, leaving every other entry as it is.
+    ///
+    /// A root that exists and holds no manifest gets a fresh one named
+    /// `name`, of kind `prod`; a root that already holds one keeps it.
+    /// The entry then caches that manifest's identity, as an operator's
+    /// registration does. A root that does not exist is recorded by
+    /// path alone and is not created, and neither is an entry identity
+    /// read off a manifest that does not parse.
+    fn register_root(&self, name: &str, root: &Path) {
+        let manifest = if root.is_dir() {
+            match bookrack_config::load_manifest(root) {
+                Ok(Some(manifest)) => Some(manifest),
+                Ok(None) => {
+                    let manifest = bookrack_config::new_manifest(name, LibraryKind::Prod, None);
+                    bookrack_config::write_manifest(root, &manifest).unwrap_or_else(|err| {
+                        panic!("write a manifest under {}: {err}", root.display())
+                    });
+                    Some(manifest)
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+        let fields = match manifest {
+            Some(manifest) => LibraryEntryFields {
+                data_dir: root.to_path_buf(),
+                kind: manifest.kind,
+                description: manifest.description,
+                index_profile: manifest.index_profile,
+                created_at: manifest.created_at,
+                uuid: Some(manifest.uuid),
+            },
+            None => LibraryEntryFields {
+                data_dir: root.to_path_buf(),
+                kind: LibraryKind::Prod,
+                description: None,
+                index_profile: None,
+                created_at: None,
+                uuid: None,
+            },
+        };
+        bookrack_config::upsert_library_entry(&self.registry_path(), name, &fields)
+            .unwrap_or_else(|err| panic!("register {name} in the sandbox registry: {err}"));
     }
 }
 
@@ -303,13 +370,6 @@ impl Default for Sandbox {
     fn default() -> Sandbox {
         Sandbox::new()
     }
-}
-
-/// Quote `value` as a TOML basic string. JSON string escaping is a
-/// subset of TOML's, so the JSON encoder produces a valid basic string
-/// for every path a tempdir can hand back.
-fn toml_string(value: &str) -> String {
-    serde_json::to_string(value).expect("string encodes as JSON")
 }
 
 #[cfg(test)]
@@ -375,6 +435,80 @@ mod tests {
         assert_eq!(entries[1].data_dir, beta);
         assert!(entries[0].is_default, "default = \"alpha\" was not written");
         assert!(!entries[1].is_default);
+    }
+
+    /// Every root an entry names gets a manifest, and the entry caches
+    /// its identity: the uuid a mount compares against the root's is
+    /// the one under the root, and the kind is the manifest's.
+    #[test]
+    fn a_written_entry_carries_the_identity_of_its_roots_manifest() {
+        let sandbox = Sandbox::new();
+        let alpha = sandbox.data_root("alpha");
+        let path = sandbox.write_registry_entries(None, &[("alpha", alpha.as_path())]);
+        let manifest = bookrack_config::load_manifest(&alpha)
+            .expect("manifest parses")
+            .expect("the root carries a manifest");
+        assert_eq!(manifest.name, "alpha");
+        assert_eq!(manifest.kind, LibraryKind::Prod);
+        let entries = bookrack_config::list_libraries_at(&path).expect("registry parses");
+        assert_eq!(entries[0].uuid.as_deref(), Some(manifest.uuid.as_str()));
+        assert_eq!(entries[0].kind, manifest.kind);
+    }
+
+    /// A root that already holds a manifest keeps it, byte for byte,
+    /// and the entry takes that manifest's identity rather than a new
+    /// one.
+    #[test]
+    fn an_existing_manifest_is_kept_and_cached() {
+        let sandbox = Sandbox::new();
+        let alpha = sandbox.data_root("alpha");
+        let own = bookrack_config::new_manifest("born-elsewhere", LibraryKind::Test, None);
+        bookrack_config::write_manifest(&alpha, &own).expect("write manifest");
+        let before =
+            std::fs::read(alpha.join(bookrack_config::MANIFEST_FILENAME)).expect("read manifest");
+        let path = sandbox.write_registry_entries(None, &[("alpha", alpha.as_path())]);
+        let after =
+            std::fs::read(alpha.join(bookrack_config::MANIFEST_FILENAME)).expect("read manifest");
+        assert_eq!(before, after, "an existing manifest was rewritten");
+        let entries = bookrack_config::list_libraries_at(&path).expect("registry parses");
+        assert_eq!(entries[0].uuid.as_deref(), Some(own.uuid.as_str()));
+        assert_eq!(entries[0].kind, LibraryKind::Test);
+    }
+
+    /// An entry whose root does not exist is a missing-root fixture:
+    /// the root is not created, and the entry carries no identity a
+    /// mount could compare.
+    #[test]
+    fn a_missing_root_is_recorded_by_path_alone() {
+        let sandbox = Sandbox::new();
+        let gone = sandbox.path().join("roots").join("gone");
+        let path = sandbox.write_registry_entries(None, &[("gone", gone.as_path())]);
+        assert!(!gone.exists(), "a missing root was created");
+        let entries = bookrack_config::list_libraries_at(&path).expect("registry parses");
+        assert_eq!(entries[0].data_dir, gone);
+        assert_eq!(entries[0].uuid, None);
+    }
+
+    /// Naming the data root adds an entry beside the ones already
+    /// written and leaves them as they were; the named root carries a
+    /// manifest whose uuid the entry caches.
+    #[test]
+    fn naming_the_data_root_adds_an_entry_beside_the_others() {
+        let sandbox = Sandbox::new();
+        let alpha = sandbox.data_root("alpha");
+        sandbox.write_registry_entries(None, &[("alpha", alpha.as_path())]);
+        let root = sandbox.name_data_dir("main");
+        assert_eq!(root, sandbox.data_dir());
+        let entries =
+            bookrack_config::list_libraries_at(&sandbox.registry_path()).expect("registry parses");
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["alpha", "main"]);
+        let main = entries.iter().find(|e| e.name == "main").expect("main");
+        assert_eq!(main.data_dir, sandbox.data_dir());
+        let manifest = bookrack_config::load_manifest(&sandbox.data_dir())
+            .expect("manifest parses")
+            .expect("the data root carries a manifest");
+        assert_eq!(main.uuid.as_deref(), Some(manifest.uuid.as_str()));
     }
 
     /// A registry written without a default has none, so the tests

@@ -94,7 +94,6 @@ impl World {
     /// alone.
     fn run(&self, args: &[&str]) -> Output {
         bookrack_cmd!(&self.sandbox)
-            .without_data_dir()
             .build()
             .args(args)
             .stdin(Stdio::null())

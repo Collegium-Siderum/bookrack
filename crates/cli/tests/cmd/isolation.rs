@@ -36,18 +36,13 @@ use eyre::Result;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_sandboxed_child_sees_no_library_and_names_the_sandbox_registry() -> Result<()> {
     let sandbox = Sandbox::new();
-    let output = tokio::process::Command::from(
-        bookrack_cmd!(&sandbox)
-            .without_data_dir()
-            .without_registry()
-            .build(),
-    )
-    .args(["doctor", "--json"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .await?;
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).without_registry().build())
+        .args(["doctor", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let report: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|e| {

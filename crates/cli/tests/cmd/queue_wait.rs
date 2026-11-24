@@ -84,7 +84,7 @@ fn seeded_document() -> Value {
 
 /// Run one client command and return its exit code, stdout and stderr.
 async fn client(sandbox: &Sandbox, args: &[&str]) -> (Option<i32>, String, String) {
-    let output = Command::from(bookrack_cmd!(sandbox).without_data_dir().build())
+    let output = Command::from(bookrack_cmd!(sandbox).build())
         .args(args)
         .output()
         .await
@@ -140,7 +140,6 @@ async fn wait_reports_ended_and_awaited_jobs_through_the_command_entry() {
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );

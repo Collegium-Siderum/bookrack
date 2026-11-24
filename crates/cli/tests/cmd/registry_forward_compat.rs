@@ -10,7 +10,7 @@ use bookrack_test_support::{Sandbox, bookrack_cmd};
 use tokio::process::Command;
 
 async fn bookrack(sandbox: &Sandbox, args: &[&str]) -> Output {
-    Command::from(bookrack_cmd!(sandbox).without_data_dir().build())
+    Command::from(bookrack_cmd!(sandbox).build())
         .args(args)
         .output()
         .await
@@ -21,15 +21,15 @@ async fn bookrack(sandbox: &Sandbox, args: &[&str]) -> Output {
 async fn clearing_the_cached_profile_removes_only_that_field() {
     let sandbox = Sandbox::new();
     let root = sandbox.data_root("lib-root");
-    let registry = sandbox.write_registry_entries(Some("lib"), &[("lib", root.as_path())]);
-    let mut text = std::fs::read_to_string(&registry).expect("read registry");
-    assert!(
-        text.ends_with("\n\n"),
-        "the entry is the last table: {text}"
-    );
-    text.truncate(text.len() - 1);
-    text.push_str("kind = \"archive\"\nindex_profile = \"cached\"\nmount_at_start = false\n");
-    std::fs::write(&registry, &text).expect("extend the entry");
+    // The entry as another build writes it: a kind token this build
+    // does not define, a cached profile, and a key it does not know.
+    // JSON string escaping is a subset of TOML's, so the encoder quotes
+    // the root as a valid basic string.
+    let registry = sandbox.write_registry(&format!(
+        "default = \"lib\"\n\n[libraries.lib]\ndata_dir = {}\nkind = \"archive\"\n\
+         index_profile = \"cached\"\nmount_at_start = false\n",
+        serde_json::to_string(&root.display().to_string()).expect("quote the root"),
+    ));
 
     let listing = bookrack(&sandbox, &["--json", "libraries", "list"]).await;
     let stdout = String::from_utf8_lossy(&listing.stdout);

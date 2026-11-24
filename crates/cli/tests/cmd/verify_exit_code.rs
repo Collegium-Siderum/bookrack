@@ -81,7 +81,6 @@ fn papers_with_one_intake(root: &Path, file_present: bool) {
 async fn spawn_daemon(sandbox: &Sandbox, primary: &str) -> DaemonProcess {
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -103,7 +102,7 @@ async fn stop_daemon(daemon: DaemonProcess) {
 /// Run one `bookrack` invocation; returns the exit code, stdout, and
 /// stderr.
 async fn run_verify(sandbox: &Sandbox, args: &[&str]) -> (Option<i32>, String, String) {
-    let output = Command::from(bookrack_cmd!(sandbox).without_data_dir().build())
+    let output = Command::from(bookrack_cmd!(sandbox).build())
         .args(args)
         .output()
         .await

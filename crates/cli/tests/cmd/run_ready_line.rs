@@ -52,7 +52,6 @@ async fn the_ready_line_is_unchanged_and_skipped_libraries_follow_it() {
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -63,7 +62,7 @@ async fn the_ready_line_is_unchanged_and_skipped_libraries_follow_it() {
         .await
         .expect("bookrack run did not become ready");
     // The skipped library's reason names who holds its root.
-    let status = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let status = Command::from(bookrack_cmd!(&sandbox).build())
         .args(["rpc", "call", "daemon.status"])
         .output()
         .await
@@ -80,7 +79,7 @@ async fn the_ready_line_is_unchanged_and_skipped_libraries_follow_it() {
         "the reason's detail names the holder: {beta_row}"
     );
 
-    let output = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let output = Command::from(bookrack_cmd!(&sandbox).build())
         .arg("quit")
         .output()
         .await

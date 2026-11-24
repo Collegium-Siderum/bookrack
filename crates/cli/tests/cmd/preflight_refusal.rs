@@ -51,11 +51,13 @@ fn spawn_empty_ollama() -> String {
 
 async fn run_against_empty_ollama(extra: &[&str]) -> (Option<i32>, String) {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir("main");
 
     let mut args: Vec<&str> = extra.to_vec();
     args.push("run");
     let output = Command::from(
         bookrack_cmd!(&sandbox)
+            .library("main")
             .ollama_url(spawn_empty_ollama())
             .build(),
     )
@@ -75,6 +77,7 @@ async fn run_against_empty_ollama(extra: &[&str]) -> (Option<i32>, String) {
 /// would mean the endpoint was not checked first.
 async fn run_against_a_held_mcp_address(extra: &[&str]) -> (Option<i32>, String, String) {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir("main");
     let occupant = TcpListener::bind("127.0.0.1:0").expect("hold an address");
     let addr = occupant.local_addr().expect("addr").to_string();
 
@@ -82,6 +85,7 @@ async fn run_against_a_held_mcp_address(extra: &[&str]) -> (Option<i32>, String,
     args.extend_from_slice(&["run", "--mcp-addr", &addr]);
     let output = Command::from(
         bookrack_cmd!(&sandbox)
+            .library("main")
             .ollama_url(spawn_empty_ollama())
             .build(),
     )
@@ -212,7 +216,6 @@ async fn no_servable_library_exits_two_naming_each() {
 
     let output = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     )
@@ -298,7 +301,6 @@ async fn a_lone_library_holding_retired_labels_exits_two_naming_its_removal() {
 
     let output = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     )
@@ -326,7 +328,6 @@ async fn a_path_selected_root_holding_retired_labels_is_not_told_to_remove_defau
 
     let output = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     )

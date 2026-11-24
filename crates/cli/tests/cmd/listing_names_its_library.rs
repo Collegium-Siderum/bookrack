@@ -77,7 +77,6 @@ async fn a_listing_names_the_library_its_rows_came_from() {
     let lock_path = sandbox.tty_lock_path();
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -142,7 +141,7 @@ async fn a_listing_names_the_library_its_rows_came_from() {
 
 /// Run `bookrack list` with extra leading arguments and return stdout.
 async fn run_list(sandbox: &Sandbox, prefix: &[&str]) -> String {
-    let mut cmd = Command::from(bookrack_cmd!(sandbox).without_data_dir().build());
+    let mut cmd = Command::from(bookrack_cmd!(sandbox).build());
     cmd.args(prefix).arg("list");
     let output = cmd.output().await.expect("run bookrack list");
     let stdout = String::from_utf8_lossy(&output.stdout)

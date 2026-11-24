@@ -53,7 +53,6 @@ async fn a_library_the_daemon_serves_answers_for_itself() {
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -67,7 +66,7 @@ async fn a_library_the_daemon_serves_answers_for_itself() {
     // `library.info` names the library it answered for, which is what
     // makes this test discriminate: two empty roots report identical
     // counts, and only the identity says which one was read.
-    let output = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let output = Command::from(bookrack_cmd!(&sandbox).build())
         .args(["--library", "beta", "rpc", "call", "library.info", "{}"])
         .output()
         .await
@@ -87,7 +86,7 @@ async fn a_library_the_daemon_serves_answers_for_itself() {
     // The other direction: an unknown name is caller input, not a
     // silent fallback to the default. Without this a client that
     // dropped the selection entirely would pass the assertion above.
-    let output = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let output = Command::from(bookrack_cmd!(&sandbox).build())
         .args(["--library", "nosuch", "rpc", "call", "library.info", "{}"])
         .output()
         .await
@@ -125,7 +124,6 @@ async fn a_path_selection_reaches_the_library_that_owns_the_root() {
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -136,7 +134,7 @@ async fn a_path_selection_reaches_the_library_that_owns_the_root() {
         .await
         .expect("bookrack run did not become ready");
 
-    let by_flag = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let by_flag = Command::from(bookrack_cmd!(&sandbox).build())
         .args(["--data-dir", &beta_root.display().to_string()])
         .args(["rpc", "call", "library.info", "{}"])
         .output()
@@ -155,8 +153,7 @@ async fn a_path_selection_reaches_the_library_that_owns_the_root() {
 
     let by_env = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
-            .data_dir(beta_root.as_path())
+            .data_dir_env(beta_root.as_path())
             .build(),
     )
     .args(["rpc", "call", "library.info", "{}"])
@@ -175,7 +172,7 @@ async fn a_path_selection_reaches_the_library_that_owns_the_root() {
     );
 
     let stranger = sandbox.data_root("stranger-root");
-    let unclaimed = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let unclaimed = Command::from(bookrack_cmd!(&sandbox).build())
         .args(["--data-dir", &stranger.display().to_string()])
         .args(["rpc", "call", "library.info", "{}"])
         .output()
@@ -214,7 +211,7 @@ async fn a_local_command_still_switches_roots_by_path() {
     let sandbox = two_library_world();
     let stranger = sandbox.data_root("stranger-root");
 
-    let out = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let out = Command::from(bookrack_cmd!(&sandbox).build())
         .args(["--data-dir", &stranger.display().to_string()])
         .args(["retrieval", "list"])
         .output()

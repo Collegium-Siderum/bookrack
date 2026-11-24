@@ -74,7 +74,6 @@ async fn serve_alpha_and_beta() -> (Sandbox, DaemonProcess) {
     let lock_path = sandbox.tty_lock_path();
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -94,7 +93,7 @@ struct Run {
 }
 
 async fn bookrack(sandbox: &Sandbox, args: &[&str]) -> Run {
-    let mut cmd = Command::from(bookrack_cmd!(sandbox).without_data_dir().build());
+    let mut cmd = Command::from(bookrack_cmd!(sandbox).build());
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

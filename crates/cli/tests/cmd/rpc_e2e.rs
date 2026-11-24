@@ -11,13 +11,18 @@ use std::time::Duration;
 use bookrack_test_support::{DaemonProcess, EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
 
+/// The name the sandbox's data root is registered under.
+const LIBRARY: &str = "main";
+
 #[tokio::test]
 async fn library_info_round_trips_through_running_daemon() {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir(LIBRARY);
     let lock_path = sandbox.tty_lock_path();
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
+            .library(LIBRARY)
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -28,7 +33,7 @@ async fn library_info_round_trips_through_running_daemon() {
         .await
         .expect("bookrack run did not become ready");
 
-    let output = Command::from(bookrack_cmd!(&sandbox).build())
+    let output = Command::from(bookrack_cmd!(&sandbox).library(LIBRARY).build())
         .arg("rpc")
         .arg("call")
         .arg("library.info")
@@ -77,6 +82,7 @@ async fn library_info_round_trips_through_running_daemon() {
 #[tokio::test]
 async fn an_unknown_audit_profile_exits_two_from_the_cli() {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir(LIBRARY);
     let lock_path = sandbox.tty_lock_path();
     // An empty directory: with the name accepted, `dryrun` fails for
     // having nothing to scan, which is a different exit code from the
@@ -86,6 +92,7 @@ async fn an_unknown_audit_profile_exits_two_from_the_cli() {
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
+            .library(LIBRARY)
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -96,7 +103,7 @@ async fn an_unknown_audit_profile_exits_two_from_the_cli() {
         .await
         .expect("bookrack run did not become ready");
 
-    let output = Command::from(bookrack_cmd!(&sandbox).build())
+    let output = Command::from(bookrack_cmd!(&sandbox).library(LIBRARY).build())
         .arg("--audit-profile")
         .arg("strictt")
         .arg("dryrun")
@@ -130,10 +137,12 @@ async fn an_unknown_audit_profile_exits_two_from_the_cli() {
 #[tokio::test]
 async fn a_remove_of_an_unknown_book_exits_two_from_the_cli() {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir(LIBRARY);
     let lock_path = sandbox.tty_lock_path();
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
+            .library(LIBRARY)
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -144,7 +153,7 @@ async fn a_remove_of_an_unknown_book_exits_two_from_the_cli() {
         .await
         .expect("bookrack run did not become ready");
 
-    let output = Command::from(bookrack_cmd!(&sandbox).build())
+    let output = Command::from(bookrack_cmd!(&sandbox).library(LIBRARY).build())
         .arg("remove")
         .arg("999999")
         .arg("--yes")
@@ -177,7 +186,6 @@ async fn rpc_call_daemon_config_refuses_a_library_flag() {
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .extra_env("BOOKRACK_EMBED_BATCH_MAX_CHUNKS", "7")
             .extra_env("BOOKRACK_NOT_A_KNOB", "1")
@@ -190,7 +198,7 @@ async fn rpc_call_daemon_config_refuses_a_library_flag() {
         .await
         .expect("bookrack run did not become ready");
 
-    let plain = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let plain = Command::from(bookrack_cmd!(&sandbox).build())
         .args(["rpc", "call", "daemon.config"])
         .output()
         .await
@@ -221,7 +229,7 @@ async fn rpc_call_daemon_config_refuses_a_library_flag() {
         .collect();
     assert_eq!(unclaimed, ["BOOKRACK_NOT_A_KNOB"], "{config}");
 
-    let flagged = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let flagged = Command::from(bookrack_cmd!(&sandbox).build())
         .args(["--library", "alpha", "rpc", "call", "daemon.config"])
         .output()
         .await

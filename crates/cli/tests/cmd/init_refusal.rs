@@ -47,7 +47,7 @@ async fn run_init(
     ollama_url: Option<String>,
     args: &[&str],
 ) -> (Option<i32>, String) {
-    let mut spawn = bookrack_cmd!(sandbox).without_data_dir();
+    let mut spawn = bookrack_cmd!(sandbox);
     if let Some(url) = ollama_url {
         spawn = spawn.ollama_url(url);
     }
@@ -120,7 +120,7 @@ async fn an_unpulled_embed_model_is_reported_once_with_its_pull_command() {
 #[tokio::test]
 async fn the_refusal_is_structured_under_json() {
     let sandbox = Sandbox::new();
-    let output = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let output = Command::from(bookrack_cmd!(&sandbox).build())
         .args(["--json", "init", "--non-interactive"])
         .output()
         .await

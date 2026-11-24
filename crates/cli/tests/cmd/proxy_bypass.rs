@@ -70,11 +70,13 @@ fn spawn_proxy() -> (String, Arc<AtomicUsize>) {
 #[tokio::test]
 async fn a_proxy_in_the_environment_does_not_capture_a_loopback_probe() {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir("main");
     let (ollama_url, ollama_hits) = spawn_ollama();
     let (proxy_url, proxy_hits) = spawn_proxy();
 
     let output = Command::from(
         bookrack_cmd!(&sandbox)
+            .library("main")
             .ollama_url(ollama_url.clone())
             // Both spellings the matcher reads, and the exemption list
             // emptied: an inherited `NO_PROXY` naming localhost would

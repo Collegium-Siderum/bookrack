@@ -127,7 +127,6 @@ impl Fixture {
         let output = tokio::process::Command::from(
             bookrack_cmd!(&self.sandbox)
                 .registry(&self.registry_path)
-                .without_data_dir()
                 .build(),
         )
         .args(args)

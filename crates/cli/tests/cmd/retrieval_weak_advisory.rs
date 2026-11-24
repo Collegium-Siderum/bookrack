@@ -24,7 +24,6 @@ use eyre::Result;
 /// name it.
 fn show(sandbox: &Sandbox, data_dir: &std::path::Path, call_id: i64) -> Result<String> {
     let out = bookrack_cmd!(sandbox)
-        .without_data_dir()
         .build()
         .args([
             "--data-dir",
@@ -119,7 +118,6 @@ fn the_environment_cannot_move_a_library_threshold() -> Result<()> {
     let data_dir = root.path().display().to_string();
 
     let shown = bookrack_cmd!(&sandbox)
-        .without_data_dir()
         .extra_env("BOOKRACK_SEARCH_WEAK_THRESHOLD", "0.9")
         .build()
         .args([
@@ -140,7 +138,6 @@ fn the_environment_cannot_move_a_library_threshold() -> Result<()> {
     );
 
     let effective = bookrack_cmd!(&sandbox)
-        .without_data_dir()
         .extra_env("BOOKRACK_SEARCH_WEAK_THRESHOLD", "0.9")
         .build()
         .args(["--data-dir", &data_dir, "--json", "config", "effective"])

@@ -30,7 +30,7 @@ fn two_library_world(body: &str) -> Sandbox {
 }
 
 async fn bookrack(sandbox: &Sandbox, args: &[&str]) -> Output {
-    Command::from(bookrack_cmd!(sandbox).without_data_dir().build())
+    Command::from(bookrack_cmd!(sandbox).build())
         .args(args)
         .output()
         .await
@@ -42,7 +42,6 @@ async fn a_library_with_a_retired_key_still_mounts_and_reports_it() {
     let sandbox = two_library_world("log_directive = \"debug\"\n");
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );

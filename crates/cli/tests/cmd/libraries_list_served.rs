@@ -40,7 +40,7 @@ fn two_library_world() -> Sandbox {
 
 /// `bookrack --json libraries list` against the given sandbox.
 async fn listing(sandbox: &Sandbox) -> String {
-    let output = Command::from(bookrack_cmd!(sandbox).without_data_dir().build())
+    let output = Command::from(bookrack_cmd!(sandbox).build())
         .args(["--json", "libraries", "list"])
         .output()
         .await
@@ -66,7 +66,6 @@ async fn every_entry_is_served_when_the_daemon_came_up_through_the_registry() {
     let sandbox = two_library_world();
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -93,7 +92,6 @@ async fn no_entry_is_served_when_the_daemon_holds_a_root_the_registry_does_not_n
     let stranger = sandbox.data_root("stranger-root");
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -146,7 +144,6 @@ async fn a_skipped_entry_is_marked_with_its_reason() {
         .expect("hold the beta root");
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -179,7 +176,7 @@ async fn a_skipped_entry_is_marked_with_its_reason() {
         "the reason names the lock: {stdout}"
     );
 
-    let output = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let output = Command::from(bookrack_cmd!(&sandbox).build())
         .args(["libraries", "list"])
         .output()
         .await

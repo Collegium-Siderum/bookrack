@@ -14,13 +14,18 @@ use std::time::Duration;
 use bookrack_test_support::{DaemonProcess, EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
 
+/// The name the sandbox's data root is registered under.
+const LIBRARY: &str = "main";
+
 #[tokio::test]
 async fn quit_terminates_the_daemon_process() {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir(LIBRARY);
     let lock_path = sandbox.tty_lock_path();
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
+            .library(LIBRARY)
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );

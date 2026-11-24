@@ -17,18 +17,24 @@
 
 #![cfg(unix)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
-use bookrack_test_support::{ProcessEnv, bookrack_cmd, process_env};
+use bookrack_test_support::{ProcessEnv, Sandbox, bookrack_cmd, process_env};
 use eyre::Result;
 use serde_json::Value;
 
-fn opts_serving_mcp(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
+/// The name the test's data root is registered under.
+const LIBRARY: &str = "main";
+
+/// Register `data_dir` as [`LIBRARY`] and return options that serve it
+/// by that name from `runtime_dir`, with MCP on a kernel-assigned port.
+fn opts_serving_mcp(sandbox: &Sandbox, data_dir: &Path, runtime_dir: PathBuf) -> RuntimeOpts {
+    sandbox.write_registry_entries(None, &[(LIBRARY, data_dir)]);
     let mut opts = RuntimeOpts::headless_with_flags(
-        Some(data_dir),
         None,
+        Some(LIBRARY.to_string()),
         bookrack_config::DaemonFlags {
             mcp_addr: Some("127.0.0.1:0".to_string()),
             ..bookrack_config::DaemonFlags::default()
@@ -55,7 +61,8 @@ async fn doctor_reports_the_endpoint_the_daemon_actually_serves() -> Result<()> 
     let runtime_root = tempfile::tempdir()?;
 
     let mut runtime = DaemonRuntime::start(opts_serving_mcp(
-        data_root.path().into(),
+        sandbox,
+        data_root.path(),
         runtime_root.path().into(),
     ))
     .await?;
@@ -65,13 +72,12 @@ async fn doctor_reports_the_endpoint_the_daemon_actually_serves() -> Result<()> 
     assert!(mcp_handle.is_some(), "the listener task must be running");
 
     let runtime_dir_for_child = runtime_root.path().to_path_buf();
-    let data_dir_for_child = data_root.path().to_path_buf();
     let child = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
         tokio::process::Command::from(
             bookrack_cmd!(sandbox)
                 .runtime_dir(runtime_dir_for_child)
-                .data_dir(data_dir_for_child)
+                .library(LIBRARY)
                 .build(),
         )
         .args(["--json", "doctor"])

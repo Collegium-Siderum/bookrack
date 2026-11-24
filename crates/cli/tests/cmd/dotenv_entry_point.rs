@@ -35,7 +35,7 @@ fn seed_dotenv(sandbox: &Sandbox) -> std::path::PathBuf {
 /// health of the probes, which an offline sandbox fails for unrelated
 /// reasons.
 async fn resolved_root(sandbox: &Sandbox, extra: &[(&str, &str)]) -> Result<String> {
-    let mut spawn = bookrack_cmd!(sandbox).without_data_dir();
+    let mut spawn = bookrack_cmd!(sandbox);
     for (key, value) in extra {
         spawn = spawn.extra_env(key, value);
     }

@@ -69,10 +69,12 @@ async fn a_leftover_lock_is_not_the_childs() {
 #[tokio::test]
 async fn a_daemon_that_exits_after_taking_the_lock_is_not_ready() {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir("main");
     let occupant = std::net::TcpListener::bind("127.0.0.1:0").expect("hold an address");
     let addr = occupant.local_addr().expect("held address").to_string();
     let mut cmd = Command::from(
         bookrack_cmd!(&sandbox)
+            .library("main")
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -107,8 +109,10 @@ async fn a_daemon_that_exits_after_taking_the_lock_is_not_ready() {
 #[tokio::test]
 async fn a_daemon_that_comes_up_is_ready() {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir("main");
     let mut cmd = Command::from(
         bookrack_cmd!(&sandbox)
+            .library("main")
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );

@@ -23,10 +23,13 @@ use bookrack_test_support::{DaemonProcess, EmbedStub, Sandbox, bookrack_cmd};
 use serde_json::Value;
 use tokio::process::Command;
 
+/// The name the sandbox's data root is registered under.
+const LIBRARY: &str = "main";
+
 /// Run one client command and return its exit success, stdout and
 /// stderr.
 async fn client(sandbox: &Sandbox, args: &[&str]) -> (bool, String, String) {
-    let output = Command::from(bookrack_cmd!(sandbox).build())
+    let output = Command::from(bookrack_cmd!(sandbox).library(LIBRARY).build())
         .args(args)
         .output()
         .await
@@ -49,10 +52,12 @@ async fn client_json(sandbox: &Sandbox, args: &[&str]) -> Value {
 #[tokio::test]
 async fn state_filter_selects_on_the_client_and_keeps_the_summary_whole() {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir(LIBRARY);
     let lock_path = sandbox.tty_lock_path();
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
+            .library(LIBRARY)
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );

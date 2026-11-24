@@ -232,7 +232,6 @@ mod tests {
 
         let child_side: BTreeMap<OsString, OsString> =
             Spawn::__with_bin("/nonexistent/bookrack", &sandbox)
-                .without_data_dir()
                 .without_registry()
                 .plan(std::iter::empty())
                 .set

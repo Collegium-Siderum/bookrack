@@ -19,7 +19,7 @@ async fn libraries_add_records_a_relative_root_as_absolute() -> Result<()> {
     let sandbox = Sandbox::new();
     let root = sandbox.cwd().join("lib");
     std::fs::create_dir_all(&root)?;
-    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
         .args(["libraries", "add", "shelf", "./lib", "--yes"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

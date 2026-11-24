@@ -55,7 +55,7 @@ async fn a_path_selected_root_is_reached_by_path_beside_a_mounted_library() {
     let lock_path = sandbox.tty_lock_path();
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .data_dir(&anonymous)
+            .data_dir_env(&anonymous)
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -67,7 +67,7 @@ async fn a_path_selected_root_is_reached_by_path_beside_a_mounted_library() {
         .expect("bookrack run did not become ready");
 
     let (code, stdout, stderr) = client(
-        Command::from(bookrack_cmd!(&sandbox).without_data_dir().build()),
+        Command::from(bookrack_cmd!(&sandbox).build()),
         &["rpc", "call", "library.mount", r#"{"name":"beta"}"#],
     )
     .await;
@@ -80,7 +80,7 @@ async fn a_path_selected_root_is_reached_by_path_beside_a_mounted_library() {
     // `--data-dir` naming the anonymous root reaches it, by the name the
     // daemon serves it under.
     let (code, stdout, stderr) = client(
-        Command::from(bookrack_cmd!(&sandbox).without_data_dir().build()),
+        Command::from(bookrack_cmd!(&sandbox).build()),
         &[
             "--data-dir",
             &anonymous.display().to_string(),
@@ -108,7 +108,7 @@ async fn a_path_selected_root_is_reached_by_path_beside_a_mounted_library() {
     // A submit selected the same way lands on that root, not on the
     // registry library mounted beside it.
     let (code, stdout, stderr) = client(
-        Command::from(bookrack_cmd!(&sandbox).without_data_dir().build()),
+        Command::from(bookrack_cmd!(&sandbox).build()),
         &[
             "--data-dir",
             &anonymous.display().to_string(),
@@ -129,7 +129,7 @@ async fn a_path_selected_root_is_reached_by_path_beside_a_mounted_library() {
         .unwrap_or_else(|| panic!("no job id in {stdout}"))
         .to_string();
     let (code, stdout, stderr) = client(
-        Command::from(bookrack_cmd!(&sandbox).without_data_dir().build()),
+        Command::from(bookrack_cmd!(&sandbox).build()),
         &["rpc", "call", "queue.list", "{}"],
     )
     .await;
@@ -150,7 +150,7 @@ async fn a_path_selected_root_is_reached_by_path_beside_a_mounted_library() {
     // `BOOKRACK_DATA_DIR` naming the bring-up root leaves `bookrack
     // status` answering: the card is about that root.
     let (code, stdout, stderr) = client(
-        Command::from(bookrack_cmd!(&sandbox).data_dir(&anonymous).build()),
+        Command::from(bookrack_cmd!(&sandbox).data_dir_env(&anonymous).build()),
         &["--json", "status"],
     )
     .await;

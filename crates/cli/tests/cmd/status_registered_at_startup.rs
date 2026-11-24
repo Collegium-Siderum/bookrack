@@ -20,7 +20,7 @@ use tokio::process::Command;
 
 /// `bookrack --json status` against the given sandbox, parsed.
 async fn status_card(sandbox: &Sandbox) -> serde_json::Value {
-    let output = Command::from(bookrack_cmd!(sandbox).without_data_dir().build())
+    let output = Command::from(bookrack_cmd!(sandbox).build())
         .args(["--json", "status"])
         .output()
         .await
@@ -52,7 +52,6 @@ async fn the_card_names_the_root_bring_up_registered() {
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -86,7 +85,6 @@ async fn the_card_has_no_such_row_when_bring_up_registered_nothing() {
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );

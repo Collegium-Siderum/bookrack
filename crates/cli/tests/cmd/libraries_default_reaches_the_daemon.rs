@@ -36,7 +36,7 @@ fn two_library_world() -> Sandbox {
 }
 
 async fn run(sandbox: &Sandbox, args: &[&str]) -> std::process::Output {
-    Command::from(bookrack_cmd!(sandbox).without_data_dir().build())
+    Command::from(bookrack_cmd!(sandbox).build())
         .args(args)
         .output()
         .await
@@ -74,7 +74,6 @@ async fn the_daemon_follows_a_default_moved_from_the_cli() {
     let sandbox = two_library_world();
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );

@@ -18,6 +18,9 @@ use bookrack_test_support::{DaemonProcess, EmbedStub, Sandbox, Spawn, bookrack_c
 use serde_json::Value;
 use tokio::process::Command;
 
+/// The name the sandbox's data root is registered under.
+const LIBRARY: &str = "main";
+
 const RULE: &str = "\
 schema = 1
 
@@ -68,6 +71,7 @@ async fn run(spawn: Spawn, args: &[&str]) -> (Option<i32>, String, String) {
 #[tokio::test]
 async fn a_rule_preview_needs_no_daemon_and_no_library() {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir(LIBRARY);
     let material = sandbox.path().join("material");
     lay_out(&material);
     let rule = material.join("rule.toml").display().to_string();
@@ -76,7 +80,7 @@ async fn a_rule_preview_needs_no_daemon_and_no_library() {
 
     // A selected library with no overlay directory reads the shipped
     // rules, and the report says so.
-    let (code, stdout, stderr) = run(bookrack_cmd!(&sandbox), &args).await;
+    let (code, stdout, stderr) = run(bookrack_cmd!(&sandbox).library(LIBRARY), &args).await;
     assert_eq!(code, Some(0), "{stdout} {stderr}");
     assert!(stdout.contains("units: 2 (2 numbered, 1 to 2)"), "{stdout}");
     assert!(stdout.contains("audit rules: shipped defaults"), "{stdout}");
@@ -84,7 +88,7 @@ async fn a_rule_preview_needs_no_daemon_and_no_library() {
     // Once the library carries one, the report names it.
     let overlay = sandbox.data_dir().join("audit-rules");
     std::fs::create_dir_all(&overlay).expect("create the overlay directory");
-    let (code, stdout, stderr) = run(bookrack_cmd!(&sandbox), &args).await;
+    let (code, stdout, stderr) = run(bookrack_cmd!(&sandbox).library(LIBRARY), &args).await;
     assert_eq!(code, Some(0), "{stdout} {stderr}");
     assert!(
         stdout
@@ -94,11 +98,7 @@ async fn a_rule_preview_needs_no_daemon_and_no_library() {
     );
 
     // With nothing selected anywhere, the shipped rules stand in.
-    let nowhere = || {
-        bookrack_cmd!(&sandbox)
-            .without_data_dir()
-            .without_registry()
-    };
+    let nowhere = || bookrack_cmd!(&sandbox).without_registry();
     let (code, stdout, stderr) = run(nowhere(), &args).await;
     assert_eq!(code, Some(0), "{stdout} {stderr}");
     assert!(
@@ -172,7 +172,7 @@ async fn a_rule_preview_needs_no_daemon_and_no_library() {
     // Without `--dry-run` the same rule is a submission, and there is
     // no daemon to take it.
     let (code, stdout, stderr) = run(
-        bookrack_cmd!(&sandbox),
+        bookrack_cmd!(&sandbox).library(LIBRARY),
         &["ingest", "--rule", rule.as_str()],
     )
     .await;
@@ -183,6 +183,7 @@ async fn a_rule_preview_needs_no_daemon_and_no_library() {
 #[tokio::test]
 async fn a_rule_submission_reaches_the_queue_under_absolute_paths() {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir(LIBRARY);
     let lock_path = sandbox.tty_lock_path();
     // The client runs in the sandbox's working directory.
     let material = sandbox.cwd().join("material");
@@ -190,6 +191,7 @@ async fn a_rule_submission_reaches_the_queue_under_absolute_paths() {
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
+            .library(LIBRARY)
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -201,7 +203,11 @@ async fn a_rule_submission_reaches_the_queue_under_absolute_paths() {
         .expect("bookrack run did not become ready");
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        let (code, _, stderr) = run(bookrack_cmd!(&sandbox), &["queue", "pause"]).await;
+        let (code, _, stderr) = run(
+            bookrack_cmd!(&sandbox).library(LIBRARY),
+            &["queue", "pause"],
+        )
+        .await;
         if code == Some(0) {
             break;
         }
@@ -214,7 +220,7 @@ async fn a_rule_submission_reaches_the_queue_under_absolute_paths() {
 
     // A rule the daemon refuses writes no row and exits as bad input.
     let (code, stdout, stderr) = run(
-        bookrack_cmd!(&sandbox),
+        bookrack_cmd!(&sandbox).library(LIBRARY),
         &["ingest", "--rule", "material/broken.toml", "--no-wait"],
     )
     .await;
@@ -225,7 +231,7 @@ async fn a_rule_submission_reaches_the_queue_under_absolute_paths() {
     );
 
     let (code, stdout, stderr) = run(
-        bookrack_cmd!(&sandbox),
+        bookrack_cmd!(&sandbox).library(LIBRARY),
         &["ingest", "--rule", "material/rule.toml", "--no-wait"],
     )
     .await;
@@ -235,7 +241,11 @@ async fn a_rule_submission_reaches_the_queue_under_absolute_paths() {
         "{stdout:?}"
     );
 
-    let (code, stdout, stderr) = run(bookrack_cmd!(&sandbox), &["--json", "queue", "list"]).await;
+    let (code, stdout, stderr) = run(
+        bookrack_cmd!(&sandbox).library(LIBRARY),
+        &["--json", "queue", "list"],
+    )
+    .await;
     assert_eq!(code, Some(0), "{stderr}");
     let listing: Value = serde_json::from_str(&stdout).expect("queue list is JSON");
     let jobs = listing["jobs"].as_array().expect("jobs");

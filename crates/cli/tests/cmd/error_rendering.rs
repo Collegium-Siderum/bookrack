@@ -17,14 +17,19 @@ use std::time::Duration;
 use bookrack_test_support::{DaemonProcess, EmbedFailure, EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
 
+/// The name each test registers the sandbox's data root under.
+const LIBRARY: &str = "main";
+
 /// Bring a daemon up on a scratch data root and run `args` through it,
 /// returning the client invocation's exit status and stderr.
 async fn client_stderr_against_daemon(args: &[&str]) -> (Option<i32>, String) {
     let sandbox = Sandbox::new();
+    sandbox.name_data_dir(LIBRARY);
     let lock_path = sandbox.tty_lock_path();
 
     let mut daemon_cmd = Command::from(
         bookrack_cmd!(&sandbox)
+            .library(LIBRARY)
             .ollama_url(EmbedStub::shared().url())
             .build(),
     );
@@ -35,7 +40,7 @@ async fn client_stderr_against_daemon(args: &[&str]) -> (Option<i32>, String) {
         .await
         .expect("bookrack run did not become ready");
 
-    let output = Command::from(bookrack_cmd!(&sandbox).build())
+    let output = Command::from(bookrack_cmd!(&sandbox).library(LIBRARY).build())
         .args(args)
         .output()
         .await
@@ -92,9 +97,15 @@ async fn reembed_against_a_failing_backend(failure: EmbedFailure) -> (Option<i32
     // A stub of this test's own: the switch below is flipped on it and
     // on nothing any other test in the binary is talking to.
     let stub = EmbedStub::start();
+    sandbox.name_data_dir(LIBRARY);
     let lock_path = sandbox.tty_lock_path();
 
-    let mut daemon_cmd = Command::from(bookrack_cmd!(&sandbox).ollama_url(stub.url()).build());
+    let mut daemon_cmd = Command::from(
+        bookrack_cmd!(&sandbox)
+            .library(LIBRARY)
+            .ollama_url(stub.url())
+            .build(),
+    );
     daemon_cmd.arg("run");
     let daemon = DaemonProcess::spawn(daemon_cmd)
         .expect("spawn bookrack run")
@@ -110,7 +121,7 @@ async fn reembed_against_a_failing_backend(failure: EmbedFailure) -> (Option<i32
     // serves, and it leaves the chunk rows the re-embed below rewrites.
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     loop {
-        let ingest = Command::from(bookrack_cmd!(&sandbox).build())
+        let ingest = Command::from(bookrack_cmd!(&sandbox).library(LIBRARY).build())
             .args(["ingest", book_path.to_str().expect("utf-8 path")])
             .output()
             .await
@@ -127,7 +138,7 @@ async fn reembed_against_a_failing_backend(failure: EmbedFailure) -> (Option<i32
     }
 
     stub.set_failure(failure);
-    let output = Command::from(bookrack_cmd!(&sandbox).build())
+    let output = Command::from(bookrack_cmd!(&sandbox).library(LIBRARY).build())
         .args(["vectors", "reembed", "--yes"])
         .output()
         .await

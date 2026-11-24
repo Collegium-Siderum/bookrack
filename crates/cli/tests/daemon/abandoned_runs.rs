@@ -26,6 +26,9 @@ use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use bookrack_test_support::{ProcessEnv, Sandbox, bookrack_cmd, process_env};
 use tokio::process::Command;
 
+/// The name each test's data root is registered under.
+const LIBRARY: &str = "lib";
+
 /// Open a `running` row on a real catalog under `root` and return its id.
 fn open_run(root: &Path, command: &str) -> String {
     let catalog = Catalog::open_for_write_unbacked(&root.join("catalog.db")).expect("open catalog");
@@ -52,11 +55,13 @@ fn status_of(root: &Path, pipeline_run_id: &str) -> String {
         .expect("status")
 }
 
-/// Run the repair through the real binary against `root`.
+/// Run the repair through the real binary against `root`, registered
+/// as [`LIBRARY`].
 async fn close_abandoned_runs(sandbox: &Sandbox, root: &Path, extra: &[&str]) -> (i32, String) {
     let mut args = vec!["doctor", "--close-abandoned-runs"];
     args.extend_from_slice(extra);
-    let output = Command::from(bookrack_cmd!(sandbox).data_dir(root).build())
+    sandbox.write_registry_entries(None, &[(LIBRARY, root)]);
+    let output = Command::from(bookrack_cmd!(sandbox).library(LIBRARY).build())
         .args(&args)
         .output()
         .await
@@ -75,7 +80,7 @@ async fn close_abandoned_runs(sandbox: &Sandbox, root: &Path, extra: &[&str]) ->
 #[tokio::test]
 async fn the_repair_closes_the_ownerless_run_and_leaves_the_owned_one() {
     let sandbox = Sandbox::new();
-    let root = sandbox.data_root("lib");
+    let root = sandbox.data_root(LIBRARY);
     std::fs::create_dir_all(&root).expect("create data root");
 
     let live = open_run(&root, "ingest");
@@ -105,7 +110,7 @@ async fn the_repair_closes_the_ownerless_run_and_leaves_the_owned_one() {
 #[tokio::test]
 async fn a_run_without_a_record_is_left_alone() {
     let sandbox = Sandbox::new();
-    let root = sandbox.data_root("lib");
+    let root = sandbox.data_root(LIBRARY);
     std::fs::create_dir_all(&root).expect("create data root");
     let unjudged = open_run(&root, "dryrun");
 
@@ -126,7 +131,7 @@ async fn a_catalog_behind_this_build_is_reported_and_fails_the_repair() {
     use bookrack_catalog::fixtures;
 
     let sandbox = Sandbox::new();
-    let root = sandbox.data_root("lib");
+    let root = sandbox.data_root(LIBRARY);
     std::fs::create_dir_all(&root).expect("create data root");
     let catalog_db = root.join("catalog.db");
     let dead = open_run(&root, "ingest");
@@ -157,7 +162,7 @@ async fn a_catalog_behind_this_build_is_reported_and_fails_the_repair() {
 #[tokio::test]
 async fn the_dry_run_writes_nothing() {
     let sandbox = Sandbox::new();
-    let root = sandbox.data_root("lib");
+    let root = sandbox.data_root(LIBRARY);
     std::fs::create_dir_all(&root).expect("create data root");
     let dead = open_run(&root, "glean");
     leave_ownerless_record(&root, &dead);
@@ -174,7 +179,7 @@ async fn the_dry_run_writes_nothing() {
 #[tokio::test]
 async fn runs_list_marks_what_the_repair_would_close() {
     let sandbox = Sandbox::new();
-    let root = sandbox.data_root("lib");
+    let root = sandbox.data_root(LIBRARY);
     std::fs::create_dir_all(&root).expect("create data root");
     let live = open_run(&root, "ingest");
     let dead = open_run(&root, "distill_build");
@@ -182,7 +187,8 @@ async fn runs_list_marks_what_the_repair_would_close() {
     let _held = RunLock::acquire(&locks, &live).expect("this process owns the live run");
     leave_ownerless_record(&root, &dead);
 
-    let output = Command::from(bookrack_cmd!(&sandbox).data_dir(&root).build())
+    sandbox.write_registry_entries(None, &[(LIBRARY, root.as_path())]);
+    let output = Command::from(bookrack_cmd!(&sandbox).library(LIBRARY).build())
         .args(["runs", "list"])
         .output()
         .await
@@ -211,7 +217,7 @@ async fn runs_list_marks_what_the_repair_would_close() {
 /// A data root holding one ownerless run, so an unrefused dry run has a
 /// plan to print.
 fn root_with_a_dead_run(sandbox: &Sandbox) -> std::path::PathBuf {
-    let root = sandbox.data_root("lib");
+    let root = sandbox.data_root(LIBRARY);
     std::fs::create_dir_all(&root).expect("create data root");
     let dead = open_run(&root, "glean");
     leave_ownerless_record(&root, &dead);
@@ -337,19 +343,19 @@ async fn a_live_daemon_refuses_the_offline_repair_as_operator_input() {
     let data_root = tempfile::tempdir().expect("data root");
     let runtime_root = tempfile::tempdir().expect("runtime root");
 
-    let mut opts = RuntimeOpts::headless(Some(data_root.path().into()), None);
+    sandbox.write_registry_entries(None, &[(LIBRARY, data_root.path())]);
+    let mut opts = RuntimeOpts::headless(None, Some(LIBRARY.to_string()));
     opts.runtime_dir = Some(runtime_root.path().into());
     let runtime = DaemonRuntime::start(opts).await.expect("daemon starts");
     let shutdown_tx = runtime.shutdown_tx.clone();
 
     let runtime_dir_for_child = runtime_root.path().to_path_buf();
-    let data_dir_for_child = data_root.path().to_path_buf();
     let child = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
         Command::from(
             bookrack_cmd!(sandbox)
                 .runtime_dir(runtime_dir_for_child)
-                .data_dir(data_dir_for_child)
+                .library(LIBRARY)
                 .build(),
         )
         .args(["doctor", "--close-abandoned-runs", "--dry-run"])

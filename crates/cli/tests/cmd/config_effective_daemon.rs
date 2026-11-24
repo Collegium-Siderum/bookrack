@@ -32,9 +32,7 @@ fn two_library_world() -> Sandbox {
 
 /// A daemon over the registry, started with `extra` in its environment.
 async fn daemon(sandbox: &Sandbox, extra: &[(&str, &str)]) -> DaemonProcess {
-    let mut spawn = bookrack_cmd!(sandbox)
-        .without_data_dir()
-        .ollama_url(EmbedStub::shared().url());
+    let mut spawn = bookrack_cmd!(sandbox).ollama_url(EmbedStub::shared().url());
     for (name, value) in extra {
         spawn = spawn.extra_env(name, value);
     }
@@ -52,7 +50,6 @@ async fn daemon(sandbox: &Sandbox, extra: &[(&str, &str)]) -> DaemonProcess {
 async fn bookrack(sandbox: &Sandbox, args: &[&str]) -> Output {
     Command::from(
         bookrack_cmd!(sandbox)
-            .without_data_dir()
             .ollama_url(EmbedStub::shared().url())
             .build(),
     )
