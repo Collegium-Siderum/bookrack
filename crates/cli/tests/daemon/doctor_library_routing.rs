@@ -48,7 +48,7 @@ fn data_root_value(report: &Value) -> Result<String> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_named_library_reaches_doctor_and_diagnose_through_the_daemon() -> Result<()> {
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     let alpha = sandbox.data_root("alpha-root");
     let beta = sandbox.data_root("beta-root");
     seed_root(&alpha)?;

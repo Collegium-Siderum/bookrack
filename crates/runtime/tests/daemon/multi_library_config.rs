@@ -65,7 +65,7 @@ top_k_out = 10"#;
 /// no supervised `llama-server` is ever spawned by this test.
 fn world() -> &'static Sandbox {
     static SEEDED: OnceLock<()> = OnceLock::new();
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     SEEDED.get_or_init(|| {
         let profiles = sandbox.path().join("index-profiles");
         std::fs::create_dir_all(&profiles).expect("profile directory");

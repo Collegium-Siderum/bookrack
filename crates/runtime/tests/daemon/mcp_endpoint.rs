@@ -25,11 +25,13 @@ use bookrack_test_support::{ProcessEnv, process_env};
 use eyre::Result;
 use tokio::net::{TcpListener, TcpStream};
 
-/// Headless bring-up options that serve MCP at `mcp_addr`.
+/// Headless bring-up options that serve MCP at `mcp_addr`, for a
+/// daemon that serves `data_dir` by name.
 fn opts_serving_mcp(data_dir: PathBuf, runtime_dir: PathBuf, mcp_addr: &str) -> RuntimeOpts {
+    crate::common::register_library(&data_dir);
     let mut opts = RuntimeOpts::headless_with_flags(
-        Some(data_dir),
         None,
+        Some(crate::common::LIBRARY.to_string()),
         DaemonFlags {
             mcp_addr: Some(mcp_addr.to_string()),
             ..DaemonFlags::default()

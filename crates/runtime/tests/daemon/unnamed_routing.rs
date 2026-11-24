@@ -59,7 +59,7 @@ fn assert_unroutable(method: &str, resp: &Value) {
 /// and routes an unnamed call to neither.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_libraries_without_a_registry_default_refuse_an_unnamed_call() -> Result<()> {
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     let alpha = sandbox.data_root("alpha-root");
     let beta = sandbox.data_root("beta-root");
     sandbox.write_registry_entries(
@@ -129,7 +129,7 @@ async fn two_libraries_without_a_registry_default_refuse_an_unnamed_call() -> Re
 /// written in memory or on disk.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_dangling_default_refuses_unnamed_reads_and_submits() -> Result<()> {
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     let beta = sandbox.data_root("beta-root");
     let registry = sandbox.write_registry_entries(None, &[("beta", beta.as_path())]);
     // The registry writers refuse a default naming no entry, so the

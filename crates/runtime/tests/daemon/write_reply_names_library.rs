@@ -24,7 +24,7 @@ use bookrack_test_support::{ProcessEnv, Sandbox, process_env};
 use eyre::{ContextCompat, Result};
 use serde_json::{Value, json};
 
-use crate::common::{Reader, Writer, build_opts, connect, join_with_deadline, recv, send};
+use crate::common::{Reader, Writer, build_path_opts, connect, join_with_deadline, recv, send};
 
 /// The data roots of the two registered libraries.
 struct Roots {
@@ -36,7 +36,7 @@ struct Roots {
 /// sandbox.
 fn world() -> &'static Roots {
     static ROOTS: OnceLock<Roots> = OnceLock::new();
-    let sandbox: &Sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox: &Sandbox = process_env(ProcessEnv::daemon());
     ROOTS.get_or_init(|| {
         let alpha = sandbox.data_root("alpha-root");
         let beta = sandbox.data_root("beta-root");
@@ -243,7 +243,7 @@ async fn a_path_selected_root_is_reported_as_default() -> Result<()> {
     world();
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
-    let runtime = DaemonRuntime::start(build_opts(
+    let runtime = DaemonRuntime::start(build_path_opts(
         data_root.path().into(),
         runtime_root.path().into(),
         true,

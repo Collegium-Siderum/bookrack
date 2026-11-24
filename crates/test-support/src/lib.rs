@@ -72,5 +72,5 @@ pub use child::{
 pub use embed_stub::{EmbedFailure, EmbedStub, HeldEmbeds, StubSpec, StubSpecError, Vectors};
 pub use host_slot::host_pdfium_root;
 pub use process::{ProcessEnv, process_env};
-pub use sandbox::Sandbox;
+pub use sandbox::{Sandbox, register_root};
 pub use spawn::{EnvPlan, Spawn};

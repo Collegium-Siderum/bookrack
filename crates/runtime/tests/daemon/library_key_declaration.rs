@@ -118,7 +118,7 @@ fn every_row_declares_a_selection_and_a_key_that_agree() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_routed_method_honours_the_key_the_registry_declares() -> Result<()> {
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     let alpha = sandbox.data_root("alpha-root");
     let beta = sandbox.data_root("beta-root");
     for root in [&alpha, &beta] {

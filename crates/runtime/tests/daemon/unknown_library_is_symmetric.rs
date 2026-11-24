@@ -47,7 +47,7 @@ async fn call(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_handler_resolving_a_library_param_refuses_an_unknown_name_alike() -> Result<()> {
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     let alpha = sandbox.data_root("alpha-root");
     let beta = sandbox.data_root("beta-root");
     // Both roots carry the layers a read projects over, so the positive

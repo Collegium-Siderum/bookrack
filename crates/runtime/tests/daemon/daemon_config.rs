@@ -19,7 +19,7 @@ use crate::common::{Reader, Writer, connect, join_with_deadline, recv, send};
 
 /// Two initialized roots, both registered, `alpha` the default.
 fn world() -> (&'static Sandbox, PathBuf, PathBuf) {
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     let alpha = sandbox.data_root("alpha-root");
     let beta = sandbox.data_root("beta-root");
     for root in [&alpha, &beta] {

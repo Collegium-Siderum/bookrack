@@ -198,7 +198,7 @@ async fn mount_answers_with_the_skip(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_registered_root_without_its_manifest_refuses_bring_up() -> Result<()> {
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     // The entry caches a uuid; the root is a bare directory, which is
     // what an unconnected volume's mount point looks like.
     let alpha = sandbox.data_root("alpha-mount");
@@ -242,7 +242,7 @@ async fn a_registered_root_without_its_manifest_refuses_bring_up() -> Result<()>
 /// reads as the mount that repairs it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_bare_root_beside_a_served_library_is_skipped_with_the_mounts_wording() -> Result<()> {
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     let alpha = sandbox.data_root("alpha-served");
     let beta = sandbox.data_root("beta-mount");
     sandbox.write_registry_entries(Some("alpha"), &[("alpha", alpha.as_path())]);
@@ -279,7 +279,7 @@ async fn a_bare_root_beside_a_served_library_is_skipped_with_the_mounts_wording(
 /// skip reads as the mount that repairs it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_swapped_root_beside_a_served_library_is_skipped_with_the_mounts_wording() -> Result<()> {
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     let alpha = sandbox.data_root("alpha-served");
     let beta = sandbox.data_root("beta-swapped");
     sandbox.write_registry_entries(Some("alpha"), &[("alpha", alpha.as_path())]);
@@ -327,7 +327,7 @@ async fn a_swapped_root_beside_a_served_library_is_skipped_with_the_mounts_wordi
 /// daemon again — not to mount through a daemon that is not running.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_bare_roots_refuse_bring_up_saying_to_start_again() -> Result<()> {
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     let alpha = sandbox.data_root("alpha-mount");
     let beta = sandbox.data_root("beta-mount");
     for (name, root) in [("alpha", &alpha), ("beta", &beta)] {
@@ -371,7 +371,7 @@ async fn two_bare_roots_refuse_bring_up_saying_to_start_again() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_registered_root_with_another_identity_refuses_bring_up() -> Result<()> {
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     // The registry caches one uuid; the manifest at the root records
     // another: a different library's volume is mounted where this
     // one's belongs.
@@ -409,7 +409,7 @@ async fn a_registered_root_with_another_identity_refuses_bring_up() -> Result<()
 /// bare directory.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mount_refuses_a_registered_root_without_its_manifest() -> Result<()> {
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     let alpha = sandbox.data_root("alpha-served");
     let beta = sandbox.data_root("beta-mount");
     sandbox.write_registry_entries(Some("alpha"), &[("alpha", alpha.as_path())]);

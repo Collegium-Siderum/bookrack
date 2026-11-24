@@ -11,9 +11,10 @@
 
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use bookrack_config::REGISTRY_ENV;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use eyre::{Result, eyre};
 
@@ -23,8 +24,37 @@ use eyre::{Result, eyre};
 /// deadline turns that hang into a failure.
 pub const TEST_DEADLINE: Duration = Duration::from_secs(60);
 
-/// Headless bring-up options against explicit data and runtime roots.
+/// The name [`build_opts`] registers a test's data root under, and so
+/// the name the daemon serves it by.
+pub const LIBRARY: &str = "main";
+
+/// Register `data_dir` as [`LIBRARY`] in the registry the process
+/// environment names, beside any entry already there.
+pub fn register_library(data_dir: &Path) {
+    let registry = std::env::var_os(REGISTRY_ENV)
+        .map(PathBuf::from)
+        .expect("the process environment names a registry");
+    bookrack_test_support::register_root(&registry, LIBRARY, data_dir);
+}
+
+/// Headless bring-up options for a daemon that serves `data_dir` by
+/// name: the root is registered by [`register_library`], and the
+/// daemon selects [`LIBRARY`] as `--library` would.
 pub fn build_opts(
+    data_dir: PathBuf,
+    runtime_dir: PathBuf,
+    spawn_queue_worker: bool,
+) -> RuntimeOpts {
+    register_library(&data_dir);
+    let mut opts = RuntimeOpts::headless(None, Some(LIBRARY.to_string()));
+    opts.spawn_queue_worker = spawn_queue_worker;
+    opts.runtime_dir = Some(runtime_dir);
+    opts
+}
+
+/// Headless bring-up options that select `data_dir` by path, for the
+/// tests whose subject is how a path-selected root is brought up.
+pub fn build_path_opts(
     data_dir: PathBuf,
     runtime_dir: PathBuf,
     spawn_queue_worker: bool,

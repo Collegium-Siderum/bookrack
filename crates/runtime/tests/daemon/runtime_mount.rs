@@ -27,7 +27,7 @@ use crate::common::{Reader, Writer, connect, join_with_deadline, recv, send};
 /// Only `alpha` is registered at bring-up; the second root exists on
 /// disk but has no entry yet.
 fn world() -> (&'static Sandbox, PathBuf, PathBuf) {
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     let alpha = sandbox.data_root("alpha-root");
     let beta = sandbox.data_root("beta-root");
     initialize(&alpha);

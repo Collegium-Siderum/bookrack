@@ -155,7 +155,7 @@ fi
 #     allowed only as the sole file of its spec, and those are listed
 #     below, so a new one is a review rather than a habit.
 grouped_crates='runtime cli'
-flat_ok='crates/runtime/tests/wizard_registry_env.rs crates/cli/tests/doctor_library_routing.rs'
+flat_ok='crates/runtime/tests/wizard_registry_env.rs'
 for crate in $grouped_crates; do
   for file in $(git ls-files "crates/$crate/tests/*.rs" | grep -vE "^crates/$crate/tests/[^/]+/"); do
     case " $flat_ok " in

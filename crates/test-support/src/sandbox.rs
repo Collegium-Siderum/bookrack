@@ -283,11 +283,10 @@ impl Sandbox {
     /// Overwrite the registry with `entries`, plus an optional
     /// `default`, and return its path.
     ///
-    /// Each entry is registered the way [`Sandbox::name_data_dir`]
-    /// registers the data root, so a root that exists carries a
-    /// manifest and its entry the manifest's identity. `default` must name one of `entries`; a
-    /// registry whose default points nowhere is written with
-    /// [`Sandbox::write_registry`].
+    /// Each entry is registered by [`register_root`], so a root that
+    /// exists carries a manifest and its entry the manifest's identity.
+    /// `default` must name one of `entries`; a registry whose default
+    /// points nowhere is written with [`Sandbox::write_registry`].
     pub fn write_registry_entries(
         &self,
         default: Option<&str>,
@@ -295,7 +294,7 @@ impl Sandbox {
     ) -> PathBuf {
         let path = self.write_registry("");
         for (name, root) in entries {
-            self.register_root(name, root);
+            register_root(&path, name, root);
         }
         if let Some(name) = default {
             bookrack_config::set_default_library(&path, name).unwrap_or_else(|err| {
@@ -309,61 +308,64 @@ impl Sandbox {
     /// registry, beside any entry already there, and return the root.
     /// A child then reaches it with [`crate::Spawn::library`].
     ///
-    /// The root gets a manifest named `name`, of kind `prod`, unless it
-    /// already holds one, and the entry caches the manifest's identity,
-    /// as an operator's registration does.
+    /// The root is registered by [`register_root`]: it gets a manifest
+    /// named `name`, of kind `prod`, unless it already holds one, and
+    /// the entry caches the manifest's identity.
     pub fn name_data_dir(&self, name: &str) -> PathBuf {
         let root = self.data_dir();
-        self.register_root(name, &root);
+        register_root(&self.registry_path(), name, &root);
         root
     }
+}
 
-    /// Add or replace the entry `name` → `root` in the sandbox
-    /// registry, leaving every other entry as it is.
-    ///
-    /// A root that exists and holds no manifest gets a fresh one named
-    /// `name`, of kind `prod`; a root that already holds one keeps it.
-    /// The entry then caches that manifest's identity, as an operator's
-    /// registration does. A root that does not exist is recorded by
-    /// path alone and is not created, and neither is an entry identity
-    /// read off a manifest that does not parse.
-    fn register_root(&self, name: &str, root: &Path) {
-        let manifest = if root.is_dir() {
-            match bookrack_config::load_manifest(root) {
-                Ok(Some(manifest)) => Some(manifest),
-                Ok(None) => {
-                    let manifest = bookrack_config::new_manifest(name, LibraryKind::Prod, None);
-                    bookrack_config::write_manifest(root, &manifest).unwrap_or_else(|err| {
-                        panic!("write a manifest under {}: {err}", root.display())
-                    });
-                    Some(manifest)
-                }
-                Err(_) => None,
+/// Add or replace the entry `name` → `root` in the registry at
+/// `registry`, leaving every other entry as it is. For a test whose
+/// process environment names the registry and that has no [`Sandbox`]
+/// at hand; one that does calls [`Sandbox::write_registry_entries`] or
+/// [`Sandbox::name_data_dir`].
+///
+/// A root that exists and holds no manifest gets a fresh one named
+/// `name`, of kind `prod`; a root that already holds one keeps it. The
+/// entry then caches that manifest's identity, as an operator's
+/// registration does. A root that does not exist is recorded by path
+/// alone and is not created, and neither is an entry identity read off
+/// a manifest that does not parse.
+pub fn register_root(registry: &Path, name: &str, root: &Path) {
+    let manifest = if root.is_dir() {
+        match bookrack_config::load_manifest(root) {
+            Ok(Some(manifest)) => Some(manifest),
+            Ok(None) => {
+                let manifest = bookrack_config::new_manifest(name, LibraryKind::Prod, None);
+                bookrack_config::write_manifest(root, &manifest).unwrap_or_else(|err| {
+                    panic!("write a manifest under {}: {err}", root.display())
+                });
+                Some(manifest)
             }
-        } else {
-            None
-        };
-        let fields = match manifest {
-            Some(manifest) => LibraryEntryFields {
-                data_dir: root.to_path_buf(),
-                kind: manifest.kind,
-                description: manifest.description,
-                index_profile: manifest.index_profile,
-                created_at: manifest.created_at,
-                uuid: Some(manifest.uuid),
-            },
-            None => LibraryEntryFields {
-                data_dir: root.to_path_buf(),
-                kind: LibraryKind::Prod,
-                description: None,
-                index_profile: None,
-                created_at: None,
-                uuid: None,
-            },
-        };
-        bookrack_config::upsert_library_entry(&self.registry_path(), name, &fields)
-            .unwrap_or_else(|err| panic!("register {name} in the sandbox registry: {err}"));
-    }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    let fields = match manifest {
+        Some(manifest) => LibraryEntryFields {
+            data_dir: root.to_path_buf(),
+            kind: manifest.kind,
+            description: manifest.description,
+            index_profile: manifest.index_profile,
+            created_at: manifest.created_at,
+            uuid: Some(manifest.uuid),
+        },
+        None => LibraryEntryFields {
+            data_dir: root.to_path_buf(),
+            kind: LibraryKind::Prod,
+            description: None,
+            index_profile: None,
+            created_at: None,
+            uuid: None,
+        },
+    };
+    bookrack_config::upsert_library_entry(registry, name, &fields)
+        .unwrap_or_else(|err| panic!("register {name} in {}: {err}", registry.display()));
 }
 
 impl Default for Sandbox {

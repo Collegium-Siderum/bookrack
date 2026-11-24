@@ -120,7 +120,11 @@ async fn a_write_is_refused_while_another_holds_the_write_mutex() -> Result<()> 
     // scheduling.
     let held = runtime
         .registry
-        .begin_host_write(bookrack_ops::Caller::control_plane(), "default", None)
+        .begin_host_write(
+            bookrack_ops::Caller::control_plane(),
+            crate::common::LIBRARY,
+            None,
+        )
         .expect("hold the write mutex");
     let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
 

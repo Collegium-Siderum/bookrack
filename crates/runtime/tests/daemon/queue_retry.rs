@@ -40,8 +40,8 @@ const FINISHED_AT: &str = "2026-01-02T03:05:05Z";
 const FAILURE_TEXT: &str =
     "ingest: registry-mediated ingest: reading the source file failed: no such file";
 
-/// The name a root selected by path is served under.
-const SERVED_LIBRARY: &str = "default";
+/// The name the test's data root is registered and served under.
+const SERVED_LIBRARY: &str = crate::common::LIBRARY;
 
 fn row(id: &str, state: &str, error: Option<&str>, merged_into: Option<i64>) -> Value {
     let terminal = state != "pending";

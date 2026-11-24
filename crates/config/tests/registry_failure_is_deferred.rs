@@ -13,11 +13,7 @@ use bookrack_test_support::{ProcessEnv, Sandbox, process_env};
 const MISSING: &str = "never-written-registry.toml";
 
 fn world() -> &'static Sandbox {
-    process_env(
-        ProcessEnv::isolated()
-            .without_data_dir()
-            .registry_absent(MISSING),
-    )
+    process_env(ProcessEnv::isolated().registry_absent(MISSING))
 }
 
 /// A root fixed by `--data-dir` consults no registry, so an unreadable

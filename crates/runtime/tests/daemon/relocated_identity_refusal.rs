@@ -22,7 +22,7 @@ use eyre::Result;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_root_whose_identity_is_registered_elsewhere_refuses_bring_up() -> Result<()> {
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     let runtime_root = tempfile::tempdir()?;
 
     // `alpha` is registered at `orig` with the uuid its manifest
@@ -45,7 +45,8 @@ async fn a_root_whose_identity_is_registered_elsewhere_refuses_bring_up() -> Res
         },
     )?;
 
-    let opts = crate::common::build_opts(copy.clone(), runtime_root.path().to_path_buf(), false);
+    let opts =
+        crate::common::build_path_opts(copy.clone(), runtime_root.path().to_path_buf(), false);
     let err = match DaemonRuntime::start(opts).await {
         Ok(runtime) => {
             let shutdown_tx = runtime.shutdown_tx.clone();

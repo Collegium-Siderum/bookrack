@@ -26,7 +26,7 @@ use crate::common::{connect, join_with_deadline, recv, send};
 /// the file rather than rewriting it.
 fn world() -> &'static Sandbox {
     static SEEDED: OnceLock<()> = OnceLock::new();
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     SEEDED.get_or_init(|| {
         let alpha = sandbox.data_root("alpha-root");
         let beta = sandbox.data_root("beta-root");

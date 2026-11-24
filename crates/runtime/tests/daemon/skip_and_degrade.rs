@@ -76,7 +76,7 @@ top_k_in = 50
 top_k_out = 10"#;
 
 fn world() -> &'static Sandbox {
-    process_env(ProcessEnv::daemon().without_data_dir())
+    process_env(ProcessEnv::daemon())
 }
 
 /// Write an index profile the sandbox's daemon resolves by name.

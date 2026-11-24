@@ -36,7 +36,7 @@ struct Roots {
 /// sandbox.
 fn world() -> &'static Roots {
     static ROOTS: OnceLock<Roots> = OnceLock::new();
-    let sandbox: &Sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox: &Sandbox = process_env(ProcessEnv::daemon());
     ROOTS.get_or_init(|| {
         let alpha = sandbox.data_root("alpha-root");
         let beta = sandbox.data_root("beta-root");

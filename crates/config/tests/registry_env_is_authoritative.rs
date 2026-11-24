@@ -24,7 +24,7 @@ const PLATFORM: &str = "platform";
 /// one whose `default` would win if it were ever consulted.
 fn world() -> &'static Sandbox {
     static SEEDED: OnceLock<()> = OnceLock::new();
-    let sandbox = process_env(ProcessEnv::isolated().without_data_dir());
+    let sandbox = process_env(ProcessEnv::isolated());
     SEEDED.get_or_init(|| {
         let pinned = sandbox.data_root("pinned");
         sandbox.write_registry_entries(None, &[("pinned", pinned.as_path())]);

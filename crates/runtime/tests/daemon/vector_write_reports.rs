@@ -279,7 +279,7 @@ async fn drop_reports_the_demoted_kind(side: Side, sock: PathBuf, root: PathBuf)
     let reply = ok_result(&mut r, &mut w, id, side.drop, json!({ "yes": true })).await?;
     assert_eq!(
         reply,
-        json!({ "ok": true, "kind": "brute-force", "library": "default" }),
+        json!({ "ok": true, "kind": "brute-force", "library": crate::common::LIBRARY }),
         "{}",
         side.drop
     );
@@ -300,7 +300,7 @@ async fn reconcile_returns_the_stamps_it_wrote(
     let (mut r, mut w) = connect(&sock).await?;
     let reply = ok_result(&mut r, &mut w, 1, side.reconcile, json!({})).await?;
     assert_eq!(reply["ok"], Value::Bool(true), "{reply}");
-    assert_eq!(reply["library"], "default", "{reply}");
+    assert_eq!(reply["library"], crate::common::LIBRARY, "{reply}");
     assert_eq!(
         reply["vector_dim"].as_u64(),
         Some(EmbedStub::DIMENSION as u64),
@@ -340,7 +340,7 @@ async fn reset_resume_with_nothing_to_resume_reports_zero(
         reply,
         json!({
             "ok": true,
-            "library": "default",
+            "library": crate::common::LIBRARY,
             "resumed": true,
             "intakes_reembedded": 0,
             "chunks_written": 0,
@@ -382,7 +382,7 @@ async fn reset_reports_what_it_reembedded(side: Side, sock: PathBuf, root: PathB
     id += 1;
     let reply = ok_result(&mut r, &mut w, id, side.reset, json!({ "yes": true })).await?;
     assert_eq!(reply["ok"], Value::Bool(true), "{reply}");
-    assert_eq!(reply["library"], "default", "{reply}");
+    assert_eq!(reply["library"], crate::common::LIBRARY, "{reply}");
     assert_eq!(reply["resumed"], Value::Bool(false), "{reply}");
     let reembedded = reply["intakes_reembedded"]
         .as_u64()

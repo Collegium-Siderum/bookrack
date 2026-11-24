@@ -34,7 +34,7 @@ fn default_line(registry: &str) -> Option<String> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_manifest_bearing_root_is_registered_and_the_registry_is_served() -> Result<()> {
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     let runtime_root = tempfile::tempdir()?;
     let alpha = sandbox.data_root("alpha-root");
     let beta = sandbox.data_root("beta-root");
@@ -46,7 +46,7 @@ async fn a_manifest_bearing_root_is_registered_and_the_registry_is_served() -> R
     write_manifest(&gamma, &new_manifest("gamma", LibraryKind::Test, None))?;
     let before = std::fs::read_to_string(sandbox.registry_path())?;
 
-    let runtime = DaemonRuntime::start(crate::common::build_opts(
+    let runtime = DaemonRuntime::start(crate::common::build_path_opts(
         gamma.clone(),
         runtime_root.path().to_path_buf(),
         false,
@@ -98,14 +98,14 @@ async fn a_manifest_bearing_root_is_registered_and_the_registry_is_served() -> R
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_root_without_a_manifest_is_served_alone_and_not_registered() -> Result<()> {
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     let runtime_root = tempfile::tempdir()?;
     let alpha = sandbox.data_root("alpha-root");
     sandbox.write_registry_entries(Some("alpha"), &[("alpha", alpha.as_path())]);
     let delta = sandbox.data_root("delta-root");
     let before = std::fs::read_to_string(sandbox.registry_path())?;
 
-    let runtime = DaemonRuntime::start(crate::common::build_opts(
+    let runtime = DaemonRuntime::start(crate::common::build_path_opts(
         delta.clone(),
         runtime_root.path().to_path_buf(),
         false,

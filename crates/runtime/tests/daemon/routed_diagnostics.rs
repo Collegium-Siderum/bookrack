@@ -67,7 +67,7 @@ fn seed_root(root: &Path) -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_two_diagnostics_act_on_the_library_named_or_defaulted() -> Result<()> {
-    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    let sandbox = process_env(ProcessEnv::daemon());
     let alpha = sandbox.data_root("alpha-root");
     let beta = sandbox.data_root("beta-root");
     seed_root(&alpha)?;

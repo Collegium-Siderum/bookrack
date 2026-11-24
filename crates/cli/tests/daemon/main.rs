@@ -8,6 +8,7 @@
 bookrack_test_support::test_group!("daemon", spec = Some("ProcessEnv::daemon()"));
 
 mod abandoned_runs;
+mod doctor_library_routing;
 mod doctor_mcp_endpoint;
 mod mcp_parity;
 mod second_launch;

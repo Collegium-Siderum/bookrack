@@ -16,11 +16,11 @@ use bookrack_runtime::doctor::{Report, Row, Status, gather};
 use bookrack_test_support::{ProcessEnv, process_env};
 
 /// Every row label, in report order, for a data root nothing has been
-/// ingested into and a registry with no entries. The registry and
-/// index-profile sections contribute rows only for registered
-/// libraries, and the reranker section only for a profile that
-/// enables one; the built-in default does not.
-const BARE_ROOT_LABELS: [&str; 20] = [
+/// ingested into, registered as the only library and selected by name.
+/// The index-profile section contributes rows only for a library that
+/// declares a profile, and the reranker section only for a profile that
+/// enables one; the built-in default does neither.
+const BARE_ROOT_LABELS: [&str; 21] = [
     "report by",
     "data root",
     "PDFium library",
@@ -38,6 +38,7 @@ const BARE_ROOT_LABELS: [&str; 20] = [
     "disk free",
     "daemon state",
     "queue snapshot",
+    "registry",
     "Ollama daemon",
     "embed model",
     "MCP endpoint",
@@ -58,10 +59,12 @@ const STORE_LABELS: [&str; 10] = [
     "queue snapshot",
 ];
 
+/// Register `data_dir` and select it by name.
 fn selection(data_dir: &Path) -> LibrarySelection {
+    crate::common::register_library(data_dir);
     LibrarySelection {
-        data_dir: Some(data_dir.to_path_buf()),
-        library: None,
+        data_dir: None,
+        library: Some(crate::common::LIBRARY.to_string()),
     }
 }
 
@@ -106,8 +109,12 @@ async fn gather_on_a_bare_root_materialises_nothing_and_fails_no_store_row() {
     let report = gather(&selection(root.path()), Some(runtime_dir.path())).await;
 
     // Every store was looked for; none was brought into being, and
-    // the daemon's queue document was not written either.
-    assert_eq!(entries(root.path()), Vec::<String>::new());
+    // the daemon's queue document was not written either. The manifest
+    // is the registration's, written before the gather ran.
+    assert_eq!(
+        entries(root.path()),
+        vec![bookrack_config::MANIFEST_FILENAME.to_string()]
+    );
     assert!(
         !sandbox.daemon_state_dir().join("queue.json").exists(),
         "reading the queue snapshot must not create it"

@@ -213,7 +213,7 @@ async fn a_job_queued_with_the_retired_hold_fails_and_a_retry_runs_it() -> Resul
         "paused": false,
         "jobs": [{
             "id": id,
-            "library": "default",
+            "library": crate::common::LIBRARY,
             "kind": "book",
             "priority": "normal",
             "op": {

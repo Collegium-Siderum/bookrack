@@ -17,7 +17,7 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use bookrack_config::{DATA_DIR_ENV, MCP_ADDR_ENV, NO_DOTENV_ENV, OLLAMA_URL_ENV, REGISTRY_ENV};
+use bookrack_config::{MCP_ADDR_ENV, NO_DOTENV_ENV, OLLAMA_URL_ENV, REGISTRY_ENV};
 
 use crate::embed_stub::EmbedStub;
 use crate::sandbox::Sandbox;
@@ -35,7 +35,6 @@ static ENV: OnceLock<(ProcessEnv, Sandbox)> = OnceLock::new();
 pub struct ProcessEnv {
     embedder: bool,
     host_pdfium: bool,
-    data_dir: bool,
     registry: RegistrySpec,
 }
 
@@ -49,16 +48,16 @@ enum RegistrySpec {
 }
 
 impl ProcessEnv {
-    /// Home, data root, registry, runtime directory, and daemon state
-    /// directory all inside a sandbox. No embedder: the crates that
-    /// never open a library do not need one. No native library either:
-    /// the sandbox's managed directories are empty, whatever the host
-    /// has installed.
+    /// Home, registry, runtime directory, and daemon state directory
+    /// all inside a sandbox. No data root is selected: a test reaches a
+    /// library by registering it and naming it. No embedder: the crates
+    /// that never open a library do not need one. No native library
+    /// either: the sandbox's managed directories are empty, whatever
+    /// the host has installed.
     pub fn isolated() -> ProcessEnv {
         ProcessEnv {
             embedder: false,
             host_pdfium: false,
-            data_dir: true,
             registry: RegistrySpec::Sandbox,
         }
     }
@@ -74,13 +73,6 @@ impl ProcessEnv {
             host_pdfium: true,
             ..ProcessEnv::isolated()
         }
-    }
-
-    /// Leave the data root unset, so resolution goes through the
-    /// registry.
-    pub fn without_data_dir(mut self) -> ProcessEnv {
-        self.data_dir = false;
-        self
     }
 
     /// Name a registry file inside the sandbox that is not created, so
@@ -126,13 +118,10 @@ pub fn process_env(spec: ProcessEnv) -> &'static Sandbox {
 }
 
 /// The location variables `spec` sets, each pointing into `sandbox`:
-/// the one list [`Sandbox::host_vars`] holds, plus the data root and
-/// the registry the spec asks for.
+/// the one list [`Sandbox::host_vars`] holds, plus the registry the
+/// spec asks for.
 fn planned(spec: &ProcessEnv, sandbox: &Sandbox) -> Vec<(&'static str, PathBuf)> {
     let mut vars = sandbox.host_vars();
-    if spec.data_dir {
-        vars.push((DATA_DIR_ENV, sandbox.data_dir()));
-    }
     match &spec.registry {
         RegistrySpec::Sandbox => vars.push((REGISTRY_ENV, sandbox.registry_path())),
         RegistrySpec::Absent(name) => vars.push((REGISTRY_ENV, sandbox.path().join(name))),
@@ -222,12 +211,11 @@ mod tests {
         .map(|(k, v)| (OsString::from(k), v.into_os_string()))
         .collect();
 
-        let process_side: BTreeMap<OsString, OsString> =
-            planned(&ProcessEnv::isolated().without_data_dir(), &sandbox)
-                .into_iter()
-                .filter(|(k, _)| *k != REGISTRY_ENV)
-                .map(|(k, v)| (OsString::from(k), v.into_os_string()))
-                .collect();
+        let process_side: BTreeMap<OsString, OsString> = planned(&ProcessEnv::isolated(), &sandbox)
+            .into_iter()
+            .filter(|(k, _)| *k != REGISTRY_ENV)
+            .map(|(k, v)| (OsString::from(k), v.into_os_string()))
+            .collect();
         assert_eq!(process_side, expected, "the process side's locations");
 
         let child_side: BTreeMap<OsString, OsString> =
@@ -241,16 +229,30 @@ mod tests {
         assert_eq!(child_side, expected, "the child side's locations");
     }
 
-    /// The presets differ, and the deviations are
-    /// distinguishable — the equality the `OnceLock` guard compares has
-    /// to be able to tell them apart.
+    /// Neither preset selects a data root: the variable is not among
+    /// the ones the process side sets, so the sweep removes a value the
+    /// host carries and a library is reached only by name.
+    #[test]
+    fn no_preset_selects_a_data_root() {
+        let sandbox = Sandbox::new();
+        for spec in [ProcessEnv::isolated(), ProcessEnv::daemon()] {
+            let names: Vec<&str> = planned(&spec, &sandbox)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+            assert!(
+                !names.contains(&bookrack_config::DATA_DIR_ENV),
+                "{spec:?} sets the data root: {names:?}"
+            );
+        }
+    }
+
+    /// The presets differ, and the deviation is distinguishable — the
+    /// equality the `OnceLock` guard compares has to be able to tell
+    /// them apart.
     #[test]
     fn the_presets_and_their_deviations_are_distinct() {
         assert_ne!(ProcessEnv::isolated(), ProcessEnv::daemon());
-        assert_ne!(
-            ProcessEnv::daemon(),
-            ProcessEnv::daemon().without_data_dir()
-        );
         assert_ne!(
             ProcessEnv::isolated(),
             ProcessEnv::isolated().registry_absent("pinned-registry.toml")
