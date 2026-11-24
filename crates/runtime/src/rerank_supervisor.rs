@@ -1018,9 +1018,29 @@ mod tests {
         port
     }
 
-    /// A port with nothing listening on it.
-    fn dead_port() -> u16 {
-        pick_loopback_port().expect("port")
+    /// A loopback port nothing answers on, held for as long as the
+    /// value lives. Its listener is never accepted from: a connection
+    /// completes in the kernel's backlog, the request on it goes
+    /// unanswered, and no other socket can bind the port in the
+    /// meantime.
+    struct DeadPort {
+        _listener: std::net::TcpListener,
+        port: u16,
+    }
+
+    impl DeadPort {
+        fn port(&self) -> u16 {
+            self.port
+        }
+    }
+
+    fn dead_port() -> DeadPort {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        DeadPort {
+            _listener: listener,
+            port,
+        }
     }
 
     /// A config with test-speed clocks, a pinned port, and a pid file
@@ -1034,6 +1054,26 @@ mod tests {
         config.term_grace = Duration::from_millis(300);
         config.restart_backoff_base = Duration::from_millis(30);
         config
+    }
+
+    #[tokio::test]
+    async fn a_dead_port_stays_taken_and_answers_nothing() {
+        let dead = dead_port();
+        let port = dead.port();
+        let rebind = std::net::TcpListener::bind(("127.0.0.1", port));
+        assert!(
+            matches!(&rebind, Err(err) if err.kind() == std::io::ErrorKind::AddrInUse),
+            "another listener could take the dead port {port}: {rebind:?}"
+        );
+        let health = bookrack_rerank::probe_health_with_timeout(
+            &format!("http://127.0.0.1:{port}"),
+            Duration::from_millis(200),
+        )
+        .await;
+        assert!(
+            matches!(health, ServerHealth::Unreachable(_)),
+            "the dead port answered a probe: {health:?}"
+        );
     }
 
     /// The pinned deployment argument set: pair-sized batches, GPU
@@ -1119,7 +1159,8 @@ mod tests {
     async fn a_child_that_exits_at_once_is_exited_early() {
         let dir = tempfile::tempdir().expect("tempdir");
         let bin = script(dir.path(), "fake-server", "#!/bin/sh\nexit 3\n");
-        let config = test_config(bin, dead_port(), dir.path());
+        let dead = dead_port();
+        let config = test_config(bin, dead.port(), dir.path());
         let err = RerankSupervisor::start(config, None).await.unwrap_err();
         assert!(
             matches!(err, RerankerSpawnError::ExitedEarly { .. }),
@@ -1135,7 +1176,8 @@ mod tests {
     async fn a_child_that_never_serves_times_out() {
         let dir = tempfile::tempdir().expect("tempdir");
         let bin = script(dir.path(), "fake-server", "#!/bin/sh\nexec sleep 60\n");
-        let mut config = test_config(bin, dead_port(), dir.path());
+        let dead = dead_port();
+        let mut config = test_config(bin, dead.port(), dir.path());
         config.ready_timeout = Duration::from_millis(300);
         let err = RerankSupervisor::start(config, None).await.unwrap_err();
         assert!(
@@ -1147,7 +1189,8 @@ mod tests {
     #[tokio::test]
     async fn a_missing_executable_is_spawn_failed() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let config = test_config(dir.path().join("no-such-bin"), dead_port(), dir.path());
+        let dead = dead_port();
+        let config = test_config(dir.path().join("no-such-bin"), dead.port(), dir.path());
         let err = RerankSupervisor::start(config, None).await.unwrap_err();
         assert!(
             matches!(err, RerankerSpawnError::SpawnFailed { .. }),
@@ -1287,7 +1330,8 @@ mod tests {
         std::fs::write(&pid_path, format!("{orphan_pid}\n0\n")).expect("write pid file");
 
         let bin = script(dir.path(), "fake-server", "#!/bin/sh\nexit 0\n");
-        let config = test_config(bin, dead_port(), dir.path());
+        let dead = dead_port();
+        let config = test_config(bin, dead.port(), dir.path());
         let _ = RerankSupervisor::start(config, None).await;
         // The test holds the orphan's handle, so the killed process
         // stays a zombie until reaped: `try_wait` is the liveness
@@ -1403,8 +1447,9 @@ mod tests {
     #[tokio::test]
     async fn bring_up_backend_with_a_dead_url_refuses_with_the_repair() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let dead = dead_port();
         let cfg = RerankerConfig {
-            url: Some(format!("http://127.0.0.1:{}", dead_port())),
+            url: Some(format!("http://127.0.0.1:{}", dead.port())),
             ..RerankerConfig::default()
         };
         let err = bring_up_backend(
