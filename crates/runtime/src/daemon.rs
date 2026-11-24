@@ -240,7 +240,7 @@ impl DaemonRuntime {
     pub async fn start(opts: RuntimeOpts) -> Result<Self> {
         // 0. raise the soft RLIMIT_NOFILE before anything opens a
         //    descriptor; the outcome is logged once the tracing
-        //    subscriber is installed in step 4.
+        //    subscriber is installed in step 3a.
         let nofile = crate::rlimit::raise_nofile();
 
         // 1. resolve runtime_dir; mkdir -p
@@ -259,13 +259,6 @@ impl DaemonRuntime {
         let runtime_dir = bookrack_session::normalize_runtime_dir(&runtime_dir)?;
 
         let daemon_config = Arc::new(opts.daemon_config);
-        for var in daemon_config.retired_seen() {
-            tracing::warn!(
-                variable = var.name,
-                help = var.help,
-                "a retired environment variable is set and ignored"
-            );
-        }
 
         // 2. resolve the MCP listener address up front so the lock
         //    file records a complete session record from the instant
@@ -282,11 +275,55 @@ impl DaemonRuntime {
         let mut tty_lock = TtyLock::acquire(&lock_path, std::process::id(), &mcp_intent, None)?;
         let started_at = Instant::now();
         let started_at_wall = Utc::now();
+
+        // 3a. The daemon state directory and the log. The state
+        //     directory holds process-scoped assets that span
+        //     libraries: the log stream and the queue snapshot (step
+        //     11). The subscriber is installed directly after the
+        //     session lock: every event from here on reaches the log,
+        //     and a second instance the lock refuses has written
+        //     nothing into the running instance's log directory.
+        let daemon_state_dir = daemon_config
+            .require_daemon_state_dir()
+            .context("resolve the daemon state directory")?
+            .to_path_buf();
+        std::fs::create_dir_all(&daemon_state_dir).with_context(|| {
+            format!(
+                "create daemon state directory {}",
+                daemon_state_dir.display()
+            )
+        })?;
+        let (obs_guard, log_stream) =
+            bookrack_obs::init(&daemon_state_dir.join("logs"), &daemon_config.log);
+        // The guard owns the non-blocking writer's background thread;
+        // drop flushes buffered lines and joins the thread. Bind it
+        // to `DaemonRuntime` so a `?` between here and the final
+        // `Ok(Self)` runs the destructor cleanly instead of stranding
+        // a writer thread on every failed bring-up.
         tracing::info!(
             path = %lock_path.display(),
             mcp = %mcp_intent,
             "bookrack session lock acquired",
         );
+        match &nofile {
+            Ok(None) => tracing::debug!("RLIMIT_NOFILE is unlimited"),
+            Ok(Some(soft)) if *soft >= crate::rlimit::NOFILE_TARGET => {
+                tracing::debug!(soft, "RLIMIT_NOFILE soft limit");
+            }
+            Ok(Some(soft)) => tracing::warn!(
+                soft,
+                target_limit = crate::rlimit::NOFILE_TARGET,
+                "RLIMIT_NOFILE below target; a large ingest batch may exhaust file descriptors",
+            ),
+            Err(e) => tracing::warn!(error = %e, "failed to raise RLIMIT_NOFILE"),
+        }
+        for var in daemon_config.retired_seen() {
+            tracing::warn!(
+                variable = var.name,
+                help = var.help,
+                "a retired environment variable is set and ignored"
+            );
+        }
 
         // 3b. Bind the control-plane socket and record its path on
         //     the lock file. A bind failure releases the lock through
@@ -339,7 +376,7 @@ impl DaemonRuntime {
             tracing::info!(mcp = %mcp_label, "MCP listener bound");
         }
 
-        // 4. Config::resolve + obs init
+        // 4. Config::resolve
         //
         // The authoritative resolve, and the only one whose result is
         // used. `bookrack run` probes the same call before taking the
@@ -508,11 +545,15 @@ impl DaemonRuntime {
         //     media have no writers to exclude. The lock rides on the
         //     candidate, and from step 6 on the library's handle, so it
         //     is released when the holder is, not when this scope ends.
-        let mut unlocked: Vec<(String, PathBuf, String)> = Vec::new();
         let mut kept = Vec::with_capacity(candidates.len());
         for mut candidate in candidates {
             match RootLock::acquire(candidate.cfg.data_dir(), std::process::id(), "daemon") {
                 Ok(lock) => {
+                    tracing::info!(
+                        library = %candidate.name,
+                        path = %root_lock_path(candidate.cfg.data_dir()).display(),
+                        "bookrack data root lock acquired",
+                    );
                     candidate.guard = Some(Arc::new(lock) as MountGuard);
                     kept.push(candidate);
                 }
@@ -530,68 +571,17 @@ impl DaemonRuntime {
                     );
                 }
                 Err(err) => {
-                    unlocked.push((
-                        candidate.name.clone(),
-                        candidate.cfg.data_dir().to_path_buf(),
-                        format!("{err}"),
-                    ));
+                    tracing::warn!(
+                        error = %err,
+                        library = %candidate.name,
+                        root = %candidate.cfg.data_dir().display(),
+                        "data root lock could not be created; serving the root unlocked",
+                    );
                     kept.push(candidate);
                 }
             }
         }
         let candidates = kept;
-        // The daemon state directory holds process-scoped assets that
-        // span libraries: the log stream (below) and the queue
-        // snapshot (step 11). Resolved once, before the subscriber
-        // needs its `logs/` subdirectory.
-        let daemon_state_dir = daemon_config
-            .require_daemon_state_dir()
-            .context("resolve the daemon state directory")?
-            .to_path_buf();
-        std::fs::create_dir_all(&daemon_state_dir).with_context(|| {
-            format!(
-                "create daemon state directory {}",
-                daemon_state_dir.display()
-            )
-        })?;
-        let (obs_guard, log_stream) =
-            bookrack_obs::init(&daemon_state_dir.join("logs"), &daemon_config.log);
-        // The guard owns the non-blocking writer's background thread;
-        // drop flushes buffered lines and joins the thread. Bind it
-        // to `DaemonRuntime` so a `?` between here and the final
-        // `Ok(Self)` runs the destructor cleanly instead of stranding
-        // a writer thread on every failed bring-up.
-        match &nofile {
-            Ok(None) => tracing::debug!("RLIMIT_NOFILE is unlimited"),
-            Ok(Some(soft)) if *soft >= crate::rlimit::NOFILE_TARGET => {
-                tracing::debug!(soft, "RLIMIT_NOFILE soft limit");
-            }
-            Ok(Some(soft)) => tracing::warn!(
-                soft,
-                target_limit = crate::rlimit::NOFILE_TARGET,
-                "RLIMIT_NOFILE below target; a large ingest batch may exhaust file descriptors",
-            ),
-            Err(e) => tracing::warn!(error = %e, "failed to raise RLIMIT_NOFILE"),
-        }
-        // The lock stage ran before the subscriber existed; its outcomes
-        // are recorded now so the log carries them.
-        for candidate in &candidates {
-            if candidate.guard.is_some() {
-                tracing::info!(
-                    library = %candidate.name,
-                    path = %root_lock_path(candidate.cfg.data_dir()).display(),
-                    "bookrack data root lock acquired",
-                );
-            }
-        }
-        for (name, root, error) in &unlocked {
-            tracing::warn!(
-                error = %error,
-                library = %name,
-                root = %root.display(),
-                "data root lock could not be created; serving the root unlocked",
-            );
-        }
 
         // 5. The primary's embed model, for the status card's snapshot
         //    alone: each handle resolves its own configuration in step
@@ -1226,8 +1216,9 @@ impl DaemonRuntime {
             control_sock,
             event_stream,
             rerank_supervisor,
-            // Bound (not folded into `..`) so the flocks live across
-            // the drain timeouts below; `..` would drop them here.
+            // Fields not bound here stay in `self` and drop when this
+            // function returns, after every binding: the log guard is
+            // among them, so it outlives each drop that may still log.
             _tty_lock,
             _mounted_set,
             ..
@@ -1268,6 +1259,9 @@ impl DaemonRuntime {
         foreground_handle.abort();
 
         if signal_triggered.load(Ordering::SeqCst) {
+            // `exit` runs no destructors: flush the non-blocking log
+            // writer first, or lines still queued for it are lost.
+            drop(self._obs_guard);
             std::process::exit(0);
         }
         Ok(())

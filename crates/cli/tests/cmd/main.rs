@@ -11,6 +11,7 @@ mod config_effective;
 mod config_effective_daemon;
 mod config_knobs;
 mod config_notices;
+mod daemon_log;
 mod distill_run_lifecycle;
 mod dotenv_entry_point;
 mod error_rendering;
