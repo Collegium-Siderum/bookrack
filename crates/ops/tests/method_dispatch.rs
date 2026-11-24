@@ -743,3 +743,72 @@ async fn the_reply_text_keeps_the_declared_field_order() {
         reply.value
     );
 }
+
+/// The intake ids on a listing reply's rows, in order.
+fn listed_ids(reply: &Reply) -> Vec<i64> {
+    reply.value["books"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a listing with books: {}", reply.text))
+        .iter()
+        .map(|row| row["intake_id"].as_i64().expect("a row's intake id"))
+        .collect()
+}
+
+/// A listing takes its page from the call: `limit` bounds the rows and
+/// `offset` skips them, each as sent. With three books on file, the
+/// first two rows and the row after them are distinct, exact pages.
+#[tokio::test]
+async fn a_listing_returns_the_page_the_params_name() {
+    let fx = Fixture::build().await;
+    let books = [
+        fx.seed_placeholder_book("sha-page-1"),
+        fx.seed_placeholder_book("sha-page-2"),
+        fx.seed_placeholder_book("sha-page-3"),
+    ];
+    let page = |params: Value| async {
+        let reply = fx
+            .call(
+                "library.list_books",
+                Surface::ControlPlane,
+                &Caller::control_plane(),
+                params,
+            )
+            .await
+            .expect("the listing");
+        listed_ids(&reply)
+    };
+
+    let all = page(json!({})).await;
+    assert_eq!(all.len(), 3, "every seeded book is listed: {all:?}");
+    for book in books {
+        assert!(all.contains(&book), "{book} is listed: {all:?}");
+    }
+    assert_eq!(page(json!({ "limit": 2 })).await, all[..2]);
+    assert_eq!(page(json!({ "limit": 2, "offset": 2 })).await, all[2..]);
+}
+
+/// The metadata listings check the filter vocabularies the params
+/// carry: a confidence the catalog does not grade with is the caller's
+/// mistake on both sides, not an unfiltered page.
+#[tokio::test]
+async fn a_metadata_listing_refuses_a_filter_value_outside_the_vocabulary() {
+    let fx = Fixture::build().await;
+    fx.seed_placeholder_book("sha-filter");
+    for method in ["library.list_metadata", "library.list_paper_metadata"] {
+        let refused = judged(
+            fx.call(
+                method,
+                Surface::Mcp,
+                &Caller::mcp(),
+                json!({ "confidence_in": ["certain"] }),
+            )
+            .await,
+        );
+        assert_eq!(refused.kind, ErrorKind::InvalidParams, "{method}");
+        assert!(
+            refused.problem.summary.contains("certain"),
+            "{method}: {}",
+            refused.problem.summary
+        );
+    }
+}

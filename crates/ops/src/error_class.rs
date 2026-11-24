@@ -1892,4 +1892,52 @@ mod tests {
             assert!(!data(&c).retryable, "{label}");
         }
     }
+
+    /// A catalog failure reached through the ingest pipeline or through
+    /// a query takes the catalog's own judgement, not the fault kind an
+    /// unread variant falls back to.
+    #[test]
+    fn a_catalog_failure_inside_ingest_or_a_query_takes_the_catalogs_judgement() {
+        for (label, err) in [
+            (
+                "ingest",
+                Report::from(IngestError::Catalog(retired_catalog())),
+            ),
+            (
+                "ops > query",
+                OpsError::Query(QueryError::Catalog(retired_catalog())).into(),
+            ),
+        ] {
+            let c = classified(err);
+            assert_eq!(
+                c.kind,
+                ErrorKind::StateUnusable,
+                "{label}: {}",
+                c.problem.summary
+            );
+        }
+    }
+
+    /// The bring-up reason reads the retired-labels catalog anywhere on
+    /// the chain and names the library in the hint; a chain without one
+    /// carries no such reason.
+    #[test]
+    fn the_retired_labels_reason_names_the_library_and_reads_nothing_else() {
+        let err = Report::from(retired_catalog()).wrap_err("cannot serve library 'beta'");
+        let problem =
+            retired_labels_reason(Some("beta"), &err).expect("a retired-labels catalog is read");
+        assert_eq!(
+            problem.summary,
+            "catalog \"/disk/library/beta/catalog.db\" holds rows from the removed OCR \
+             intake path"
+        );
+        let hint = problem.data.hint.as_deref().unwrap_or_default();
+        assert!(
+            hint.contains("`bookrack libraries remove beta --purge`"),
+            "{hint}"
+        );
+
+        let other = Report::from(OpsError::IntakeNotFound { intake_id: 1 });
+        assert!(retired_labels_reason(Some("beta"), &other).is_none());
+    }
 }

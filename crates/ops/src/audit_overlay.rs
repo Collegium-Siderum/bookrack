@@ -284,4 +284,30 @@ mod tests {
         let (_tmp, cfg) = library_with_rules(&[("audit_data.toml", "[[[ not toml")]);
         assert_eq!(load_audit_data(&cfg), AuditData::default_data());
     }
+
+    /// A named paper built-in wins over the library's overlay: each of
+    /// the two names answers with its own profile while an overlay that
+    /// differs from both sits on disk.
+    #[test]
+    fn a_named_paper_built_in_ignores_the_library_overlay() {
+        let (_tmp, cfg) = library_with_rules(&[(
+            "paper_audit_profile.local.toml",
+            "schema_version = 1\n\n[title]\nplaceholder_check = false\n",
+        )]);
+        let overlaid = load_paper_audit_profile(&cfg, None);
+        assert!(
+            !overlaid.title.placeholder_check,
+            "the overlay must take effect on the unnamed profile"
+        );
+        assert_eq!(
+            load_paper_audit_profile(&cfg, Some("default")),
+            PaperAuditProfile::default_profile()
+        );
+        assert_ne!(PaperAuditProfile::default_profile(), overlaid);
+        assert_eq!(
+            load_paper_audit_profile(&cfg, Some("trust-source")),
+            PaperAuditProfile::trust_source()
+        );
+        assert_ne!(PaperAuditProfile::trust_source(), overlaid);
+    }
 }
