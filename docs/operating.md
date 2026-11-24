@@ -42,7 +42,8 @@ the daemon came up under — what `bookrack status` reports the daemon
 as — the last mounted library, and a library with queue jobs still to
 run. The registry default can be taken out; every unqualified command
 is then refused, naming the mounted libraries and `--library`, until
-it is mounted again. `bookrack libraries fork` mounts the clone it creates, so a forked
+it is mounted again. `bookrack libraries fork` mounts the clone it
+creates, so a forked
 library is served on the same command.
 
 `bookrack libraries list` reads the registry file, so it works with no
@@ -94,7 +95,7 @@ a second cluster under the same data root. `bookrack ingest --rule
 <rule.toml>` submits a book whose text sits in plain-text files; see
 [Ingesting text through a rule file](#ingesting-text-through-a-rule-file).
 
-```
+```sh
 bookrack ingest /path/to/book.epub
 bookrack ingest --recursive /path/to/books-dir/
 bookrack glean --recursive /path/to/papers-dir/
@@ -127,21 +128,21 @@ daemon itself.
 
 macOS — `caffeinate` blocks idle sleep without blocking display sleep:
 
-```
+```sh
 caffeinate -i ./bookrack run
 ```
 
 Linux (systemd) — `systemd-inhibit` takes the same lock the desktop
 uses for media playback:
 
-```
+```sh
 systemd-inhibit --what=idle --why="bookrack" ./bookrack run
 ```
 
 Windows (PowerShell) — flip the active power scheme's idle-sleep
 timeout to zero for the session, then restore it:
 
-```
+```powershell
 powercfg /change standby-timeout-ac 0
 .\bookrack.exe run
 powercfg /change standby-timeout-ac 30   # restore the previous value
@@ -163,7 +164,7 @@ at the same point.
 Ingest work runs through a persistent queue the worker drains on a
 fixed tick. `bookrack queue` inspects and steers it:
 
-```
+```sh
 bookrack queue list          # jobs plus a per-state count footer
 bookrack queue list --state failed      # one state, failures grouped by cause
 bookrack queue list --state pending --limit 20
@@ -217,7 +218,7 @@ bookrack stays engine-agnostic: run any OCR tool over a listed source,
 describe its output in a rule file (next section), and bring the text
 in with `--source` naming the scan.
 
-```
+```sh
 bookrack find --scope book --awaiting-text
 # ...run an OCR engine over each listed source...
 bookrack ingest --rule <rule.toml> --dry-run
@@ -316,7 +317,8 @@ marker = '^<!-- page (?P<label>\S*) \(sheet (?P<sheet>\d+)\) -->$'
 `--dry-run` previews a rule in the calling process: it needs no daemon
 and no library, queues and writes nothing, and reports the units and
 their numbering, the title, the counts of blocks, table-of-contents
-entries and chunks, and the audit verdict the book would receive. It takes none of `--source`, `--allow-partial`,
+entries and chunks, and the audit verdict the book would receive. It
+takes none of `--source`, `--allow-partial`,
 `--force`, `--priority`, or `--no-wait`. Without `--dry-run` the rule
 file is checked when it is submitted — it parses, and it matches at
 least one member — and a rule that fails is refused with exit `2` and
@@ -351,7 +353,7 @@ papers` reads the paper catalog, and the unprefixed write commands —
 
 An id can also be written with the pipeline in front of it:
 
-```
+```sh
 bookrack papers show paper:101
 bookrack papers metadata set paper:101 --field title --value "..."
 bookrack metadata set book:12 --field title --value "..."
@@ -367,7 +369,7 @@ papers show book:12` names the other catalog, so it is refused while
 arguments are being read — before anything is looked up or written —
 and exits `2`:
 
-```
+```console
 $ bookrack papers show book:12
 error: invalid value 'book:12' for '<INTAKE_ID>': "book:12" names the
 book catalog, and this command reads the paper catalog. Pass it as
@@ -384,7 +386,7 @@ side refuses `paper:101` the same way, and for the same reason.
 A typed id needs no namespace to resolve it, so there is a verb that
 takes one directly:
 
-```
+```sh
 bookrack show book:12
 bookrack show paper:101
 bookrack show 'reference:names/Ashgrove, Wren'
@@ -416,12 +418,11 @@ A `reference:` id without a key names a whole reference book, which
 card belongs to the reference query model. The refusal names the keyed
 form and `bookrack distill list`, which lists the reference books.
 
-
 ### Browsing and searching both catalogs
 
 Three verbs read across the pipelines rather than within one:
 
-```
+```sh
 bookrack list
 bookrack find --title "Sample Title"
 bookrack search "a sample phrase"
@@ -445,7 +446,7 @@ one has: `--format` on the book side, `--year` / `--venue` / `--doi` on
 the paper side. Each of those requires `--scope`, and a scope that
 reaches the other side is refused before anything is sent:
 
-```
+```console
 $ bookrack find --year 2020 --scope all
 bookrack: --year filters the paper side only
 ```
@@ -468,14 +469,15 @@ describes them. A single-sided search is recorded as usual.
 
 ## The status card
 
-```
+```sh
 bookrack status
 ```
 
 One no-argument call answers "is a daemon running, which library does
 it serve, is it busy". With a live daemon it renders a single card in
 three sections — `daemon.*` (version, pid, uptime, state, MCP and
-control endpoints, open file descriptors against the limit), `library.*` (name, data root, chunk and ready-book
+control endpoints, open file descriptors against the limit), `library.*`
+(name, data root, chunk and ready-book
 counts, disk usage), `queue.*` (pending, running, worker) — and a hint
 pointing at `bookrack doctor` for the health probes the card
 deliberately skips (embedder and reranker reachability involve network
@@ -547,7 +549,7 @@ got. `--quiet` prints nothing and lets the exit code answer.
 
 ## Health and diagnostics
 
-```
+```sh
 bookrack doctor
 ```
 
@@ -720,7 +722,7 @@ below a severity. `--json` emits newline-delimited `LogEvent` records.
 top-level command that drives a pipeline over a set of items, grouped
 with the audit rows it wrote:
 
-```
+```sh
 bookrack runs list [--last N] [--command <name>]
 bookrack runs show <run-id>       # profiles, verdict / flag / coverage histograms
 ```
@@ -760,7 +762,7 @@ recompute one intake's rollup, and their trail lives on the
 per single-store search invocation, stamped with the 16-hex corpus
 fingerprint that served it and its per-hit detail:
 
-```
+```sh
 bookrack retrieval list [--last N] [--corpus-fingerprint <hex>]
 bookrack retrieval show <call-id>
 ```

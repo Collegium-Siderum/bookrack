@@ -32,7 +32,7 @@ downloaded archive against them.
 
 Download URL template:
 
-```
+```text
 https://github.com/ggml-org/llama.cpp/releases/download/b9934/llama-b9934-bin-<platform>.tar.gz
 ```
 
@@ -63,7 +63,7 @@ budget.
 
 Download URL template:
 
-```
+```text
 https://huggingface.co/<repo>/resolve/main/<file>
 ```
 

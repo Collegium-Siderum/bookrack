@@ -568,7 +568,8 @@ unchanged.
   `fds.pressure` as `high`.
 - `daemon.methods` — the live method table: every name this daemon
   dispatches, with its read/write class, whether a daemon without a
-  queue worker refuses it, and how a library selection reaches it. Authoritative at
+  queue worker refuses it, and how a library selection reaches it.
+  Authoritative at
   runtime where this document is authoritative at review time.
 
   The selection field is one of three values, and `library_key` names
@@ -815,7 +816,8 @@ unchanged.
   form `{ rule, source?, allow_partial?, library?, priority?, force?,
   audit_profile? }` → `{ job_ids: [<uuid v7>] }`.
   Appends jobs to the persistent queue document; the worker picks
-  them up on the next 200 ms tick. The file form is described first. When `recursive` is `true`,
+  them up on the next 200 ms tick. The file form is described first.
+  When `recursive` is `true`,
   every directory in `paths` is walked depth-first and expanded to
   its supported-format files before enqueueing; files passed
   directly are enqueued verbatim. With `recursive` omitted or
@@ -1086,7 +1088,8 @@ another (`-32015`). `papers.remove` and the `remove` / `corpus.rebuild`
 Every method that goes through the write mutex names the library it
 acted on in its success reply: `library` is the registry name the call
 resolved to — the explicit parameter, or the library the unnamed-call
-rule routed to at the moment of the call. A method that already returns an object keeps
+rule routed to at the moment of the call. A method that already returns
+an object keeps
 every field it had; `library` is added beside them. `library.fork`
 reports the source library there, next to `new_name`;
 `library.mount` and `library.unmount` report the same name in `name`
@@ -1568,7 +1571,8 @@ whether the write was refused or its answer was lost.
   `library.unmount` naming the library that joined or left the served
   set, a `library.fork` naming its source and the clone it mounted,
   and the MCP write tools — `reference.overlay_set` and the
-  `library.metadata.*` tools. The payload does not say *what* happened, because every
+  `library.metadata.*` tools. The payload does not say *what* happened,
+  because every
   subscriber's response is the same one: refresh what it believes the
   library set to be. A dry-run leg publishes none: it holds the write
   mutex but leaves every library as it found it, so a subscriber that

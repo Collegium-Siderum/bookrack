@@ -1,0 +1,22 @@
+# rumdl, the Markdown linter: `rumdl check .` from the repository root.
+
+[global]
+# Fixtures are extractor inputs: their shape is what the tests read.
+exclude = ["**/tests/fixtures/**"]
+# Applies the exclusion to files named on the command line as well.
+force_exclude = true
+# A list with one multi-paragraph item renders loose in CommonMark as a
+# whole, so blank lines between its other items change nothing on the
+# page.
+disable = ["MD076"]
+cache = false
+
+[MD013]
+# Command listings keep each command and its aligned comment on one line.
+code-blocks = false
+
+[per-file-ignores]
+# Issue templates open with front matter GitHub reads, not with a heading.
+".github/ISSUE_TEMPLATE/*.md" = ["MD041"]
+# A code span quotes a marker whose trailing space is part of the literal.
+"CHANGELOG.md" = ["MD038"]

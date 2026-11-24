@@ -976,7 +976,8 @@ release workflow extracts the matching section verbatim from this file.
   PDF parsed after the upgrade, without re-ingesting. Chromium rates
   CVE-2026-17875 Medium, counting on the sandbox Chrome runs PDFium
   in; bookrack parses PDFs with no sandbox around them. The same move
-  clears eleven more advisories, none of which bookrack reaches. CVE-2026-18012, CVE-2026-121166, and
+  clears eleven more advisories, none of which bookrack reaches.
+  CVE-2026-18012, CVE-2026-121166, and
   CVE-2026-113022 belong to the JavaScript and XFA layers, which the
   non-V8 archives do not compile or leave as empty stubs, as does
   CVE-2026-10002 (`cjs_field`). CVE-2026-87585, CVE-2026-93381,
@@ -1050,7 +1051,8 @@ release workflow extracts the matching section verbatim from this file.
 - **Terminal queue jobs can be retried.** The new control-plane method
   `queue.retry` flips `failed`, `needs_ocr`, or `cancelled` rows back
   to `pending` in place — one row by its id or any part of it, or
-  every row in one state — clearing the previous run's error and timestamps, so the
+  every row in one state — clearing the previous run's error and
+  timestamps, so the
   worker re-runs them as fresh submissions. Nothing else in the queue
   document moves, and a paused queue holds the rows until `resume`.
   `bookrack queue retry` is the verb: with no flag it retries every
@@ -2752,7 +2754,6 @@ release workflow extracts the matching section verbatim from this file.
   On locally resolving commands (`run`, `init`, `runs`, `retrieval`,
   `distill`, offline `doctor`, `index-profile` reads) a path is
   unchanged: it switches the root, and the registry has no say.
-
 
 - **`papers metadata contributor-remove` names the paper the row
   belongs to.** The command took the contributor row's surrogate id
@@ -4531,7 +4532,8 @@ release workflow extracts the matching section verbatim from this file.
   `index-profile current` reports no stamp mismatch — that line compares
   the profile against the vectors you already have, which is the question
   that matters — before you drop the override.
-  [`docs/UPGRADE.md`](docs/UPGRADE.md) has the per-library steps. After removal, a `config.toml` still carrying the
+  [`docs/UPGRADE.md`](docs/UPGRADE.md) has the per-library steps. After
+  removal, a `config.toml` still carrying the
   key will fail loudly rather than resolve a model you did not ask for.
   The `BOOKRACK_SEARCH_*` and embed-batching variables are unaffected:
   they configure a process, not a library.

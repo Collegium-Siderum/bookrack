@@ -147,7 +147,8 @@ they carry no runbook step:
   daemon stopped — loads as `failed`, naming the retired hold, and
   `bookrack queue retry` runs it as a plain ingest; every other job
   keeps its record and loses only the field (see *Retiring the
-  metadata hold* below). Version 8 splits a job row into what every job has — `id`, `library`,
+  metadata hold* below). Version 8 splits a job row into what every job
+  has — `id`, `library`,
   `kind`, `priority`, the lifecycle fields — and an `op` object holding
   what one operation reads: for `"type": "ingest"`, the `path`, `force`,
   `hold_for_metadata`, and `audit_profile` that sat on the row itself
@@ -239,9 +240,11 @@ the extraction alone. When they differ, or the envelope is missing,
 unreadable, recorded for another source or intake, older than the
 stamp, or cannot be rewritten, the full pipeline runs: the corpus tree
 and the chunks are derived afresh, a chunk whose text is unchanged
-keeps the vector already stored for it, and the rest are embedded. Any other stale row — a
+keeps the vector already stored for it, and the rest are embedded. Any
+other stale row — a
 book in another state or with another stamp behind as well, or a
-paper — runs the full pipeline without the comparison. Pointing `--recursive` at the original source directory
+paper — runs the full pipeline without the comparison. Pointing
+`--recursive` at the original source directory
 therefore refreshes every stale file under it: the files whose stamps
 are current finish as `skipped_duplicate` jobs without doing any work. One
 exception: a paper in which no abstract was found has no chunk, and
@@ -285,7 +288,8 @@ that is `approved`, `acknowledged`, or `rejected` keeps that status, its
 reviewer, and its review time; the new run replaces only the audit
 report in the review row's notes. A row still `pending` is re-stamped
 instead, its reviewer naming the latest run's audit profile. A
-`--force` re-ingest behaves the same way. The verdict is not checked against the new extraction, so it
+`--force` re-ingest behaves the same way. The verdict is not checked
+against the new extraction, so it
 stands even where the new extractor changed the record that was
 reviewed — compare the refreshed report with the record to find those.
 `bookrack papers metadata reopen <id>` returns a paper to the review
@@ -519,19 +523,19 @@ A reference in the root's `config.toml` does not. That key is retired:
 it is ignored, and `bookrack doctor` names it in its `config.toml` row
 until the line goes. One offline verb clears it:
 
-```
+```sh
 bookrack libraries config <name> --unset index_profile
 ```
 
 To move a library's reference to its new home, declare it once:
 
-```
+```sh
 bookrack index-profile apply <profile> --library <name>
 ```
 
 or, without the reconciliation plan,
 
-```
+```sh
 bookrack libraries config <name> index_profile=<profile>
 ```
 
@@ -570,7 +574,7 @@ home and the command that deletes the line.
 
 One offline verb clears them:
 
-```
+```sh
 bookrack libraries config <name> --unset mcp_addr --unset log_directive
 ```
 
@@ -612,7 +616,7 @@ shows as `extracted` in the `status` column of `bookrack list`, and
 `book_state_counts_by_stage.metadata`. To finish it, ingest the same
 source again, from the path the book was ingested from:
 
-```
+```sh
 bookrack ingest <path>
 ```
 

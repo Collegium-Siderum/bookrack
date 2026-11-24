@@ -24,7 +24,7 @@ are still being hardened for production use.
    default is `qwen3-embedding:0.6b`; any Ollama-served embedding
    model works once configured.
 
-   ```
+   ```sh
    # https://ollama.com/download
    ollama serve &
    ollama pull qwen3-embedding:0.6b
@@ -51,7 +51,7 @@ are still being hardened for production use.
    macOS — the tarball holds a `Bookrack.app` bundle and the binaries
    live inside it:
 
-   ```
+   ```sh
    tar -xzf bookrack-*.tar.gz
    cd bookrack-*/Bookrack.app/Contents/Resources
    ./bookrack init
@@ -59,7 +59,7 @@ are still being hardened for production use.
 
    Linux:
 
-   ```
+   ```sh
    tar -xzf bookrack-*.tar.gz
    cd bookrack-*
    ./bookrack init
@@ -67,7 +67,7 @@ are still being hardened for production use.
 
    Windows (PowerShell):
 
-   ```
+   ```powershell
    Expand-Archive bookrack-*.zip -DestinationPath .
    cd bookrack-*
    .\bookrack.exe init
@@ -101,14 +101,14 @@ are still being hardened for production use.
    only one through the interface. From a terminal, the equivalent
    is:
 
-   ```
+   ```sh
    xattr -dr com.apple.quarantine bookrack-*/
    ```
 
    Windows — choose "More info" then "Run anyway" when SmartScreen
    appears, or clear the tag before extracting:
 
-   ```
+   ```powershell
    Unblock-File bookrack-*.zip
    ```
 
@@ -123,7 +123,7 @@ are still being hardened for production use.
 
    macOS / Linux:
 
-   ```
+   ```sh
    ./bookrack run                          # terminal 1: the daemon
    ./bookrack ingest /path/to/book.epub    # terminal 2
    ./bookrack search "your question"
@@ -131,7 +131,7 @@ are still being hardened for production use.
 
    Windows (PowerShell):
 
-   ```
+   ```powershell
    .\bookrack.exe run
    .\bookrack.exe ingest path\to\book.epub
    .\bookrack.exe search "your question"
@@ -141,7 +141,7 @@ are still being hardened for production use.
    it follows the same control-plane streaming, and `--recursive`
    walks a directory and forwards every supported file it finds:
 
-   ```
+   ```sh
    ./bookrack glean /path/to/paper.pdf
    ./bookrack glean --recursive /path/to/papers-dir/
    ```
@@ -162,7 +162,7 @@ default scope is `local` — the server is visible only inside the
 project the command is run from; pass `--scope user` to register it
 once for every project on the machine:
 
-```
+```sh
 # current project only (local scope, the default)
 claude mcp add --transport http bookrack http://127.0.0.1:8765/mcp
 
@@ -200,7 +200,7 @@ the bundle and let the pointer `init` writes find it.
 
 Clone the repo and build the binary:
 
-```
+```sh
 cargo build --release -p bookrack-cli
 ```
 

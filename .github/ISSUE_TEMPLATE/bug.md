@@ -27,7 +27,7 @@ share the forensic context.
 
 Please run:
 
-```
+```sh
 bookrack diagnose
 ```
 

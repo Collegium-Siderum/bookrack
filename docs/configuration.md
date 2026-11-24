@@ -60,7 +60,8 @@ portable layout never consults the registry, so an unreadable or
 malformed one does not veto it: the resolution succeeds and the
 annotations that would have come from the registry — the registry
 default the selection passed over, the library name claimed for a
-path-class root — are simply absent. A selection that does need the registry (`--library`, or
+path-class root — are simply absent. A selection that does need the
+registry (`--library`, or
 falling through to a `default`) still fails, and it fails naming the
 registry rather than reporting that no library is configured.
 
@@ -133,7 +134,7 @@ checked against the entry registered at that path.
 Every registry verb resolves locally with no running daemon, so it
 works during a fresh install or a recovery:
 
-```
+```sh
 bookrack libraries list                       # entries, marking the default
 bookrack libraries info [--name <name>]        # per-library status card
 bookrack libraries default <name>              # persist the default pointer
@@ -232,7 +233,8 @@ library, and every build that opens the library has to be able to read
 it. `bookrack doctor` shows the ignored keys in its `config.toml` row,
 `bookrack config effective` lists them under `config_notices`, and
 `libraries config <name>` annotates each as it prints the file.
-`libraries config <name> --unset <key>` deletes a retired key; an unknown one is edited out by
+`libraries config <name> --unset <key>` deletes a retired key; an
+unknown one is edited out by
 hand, since the verb refuses to write or delete a key it does not know.
 A known key holding a value of the wrong type is still an error.
 
@@ -380,7 +382,8 @@ shown as a layer that offered a value and lost. It lost at load time,
 so it stays lost — a variable that is set but blank, or set to text the
 knob cannot parse, offers nothing itself and still does not hand the
 file's line its chance back. The value in that case comes from the
-built-in default, and the table shows the file's line beneath it. This holds for the data root as well, on both halves:
+built-in default, and the table shows the file's line beneath it. This
+holds for the data root as well, on both halves:
 a `BOOKRACK_DATA_DIR` written into `.env` wins rung 3 of the ladder
 above and is credited to the file, and one the real environment already
 carried leaves the file's line reported as a layer that lost. Both
@@ -551,7 +554,7 @@ A library declares the profile it runs under in its manifest
 registry entry caches the same name, and `libraries scan` refreshes the
 cache from the manifests. Declare one offline with:
 
-```
+```sh
 bookrack libraries config <name> index_profile=<profile>
 ```
 
@@ -560,7 +563,7 @@ library and takes it from the ordinary selection — `--data-dir`,
 `--library`, `BOOKRACK_DATA_DIR`, then the registry default — so it
 reports on the same root every other command would use:
 
-```
+```sh
 bookrack index-profile list                 # built-ins + user profiles
 bookrack index-profile show <name>          # source and validation result
 bookrack index-profile validate <name>      # static checks; non-zero on error
@@ -608,7 +611,7 @@ with the stamp — and is checked against the backend before a reset.
 
 The sixth verb changes things rather than reporting them:
 
-```
+```sh
 bookrack index-profile apply <profile> [--library <name>] [--dry-run]
 ```
 
@@ -643,7 +646,7 @@ the binary:
 - `strict` — the `default` toggle set, reserved for future upgrades
   that promote selected signals to higher severities.
 
-```
+```sh
 bookrack audit-profile list
 bookrack audit-profile show trust-source
 bookrack audit-profile diff default strict

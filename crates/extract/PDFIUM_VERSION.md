@@ -51,7 +51,7 @@ or a silently re-cut upstream asset then fails loudly.
 
 Download URL template:
 
-```
+```text
 https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8125/pdfium-<platform>.tgz
 ```
 
